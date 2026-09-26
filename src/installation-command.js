@@ -1,0 +1,74 @@
+import { hostname, userInfo } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { createInstallation } from './installation.js';
+import { createRamLogs } from './ram-logs.js';
+import { createDesktopRuntime } from './desktop-runtime.js';
+import { resolveHome } from './homes.js';
+import { recoverSelection } from './desktop-selection.js';
+import { acquire, release, exists, globalLock } from './metadata.js';
+import { userPaths } from './paths.js';
+import { checkNode } from './node-runtime.js';
+
+// Installation changes diagnostic log routing only after restoring ordinary
+// native paths and taking the same writer reservations as other xfx operations.
+export async function installationCommand(store, operation, {
+  backgroundPath, userHome = userInfo().homedir, runtime = createDesktopRuntime(),
+  source = fileURLToPath(new URL('..', import.meta.url)),
+  logs = createRamLogs({ registry: join(userPaths(userHome).ramlogs, 'homes') }),
+  installation = createInstallation, nodeCheck = checkNode, lockPath = globalLock(), signal,
+} = {}) {
+  if (operation === 'install') await nodeCheck();
+  await runtime.assertExternal();
+  const profiles = (await store.read()).profiles.filter(profile => profile.native);
+  const homes = await Promise.all(profiles.map(async profile => {
+    const { native, environment } = await resolveHome(store, profile.id);
+    return { home: environment.home, key: environment.id, root: native.root, executable: native.executable };
+  }));
+  const cliExecutables = homes.map(home => home.executable);
+  await runtime.prepareClients({ cliExecutables, includeDesktop: true });
+  await runtime.assertIdle({ cliExecutables });
+  if (await exists(join(store.directory, 'desktop-selection', 'session.json'))
+    || await exists(join(store.directory, 'activation', 'manifest.json'))) {
+    await recoverSelection(store, { runtime, noOpen: true, defaultUserHome: userHome, signal, lockPath });
+  }
+  const defaultHome = join(userHome, '.codex');
+  if (await exists(defaultHome)) homes.unshift({ home: defaultHome, key: 'default' });
+  const owner = { kind: 'log-storage', pid: process.pid, host: hostname(), runId: randomUUID(), storePath: store.directory };
+  const locks = [lockPath + '.selection', lockPath, ...homes.filter(home => home.root).map(home => join(home.root, '.run-lock'))];
+  const held = [];
+  try {
+    for (const path of locks) { await acquire(path, owner, true); held.push(path); }
+    await runtime.assertIdle({ cliExecutables, resourcePaths: homes.map(home => home.home) });
+    const manager = installation({ home: userHome, source,
+      prepareLogs: async () => { for (const home of homes) await logs.prepareHome({ ...home, signal }); },
+      restoreLogs: async () => { for (const home of homes) await logs.restoreHome({ ...home, signal }); },
+    });
+    if (operation === 'install') {
+      await store.update(() => undefined);
+      return await manager.install({ backgroundPath });
+    }
+    if (!['enable', 'disable', 'uninstall'].includes(operation)) throw new Error('Unknown installation operation');
+    return await manager[operation]({ backgroundPath });
+  } finally {
+    for (const path of held.reverse()) await release(path, owner);
+  }
+}
+
+// Explicit normal log cleanup can be used on a known owned home without a
+// controller. It never imports profile records or modifies native user data.
+export async function restoreHomeLogs(home, key, {
+  runtime = createDesktopRuntime(), logs = createRamLogs(), lockPath = globalLock(), signal,
+} = {}) {
+  await runtime.assertExternal();
+  await runtime.prepareClients({ includeDesktop: true });
+  await runtime.assertIdle({ resourcePaths: [home] });
+  const owner = { kind: 'log-storage', pid: process.pid, host: hostname(), runId: randomUUID() };
+  const held = [];
+  try {
+    for (const path of [lockPath + '.selection', lockPath]) { await acquire(path, owner, true); held.push(path); }
+    await runtime.assertIdle({ resourcePaths: [home] });
+    return await logs.restoreHome({ home, key, signal });
+  } finally { for (const path of held.reverse()) await release(path, owner); }
+}
