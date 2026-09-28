@@ -182,13 +182,32 @@ export async function planActivationTarget(store, name, { runtime, defaultUserHo
     ...component.targets, [addedTarget]: fresh.components[index].targets[addedTarget],
   } }));
   const knownFacts = new Set(base.facts.map(fact => fact.path));
-  const facts = [...base.facts, ...fresh.facts.filter(fact => !knownFacts.has(fact.path))];
+  // Extensions retain the base document's device-number namespace. A reboot
+  // may renumber devices; mixing freshly observed numbers with saved ones
+  // would make one physical volume appear to be two different volumes.
+  const savedDevices = new Map(), usedDevices = new Set(base.facts.map(f => f.device));
+  for (const saved of base.facts) {
+    const current = fresh.facts.find(f => f.path === saved.path);
+    if (!current) throw new Error('Activation target proposal lost a base directory');
+    savedDevices.set(current.device, saved.device);
+  }
+  const addedFacts = fresh.facts.filter(f => !knownFacts.has(f.path)).map(f => {
+    if (!savedDevices.has(f.device)) {
+      let device = f.device;
+      while (usedDevices.has(device)) device++;
+      savedDevices.set(f.device, device); usedDevices.add(device);
+    }
+    return { ...f, device: savedDevices.get(f.device) };
+  });
+  const facts = [...base.facts, ...addedFacts];
   const body = { ...fresh, id: base.id, profiles: [...base.profiles, added], components, facts,
     cliByProfile: { ...base.cliByProfile, [added.profileId]: fresh.cliByProfile[added.profileId] },
     extensionOf: { activationId: base.id, approvalId: base.approvalId,
     targetProfileId: selected.profileId } };
   delete body.approvalId;
-  return { ...body, approvalId: digest(body) };
+  const proposal = { ...body, approvalId: digest(body) };
+  await pairedDirectoryFacts(proposal);
+  return proposal;
 }
 
 function matchingExtension(base, candidate) {
