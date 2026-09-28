@@ -8,7 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { parse, stringify } from 'smol-toml';
 import { inspectProfile } from './profile-inventory.js';
 import { resolveNativeSettingsHome } from './native-copy.js';
-import { redactText } from './redact.js';
+import { redactText, redactValue } from './redact.js';
 import { privateDirectory } from './metadata.js';
 
 const MAX_FILES = 256, MAX_FILE = 4 * 1024 * 1024, MAX_TOTAL = 32 * 1024 * 1024;
@@ -84,7 +84,7 @@ async function tree(root, sourcePath, destination) {
 async function resolveSelection(store, source, selection, defaultUserHome) {
   if (!Array.isArray(selection) || !selection.length || selection.some(x => typeof x !== 'string') || new Set(selection).size !== selection.length)
     throw new Error('Choose one or more inventoried item IDs');
-  const inventory = await inspectProfile(store, source, { defaultUserHome });
+  const inventory = await inspectProfile(store, source, { defaultUserHome, includeProjects: false });
   const byId = new Map(inventory.items.map(x => [x.id, x]));
   const items = selection.map(id => {
     const item = byId.get(id);
@@ -118,10 +118,10 @@ async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint)
   if (t.kind === 'config') {
     const f = await readSafe(expected, { text: true }); if (!f) throw new Error('Selected config source is missing');
     const config = parse(f.content), key = t.key;
-    if(redactText(f.content,expected)!==f.content) throw new Error('Credential-like content in selected settings; copy refused: '+t.path);
     if (typeof key !== 'string' || !/^(?:[A-Za-z_][\w-]*|agents\.[A-Za-z_][\w-]*|features\.multi_agent)$/.test(key)) throw new Error('Unsupported config key');
     const value = key.includes('.') ? key.split('.').reduce((o,k) => o?.[k], config) : config[key];
     if (!['string','number','boolean'].includes(typeof value) && !(Array.isArray(value) && value.every(x => typeof x === 'string'))) throw new Error('Unsupported selected config value');
+    if (JSON.stringify(redactValue(value, key)) !== JSON.stringify(value)) throw new Error('Credential-like content in selected setting; copy refused: '+t.path+':'+key);
     return { kind:'config', key, value, sourcePath:expected };
   }
   if (t.kind === 'skill') return { kind:'tree', files:await tree(expectedRoot, expected, t.path) };

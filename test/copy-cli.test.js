@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -104,6 +104,11 @@ test('profile inspect exposes scoped inventory without modifying the native prof
 test('advanced copy works end to end as a read-only terminal selection', async t => {
   if (spawnSync('/usr/bin/expect', ['-v']).error) return t.skip('expect unavailable');
   const f = await fixture(t), before = await readFile(join(f.b.home, 'config.toml'));
+  const project=join(f.root,'project');
+  await mkdir(join(project,'.codex','agents'),{recursive:true,mode:0o700});
+  await writeFile(join(project,'.codex','agents','repo-only.toml'),'name="repo-only"\ndescription="repo agent"\ndeveloper_instructions="Local only"\n',{mode:0o600});
+  const configPath=join(f.a.home,'config.toml');
+  await writeFile(configPath,`${await readFile(configPath,'utf8')}\n[projects.${JSON.stringify(project)}]\ntrust_level="trusted"\n[mcp_servers.private.http_headers]\nAuthorization="Bearer sk-fixture12345678901234567890"\n`,{mode:0o600});
   const program = `set timeout 10
 spawn $env(XFX_TEST_NODE) $env(XFX_TEST_CLI) --store $env(XFX_TEST_STORE) copy A B --advanced
 expect {
@@ -133,6 +138,7 @@ exit [lindex $result 3]`;
     env: { ...process.env, HOME: f.root, XFX_TEST_NODE: process.execPath, XFX_TEST_CLI: cli, XFX_TEST_STORE: f.store.directory } });
   assert.equal(result.status, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /source-model/);
+  assert.doesNotMatch(result.stdout, /repo-only|state_5\.sqlite|sk-fixture12345678901234567890|Could not build preview/);
   assert.deepEqual(await readFile(join(f.b.home, 'config.toml')), before);
   await absent(join(f.store.directory, 'native-copies'));
 });

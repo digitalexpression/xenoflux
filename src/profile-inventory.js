@@ -163,31 +163,41 @@ async function threadMetadata(home) {
     } finally { conn.close(); }
   } catch { return {status:'unreadable',rows:[]}; }
 }
-async function collectProjects(store, profile, home, defaultUserHome, items, projects, limitations) {
+function updatedAtIso(value) {
+  if(typeof value!=='number'||!Number.isFinite(value)||value<0) return undefined;
+  const millis=value>=1e12?value:value*1000;
+  const date=new Date(millis);
+  return Number.isNaN(date.valueOf())?undefined:date.toISOString();
+}
+async function collectProjects(store, profile, home, defaultUserHome, items, projects, limitations, {includeProjects=true}={}) {
   const roots=new Set();
-  try { const txt=await safeText(join(home,'config.toml')), c=parse(txt??''); for(const p of Object.keys(c.projects??{})) if(p.startsWith('/')&&resolve(p)===p) roots.add(p); }
-  catch {}
-  // The application state is optional and versioned by upstream; do not infer
-  // project roots from unknown formats.
-  const state=join(home,'.codex-global-state.json');
-  try { const text=await safeText(state); if(text===null) throw new Error('unsafe saved roots'); const data=JSON.parse(text); const saved=data?.project_roots??data?.projects;
-    add(items,{category:'project',label:'.codex-global-state.json',scope:'profile',origin:'native-home',path:state});
-    if(Array.isArray(saved)) for(const p of saved) if(typeof p==='string'&&p.startsWith('/')&&resolve(p)===p) roots.add(p);
-    const electron=data?.['electron-saved-workspace-roots'];
-    if(Array.isArray(electron)) { for(const p of electron) if(typeof p==='string'&&p.startsWith('/')&&resolve(p)===p) roots.add(p); }
-    else if(electron&&typeof electron==='object') { for(const p of Object.keys(electron)) if(p.startsWith('/')&&resolve(p)===p) roots.add(p); }
-  } catch(e) { add(items,{category:'project',label:'.codex-global-state.json',scope:'profile',origin:'native-home',path:state,reason:e.code==='ENOENT'?'Missing saved project state':'Saved project roots are unreadable or unsupported'}); if(e.code!=='ENOENT') limitations.push('Saved project roots could not be read or had an unsupported format.'); }
-  for(const repo of profile.repositories??[]) if(repo.path?.startsWith('/')&&resolve(repo.path)===repo.path) roots.add(repo.path);
+  if(includeProjects) {
+    try { const txt=await safeText(join(home,'config.toml')), c=parse(txt??''); for(const p of Object.keys(c.projects??{})) if(p.startsWith('/')&&resolve(p)===p) roots.add(p); }
+    catch {}
+    // The application state is optional and versioned by upstream; do not infer
+    // project roots from unknown formats.
+    const state=join(home,'.codex-global-state.json');
+    try { const text=await safeText(state); if(text===null) throw new Error('unsafe saved roots'); const data=JSON.parse(text); const saved=data?.project_roots??data?.projects;
+      add(items,{category:'project',label:'.codex-global-state.json',scope:'profile',origin:'native-home',path:state});
+      if(Array.isArray(saved)) for(const p of saved) if(typeof p==='string'&&p.startsWith('/')&&resolve(p)===p) roots.add(p);
+      const electron=data?.['electron-saved-workspace-roots'];
+      if(Array.isArray(electron)) { for(const p of electron) if(typeof p==='string'&&p.startsWith('/')&&resolve(p)===p) roots.add(p); }
+      else if(electron&&typeof electron==='object') { for(const p of Object.keys(electron)) if(p.startsWith('/')&&resolve(p)===p) roots.add(p); }
+    } catch(e) { add(items,{category:'project',label:'.codex-global-state.json',scope:'profile',origin:'native-home',path:join(home,'.codex-global-state.json'),reason:e.code==='ENOENT'?'Missing saved project state':'Saved project roots are unreadable or unsupported'}); if(e.code!=='ENOENT') limitations.push('Saved project roots could not be read or had an unsupported format.'); }
+    for(const repo of profile.repositories??[]) if(repo.path?.startsWith('/')&&resolve(repo.path)===repo.path) roots.add(repo.path);
+  }
   const conversation=await threadMetadata(home);
-  if(conversation.status==='unreadable'||conversation.status==='unsupported') limitations.push('Conversation project discovery is partial because the thread index was unreadable or unsupported.');
+  if(conversation.status==='unreadable'||conversation.status==='unsupported') limitations.push('Conversation inventory is partial because the thread index was unreadable or unsupported.');
   if(conversation.status==='partial') limitations.push(`Conversation metadata was capped at ${MAX_PROJECTS} entries.`);
   for(const row of conversation.rows) {
     if(typeof row.cwd==='string'&&row.cwd.startsWith('/')&&resolve(row.cwd)===row.cwd) roots.add(row.cwd);
     const title=typeof row.title==='string' ? String(redactValue(row.title)).replace(/[\x00-\x1f\x7f]/g,' ').slice(0,200) : 'Untitled task';
-    add(items,{category:'conversation',label:title||'Untitled task',scope:'profile',origin:'thread-index',path:join(home,'state_5.sqlite'),identity:row.id,reason:conversation.status==='partial'?'Conversation index is partial':undefined});
-    const last=items[items.length-1]; last.conversationId=String(row.id??'').slice(0,64); if(typeof row.cwd==='string'&&row.cwd.startsWith('/')&&resolve(row.cwd)===row.cwd) last.cwd=row.cwd;
+    const id=String(row.id??'').slice(0,64), date=updatedAtIso(row.updated_at);
+    add(items,{category:'conversation',label:`#${id.slice(-8)} · ${title||'Untitled task'}`,scope:'profile',origin:'thread-index',path:join(home,'state_5.sqlite'),identity:id,reason:conversation.status==='partial'?'Conversation index is partial; native thread metadata only':'Native thread metadata only; session bodies are not inspected'});
+    const last=items[items.length-1]; last.conversationId=id; if(typeof row.cwd==='string'&&row.cwd.startsWith('/')&&resolve(row.cwd)===row.cwd) last.cwd=row.cwd; if(date) last.updatedAt=date;
   }
   if(!conversation.rows.length) add(items,{category:'conversation',label:'thread index',scope:'profile',origin:'thread-index',path:join(home,'state_5.sqlite'),reason:conversation.status==='present'?'No conversations':conversation.status==='missing'?'Missing':`Conversation index ${conversation.status}`});
+  if(!includeProjects) return;
   if(roots.size>MAX_PROJECTS) { limitations.push(`Project discovery was capped at ${MAX_PROJECTS} roots.`); }
   let count=0;
   for(const candidate of [...roots].sort().slice(0,MAX_PROJECTS)) {
@@ -314,7 +324,7 @@ async function runtimeItems(home,items,limitations) {
 }
 
 /** Build a non-mutating, content-free inventory for one named profile or Default. */
-export async function inspectProfile(store, name, { defaultUserHome = homedir() } = {}) {
+export async function inspectProfile(store, name, { defaultUserHome = homedir(), includeProjects = true } = {}) {
   const profile=name.toLowerCase()==='default' ? {name:'Default'} : find(await store.read(),name);
   const endpoint=await resolveNativeSettingsHome(store,profile.name,{defaultUserHome}), home=endpoint.home;
   const items=[],projects=[],limitations=[
@@ -337,7 +347,7 @@ export async function inspectProfile(store, name, { defaultUserHome = homedir() 
     limitations.push('Named CLI user settings are read from this profile’s user-home; machine-user settings are shown as Dock-dependent and are not copied.');
   }
   await runtimeItems(home,items,limitations);
-  await collectProjects(store,profile,home,defaultUserHome,items,projects,limitations);
+  await collectProjects(store,profile,home,defaultUserHome,items,projects,limitations,{includeProjects});
   const sections=[...new Set(items.map(x=>x.category))].sort().map(category=>{
     const subset=items.filter(x=>x.category===category),statusCounts={};
     for(const item of subset) statusCounts[item.status]=(statusCounts[item.status]??0)+1;

@@ -58,6 +58,7 @@ test('reports absent, malformed, unsupported, and symbolic-link entries without 
   assert.match(by(result,'skill','linked').reason,/Unsupported/);
   assert.equal(by(result,'plugin','plugins').reason,'Missing');
   assert.equal(by(result,'db','state_5.sqlite').reason,'Missing');
+  assert.equal(by(result,'memory','memories_1.sqlite').reason,'Missing');
   assert.equal(by(result,'conversation','thread index').reason,'Missing');
   assert.equal((await lstat(join(f.home,'skills','linked'))).isSymbolicLink(),true);
 });
@@ -137,4 +138,33 @@ test('depth-limited projects report partial and invalid project/system skills re
   const empty = result.items.filter(item => item.category === 'skill' && item.label === 'empty');
   assert.equal(empty.length, 2);
   assert.ok(empty.every(item => item.status === 'unsupported' && item.copyable === false));
+});
+
+test('includeProjects excludes repository inventory but preserves distinct read-only conversation metadata', async t => {
+  const f = await fixture(t), projectA = join(f.root, 'repo-a'), projectB = join(f.root, 'repo-b');
+  await mkdir(projectA, { recursive: true, mode: 0o700 });
+  await mkdir(projectB, { recursive: true, mode: 0o700 });
+  await append(join(f.home, 'config.toml'), `\n[projects.${JSON.stringify(projectA)}]\ntrust_level="trusted"\n`);
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(join(f.home, 'state_5.sqlite'));
+  db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT NOT NULL, title TEXT NOT NULL, updated_at INTEGER NOT NULL)');
+  const insert = db.prepare('INSERT INTO threads (id,cwd,title,updated_at) VALUES (?,?,?,?)');
+  insert.run('aaaaaaaa-1111-4111-8111-111111111111', projectA, 'Same title', 1710000000);
+  insert.run('bbbbbbbb-2222-4222-8222-222222222222', projectB, 'Same title', 1710000001000);
+  db.close();
+
+  const result = await inspectProfile(f.store, 'A', { defaultUserHome: f.user, includeProjects: false });
+  assert.deepEqual(result.projects, []);
+  assert.equal(result.items.some(item => item.category === 'project'), false);
+  const conversations = result.items.filter(item => item.category === 'conversation');
+  assert.equal(conversations.length, 2);
+  assert.notEqual(conversations[0].id, conversations[1].id);
+  assert.notEqual(conversations[0].label, conversations[1].label);
+  assert.match(conversations[0].label, /^#[a-f0-9]{8} · Same title$/);
+  assert.equal(conversations.find(item => item.conversationId.startsWith('aaaaaaaa')).cwd, projectA);
+  assert.equal(conversations.find(item => item.conversationId.startsWith('bbbbbbbb')).cwd, projectB);
+  assert.equal(conversations.find(item => item.conversationId.startsWith('aaaaaaaa')).updatedAt, new Date(1710000000 * 1000).toISOString());
+  assert.equal(conversations.find(item => item.conversationId.startsWith('bbbbbbbb')).updatedAt, new Date(1710000001000).toISOString());
+  assert.ok(conversations.every(item => /metadata only|bodies are not inspected/.test(item.reason)));
+  assert.equal(JSON.stringify(result).includes('session body'), false);
 });

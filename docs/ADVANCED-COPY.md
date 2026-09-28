@@ -2,7 +2,7 @@
 
 Use `xfx profile inspect Default` or `xfx profile inspect Research --json` to inspect a profile. The inventory reports discovered contents and their origin. It does not prove that Codex loaded every item into a particular task.
 
-The inventory considers known project locations automatically. Project-local resources remain associated with their projects: inspecting them does not copy repositories, grant trust, or change project files. Missing paths, unsupported formats and scan limits are reported rather than treated as empty inventories.
+Full profile inspection considers known project locations automatically. The advanced copy selector excludes project-owned resources and does not scan project folders. Project-local resources remain associated with their projects: inspecting them does not copy repositories, grant trust, or change project files. Missing paths, unsupported formats and scan limits are reported rather than treated as empty inventories.
 
 ## Select individual items
 
@@ -29,9 +29,9 @@ The established `--include config,instructions,agents` category-copy workflow is
 
 ## Limits and dependencies
 
-Plugins, hooks, MCP connections, project references, conversations and memories are inventory-only in this version. Their visibility is not a promise of transfer support. Credentials, plugin sign-in, hook trust and project trust are not copied. Runtime caches, locks, databases and RAM-log links are not copied.
+Plugins, hooks, MCP connections, project references, conversations and memories are inventory-only in this version. Their visibility is not a promise of transfer support. Conversations represent native thread records, identified by title and a short ID; details show the full ID, project directory and update time when available. Session/index storage files are not listed as additional conversations in the selector. Credentials, plugin sign-in, hook trust and project trust are not copied. Runtime caches, locks, databases and RAM-log links are not copied.
 
-Instructions and skill scripts may reference external commands, files or integrations. Copying the selected files does not install those dependencies or rewrite arbitrary references. Review their requirements before using the destination. Unknown configuration is visible but not freely copyable; destination storage and authentication routing are preserved.
+Instructions and skill scripts may reference external commands, files or integrations. Copying the selected files does not install those dependencies or rewrite arbitrary references. Review their requirements before using the destination. For config-key copying, credential checks apply to the selected values, so unrelated private integrations in the source configuration do not block copying safe keys. Unknown configuration is visible but not freely copyable; destination storage and authentication routing are preserved.
 
 CLI and desktop discovery can differ because their user environments differ. Machine-level resources shown as shared or desktop-dependent may not be available to an isolated named CLI profile. Test the destination through the interface you intend to use.
 

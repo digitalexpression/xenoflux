@@ -9,7 +9,7 @@ const bounded = (value, limit) => {
 };
 
 function itemSearchText(item) {
-  return [item.label, item.category, item.scope, item.origin, item.path, item.reason]
+  return [item.label, item.category, item.scope, item.origin, item.path, item.reason, item.conversationId, item.cwd, item.updatedAt]
     .map(value => String(value ?? '').toLowerCase()).join(' ');
 }
 
@@ -170,7 +170,7 @@ export async function pickAdvancedItems(inventory, { input = process.stdin, outp
       `Category: ${clean(item.category || 'Other', 120)}`,
       `Availability: ${item.copyable === true ? 'available to copy' : `unavailable${item.reason ? ` — ${clean(item.reason, 220)}` : ''}`}`,
     ];
-    for (const key of ['scope', 'origin', 'path']) if (item[key] != null) details.push(`${key}: ${clean(item[key], 220)}`);
+    for (const [key, label] of [['scope', 'Scope'], ['origin', 'Origin'], ['path', 'Source path'], ['conversationId', 'Thread ID'], ['cwd', 'Project'], ['updatedAt', 'Updated']]) if (item[key] != null) details.push(`${label}: ${clean(item[key], 220)}`);
     if (item.copyable === true && review) await showPreview([item.id], details.concat(['']));
     else {
       previewLinesCache = details;

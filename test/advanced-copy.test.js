@@ -120,3 +120,24 @@ test('source changes invalidate the preview and unsafe selected skill links are 
   journal.files[0].afterMode=0o666;
   await assert.rejects(validateAdvancedFiles(join(result.backup,'..'),journal.files),/file mode/);
 });
+
+ test('selected safe config keys ignore unrelated credentials but refuse a selected credential-like value', async t=>{
+  const f=await fixture(t), config=join(f.source,'config.toml');
+  const secret='sk-fixture12345678901234567890';
+  await writeFile(config,`model="safe-model"\n# ${secret}\n[mcp_servers.private.http_headers]\nAuthorization="Bearer ${secret}"\n`,{mode:0o600});
+  const selected=await item(f.store,'Default','config','model',f.defaultUserHome);
+  const options={...f.options,selection:[selected.id]};
+  await validateAdvancedSelection(f.store,'Default',options.selection,options);
+  const preview=await planCopy(f.store,'Default','B',options);
+  assert.equal(JSON.stringify(preview).includes(secret),false);
+  const before=await read(join(f.b.home,'config.toml'));
+  const result=await applyCopy(f.store,'Default','B',{...options,expectedHash:preview.hash});
+  const target=await readFile(join(f.b.home,'config.toml'),'utf8');
+  assert.equal(parse(target).model,'safe-model');
+  assert.equal(target.includes(secret),false);
+  assert.equal(parse(target).mcp_servers,undefined);
+  await undoCopy(f.store,result.id,f.options);
+  assert.deepEqual(await read(join(f.b.home,'config.toml')),before);
+  await writeFile(config,`model="${secret}"\n`,{mode:0o600});
+  await assert.rejects(validateAdvancedSelection(f.store,'Default',options.selection,options),/Credential-like content in selected setting/);
+});

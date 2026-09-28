@@ -104,7 +104,7 @@ test('details show unavailable item metadata without calling review, and Ctrl-C 
   assert.equal(await pending, null);
   assert.equal(reviewCalls, 0);
   assert.match(io.shown(), /Availability: unavailable — managed externally/);
-  assert.match(io.shown(), /origin: generated/);
+  assert.match(io.shown(), /Origin: generated/);
   assert.match(io.shown(), /path: agents\/remote.toml/);
 });
 
@@ -156,4 +156,14 @@ expect {
 catch wait result
 exit [lindex $result 3]`;
   await runFile('/usr/bin/expect', ['-c', expectProgram], { timeout: 8_000 });
+});
+
+ test('conversation details identify the native thread and its project and update time', async()=>{
+  const io=streams();
+  const pending=pickAdvancedItems({items:[{id:'thread',category:'conversation',label:'Repeated title [abc12345]',copyable:false,conversationId:'abc12345-full-id',cwd:'/fixture/project',updatedAt:'2026-09-28T00:00:00.000Z',reason:'Native conversation; transfer is not supported'}]},io);
+  io.input.write('\u001b[B'); io.input.write('d');
+  assert.match(io.shown(),/abc12345-full-id/);
+  assert.match(io.shown(),/Project: \/fixture\/project/);
+  assert.match(io.shown(),/Updated: 2026-09-28/);
+  io.input.end(); await pending;
 });
