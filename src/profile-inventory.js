@@ -171,7 +171,8 @@ async function threadMetadata(home, mainOnly = false) {
         }
       }
       const where=filters.length?` WHERE ${filters.join(' AND ')}`:'';
-      const rows=conn.prepare(`SELECT substr(id,1,64) AS id, substr(cwd,1,4097) AS cwd, substr(title,1,201) AS title, updated_at FROM threads${where} ORDER BY updated_at DESC LIMIT ?`).all(MAX_PROJECTS+1);
+      const displayName=cols.some(c=>c.name==='name')?'substr(name,1,201)':'NULL';
+      const rows=conn.prepare(`SELECT ${displayName} AS name, substr(id,1,64) AS id, substr(cwd,1,4097) AS cwd, substr(title,1,201) AS title, updated_at FROM threads${where} ORDER BY updated_at DESC LIMIT ?`).all(MAX_PROJECTS+1);
       return {status:rows.length>MAX_PROJECTS?'partial':'present',rows:rows.slice(0,MAX_PROJECTS)};
     } finally { conn.close(); }
   } catch { return {status:'unreadable',rows:[]}; }
@@ -204,9 +205,10 @@ async function collectProjects(store, profile, home, defaultUserHome, items, pro
   if(conversation.status==='partial') limitations.push(`Conversation metadata was capped at ${MAX_PROJECTS} entries.`);
   for(const row of conversation.rows) {
     if(typeof row.cwd==='string'&&row.cwd.startsWith('/')&&resolve(row.cwd)===row.cwd) roots.add(row.cwd);
-    const title=typeof row.title==='string' ? String(redactValue(row.title)).replace(/[\x00-\x1f\x7f]/g,' ').slice(0,200) : 'Untitled task';
+    const displayTitle=typeof row.name==='string'&&row.name.trim()?row.name:row.title;
+    const title=typeof displayTitle==='string' ? String(redactValue(displayTitle)).replace(/[\x00-\x1f\x7f-\x9f]/g,' ').trim().slice(0,200) : 'Untitled task';
     const id=String(row.id??'').slice(0,64), date=updatedAtIso(row.updated_at);
-    add(items,{category:'conversation',label:`#${id.slice(-8)} · ${title||'Untitled task'}`,scope:'profile',origin:'thread-index',path:join(home,'state_5.sqlite'),identity:id,reason:conversation.status==='partial'?'Conversation index is partial; native thread metadata only':'Native thread metadata only; session bodies are not inspected'});
+    add(items,{category:'conversation',label:`${title||'Untitled task'} · #${id.slice(-8)}`,scope:'profile',origin:'thread-index',path:join(home,'state_5.sqlite'),identity:id,reason:conversation.status==='partial'?'Conversation index is partial; native thread metadata only':'Native thread metadata only; session bodies are not inspected'});
     const last=items[items.length-1]; last.conversationId=id; if(typeof row.cwd==='string'&&row.cwd.startsWith('/')&&resolve(row.cwd)===row.cwd) last.cwd=row.cwd; if(date) last.updatedAt=date;
   }
   if(!conversation.rows.length) add(items,{category:'conversation',label:'thread index',scope:'profile',origin:'thread-index',path:join(home,'state_5.sqlite'),reason:conversation.status==='present'?'No conversations':conversation.status==='missing'?'Missing':`Conversation index ${conversation.status}`});

@@ -160,7 +160,7 @@ test('includeProjects excludes repository inventory but preserves distinct read-
   assert.equal(conversations.length, 2);
   assert.notEqual(conversations[0].id, conversations[1].id);
   assert.notEqual(conversations[0].label, conversations[1].label);
-  assert.match(conversations[0].label, /^#[a-f0-9]{8} · Same title$/);
+  assert.match(conversations[0].label, /^Same title · #[a-f0-9]{8}$/);
   assert.equal(conversations.find(item => item.conversationId.startsWith('aaaaaaaa')).cwd, projectA);
   assert.equal(conversations.find(item => item.conversationId.startsWith('bbbbbbbb')).cwd, projectB);
   assert.equal(conversations.find(item => item.conversationId.startsWith('aaaaaaaa')).updatedAt, new Date(1710000000 * 1000).toISOString());
@@ -176,9 +176,14 @@ test('includeProjects excludes repository inventory but preserves distinct read-
   const put=db.prepare('INSERT INTO threads VALUES(?,?,?,?,?,?,?)');
   for(let i=0;i<270;i++) put.run('sub'+i,'/fixture','Same title',100+i,JSON.stringify({subagent:{thread_spawn:{parent_thread_id:'main'}}}),'subagent',null);
   for(const [id,source,kind,path] of [['main','vscode','user',null],['legacy','cli',null,null],['handoff','vscode','chatgpt_handoff',null],['separate','vscode','agent_created_thread',null],['side','vscode','side_chat',null],['child','vscode','user','/root/worker'],['linked','cli',null,null],['unknown','future',null,null],['guardian','vscode','guardian_review',null]]) put.run(id,'/fixture','Same title',1,source,kind,path);
-  db.prepare('INSERT INTO thread_spawn_edges VALUES(?,?)').run('main','linked'); db.close();
+  db.prepare('INSERT INTO thread_spawn_edges VALUES(?,?)').run('main','linked');
+  db.exec('ALTER TABLE threads ADD COLUMN name TEXT');
+  db.prepare('UPDATE threads SET name=? WHERE id=?').run('Analyze Xenoflux complexity','main');
+  db.prepare('UPDATE threads SET name=? WHERE id=?').run('   ','legacy'); db.close();
   const result=await inspectProfile(f.store,'A',{defaultUserHome:f.user,includeProjects:false,mainConversationsOnly:true});
   assert.deepEqual(result.items.filter(x=>x.conversationId).map(x=>x.conversationId).sort(),['handoff','legacy','main','separate']);
+  assert.equal(result.items.find(x=>x.conversationId==='main').label,'Analyze Xenoflux complexity · #main');
+  assert.equal(result.items.find(x=>x.conversationId==='legacy').label,'Same title · #legacy');
   assert.ok(!result.limitations.some(x=>x.includes('metadata was capped')));
   const full=await inspectProfile(f.store,'A',{defaultUserHome:f.user,includeProjects:false});
   assert.ok(full.items.some(x=>x.conversationId?.startsWith('sub')));
