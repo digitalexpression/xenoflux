@@ -18,6 +18,7 @@ const AGENT_KEYS = ['max_threads', 'max_concurrent_threads_per_session', 'max_de
 const ROLE_KEYS = ['name', 'description', 'model', 'model_reasoning_effort', 'sandbox_mode', 'nickname_candidates', 'developer_instructions'];
 const MAX_DEPTH = 5, MAX_ENTRIES = 256, MAX_PROJECTS = 256, MAX_FILE = 384 * 1024;
 const MAX_PLUGIN_ENTRIES = 512;
+const INVENTORY_METADATA = new Set(['.DS_Store', '.git', '.tmp']);
 const hash = value => createHash('sha256').update(value).digest('hex').slice(0, 24);
 
 function safeConfigValue(value) {
@@ -49,7 +50,7 @@ async function safeNames(path) {
   try {
     if(await realpath(path)!==path) return null;
     const dir=await opendir(path), entries=[]; let partial=false;
-    for await (const entry of dir) { if(entries.length>=MAX_ENTRIES) { partial=true; break; } entries.push(entry); }
+    for await (const entry of dir) { if(INVENTORY_METADATA.has(entry.name)) continue; if(entries.length>=MAX_ENTRIES) { partial=true; break; } entries.push(entry); }
     entries.sort((a,b)=>a.name.localeCompare(b.name)); Object.defineProperty(entries,'partial',{value:partial}); return entries;
   } catch { return null; }
 }

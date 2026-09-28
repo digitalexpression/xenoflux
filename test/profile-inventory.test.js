@@ -188,3 +188,21 @@ test('includeProjects excludes repository inventory but preserves distinct read-
   const full=await inspectProfile(f.store,'A',{defaultUserHome:f.user,includeProjects:false});
   assert.ok(full.items.some(x=>x.conversationId?.startsWith('sub')));
 });
+
+ test('inventory omits filesystem metadata without deleting it or hiding system skills',async t=>{
+  const f=await fixture(t);
+  await put(join(f.home,'skills','.system','bundled','SKILL.md'),'Bundled skill');
+  await put(join(f.home,'memories','notes.md'),'Memory');
+  const before=await inspectProfile(f.store,'A',{defaultUserHome:f.user,includeProjects:false});
+  const metadata=[];
+  for(const folder of ['skills','memories']) for(const name of ['.DS_Store','.git','.tmp']) {
+    const path=join(f.home,folder,name); metadata.push(path);
+    if(name==='.DS_Store') await put(path,'metadata'); else await mkdir(path,{mode:0o700});
+  }
+  const after=await inspectProfile(f.store,'A',{defaultUserHome:f.user,includeProjects:false});
+  assert.ok(!after.items.some(x=>['.DS_Store','.git','.tmp'].includes(x.label)));
+  assert.deepEqual(after.sections,before.sections);
+  assert.ok(after.items.some(x=>x.label==='bundled'&&x.scope==='system'));
+  assert.ok(after.items.some(x=>x.label==='notes.md'));
+  for(const path of metadata) await lstat(path);
+});

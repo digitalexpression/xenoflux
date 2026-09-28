@@ -2,7 +2,7 @@
 
 Use `xfx profile inspect Default` or `xfx profile inspect Research --json` to inspect a profile. The inventory reports discovered contents and their origin. It does not prove that Codex loaded every item into a particular task.
 
-Full profile inspection considers known project locations automatically. The advanced copy selector excludes project-owned resources and does not scan project folders. Project-local resources remain associated with their projects: inspecting them does not copy repositories, grant trust, or change project files. Missing paths, unsupported formats and scan limits are reported rather than treated as empty inventories.
+Full profile inspection considers known project locations automatically. The advanced copy selector excludes project-owned resources and does not scan project folders. Project-local resources remain associated with their projects: inspecting them does not copy repositories, grant trust, or change project files. Filesystem metadata entries `.DS_Store`, `.git`, and `.tmp` are omitted from inventory and counts without changing files on disk. Legitimate hidden resources such as `.system` remain discoverable. Missing paths, unsupported formats and scan limits are reported rather than treated as empty inventories.
 
 ## Select individual items
 
