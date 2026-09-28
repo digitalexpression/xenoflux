@@ -1,6 +1,6 @@
 {
   "name": "xenoflux",
-  "version": "0.2.0-rc.4",
+  "version": "0.3.0-rc.6",
   "description": "Codex profile manager for macOS",
   "type": "module",
   "bin": {
@@ -13,7 +13,8 @@
     "README.md",
     "docs/LOCAL-RELEASE.md",
     "docs/RAM-LOGS.md",
-    "docs/PROFILE-RECOVERY.md"
+    "docs/PROFILE-RECOVERY.md",
+    "docs/ADVANCED-COPY.md"
   ],
   "engines": {
     "node": ">=22.13.0 <23 || >=23.4.0"

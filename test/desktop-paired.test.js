@@ -793,3 +793,18 @@ test('stopping and restoring uncommitted intents recover through the signed plan
     assert.equal(await pairedStatus(f.store, { defaultUserHome: f.defaultUserHome }), null);
   });
 });
+
+ test('adding a target after device renumbering preserves the reviewed device mapping', async t => {
+  const f=await fixture(t);
+  const initial=renumberDevices(await preparePairedActivation(f.store,['alpha','bravo'],{runtime:f.runtime,defaultUserHome:f.defaultUserHome}));
+  await switchDesktop(f.store,'alpha',options(f,{requestedActivationPlan:initial}));
+  await restoreDesktop(f.store,options(f));
+  await registeredTarget(f);
+  const proposal=await planActivationTarget(f.store,'charlie',{runtime:f.runtime,defaultUserHome:f.defaultUserHome});
+  assert.deepEqual(proposal.facts.slice(0,initial.facts.length),initial.facts);
+  assert.equal(new Set(proposal.facts.map(f=>f.device)).size,1);
+  await registerActivationTarget(f.store,proposal,{runtime:f.runtime,defaultUserHome:f.defaultUserHome,lockPath:f.lockPath});
+  await switchDesktop(f.store,'charlie',options(f));
+  assert.equal((await currentDesktop(f.store,{defaultUserHome:f.defaultUserHome})).activeProfile.name,'charlie');
+  await restoreDesktop(f.store,options(f));
+});
