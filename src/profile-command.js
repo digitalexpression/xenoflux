@@ -8,10 +8,14 @@ import { listHomes, resolveHome } from './homes.js';
 import { planHomeCreation, createHome, inspectHomeCreation, startHomeSignIn } from './home-create.js';
 import { COPY_COMPONENTS, planCopy, applyCopy } from './native-copy.js';
 import { pickCopyComponents, confirmCopyAction } from './copy-picker.js';
+import { selectAdvancedCopy, reviewAdvancedConflicts } from './advanced-command.js';
 import { planActivationTarget, registerActivationTarget, readPairedPlan, preparePairedActivation } from './desktop-paired.js';
 import { privateDirectory, record } from './metadata.js';
 import { probeVersion } from './version-probe.js';
 import { nativePath } from './node-runtime.js';
+
+// Preserve JSON values while escaping terminal C1 controls in native metadata.
+const displayJSON = value => JSON.stringify(value, null, 2).replace(/[\x7f-\x9f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 const display = value => String(value).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
 
@@ -54,15 +58,18 @@ async function nativeClient(store, options, signal) {
 /** The wizard composes existing profile, copy and activation operations. Each
  * completed step survives cancellation; no native data is cloned or removed. */
 export async function profileCommand(store, params, options, { json = false, clientRuntime,
-  input = process.stdin, output = process.stdout, signIn = startHomeSignIn, defaultUserHome = homedir() } = {}) {
+  input = process.stdin, output = process.stdout, signIn = startHomeSignIn, selectAdvanced = selectAdvancedCopy, defaultUserHome = homedir() } = {}) {
   const [operation, name] = params;
   if (params.length !== 2 || !['create', 'signin'].includes(operation)) throw new Error('Use profile create NAME or profile signin NAME');
   if (options['--apply'] && options['--dry-run']) throw new Error('--apply cannot be combined with --dry-run');
+  const advanced = options['--advanced'] === true;
+  if (advanced && (operation !== 'create' || options['--include'] !== undefined)) throw new Error('--advanced is only supported for creation without --include');
+  if (advanced && (json || !input.isTTY || !output.isTTY)) throw new Error('Advanced selection requires an interactive terminal; use profile inspect NAME --json for inventory');
   let include = options['--include']?.split(',').map(value => value.trim());
   if (include && (!include.length || include.some(value => !COPY_COMPONENTS.includes(value)) || new Set(include).size !== include.length))
     throw new Error(`--include must name one or more of: ${COPY_COMPONENTS.join(', ')}`);
   if (include && !options['--from']) throw new Error('--include requires --from for profile creation');
-  if (options['--from'] && !include && (!options['--apply'] || json || !input.isTTY))
+  if (!advanced && options['--from'] && !include && (!options['--apply'] || json || !input.isTTY))
     throw new Error('--from requires --include outside the guided setup');
   const data = await store.read();
   const existing = data.profiles.find(profile => profile.name === name || profile.id === name);
@@ -71,16 +78,22 @@ export async function profileCommand(store, params, options, { json = false, cli
     : await inspectHomeCreation({ store, name, base });
   preview = { ...preview, settings: { source: options['--from'] ?? null, included: include ?? [] },
     desktop: 'A reviewed activation target is required for Dock reopening.', nativeSignIn: 'Explicit native login; no credentials or history are copied.' };
-  if (!options['--apply']) return preview;
+  if (!options['--apply']) {
+    if (!advanced) return preview;
+    const source = options['--from'] ?? 'Default';
+    if (source === name) throw new Error('Choose a different settings source');
+    const selection = await selectAdvanced(store, source, existing?.native ? existing.id : null, { input, output, defaultUserHome });
+    return selection ? { ...preview, settings: { source, selection } } : { status: 'cancelled' };
+  }
   if (!input.isTTY || !output.isTTY || json) throw new Error('Profile setup requires an external interactive terminal; omit --apply to preview');
   const controller = new AbortController(), abort = () => controller.abort();
   const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT', 'SIGTSTP'];
   for (const signal of signals) process.on(signal, abort);
   const io = { input, output, signal: controller.signal }, runtime = clientRuntime(controller.signal);
-  const show = value => output.write(`${JSON.stringify(value, null, 2)}\n`);
+  const show = value => output.write(`${displayJSON(value)}\n`);
   try {
     await runtime.assertExternal();
-    let source = options['--from'], setup;
+    let source = options['--from'] ?? (advanced ? 'Default' : undefined), setup, selection;
     if (operation === 'create') {
       if (!source && preview.profile.action !== 'resume') {
         const choice = await question('Settings: 1 minimal (recommended), 2 copy selected settings, q cancel\n> ', io);
@@ -92,12 +105,17 @@ export async function profileCommand(store, params, options, { json = false, cli
           source ||= 'Default';
         }
       }
-      if (source && !include) include = await pickCopyComponents(COPY_COMPONENTS, io);
-      if (source && !include) return { status: 'cancelled' };
+      if (advanced) {
+        selection = await selectAdvanced(store, source, existing?.native ? existing.id : null, { ...io, defaultUserHome });
+        if (!selection) return { status: 'cancelled' };
+      } else {
+        if (source && !include) include = await pickCopyComponents(COPY_COMPONENTS, io);
+        if (source && !include) return { status: 'cancelled' };
+      }
       if (source === name) throw new Error('Choose a different settings source');
       // Resolve the source before preparing a target so a typo leaves no profile.
       if (source && source.toLowerCase() !== 'default') await resolveHome(store, source);
-      show({ ...preview, settings: { source: source ?? null, included: include ?? [] } });
+      show({ ...preview, settings: { source: source ?? null, included: include ?? [], ...(selection ? { selection } : {}) } });
       if (!await confirmCopyAction('create', io)) return { status: 'cancelled' };
       const client = await nativeClient(store, options, controller.signal);
       if (base === join(dirname(store.directory), 'profiles')) {
@@ -109,9 +127,17 @@ export async function profileCommand(store, params, options, { json = false, cli
       setup = await createHome({ store, name, base, description: options['--description'], ...client });
       show(setup);
       if (source) {
-        const copy = await planCopy(store, source, setup.profile.id, { include, defaultUserHome }); show(copy);
+        let copyOptions = { ...(advanced ? { selection } : { include }), defaultUserHome };
+        let copy = await planCopy(store, source, setup.profile.id, copyOptions);
+        if (advanced && !existing?.native) {
+          selection = await reviewAdvancedConflicts(copy, selection, io);
+          if (!selection?.length) return { ...setup, status: 'setup-pending', next: 'No settings copied. Continue with profile signin or copy --advanced.' };
+          copyOptions = { selection, defaultUserHome };
+          copy = await planCopy(store, source, setup.profile.id, copyOptions);
+        }
+        show(copy);
         if (!await confirmCopyAction('copy', io)) return { ...setup, status: controller.signal.aborted ? 'cancelled' : 'setup-pending', next: 'Settings copy and native sign-in remain available as separate commands.' };
-        const applied = await applyCopy(store, source, setup.profile.id, { include, expectedHash: copy.hash, defaultUserHome, runtime, signal: controller.signal });
+        const applied = await applyCopy(store, source, setup.profile.id, { ...copyOptions, expectedHash: copy.hash, runtime, signal: controller.signal });
         show(applied);
         setup.copy = applied;
       }

@@ -61,7 +61,17 @@ xfx copy undo COPY_ID
 xfx copy undo COPY_ID --apply --close-clients
 ```
 
-The preview is read-only. A copy or undo records its backup and refuses to overwrite an intervening native change. Restore the desktop to `Default` before applying a copy. Skills, plugins, MCP configuration, credentials, histories, and repository files are outside the copy surface.
+Use `xfx profile inspect Default` to inventory discovered settings and resources, including known projects. For a searchable selection of individual supported items, use:
+
+```sh
+xfx copy Default Research --advanced
+xfx copy Default Research --advanced --apply --close-clients
+xfx profile create Research --from Default --advanced --apply --close-clients
+```
+
+Advanced mode supports configuration keys, instruction files, individual agents, standalone skills and rules. It preserves unselected destination items and reviews replacement conflicts. Other categories remain visible with transfer limitations. See [Advanced copying](docs/ADVANCED-COPY.md) for selection controls, discovery scope and recovery.
+
+The preview is read-only. A copy or undo records its backup and refuses to overwrite an intervening native change. Restore the desktop to `Default` before applying a copy. The category-based copy surface excludes skills, plugins, MCP configuration, credentials, histories, and repository files. Advanced mode adds standalone skills and rules; it does not copy native history or integrations.
 
 ## Desktop selection and recovery
 

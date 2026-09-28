@@ -51,6 +51,9 @@ test('copy parser rejects unsupported selections and conflicting flags before co
   const f = await fixture(t);
   for (const args of [
     ['--json', 'copy', 'A', 'B', '--include', 'history'],
+    ['--json', 'copy', 'A', 'B', '--advanced'],
+    ['copy', 'A', 'B', '--advanced', '--include', 'config'],
+    ['copy', 'undo', 'pending', '--advanced'],
     ['--json', 'copy', 'undo', 'pending', '--include', 'config'],
     ['--json', 'copy', 'A', 'B', '--include', 'config,config'],
     ['--json', 'copy', 'A', 'B', '--include', 'config', '--apply', '--dry-run'],
@@ -85,4 +88,51 @@ test('help documents preview, application, and undo without exposing unsupported
   assert.match(result.stdout, /copy undo COPY_ID/);
   assert.match(result.stdout, /--close-clients/);
   assert.match(result.stdout, /Read-only operations never quit applications/);
+});
+
+test('profile inspect exposes scoped inventory without modifying the native profile', async t => {
+  const f = await fixture(t), before = await readFile(join(f.a.home, 'config.toml'));
+  const result = run(f, '--json', 'profile', 'inspect', 'A');
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(result.stdout);
+  assert.ok(report.inventory.items.some(item => item.transfer?.key === 'model' && item.copyable));
+  assert.ok(report.inventory.limitations.length);
+  assert.deepEqual(await readFile(join(f.a.home, 'config.toml')), before);
+  await absent(join(f.store.directory, 'native-copies'));
+});
+
+test('advanced copy works end to end as a read-only terminal selection', async t => {
+  if (spawnSync('/usr/bin/expect', ['-v']).error) return t.skip('expect unavailable');
+  const f = await fixture(t), before = await readFile(join(f.b.home, 'config.toml'));
+  const program = `set timeout 10
+spawn $env(XFX_TEST_NODE) $env(XFX_TEST_CLI) --store $env(XFX_TEST_STORE) copy A B --advanced
+expect {
+  -re {Selected: 0} {}
+  timeout { exit 2 }
+}
+send -- "/model\\r"
+after 50
+send -- "\\033\\133B"
+send -- " "
+expect {
+  -re {Selected: 1} {}
+  timeout { exit 3 }
+}
+send -- "\\r"
+expect {
+  -re {source-model} {}
+  timeout { exit 4 }
+}
+expect {
+  eof {}
+  timeout { exit 5 }
+}
+catch wait result
+exit [lindex $result 3]`;
+  const result = spawnSync('/usr/bin/expect', ['-c', program], { encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, HOME: f.root, XFX_TEST_NODE: process.execPath, XFX_TEST_CLI: cli, XFX_TEST_STORE: f.store.directory } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /source-model/);
+  assert.deepEqual(await readFile(join(f.b.home, 'config.toml')), before);
+  await absent(join(f.store.directory, 'native-copies'));
 });

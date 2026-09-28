@@ -17,6 +17,8 @@ import { activationPlan } from '../src/activation.js';
 import { preparePairedActivation, readPairedPlan, planActivationTarget, registerActivationTarget } from '../src/desktop-paired.js';
 import { COPY_COMPONENTS, planCopy, applyCopy, planUndo, undoCopy } from '../src/native-copy.js';
 import { pickCopyComponents, confirmCopyAction } from '../src/copy-picker.js';
+import { inspectProfile } from '../src/profile-inventory.js';
+import { selectAdvancedCopy } from '../src/advanced-command.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
 import { confirmClientShutdown } from '../src/client-shutdown.js';
 import { createLogStorage } from '../src/log-storage.js';
@@ -27,22 +29,26 @@ import { createInstallation } from '../src/installation.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
 import { readLogSettings } from '../src/log-storage.js';
 
+// Preserve JSON values while escaping terminal C1 controls in native metadata.
+const displayJSON = value => JSON.stringify(value, null, 2).replace(/[\x7f-\x9f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
 const help = `xfx — Xenoflux Codex profile manager
 
 Usage: xfx [--store DIRECTORY] [--json] COMMAND
   profile create NAME [--apply]           Preview and guide a new native profile
     [--description TEXT] [--base DIRECTORY] [--from PROFILE --include config,instructions,agents]
-    [--codex EXECUTABLE --codex-version VERSION]
+    [--codex EXECUTABLE --codex-version VERSION] [--advanced]
   profile signin NAME [--apply]           Continue native sign-in for a prepared profile
   profile recover NAME [--apply]          Preview or reconcile a stopped, interrupted profile run
   profile register NAME ROOT --codex EXECUTABLE --codex-version VERSION
-  profile list | profile inspect NAME     List named profiles or inspect settings and log status
+  profile list | profile inspect NAME     List profiles or inspect contents, origins and log status
   profile rename NAME NEW_NAME | profile delete NAME
   profile bind NAME REPOSITORY
   profile unbind NAME [REPOSITORY]        Remove the native binding, or only the supplied repository binding
   compare LEFT RIGHT [--include config,instructions,agents]
     [--viewer EXECUTABLE] [--viewer-arg=ARG]
   copy SOURCE TARGET [--include config,instructions,agents] [--apply]
+    [--advanced]                          Search and select individual items
   copy undo COPY_ID [--apply]             Preview or undo a settings copy
   launch NAME [--repo DIRECTORY] [--dry-run]
   resume NAME TASK_ID [--dry-run]
@@ -62,7 +68,8 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
 
 Store: --store, XFX_HOME, or ~/.xfx/controller.
 Comparison covers copyable native settings only; skills/plugins/MCP and effective repository configuration are excluded.
-Default is supported by compare/copy and the desktop picker. Native sign-in never clones credentials or history.
+Advanced copy preserves unselected items; category copy replaces selected categories.
+Default is supported by inspect, compare/copy and the desktop picker. Native sign-in never clones credentials or history.
 --close-clients permits graceful shutdown for desktop control, copy --apply, or profile create/signin --apply.
 Mutation prompts and external-terminal checks still apply. Read-only operations never quit applications.
 `;
@@ -74,7 +81,7 @@ try {
     const value = argv[i];
     if (value === '--json') { json = true; continue; }
     if (value === '--help' || value === '-h') { options.help = true; continue; }
-    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--no-open'].includes(value)) { options[value] = true; continue; }
+    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--no-open', '--advanced'].includes(value)) { options[value] = true; continue; }
     if (value.startsWith('--')) {
       const equals = value.indexOf('=');
       const flag = equals < 0 ? value : value.slice(0, equals);
@@ -105,6 +112,7 @@ try {
       '--codex': command === 'profile' && ['register', 'create'].includes(params[0]),
       '--codex-version': command === 'profile' && ['register', 'create'].includes(params[0]),
       '--viewer': ['compare', 'pick'].includes(command), '--viewer-arg': ['compare', 'pick'].includes(command),
+      '--advanced': (command === 'copy' && params[0] !== 'undo') || (settingUp && params[0] === 'create'),
       '--include': command === 'compare' || (command === 'copy' && params[0] !== 'undo') || (settingUp && params[0] === 'create'),
       '--apply': command === 'copy' || settingUp || recoveringProfile,
       '--dry-run': ['launch', 'resume', 'pick', 'copy'].includes(command) || settingUp
@@ -156,8 +164,14 @@ try {
       if (options['--apply'] && options['--dry-run']) throw new Error('--apply cannot be combined with --dry-run');
       if (options['--apply'] && (!process.stdin.isTTY || !process.stdout.isTTY || json))
         throw new Error('Copy changes require an external interactive terminal; preview with --include and --json first');
-      let include;
-      if (!undo) {
+      if (options['--advanced'] && options['--include'] !== undefined) throw new Error('--advanced cannot be combined with --include');
+      if (options['--advanced'] && (json || !process.stdin.isTTY || !process.stdout.isTTY))
+        throw new Error('Advanced selection requires an interactive terminal; use profile inspect NAME --json for inventory');
+      let include, selection;
+      if (options['--advanced']) {
+        selection = await selectAdvancedCopy(store, source, target);
+        if (!selection) { result = { status: 'cancelled' }; process.exitCode = 130; }
+      } else if (!undo) {
         if (options['--include'] !== undefined) {
           include = options['--include'].split(',').map(value => value.trim());
           if (!include.length || include.some(value => !COPY_COMPONENTS.includes(value)) || new Set(include).size !== include.length)
@@ -170,7 +184,7 @@ try {
         }
       }
       if (!result) {
-        const copyOptions = { include, defaultUserHome: homedir() };
+        const copyOptions = { ...(selection ? { selection } : { include }), defaultUserHome: homedir() };
         const preview = undo ? await planUndo(store, target, copyOptions) : await planCopy(store, source, target, copyOptions);
         if (!options['--apply']) result = preview;
         else {
@@ -178,7 +192,7 @@ try {
           const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT', 'SIGTSTP'];
           for (const signal of signals) process.on(signal, abort);
           try {
-            process.stdout.write(`${JSON.stringify(preview, null, 2)}\n`);
+            process.stdout.write(`${displayJSON(preview)}\n`);
             process.stdout.write('Return to Default through desktop restore first if a named desktop is selected. Blocking applications will be offered a graceful quit; standalone terminal Codex sessions must be closed manually.\n');
             const action = undo ? 'undo' : 'copy';
             if (!await confirmCopyAction(action, { signal: controller.signal })) { result = { status: 'cancelled' }; process.exitCode = 130; }
@@ -186,7 +200,7 @@ try {
               const mutationOptions = { expectedHash: preview.hash, defaultUserHome: copyOptions.defaultUserHome,
                 runtime: clientRuntime(controller.signal), signal: controller.signal };
               result = undo ? await undoCopy(store, target, mutationOptions)
-                : await applyCopy(store, source, target, { ...mutationOptions, include });
+                : await applyCopy(store, source, target, { ...copyOptions, ...mutationOptions });
             }
           } finally { for (const signal of signals) process.off(signal, abort); }
         }
@@ -266,8 +280,10 @@ try {
           : await store.update(data => unbind(data, profile, directory));
         else if (operation === 'list') result = await listHomes(store);
         else if (operation === 'inspect') {
-          result = await launchPlan(store, profile);
-          result.logStorage = await createLogStorage().inspect({ home: result.home, key: result.environmentId });
+          const inventory = await inspectProfile(store, profile);
+          result = profile.toLowerCase() === 'default' ? { name: 'Default', home: inventory.profile.home } : await launchPlan(store, profile);
+          result.inventory = inventory;
+          result.logStorage = await createLogStorage().inspect({ home: result.home, key: result.environmentId ?? 'default' });
         } else if (operation === 'delete') result = await removeProfile(store, profile);
         else result = await store.update(data => {
           if (operation === 'rename') return renameProfile(data, profile, directory);
@@ -328,7 +344,7 @@ try {
       if (result.truncated) process.stdout.write('More tasks are available; narrow --search or increase --limit.\n');
     }
     else if (!json && ['launch','resume','pick'].includes(command) && result.reportPath) process.stdout.write(`Codex ${result.status}${result.error ? ` (${result.error})` : ''}.\nLaunch record: ${result.reportPath}\n`);
-    else process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    else process.stdout.write(`${displayJSON(result)}\n`);
   }
 } catch (error) {
   process.stderr.write(json ? `${JSON.stringify({ error: error.message })}\n` : `xfx: ${error.message}\n`);

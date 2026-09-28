@@ -104,3 +104,40 @@ test('selected Default settings use the retained copy journal and undo contract'
   assert.equal(result.status, 'setup-pending');
   assert.equal((await stat(join(f.root, 'fresh-xfx'))).mode & 0o077, 0);
 });
+
+test('advanced creation copies one chosen key and retains the undoable operation', async t => {
+  const f = await fixture(t), io = terminal(['create', 'copy', 'later']);
+  const { inspectProfile } = await import('../src/profile-inventory.js');
+  const selectAdvanced = async (store, source) => {
+    const inventory = await inspectProfile(store, source, { defaultUserHome: f.defaultUserHome });
+    return [inventory.items.find(item => item.transfer?.key === 'model').id];
+  };
+  const result = await profileCommand(f.store, ['create', 'advanced'], { ...f.options, '--from': 'Default', '--advanced': true },
+    { input: io.input, output: io.output, clientRuntime: f.clientRuntime, selectAdvanced, defaultUserHome: f.defaultUserHome });
+  assert.equal(result.status, 'setup-pending');
+  assert.ok(result.copy.id);
+  assert.match(await readFile(join(result.home, 'config.toml'), 'utf8'), /model = "default-model"/);
+  assert.match(await readFile(join(result.home, 'config.toml'), 'utf8'), /cli_auth_credentials_store = "file"/);
+  await undoCopy(f.store, result.copy.id, { runtime: f.runtime });
+  assert.doesNotMatch(await readFile(join(result.home, 'config.toml'), 'utf8'), /default-model/);
+});
+
+test('advanced selection cancellation leaves no prepared profile', async t => {
+  const f = await fixture(t), io = terminal([]);
+  const result = await profileCommand(f.store, ['create', 'cancelled-advanced'], { ...f.options, '--advanced': true },
+    { input: io.input, output: io.output, clientRuntime: f.clientRuntime, selectAdvanced: async () => null, defaultUserHome: f.defaultUserHome });
+  assert.equal(result.status, 'cancelled');
+  assert.equal((await f.store.read()).profiles.length, 0);
+  await assert.rejects(stat(f.base), { code: 'ENOENT' });
+});
+
+test('advanced source preview does not prepare a destination', async t => {
+  const f = await fixture(t), io = terminal([]);
+  const result = await profileCommand(f.store, ['create', 'preview-advanced'], { '--advanced': true, '--base': f.base },
+    { input: io.input, output: io.output, clientRuntime: f.clientRuntime, selectAdvanced: async () => ['fixture-item'], defaultUserHome: f.defaultUserHome });
+  assert.equal(result.status, 'preview');
+  assert.deepEqual(result.settings.selection, ['fixture-item']);
+  assert.equal((await f.store.read()).profiles.length, 0);
+  assert.deepEqual(f.calls, []);
+  await assert.rejects(stat(f.base), { code: 'ENOENT' });
+});

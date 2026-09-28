@@ -12,6 +12,10 @@ import { acquire, release, globalLock, privateDirectory, readJSON, record, exist
 import { createDesktopRuntime } from './desktop-runtime.js';
 import { redactText, redactValue } from './redact.js';
 import { MAX_COPIED_NATIVE_CONFIG_BYTES, MAX_NATIVE_CONFIG_BYTES } from './native-config.js';
+import { buildAdvancedCopy, validateAdvancedSelection, persistAdvancedFiles, validateAdvancedFiles,
+  writeAdvanced, matchesAdvanced, snapshotAdvanced, cleanupAdvancedDirectories } from './advanced-copy.js';
+export { validateAdvancedSelection };
+
 
 export const COPY_COMPONENTS = Object.freeze(['config', 'instructions', 'agents']);
 const CONFIG_KEYS = ['model', 'model_reasoning_effort', 'plan_mode_reasoning_effort', 'model_verbosity',
@@ -152,7 +156,19 @@ export function projectNativeSettingsConfig(content, components) {
   }
   return redactValue(result);
 }
-async function build(store, sourceName, targetName, { include, defaultUserHome = homedir() } = {}) {
+async function build(store, sourceName, targetName, { include, selection: selectedItems, defaultUserHome = homedir() } = {}) {
+  if (selectedItems !== undefined) {
+    if (include !== undefined) throw new Error('Choose either category --include or advanced item selection');
+    await safeStore(store);
+    const source = await endpoint(store, sourceName, defaultUserHome);
+    const target = await endpoint(store, targetName, defaultUserHome, true);
+    if (overlap(source.home, target.home) || overlap(store.directory, target.home) || overlap(store.directory, source.home))
+      throw new Error('Source, destination and backup storage must be separate');
+    const built = await buildAdvancedCopy(store, sourceName, targetName, selectedItems, { defaultUserHome });
+    return { report: built.report, plan: { source, target, components: ['advanced'], selection: selectedItems,
+      files: built.plan.files.filter(f => f.before === null || !f.before.equals(f.after) || f.beforeMode !== f.afterMode),
+      createdDirectories: built.plan.createdDirectories ?? [], defaultUserHome } };
+  }
   const components = selection(include);
   await safeStore(store);
   const source = await endpoint(store, sourceName, defaultUserHome), target = await endpoint(store, targetName, defaultUserHome, true);
@@ -293,27 +309,38 @@ async function validateTarget(store, j) {
   if (!equal(currentIdentity, savedIdentity)) throw new Error('Copy destination binding or directory identity changed');
   return target;
 }
+function journalPayload(j) {
+  const base = { source: j.source, target: j.target, components: j.components, files: j.files, defaultUserHome: j.defaultUserHome };
+  return j.schemaVersion === 2 ? { ...base, selection: j.selection, createdDirectories: j.createdDirectories } : base;
+}
 async function readJournal(store, id) {
   await safeStore(store);
   const path = await journalPath(store, id);
   await privateDirectory(dirname(path));
   const j = await readJSON(path);
-  if (j.schemaVersion !== 1 || j.kind !== 'native-settings-copy' || !uuid.test(j.id ?? '') || !path.endsWith('/' + j.id + '/journal.json')
+  if (![1, 2].includes(j.schemaVersion) || j.kind !== 'native-settings-copy' || !uuid.test(j.id ?? '') || !path.endsWith('/' + j.id + '/journal.json')
     || j.storePath !== store.directory || !['prepared', 'applied', 'undone'].includes(j.phase)
-    || !Array.isArray(j.files) || j.files.length > MAX_FILES || new Set(j.files.map(f => f.path)).size !== j.files.length
+    || !Array.isArray(j.files) || new Set(j.files.map(f => f.path)).size !== j.files.length
+    || j.payloadHash !== digest(journalPayload(j))) throw new Error('Invalid settings-copy journal');
+  if (j.schemaVersion === 2) {
+    if (!Array.isArray(j.selection) || !j.selection.length || j.selection.some(id => typeof id !== 'string')
+      || !Array.isArray(j.createdDirectories) || j.createdDirectories.length > 3072
+      || j.createdDirectories.some(dir => typeof dir !== 'string' || !/^(?:agents|rules|skills)(?:\/[A-Za-z0-9_.-]+)*$/.test(dir)
+        || dir.split('/').some(part => part === '.' || part === '..')))
+      throw new Error('Invalid advanced-copy journal');
+    await validateAdvancedFiles(dirname(path), j.files);
+  } else if (j.files.length > MAX_FILES
     || j.files.some(f => !relativeFile(f.path) || ![f.before, f.after].every(x => x === null || typeof x === 'string')
       || (f.beforeMode !== null && (!Number.isInteger(f.beforeMode) || f.beforeMode < 0 || f.beforeMode > 0o777 || (f.beforeMode & 0o022))))
-    || j.payloadHash !== digest({ source: j.source, target: j.target, components: j.components, files: j.files, defaultUserHome: j.defaultUserHome }))
-    throw new Error('Invalid settings-copy journal');
-  if (j.files.reduce((total, f) => total + bytes(f.before) + bytes(f.after), 0) > MAX_TOTAL
-    || j.files.some(f => bytes(f.before) > MAX_FILE
-      || bytes(f.after) > MAX_FILE))
+    || j.files.reduce((total, f) => total + bytes(f.before) + bytes(f.after), 0) > MAX_TOTAL
+    || j.files.some(f => bytes(f.before) > MAX_FILE || bytes(f.after) > MAX_FILE))
     throw new Error('Invalid settings-copy journal');
   if (!j.source || (j.source.root !== null && !isAbsolute(j.source.root))) throw new Error('Invalid source binding in copy journal');
   await validateTarget(store, j);
   return { path, journal: j };
 }
-async function writeSetting(home, f, undo = false) {
+async function writeSetting(home, f, undo = false, payloadDirectory = null) {
+  if (payloadDirectory) return writeAdvanced(home, f, payloadDirectory, undo);
   const path = join(home, f.path), content = undo ? f.before : f.after;
   const parent = dirname(path);
   if (parent !== home) {
@@ -327,20 +354,24 @@ async function writeSetting(home, f, undo = false) {
     await rename(tmp, path);
   } finally { await unlink(tmp).catch(e => { if (e.code !== 'ENOENT') throw e; }); }
 }
-async function matchesFile(home, f, direction, allowBoth = false) {
+async function matchesFile(home, f, direction, allowBoth = false, payloadDirectory = null) {
+  if (payloadDirectory) return matchesAdvanced(home, f, payloadDirectory, direction, allowBoth);
   const current = (await textFile(join(home, f.path)))?.content ?? null;
   if (current !== f[direction] && !(allowBoth && current === f[direction === 'before' ? 'after' : 'before']))
     throw new Error('Settings changed since the copy; refusing to overwrite: ' + f.path);
 }
 async function restoreFiles(store, j, path, { allowBoth = false, runtime, checkpoint = async () => {} } = {}) {
   await validateTarget(store, j);
-  for (const f of j.files) await matchesFile(j.target.home, f, 'after', allowBoth);
+  const payloadDirectory = j.schemaVersion === 2 ? dirname(path) : null;
+  for (const f of j.files) await matchesFile(j.target.home, f, 'after', allowBoth, payloadDirectory);
   for (const f of [...j.files].reverse()) {
     await runtime.assertIdle({ cliExecutables: [j.target.executable] });
-    await matchesFile(j.target.home, f, 'after', allowBoth);
-    await writeSetting(j.target.home, f, true);
+    await validateTarget(store, j);
+    await matchesFile(j.target.home, f, 'after', allowBoth, payloadDirectory);
+    await writeSetting(j.target.home, f, true, payloadDirectory);
     await checkpoint('undo-file', f.path);
   }
+  if (payloadDirectory) await cleanupAdvancedDirectories(j.target.home, j.createdDirectories);
   j.phase = 'undone'; j.undoneAt = new Date().toISOString(); await record(path, j);
 }
 async function clearPending(store, id) {
@@ -353,8 +384,9 @@ export async function applyCopy(store, source, target, options = {}) {
   const initial = await build(store, source, target, options);
   if (options.expectedHash && initial.report.hash !== options.expectedHash) throw new Error('Copy preview changed; preview again');
   if (!initial.plan.files.length) return { ...initial.report, status: 'unchanged' };
-  const j = { schemaVersion: 1, kind: 'native-settings-copy', id: randomUUID(), storePath: store.directory,
-    phase: 'prepared', createdAt: new Date().toISOString(), ...initial.plan, payloadHash: digest(initial.plan) };
+  const j = { schemaVersion: options.selection === undefined ? 1 : 2, kind: 'native-settings-copy', id: randomUUID(), storePath: store.directory,
+    phase: 'prepared', createdAt: new Date().toISOString(), ...initial.plan };
+  j.payloadHash = digest(journalPayload(j));
   const verifyInputs = async () => {
     if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
     const current = await build(store, source, target, options);
@@ -365,6 +397,11 @@ export async function applyCopy(store, source, target, options = {}) {
     await safeStore(store, true);
     const dir = join(rootPath(store), j.id); await privateDirectory(dir, true);
     const path = join(dir, 'journal.json');
+    if (j.schemaVersion === 2) {
+      j.files = await persistAdvancedFiles(dir, initial.plan.files);
+      j.payloadHash = digest(journalPayload(j));
+    }
+    const payloadDirectory = j.schemaVersion === 2 ? dir : null;
     if (Buffer.byteLength(JSON.stringify(j)) > 900000) throw new Error('Copy journal exceeds metadata limit');
     await record(path, j);
     await record(pendingPath(store), { id: j.id });
@@ -373,8 +410,8 @@ export async function applyCopy(store, source, target, options = {}) {
         if (options.signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
         await runtime.assertIdle({ cliExecutables: [j.target.executable] });
         await validateTarget(store, j);
-        await matchesFile(j.target.home, f, 'before');
-        await writeSetting(j.target.home, f);
+        await matchesFile(j.target.home, f, 'before', false, payloadDirectory);
+        await writeSetting(j.target.home, f, false, payloadDirectory);
         await options.checkpoint?.('copy-file', f.path);
       }
       j.phase = 'applied'; j.appliedAt = new Date().toISOString(); await record(path, j);
@@ -396,7 +433,9 @@ export async function applyCopy(store, source, target, options = {}) {
 export async function planUndo(store, id) {
   const { journal: j } = await readJournal(store, id);
   const current = [];
-  for (const f of j.files) current.push({ path: f.path, content: (await textFile(join(j.target.home, f.path)))?.content ?? null });
+  for (const f of j.files) current.push(j.schemaVersion === 2
+    ? { path: f.path, ...await snapshotAdvanced(j.target.home, f) }
+    : { path: f.path, content: (await textFile(join(j.target.home, f.path)))?.content ?? null });
   return { status: 'preview', id: j.id, phase: j.phase, target: { name: j.target.name, home: j.target.home },
     hash: digest({ journal: j, current }), changes: j.files.map(f => ({ path: f.path, action: f.before === null ? 'remove' : 'restore' })),
     notes: ['Undo restores copied settings only. Newer edits are preserved by refusing conflicts. History and sign-in remain untouched.'] };
@@ -414,7 +453,7 @@ export async function undoCopy(store, id, options = {}) {
     if (j.phase !== 'undone') {
       // Validate an ordinary undo before recording recovery authority. A later
       // interrupted undo may contain any mix of its before/after file contents.
-      for (const f of j.files) await matchesFile(j.target.home, f, 'after', j.phase === 'prepared' || Boolean(j.undoStarted));
+      for (const f of j.files) await matchesFile(j.target.home, f, 'after', j.phase === 'prepared' || Boolean(j.undoStarted), j.schemaVersion === 2 ? dirname(path) : null);
     }
     return j.phase !== 'undone';
   };
