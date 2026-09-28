@@ -168,3 +168,18 @@ test('includeProjects excludes repository inventory but preserves distinct read-
   assert.ok(conversations.every(item => /metadata only|bodies are not inspected/.test(item.reason)));
   assert.equal(JSON.stringify(result).includes('session body'), false);
 });
+
+ test('main conversation filter excludes children and side chats before the inventory cap',async t=>{
+  const f=await fixture(t); const {DatabaseSync}=await import('node:sqlite');
+  const db=new DatabaseSync(join(f.home,'state_5.sqlite'));
+  db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,cwd TEXT,title TEXT,updated_at INTEGER,source TEXT,thread_source TEXT,agent_path TEXT); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT)');
+  const put=db.prepare('INSERT INTO threads VALUES(?,?,?,?,?,?,?)');
+  for(let i=0;i<270;i++) put.run('sub'+i,'/fixture','Same title',100+i,JSON.stringify({subagent:{thread_spawn:{parent_thread_id:'main'}}}),'subagent',null);
+  for(const [id,source,kind,path] of [['main','vscode','user',null],['legacy','cli',null,null],['handoff','vscode','chatgpt_handoff',null],['separate','vscode','agent_created_thread',null],['side','vscode','side_chat',null],['child','vscode','user','/root/worker'],['linked','cli',null,null],['unknown','future',null,null],['guardian','vscode','guardian_review',null]]) put.run(id,'/fixture','Same title',1,source,kind,path);
+  db.prepare('INSERT INTO thread_spawn_edges VALUES(?,?)').run('main','linked'); db.close();
+  const result=await inspectProfile(f.store,'A',{defaultUserHome:f.user,includeProjects:false,mainConversationsOnly:true});
+  assert.deepEqual(result.items.filter(x=>x.conversationId).map(x=>x.conversationId).sort(),['handoff','legacy','main','separate']);
+  assert.ok(!result.limitations.some(x=>x.includes('metadata was capped')));
+  const full=await inspectProfile(f.store,'A',{defaultUserHome:f.user,includeProjects:false});
+  assert.ok(full.items.some(x=>x.conversationId?.startsWith('sub')));
+});

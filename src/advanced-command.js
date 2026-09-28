@@ -34,7 +34,7 @@ export async function selectAdvancedCopy(store, source, target, {
   const io = { input, output, signal };
   try {
     if (!input.isTTY || !output.isTTY) throw new Error('Advanced selection requires an interactive terminal; use profile inspect NAME --json for inventory');
-    const inventory = await inspectProfile(store, source, { defaultUserHome, includeProjects: false });
+    const inventory = await inspectProfile(store, source, { defaultUserHome, includeProjects: false, mainConversationsOnly: true });
     // Storage artifacts are not separate transferable conversations or settings.
     inventory.items = inventory.items.filter(item => item.scope !== 'project' && !['project', 'db', 'runtime', 'docs'].includes(item.category));
     const review = selection => target

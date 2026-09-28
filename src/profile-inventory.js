@@ -141,7 +141,7 @@ async function settings(home, items, scope, origin) {
   }
   if(names?.partial) add(items,{category:'agent',label:'additional agents',scope,origin,path:agents,reason:'Agent enumeration is partial'});
 }
-async function threadMetadata(home) {
+async function threadMetadata(home, mainOnly = false) {
   const db=join(home,'state_5.sqlite');
   if(await kind(db)==='missing') return {status:'missing',rows:[]};
   if(await kind(db)!=='file') return {status:'unsupported',rows:[]};
@@ -158,7 +158,20 @@ async function threadMetadata(home) {
       const table=conn.prepare("SELECT type FROM sqlite_master WHERE name='threads'").get();
       const cols=table?.type==='table'?conn.prepare('PRAGMA table_info(threads)').all():[];
       if(!['id','cwd','title','updated_at'].every(n=>cols.some(c=>c.name===n))) throw new Error('unsupported schema');
-      const rows=conn.prepare('SELECT substr(id,1,64) AS id, substr(cwd,1,4097) AS cwd, substr(title,1,201) AS title, updated_at FROM threads ORDER BY updated_at DESC LIMIT ?').all(MAX_PROJECTS+1);
+      const filters=[];
+      if(mainOnly) {
+        if(!cols.some(c=>c.name==='source')) return {status:'unsupported',rows:[]};
+        filters.push("source IN ('cli','vscode','exec')");
+        if(cols.some(c=>c.name==='thread_source')) filters.push("(thread_source IS NULL OR thread_source IN ('','user','chatgpt_handoff','agent_created_thread'))");
+        if(cols.some(c=>c.name==='agent_path')) filters.push("(agent_path IS NULL OR agent_path IN ('','/root'))");
+        const edges=conn.prepare("SELECT type FROM sqlite_master WHERE name='thread_spawn_edges'").get();
+        if(edges) {
+          if(edges.type!=='table'||!conn.prepare('PRAGMA table_info(thread_spawn_edges)').all().some(c=>c.name==='child_thread_id')) return {status:'unsupported',rows:[]};
+          filters.push('NOT EXISTS (SELECT 1 FROM thread_spawn_edges e WHERE e.child_thread_id=threads.id)');
+        }
+      }
+      const where=filters.length?` WHERE ${filters.join(' AND ')}`:'';
+      const rows=conn.prepare(`SELECT substr(id,1,64) AS id, substr(cwd,1,4097) AS cwd, substr(title,1,201) AS title, updated_at FROM threads${where} ORDER BY updated_at DESC LIMIT ?`).all(MAX_PROJECTS+1);
       return {status:rows.length>MAX_PROJECTS?'partial':'present',rows:rows.slice(0,MAX_PROJECTS)};
     } finally { conn.close(); }
   } catch { return {status:'unreadable',rows:[]}; }
@@ -169,7 +182,7 @@ function updatedAtIso(value) {
   const date=new Date(millis);
   return Number.isNaN(date.valueOf())?undefined:date.toISOString();
 }
-async function collectProjects(store, profile, home, defaultUserHome, items, projects, limitations, {includeProjects=true}={}) {
+async function collectProjects(store, profile, home, defaultUserHome, items, projects, limitations, {includeProjects=true,mainConversationsOnly=false}={}) {
   const roots=new Set();
   if(includeProjects) {
     try { const txt=await safeText(join(home,'config.toml')), c=parse(txt??''); for(const p of Object.keys(c.projects??{})) if(p.startsWith('/')&&resolve(p)===p) roots.add(p); }
@@ -186,7 +199,7 @@ async function collectProjects(store, profile, home, defaultUserHome, items, pro
     } catch(e) { add(items,{category:'project',label:'.codex-global-state.json',scope:'profile',origin:'native-home',path:join(home,'.codex-global-state.json'),reason:e.code==='ENOENT'?'Missing saved project state':'Saved project roots are unreadable or unsupported'}); if(e.code!=='ENOENT') limitations.push('Saved project roots could not be read or had an unsupported format.'); }
     for(const repo of profile.repositories??[]) if(repo.path?.startsWith('/')&&resolve(repo.path)===repo.path) roots.add(repo.path);
   }
-  const conversation=await threadMetadata(home);
+  const conversation=await threadMetadata(home,mainConversationsOnly);
   if(conversation.status==='unreadable'||conversation.status==='unsupported') limitations.push('Conversation inventory is partial because the thread index was unreadable or unsupported.');
   if(conversation.status==='partial') limitations.push(`Conversation metadata was capped at ${MAX_PROJECTS} entries.`);
   for(const row of conversation.rows) {
@@ -324,7 +337,7 @@ async function runtimeItems(home,items,limitations) {
 }
 
 /** Build a non-mutating, content-free inventory for one named profile or Default. */
-export async function inspectProfile(store, name, { defaultUserHome = homedir(), includeProjects = true } = {}) {
+export async function inspectProfile(store, name, { defaultUserHome = homedir(), includeProjects = true, mainConversationsOnly = false } = {}) {
   const profile=name.toLowerCase()==='default' ? {name:'Default'} : find(await store.read(),name);
   const endpoint=await resolveNativeSettingsHome(store,profile.name,{defaultUserHome}), home=endpoint.home;
   const items=[],projects=[],limitations=[
@@ -347,7 +360,8 @@ export async function inspectProfile(store, name, { defaultUserHome = homedir(),
     limitations.push('Named CLI user settings are read from this profile’s user-home; machine-user settings are shown as Dock-dependent and are not copied.');
   }
   await runtimeItems(home,items,limitations);
-  await collectProjects(store,profile,home,defaultUserHome,items,projects,limitations,{includeProjects});
+  await collectProjects(store,profile,home,defaultUserHome,items,projects,limitations,{includeProjects,mainConversationsOnly});
+  if(mainConversationsOnly) limitations.push('Only recognized main conversations are shown; subagents, side chats and unclassified thread sources are excluded.');
   const sections=[...new Set(items.map(x=>x.category))].sort().map(category=>{
     const subset=items.filter(x=>x.category===category),statusCounts={};
     for(const item of subset) statusCounts[item.status]=(statusCounts[item.status]??0)+1;
