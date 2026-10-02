@@ -135,12 +135,15 @@ The `codex/profile-copy-policy` implementation changes that baseline as follows:
   not scan conversations, memory, project contents or plugin caches. Full diagnostic
   inspection retains its broader scope. Local plugin manifest versions describe the
   source package only; installed versions and runtime availability remain unknown.
-- Fixture and package checks establish transfer/preservation behavior only. Native
-  probes from the preceding audit
-  against standalone CLI `0.157.1` and desktop backend `0.159.2` discovered synthetic
-  skills in profile, user, and project roots. This does not establish skill execution,
-  automatic rule enforcement, or the desktop host's routing. Those remain bounded
-  native acceptance work, not reasons to expand transfer scope.
+- Fixture and package checks establish transfer/preservation behavior only. On
+  2026-10-02, candidate `2074a34` passed a disposable native CLI `0.157.1` check:
+  the destination skill appeared in native context, its resource was read, its
+  executable ran, and the copied rule rejected its harmless marker command. Undo
+  restored the prior package and removed the rule; a fresh session then ran the
+  same marker successfully. Copy used the candidate planner/executor with isolated
+  locks; this does not verify live desktop client coordination. Desktop-host skill
+  execution, rule enforcement and routing remain unverified. Earlier desktop
+  backend discovery alone does not establish those behaviors.
 
 Record candidate-specific check results in the local handover. Do not present this
 unpublished implementation or fixture evidence as released native acceptance.
