@@ -141,9 +141,15 @@ The `codex/profile-copy-policy` implementation changes that baseline as follows:
   executable ran, and the copied rule rejected its harmless marker command. Undo
   restored the prior package and removed the rule; a fresh session then ran the
   same marker successfully. Copy used the candidate planner/executor with isolated
-  locks; this does not verify live desktop client coordination. Desktop-host skill
-  execution, rule enforcement and routing remain unverified. Earlier desktop
-  backend discovery alone does not establish those behaviors.
+  locks; this does not verify live desktop client coordination.
+- The subsequent desktop check passed on app `26.930.21537` (12776), backend
+  `0.159.0-alpha.12.1`: Advanced Check was observed active, native context discovered
+  the synthetic profile skill, its resource/script produced the expected tool
+  outputs, and a separate task received the exact native rule denial. Default
+  restoration and guarded fixture cleanup passed. Tasks used desktop-created
+  folders under Documents/Codex. Fixtures were staged directly; this establishes
+  native profile loading in those contexts, not arbitrary project precedence or
+  another interactive copy test. Existing profile data and sign-in were preserved.
 
 Record candidate-specific check results in the local handover. Do not present this
 unpublished implementation or fixture evidence as released native acceptance.
