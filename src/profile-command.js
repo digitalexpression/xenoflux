@@ -83,7 +83,8 @@ export async function profileCommand(store, params, options, { json = false, cli
     const source = options['--from'] ?? 'Default';
     if (source === name) throw new Error('Choose a different settings source');
     const selection = await selectAdvanced(store, source, existing?.native ? existing.id : null, { input, output, defaultUserHome });
-    return selection ? { ...preview, settings: { source, selection } } : { status: 'cancelled' };
+    return selection ? { ...preview, settings: { source, selection: Array.isArray(selection) ? selection : selection.selection,
+      setup: Array.isArray(selection) ? [] : selection.setup ?? [], limitations: Array.isArray(selection) ? [] : selection.limitations ?? [] } } : { status: 'cancelled' };
   }
   if (!input.isTTY || !output.isTTY || json) throw new Error('Profile setup requires an external interactive terminal; omit --apply to preview');
   const controller = new AbortController(), abort = () => controller.abort();
@@ -93,7 +94,7 @@ export async function profileCommand(store, params, options, { json = false, cli
   const show = value => output.write(`${displayJSON(value)}\n`);
   try {
     await runtime.assertExternal();
-    let source = options['--from'] ?? (advanced ? 'Default' : undefined), setup, selection;
+    let source = options['--from'] ?? (advanced ? 'Default' : undefined), setup, selection, setupGuidance = [], limitations = [], skipped = [];
     if (operation === 'create') {
       if (!source && preview.profile.action !== 'resume') {
         const choice = await question('Settings: 1 minimal (recommended), 2 copy selected settings, q cancel\n> ', io);
@@ -108,6 +109,9 @@ export async function profileCommand(store, params, options, { json = false, cli
       if (advanced) {
         selection = await selectAdvanced(store, source, existing?.native ? existing.id : null, { ...io, defaultUserHome });
         if (!selection) return { status: 'cancelled' };
+        if (Array.isArray(selection)) selection = { selection, setup: [], limitations: [], skipped: [] };
+        setupGuidance = selection.setup ?? [];
+        limitations = selection.limitations ?? [];
       } else {
         if (source && !include) include = await pickCopyComponents(COPY_COMPONENTS, io);
         if (source && !include) return { status: 'cancelled' };
@@ -115,7 +119,7 @@ export async function profileCommand(store, params, options, { json = false, cli
       if (source === name) throw new Error('Choose a different settings source');
       // Resolve the source before preparing a target so a typo leaves no profile.
       if (source && source.toLowerCase() !== 'default') await resolveHome(store, source);
-      show({ ...preview, settings: { source: source ?? null, included: include ?? [], ...(selection ? { selection } : {}) } });
+      show({ ...preview, settings: { source: source ?? null, included: include ?? [], ...(selection ? { selection: selection.selection, setup: setupGuidance, limitations } : {}) } });
       if (!await confirmCopyAction('create', io)) return { status: 'cancelled' };
       const client = await nativeClient(store, options, controller.signal);
       if (base === join(dirname(store.directory), 'profiles')) {
@@ -127,19 +131,35 @@ export async function profileCommand(store, params, options, { json = false, cli
       setup = await createHome({ store, name, base, description: options['--description'], ...client });
       show(setup);
       if (source) {
-        let copyOptions = { ...(advanced ? { selection } : { include }), defaultUserHome };
+        let copyOptions = { ...(advanced ? { selection: selection.selection } : { include }), defaultUserHome };
         let copy = await planCopy(store, source, setup.profile.id, copyOptions);
-        if (advanced && !existing?.native) {
-          selection = await reviewAdvancedConflicts(copy, selection, io);
-          if (!selection?.length) return { ...setup, status: 'setup-pending', next: 'No settings copied. Continue with profile signin or copy --advanced.' };
-          copyOptions = { selection, defaultUserHome };
-          copy = await planCopy(store, source, setup.profile.id, copyOptions);
+        if (copy.items?.some(item => item.status === 'conflict')) {
+          const ids = advanced ? selection.selection : copy.items.map(item => item.id).filter(Boolean);
+          const reviewed = await reviewAdvancedConflicts(copy, advanced ? { ...selection, selection: ids } : ids, io);
+          if (!reviewed) return { ...setup, status: controller.signal.aborted ? 'cancelled' : 'setup-pending', next: 'Settings copy and native sign-in remain available as separate commands.' };
+          if (advanced) {
+            selection = reviewed;
+            setupGuidance = selection.setup ?? setupGuidance;
+            copyOptions = { selection: selection.selection, defaultUserHome };
+          } else copyOptions = { selection: reviewed.selection, defaultUserHome };
+          skipped = reviewed.skipped ?? [];
+          if (reviewed.selection.length) copy = await planCopy(store, source, setup.profile.id, copyOptions);
+          else {
+            copy = { ...copy, status: 'unchanged', items: [], changes: [], hash: undefined };
+          }
         }
-        show(copy);
-        if (!await confirmCopyAction('copy', io)) return { ...setup, status: controller.signal.aborted ? 'cancelled' : 'setup-pending', next: 'Settings copy and native sign-in remain available as separate commands.' };
-        const applied = await applyCopy(store, source, setup.profile.id, { ...copyOptions, expectedHash: copy.hash, runtime, signal: controller.signal });
-        show(applied);
-        setup.copy = applied;
+        const copyReview = { ...copy, setup: setupGuidance, limitations, skipped };
+        show(copyReview);
+        const writes = (copy.changes ?? []).some(change => change.action !== 'identical')
+          || (copy.items ?? []).some(item => !['identical', 'unchanged', 'skipped', 'kept'].includes(item.status));
+        if (writes) {
+          if (!await confirmCopyAction('copy', io)) return { ...setup, status: controller.signal.aborted ? 'cancelled' : 'setup-pending', setup: setupGuidance, next: 'Settings copy and native sign-in remain available as separate commands.' };
+          const applied = await applyCopy(store, source, setup.profile.id, { ...copyOptions, expectedHash: copy.hash, runtime, signal: controller.signal });
+          show({ ...applied, setup: setupGuidance, limitations, skipped });
+          setup.copy = applied;
+        } else setup.copy = { ...copy, status: 'unchanged', skipped };
+        setup.setup = setupGuidance;
+        setup.limitations = limitations;
       }
     } else setup = await inspectHomeCreation({ store, name, base });
     if (setup.login.state !== 'completed') {

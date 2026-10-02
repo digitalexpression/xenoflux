@@ -189,7 +189,7 @@ test('includeProjects excludes repository inventory but preserves distinct read-
   assert.ok(full.items.some(x=>x.conversationId?.startsWith('sub')));
 });
 
- test('inventory omits filesystem metadata without deleting it or hiding system skills',async t=>{
+test('inventory omits filesystem metadata without deleting it or hiding system skills',async t=>{
   const f=await fixture(t);
   await put(join(f.home,'skills','.system','bundled','SKILL.md'),'Bundled skill');
   await put(join(f.home,'memories','notes.md'),'Memory');
@@ -205,4 +205,22 @@ test('includeProjects excludes repository inventory but preserves distinct read-
   assert.ok(after.items.some(x=>x.label==='bundled'&&x.scope==='system'));
   assert.ok(after.items.some(x=>x.label==='notes.md'));
   for(const path of metadata) await lstat(path);
+});
+
+test('copy-only inventory scans transferable settings and standalone files without runtime or project discovery', async t => {
+  const f = await fixture(t), project = join(f.root, 'unvisited-project');
+  await append(join(f.home, 'config.toml'), `\n[projects.${JSON.stringify(project)}]\ntrust_level="trusted"\n`);
+  await put(join(f.home, 'plugins', 'cache', 'market.example', 'plugin', '1.0.0', 'plugin.json'), '{"name":"cached"}');
+  await put(join(f.home, 'memories', 'private.md'), 'private memory');
+  await put(join(f.home, 'agents', 'worker.toml'), 'name="worker"\ndescription="A role"\ndeveloper_instructions="Do work."\n');
+  await put(join(f.home, 'rules', 'safe.rules'), 'prefix_rule(pattern="true")\n');
+  await put(join(f.home, 'skills', 'safe', 'SKILL.md'), '---\nname: safe\ndescription: safe\n---\n');
+  const result = await inspectProfile(f.store, 'A', { defaultUserHome: f.user, copyOnly: true });
+  assert.ok(result.items.some(item => item.category === 'agent' && item.label === 'worker.toml'));
+  assert.ok(result.items.some(item => item.category === 'rule' && item.label === 'safe.rules'));
+  assert.ok(result.items.some(item => item.category === 'skill' && item.label === 'safe'));
+  assert.equal(result.items.some(item => ['plugin', 'memory', 'conversation', 'project', 'db'].includes(item.category)), false);
+  assert.deepEqual(result.projects, []);
+  assert.equal(JSON.stringify(result).includes('private memory'), false);
+  assert.ok(result.limitations.some(message => message.includes('Copy discovery is limited')));
 });

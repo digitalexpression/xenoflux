@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store, create } from '../src/profiles.js';
+import { planCopy } from '../src/native-copy.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome } from '../src/homes.js';
 
@@ -41,9 +42,70 @@ test('copy preview with explicit include is JSON-safe and leaves native homes an
   const preview = JSON.parse(result.stdout);
   assert.equal(preview.status, 'preview');
   assert.deepEqual(preview.components, ['config']);
-  assert.match(preview.config.scope, /General model/);
+  assert.match(preview.config.scope, /Selected supported source config values/);
   assert.ok(preview.changes.some(change => change.path === 'config.toml'));
   assert.equal(await readFile(target, 'utf8'), before);
+  await absent(join(f.store.directory, 'native-copies'));
+});
+
+test('applying an identical copy skips client preparation and creates no journal', async t => {
+  if (spawnSync('/usr/bin/expect', ['-v']).error) return t.skip('expect unavailable');
+  const f = await fixture(t);
+  const sourceConfig = await readFile(join(f.a.home, 'config.toml'));
+  await writeFile(join(f.b.home, 'config.toml'), sourceConfig, { mode: 0o600 });
+  const program = `set timeout 10
+spawn $env(XFX_TEST_NODE) $env(XFX_TEST_CLI) --store $env(XFX_TEST_STORE) copy A B --include config --apply
+expect {
+  eof { }
+  timeout { puts stderr "unchanged copy did not finish"; exit 2 }
+}
+catch wait result
+exit [lindex $result 3]`;
+  const result = spawnSync('/usr/bin/expect', ['-c', program], { encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, HOME: f.root, XFX_TEST_NODE: process.execPath, XFX_TEST_CLI: cli, XFX_TEST_STORE: f.store.directory } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.doesNotMatch(result.stdout, /Type copy to continue|Return to Default/);
+  assert.match(result.stdout, /identical|unchanged/);
+  await absent(join(f.store.directory, 'native-copies'));
+  assert.deepEqual(await readFile(join(f.b.home, 'config.toml')), sourceConfig);
+});
+
+test('legacy include copy can keep a conflict and replan the remaining selection', async t => {
+  if (spawnSync('/usr/bin/expect', ['-v']).error) return t.skip('expect unavailable');
+  const f = await fixture(t), target = join(f.b.home, 'config.toml');
+  const sourceConfig = join(f.a.home, 'config.toml');
+  await writeFile(sourceConfig, `${await readFile(sourceConfig, 'utf8')}personality = "friendly"\n`, { mode: 0o600 });
+  await writeFile(target, `${await readFile(target, 'utf8')}model = "destination-model"\n`, { mode: 0o600 });
+  const first = await planCopy(f.store, 'A', 'B', { include: ['config'] });
+  const remaining = first.items.filter(item => item.status !== 'conflict').map(item => item.id);
+  const replanned = await planCopy(f.store, 'A', 'B', { selection: remaining });
+  assert.notEqual(first.hash, replanned.hash);
+  const program = `set timeout 10
+spawn $env(XFX_TEST_NODE) $env(XFX_TEST_CLI) --store $env(XFX_TEST_STORE) copy A B --include config --apply
+expect {
+  -re {Type replace to apply this selected change} { send -- "keep\\r" }
+  timeout { puts stderr "conflict review did not appear"; exit 2 }
+}
+expect {
+  -re {Type copy to continue} { send -- "keep-preview-only\\r" }
+  eof { }
+  timeout { puts stderr "reviewed copy did not finish"; exit 3 }
+}
+expect {
+  eof { }
+  timeout { puts stderr "copy process did not exit"; exit 4 }
+}
+catch wait result
+exit [lindex $result 3]`;
+  const result = spawnSync('/usr/bin/expect', ['-c', program], { encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, HOME: f.root, XFX_TEST_NODE: process.execPath, XFX_TEST_CLI: cli, XFX_TEST_STORE: f.store.directory } });
+  assert.equal(result.status, 130, result.stdout + result.stderr);
+  assert.match(result.stdout, new RegExp(`"hash":\\s*"${replanned.hash}"`));
+  assert.match(result.stdout, /"label": "personality"/);
+  assert.match(result.stdout, /"reason": "Kept the destination item\."/);
+  const finalConfig = await readFile(target, 'utf8');
+  assert.match(finalConfig, /model = "destination-model"/);
+  assert.doesNotMatch(finalConfig, /personality = "friendly"/);
   await absent(join(f.store.directory, 'native-copies'));
 });
 

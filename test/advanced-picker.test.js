@@ -72,6 +72,57 @@ test('selects by keyboard, keeps canonical inventory order, and reviews before r
   assert.match(io.shown(), /before: old; after: new/);
 });
 
+test('setup guidance is selectable but unavailable inventory rows remain unselectable; empty selection is valid', async () => {
+  const items = { items: [
+    { id: 'setup:server', category: 'setup', label: 'Public docs server', scope: 'profile', origin: 'config', path: 'config.toml', setup: true, copyable: false, integration: 'plugin', pluginIdentity: 'docs@personal', marketplace: 'personal', sourceVersion: '1.2.3', installedVersion: 'unknown', steps: ['Check the destination server list first.'] },
+    { id: 'blocked', category: 'Other', label: 'Unknown', copyable: false },
+  ] };
+  const io = streams();
+  const pending = pickAdvancedItems(items, io);
+  io.input.write('\u001b[B'); // setup row
+  io.input.write('d');
+  assert.match(io.shown(), /Plugin identity: docs@personal/);
+  assert.match(io.shown(), /Source manifest version: 1\.2\.3/);
+  assert.match(io.shown(), /Installed version: unknown/);
+  io.input.write('x'); // return to picker
+  io.input.write(' ');
+  io.input.write('\r');
+  io.input.end();
+  assert.deepEqual(await pending, ['setup:server']);
+  assert.match(io.shown(), /manual setup/);
+  assert.match(io.shown(), /Check the destination server list first/);
+
+  const empty = streams();
+  const emptyPending = pickAdvancedItems({ items: [] }, empty);
+  empty.input.write('\r'); empty.input.end();
+  assert.deepEqual(await emptyPending, []);
+});
+
+test('final preview rows retain origin, scope, and source path', async () => {
+  const io = streams();
+  const pending = pickAdvancedItems({ items: [{ id: 'x', category: 'Skills', label: 'review-helper', origin: 'Default', scope: 'profile', path: 'skills/review-helper/SKILL.md', sourcePath: '/profiles/default/skills/review-helper', copyable: true }] }, {
+    ...io, review: async () => ({ items: [{ id: 'x', label: 'review-helper', origin: 'Default', scope: 'profile', sourcePath: '/profiles/default/skills/review-helper', status: 'conflict', changes: [{ path: 'old.sh', action: 'remove', beforeMode: '0755' }] }] }),
+  });
+  io.input.write('\u001b[B'); io.input.write(' '); io.input.write('\r');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(io.shown(), /Origin: Default \| Scope: profile \| Source: \/profiles\/default\/skills\/review-helper/);
+  assert.match(io.shown(), /old\.sh; action: remove; beforeMode: 0755/);
+  io.input.write('q'); io.input.end(); await pending;
+});
+
+test('preview shows complete bounded text details beyond the former 220-character limit', async () => {
+  const io = streams();
+  const longValue = 'reviewable-change-'.repeat(40);
+  const pending = pickAdvancedItems({ items: [{ id: 'long', category: 'Core', label: 'Long change', copyable: true }] }, {
+    ...io, review: async () => ({ items: [{ id: 'long', label: 'Long change', origin: 'Default', scope: 'profile', sourcePath: '/source/config.toml', status: 'conflict', changes: [{ path: 'config.toml:model', before: longValue, after: 'new' }] }] }),
+  });
+  io.input.write('\u001b[B'); io.input.write(' '); io.input.write('\r');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(io.shown().includes(longValue));
+  assert.doesNotMatch(io.shown(), /\[truncated\]/);
+  io.input.write('q'); io.input.end(); await pending;
+});
+
 test('cancel, EOF and abort restore terminal raw mode', async () => {
   const cancelled = streams({ tty: true });
   const cancelPending = pickAdvancedItems(inventory, cancelled);

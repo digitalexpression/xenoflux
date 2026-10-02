@@ -46,8 +46,9 @@ async function fixture(t) {
 test('preview is read-only and refuses unsupported scope, Default target, and identical homes', async t => {
   const f = await fixture(t), before = await text(join(f.b.home, 'AGENTS.md'));
   const result = await planCopy(f.store, 'Default', 'B', f.options);
-  assert.deepEqual(result.changes.map(c => [c.path, c.action]), [['AGENTS.md', 'replace'], ['AGENTS.override.md', 'remove']]);
-  assert.ok(!JSON.stringify(result).includes('Source global instructions'));
+  assert.deepEqual(result.changes.map(c => [c.path, c.action]), [['AGENTS.md', 'replace']]);
+  assert.ok(JSON.stringify(result).includes('Source global instructions'));
+  assert.ok(result.kept.some(item=>item.label==='AGENTS.override.md'&&item.scope==='profile'&&item.destinationPath.endsWith('/AGENTS.override.md')));
   assert.equal(await text(join(f.b.home, 'AGENTS.md')), before);
   await absent(join(f.store.directory, 'native-copies'));
   await assert.rejects(planCopy(f.store, 'Default', 'B', { ...f.options, include: ['history'] }), /not supported/);
@@ -62,7 +63,7 @@ test('instruction copy preserves config, credentials and history; undo restores 
   const result = await applyCopy(f.store, 'Default', 'B', { ...f.options, expectedHash: preview.hash });
   assert.equal(result.status, 'applied');
   assert.equal(await text(join(f.b.home, 'AGENTS.md')), await text(join(f.defaultProfile, 'AGENTS.md')));
-  await absent(join(f.b.home, 'AGENTS.override.md'));
+  assert.equal(await text(join(f.b.home, 'AGENTS.override.md')), 'An old overriding instruction.\n');
   assert.equal((await stat(result.backup)).mode & 0o777, 0o600);
   assert.equal(await text(join(f.b.home, 'config.toml')), config);
   assert.equal(await text(join(f.b.home, 'auth.json')), 'credential sentinel');
@@ -118,13 +119,12 @@ test('config projection copies general choices and preserves target routing, int
     plugins: { test: { enabled: true } }, mcp_servers: { local: { command: '/target/tool' } } }));
   const before = parse(await text(join(f.b.home, 'config.toml')));
   const preview = await planCopy(f.store, 'Default', 'B', { ...f.options, include: ['config'] });
-  assert.deepEqual(preview.config.enforcedKeys, ['allow_symlinked_codex_home']);
-  assert.ok(!preview.config.preservedKeys.includes('allow_symlinked_codex_home'));
+  assert.ok(preview.items.some(item=>item.label==='model'));
   const result = await applyCopy(f.store, 'Default', 'B', { ...f.options, include: ['config'] });
   const after = parse(await text(join(f.b.home, 'config.toml')));
   assert.equal(after.model, 'source-model');
   assert.equal(after.model_reasoning_effort, 'high');
-  assert.equal(after.model_verbosity, undefined);
+  assert.equal(after.model_verbosity, 'low');
   assert.equal(after.allow_symlinked_codex_home, true);
   for (const key of ['cli_auth_credentials_store', 'sqlite_home', 'notify', 'agents', 'features', 'plugins', 'mcp_servers']) assert.deepEqual(after[key], before[key]);
   assert.ok(!JSON.stringify(result).includes('1234567890abcdef'));
@@ -169,11 +169,11 @@ test('copy refuses a configuration projection that expands beyond the new-copy l
   await put(f.b.home, 'config.toml', `${await text(join(f.b.home, 'config.toml'))}\n[mcp_servers.retained]\ncommand = '${retained}'\n`);
 
   await assert.rejects(planCopy(f.store, 'Default', 'B', { ...f.options, include: ['config'] }),
-    /bounded file limit: config\.toml/);
+    /bounded native config limit/);
   assert.ok(Buffer.byteLength(await text(join(f.b.home, 'config.toml'))) < 256 * 1024);
 });
 
-test('agents selection replaces direct definitions and agent settings while preserving general config', async t => {
+test('agents category copies selected definitions and settings while preserving destination-only data', async t => {
   const f = await fixture(t);
   const source = parse(await text(join(f.defaultProfile, 'config.toml')));
   source.agents.default_subagent_model = 'worker-model';
@@ -187,12 +187,19 @@ test('agents selection replaces direct definitions and agent settings while pres
   const result = await applyCopy(f.store, 'Default', 'B', { ...f.options, include: ['agents'] });
   const after = parse(await text(join(f.b.home, 'config.toml')));
   assert.equal(after.model, 'target-model');
-  assert.deepEqual({ ...after.agents }, { max_threads: 3, default_subagent_model: 'worker-model', default_subagent_reasoning_effort: 'medium' });
+  assert.deepEqual({ ...after.agents }, { max_threads: 3, max_depth: 1, default_subagent_model: 'worker-model', default_subagent_reasoning_effort: 'medium' });
   assert.deepEqual({ ...after.features }, { memories: true, multi_agent: true });
-  assert.deepEqual(await readdir(join(f.b.home, 'agents')), ['reviewer.toml']);
+  assert.deepEqual((await readdir(join(f.b.home, 'agents'))).sort(), ['old.toml', 'reviewer.toml']);
   await undoCopy(f.store, result.id, f.options);
   assert.equal(await text(join(f.b.home, 'config.toml')), before);
   assert.deepEqual(await readdir(join(f.b.home, 'agents')), ['old.toml']);
+});
+
+test('agents category refuses bounded partial source enumeration',async t=>{
+  const f=await fixture(t),dir=join(f.defaultProfile,'agents');
+  for(let i=0;i<257;i++) await put(f.defaultProfile,`agents/agent-${String(i).padStart(3,'0')}.toml`,role(`agent-${i}`));
+  await assert.rejects(planCopy(f.store,'Default','B',{...f.options,include:['agents']}),/inventory is partial/);
+  await absent(join(f.store.directory,'native-copies'));
 });
 
 test('agent copy refuses malformed destination tables instead of silently losing selected fields', async t => {
@@ -200,7 +207,7 @@ test('agent copy refuses malformed destination tables instead of silently losing
   for (const key of ['features', 'agents']) {
     const config = parse(original); config[key] = ['unexpected'];
     const content = stringify(config); await put(f.b.home, 'config.toml', content);
-    await assert.rejects(applyCopy(f.store, 'Default', 'B', { ...f.options, include: ['agents'] }), /require a TOML table/);
+    await assert.rejects(applyCopy(f.store, 'Default', 'B', { ...f.options, include: ['agents'] }), /TOML table/);
     assert.equal(await text(join(f.b.home, 'config.toml')), content);
   }
 });
@@ -264,7 +271,7 @@ test('selected symlinks, hard links, parent symlinks and credential-like text ar
         await rm(join(f.defaultProfile, 'agents'), { recursive: true });
         await symlink(f.b.home, join(f.defaultProfile, 'agents'));
         f.options.include = ['agents'];
-      } else await put(f.defaultProfile, 'AGENTS.md', kind === 'secret' ? 'api_key = sk-1234567890abcdef\n' : 'x'.repeat(256 * 1024 + 1));
+      } else await put(f.defaultProfile, 'AGENTS.md', kind === 'secret' ? 'api_key = sk-1234567890abcdef\n' : 'x'.repeat(512 * 1024 + 1));
       await assert.rejects(planCopy(f.store, 'Default', 'B', f.options));
       await absent(join(f.store.directory, 'native-copies'));
     });
@@ -333,7 +340,7 @@ test('journal tampering and externally rerouted destination files are refused du
   await writeFile(result.backup, original);
   await rm(join(f.b.home, 'AGENTS.md'));
   await symlink(join(f.defaultProfile, 'AGENTS.md'), join(f.b.home, 'AGENTS.md'));
-  await assert.rejects(undoCopy(f.store, result.id, f.options), /Unsafe or unreadable/);
+  await assert.rejects(undoCopy(f.store, result.id, f.options), /Unsafe advanced-copy file/);
 });
 
 test('renaming a profile does not prevent undo into the same bound home', async t => {

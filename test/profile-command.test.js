@@ -14,15 +14,15 @@ const app = { appPath: '/fixture/Codex.app', bundleId: 'com.fixture.codex', exec
 function terminal(replies) {
   const input = new PassThrough(), output = new PassThrough(); input.isTTY = output.isTTY = true;
   const prompts = ['Settings:', 'Source profile', 'Numbers or names', 'Type create', 'Type copy', 'Type signin', 'Type register'];
-  const seen = new Set(); let text = 0;
+  const seen = new Set(); let text = 0, shown = '';
   output.on('data', chunk => {
-    const value = chunk.toString(); text += value.length;
+    const value = chunk.toString(); text += value.length; shown += value;
     for (const prompt of prompts) if (!seen.has(prompt) && value.includes(prompt)) {
       seen.add(prompt); const reply = replies.shift();
       queueMicrotask(() => input.write(`${reply}\n`));
     }
   });
-  return { input, output, replies };
+  return { input, output, replies, shown: () => shown };
 }
 
 async function fixture(t) {
@@ -120,6 +120,22 @@ test('advanced creation copies one chosen key and retains the undoable operation
   assert.match(await readFile(join(result.home, 'config.toml'), 'utf8'), /cli_auth_credentials_store = "file"/);
   await undoCopy(f.store, result.copy.id, { runtime: f.runtime });
   assert.doesNotMatch(await readFile(join(result.home, 'config.toml'), 'utf8'), /default-model/);
+});
+
+test('manual-only advanced creation keeps setup guidance separate from an empty copy and journal', async t => {
+  const f = await fixture(t), io = terminal(['create', 'later']);
+  const setupItem = { id: 'setup:mcp:docs', label: 'MCP · docs', category: 'setup', setup: true, copyable: false,
+    scope: 'profile', origin: 'config.toml', path: 'config.toml', steps: ['Check the destination first.'] };
+  const result = await profileCommand(f.store, ['create', 'manual-only'], { ...f.options, '--from': 'Default', '--advanced': true }, {
+    input: io.input, output: io.output, clientRuntime: f.clientRuntime, signIn: f.signin(0), defaultUserHome: f.defaultUserHome,
+    selectAdvanced: async () => ({ selection: [], setup: [setupItem], limitations: [] }),
+  });
+  assert.equal(result.status, 'setup-pending');
+  assert.equal(result.copy.status, 'unchanged');
+  assert.deepEqual(result.setup, [setupItem]);
+  assert.ok(!f.calls.includes('idle'), 'an unchanged settings plan does not prepare the copy runtime');
+  await assert.rejects(stat(join(f.store.directory, 'native-copies')), { code: 'ENOENT' });
+  assert.match(io.shown(), /Check the destination first/);
 });
 
 test('advanced selection cancellation leaves no prepared profile', async t => {
