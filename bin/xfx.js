@@ -68,7 +68,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
 
 Store: --store, XFX_HOME, or ~/.xfx/controller.
 Comparison covers copyable native settings only; skills/plugins/MCP and effective repository configuration are excluded.
-Advanced copy preserves unselected items; category copy replaces selected categories.
+All copy modes preserve unselected settings and destination-only items; selected skill packages are replaced exactly.
 Default is supported by inspect, compare/copy and the desktop picker. Native sign-in never clones credentials or history.
 --close-clients permits graceful shutdown for desktop control, copy --apply, or profile create/signin --apply.
 Mutation prompts and external-terminal checks still apply. Read-only operations never quit applications.
