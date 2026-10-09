@@ -95,7 +95,7 @@ async function settings(home, items, scope, origin) {
     try {
       const content=await safeText(configPath); if(content===null) throw new Error('unsafe config');
       const config = parse(content);
-      if (config.model_provider && config.model_provider !== 'openai') throw new Error('custom model provider is unsupported');
+      if ((config.model_provider ?? 'openai') !== 'openai' || Object.hasOwn(config.model_providers ?? {}, 'openai')) throw new Error('custom model provider is unsupported');
       for (const key of CONFIG_KEYS) if (Object.hasOwn(config, key)) {
         const value = safeConfigValue(config[key]);
         const eligible=['profile','user'].includes(scope);
@@ -340,7 +340,7 @@ async function runtimeItems(home,items,limitations) {
 }
 
 /** Build a non-mutating, content-free inventory for one named profile or Default. */
-export async function inspectProfile(store, name, { defaultUserHome = homedir(), includeProjects = true, mainConversationsOnly = false } = {}) {
+export async function inspectProfile(store, name, { defaultUserHome = homedir(), includeProjects = true, mainConversationsOnly = false, copyOnly = false } = {}) {
   const profile=name.toLowerCase()==='default' ? {name:'Default'} : find(await store.read(),name);
   const endpoint=await resolveNativeSettingsHome(store,profile.name,{defaultUserHome}), home=endpoint.home;
   const items=[],projects=[],limitations=[
@@ -352,8 +352,10 @@ export async function inspectProfile(store, name, { defaultUserHome = homedir(),
   const effectiveUserHome=profile.name==='Default'?defaultUserHome:join(endpoint.root,'user-home');
   const userAgents=join(effectiveUserHome,'.agents');
   await skillDirs(userAgents,'user',profile.name==='Default'?'user':'profile-user-home',items);
-  add(items,{category:'skill',label:'system skills',scope:'system',origin:'native-runtime',reason:'System skill roots are not discoverable from native home'});
-  limitations.push('System-provided skills are not discoverable; plugin inventory covers direct native-home entries and safe manifest metadata only.');
+  if (!copyOnly) {
+    add(items,{category:'skill',label:'system skills',scope:'system',origin:'native-runtime',reason:'System skill roots are not discoverable from native home'});
+    limitations.push('System-provided skills are not discoverable; plugin inventory covers direct native-home entries and safe manifest metadata only.');
+  }
   if(profile.name!=='Default') {
     const sharedAgents=join(defaultUserHome,'.agents');
     await skillDirs(sharedAgents,'user','machine-user (Dock-dependent)',items);
@@ -362,9 +364,13 @@ export async function inspectProfile(store, name, { defaultUserHome = homedir(),
     }
     limitations.push('Named CLI user settings are read from this profile’s user-home; machine-user settings are shown as Dock-dependent and are not copied.');
   }
-  await runtimeItems(home,items,limitations);
-  await collectProjects(store,profile,home,defaultUserHome,items,projects,limitations,{includeProjects,mainConversationsOnly});
-  if(mainConversationsOnly) limitations.push('Only recognized main conversations are shown; subagents, side chats and unclassified thread sources are excluded.');
+  if (!copyOnly) {
+    await runtimeItems(home,items,limitations);
+    await collectProjects(store,profile,home,defaultUserHome,items,projects,limitations,{includeProjects,mainConversationsOnly});
+    if(mainConversationsOnly) limitations.push('Only recognized main conversations are shown; subagents, side chats and unclassified thread sources are excluded.');
+  } else {
+    limitations.push('Copy discovery is limited to supported settings and standalone instructions, agents, rules, and skills; integrations, conversations, memory, and project-owned resources are excluded.');
+  }
   const sections=[...new Set(items.map(x=>x.category))].sort().map(category=>{
     const subset=items.filter(x=>x.category===category),statusCounts={};
     for(const item of subset) statusCounts[item.status]=(statusCounts[item.status]??0)+1;

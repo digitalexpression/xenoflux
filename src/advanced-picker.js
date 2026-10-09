@@ -1,12 +1,22 @@
 import { StringDecoder } from 'node:string_decoder';
 
-const clean = (value, limit = 240) => String(value ?? '')
+const clean = (value, limit = 8192) => String(value ?? '')
   .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
   .replace(/\s+/g, ' ').trim().slice(0, limit);
 const bounded = (value, limit) => {
   const text = clean(value, Number.MAX_SAFE_INTEGER);
   return text.length > limit ? `${text.slice(0, Math.max(0, limit - 14))}… [truncated]` : text;
 };
+const MAX_REVIEW_CHARS = 1024 * 1024;
+const MAX_CHANGE_TEXT = 256 * 1024;
+
+function reviewSize(preview) {
+  const entries = Array.isArray(preview) ? preview : preview?.items;
+  if (!Array.isArray(entries)) return 0;
+  if (entries.reduce((count, entry) => count + (Array.isArray(entry.changes) ? entry.changes.length : 0), 0) > 1900) return MAX_REVIEW_CHARS + 1;
+  if (entries.some(entry => Array.isArray(entry.changes) && entry.changes.some(change => ['before', 'after'].some(key => typeof change?.[key] === 'string' && change[key].length > MAX_CHANGE_TEXT)))) return MAX_REVIEW_CHARS + 1;
+  return entries.reduce((total, entry) => total + JSON.stringify(entry.changes ?? null).length, 0);
+}
 
 function itemSearchText(item) {
   return [item.label, item.category, item.scope, item.origin, item.path, item.reason, item.conversationId, item.cwd, item.updatedAt]
@@ -37,9 +47,9 @@ function formatChange(change) {
   if (typeof change === 'string') return clean(change, 500);
   if (change && typeof change === 'object' && ('before' in change || 'after' in change)) {
     const parts = [];
-    for (const key of ['path', 'action']) if (change[key] != null) parts.push(`${key}: ${clean(change[key], 160)}`);
-    if ('before' in change) parts.push(`before: ${bounded(change.before, 220)}`);
-    if ('after' in change) parts.push(`after: ${bounded(change.after, 220)}`);
+    for (const key of ['path', 'action', 'mode', 'beforeMode', 'afterMode']) if (change[key] != null) parts.push(`${key}: ${clean(change[key], 8192)}`);
+    if ('before' in change) parts.push(`before: ${bounded(change.before, MAX_CHANGE_TEXT)}`);
+    if ('after' in change) parts.push(`after: ${bounded(change.after, MAX_CHANGE_TEXT)}`);
     for (const key of ['beforeHash', 'afterHash', 'hash', 'beforeSize', 'afterSize', 'size']) {
       if (change[key] != null) parts.push(`${key}: ${clean(change[key], 100)}`);
     }
@@ -47,8 +57,8 @@ function formatChange(change) {
   }
   if (change && typeof change === 'object') {
     const parts = [];
-    for (const key of ['path', 'action', 'status', 'hash', 'beforeHash', 'afterHash', 'size', 'beforeSize', 'afterSize'])
-      if (change[key] != null) parts.push(`${key}: ${clean(change[key], 160)}`);
+    for (const key of ['path', 'action', 'status', 'mode', 'beforeMode', 'afterMode', 'hash', 'beforeHash', 'afterHash', 'size', 'beforeSize', 'afterSize'])
+      if (change[key] != null) parts.push(`${key}: ${clean(change[key], 8192)}`);
     if (parts.length) return parts.join('; ');
     return 'Change details are available in the final copy report.';
   }
@@ -56,16 +66,23 @@ function formatChange(change) {
 }
 
 function previewLines(preview) {
-  const entries = Array.isArray(preview) ? preview : preview?.items;
+  const entries = Array.isArray(preview) ? preview : Array.isArray(preview?.items)
+    ? [...preview.items, ...(preview.kept ?? []).map(item => ({ ...item, status: item.status ?? 'kept' }))]
+    : undefined;
   if (!Array.isArray(entries)) return ['Preview is ready.'];
   const lines = ['Preview:'];
   for (const entry of entries) {
-    lines.push(`  ${clean(entry.label || entry.id, 120)} — ${clean(entry.status || 'planned', 80)}`);
+    lines.push(`  ${clean(entry.label || entry.id)} — ${clean(entry.status || 'planned', 80)}`);
+    const location = entry.sourcePath ?? entry.destinationPath ?? entry.path;
+    const locationLabel = entry.sourcePath ? 'Source' : 'Destination';
+    lines.push(`    Origin: ${clean(entry.origin || 'unknown')} | Scope: ${clean(entry.scope || 'unknown')} | ${locationLabel}: ${clean(location || 'unknown')}`);
+    if (entry.reason) lines.push(`    Inventory: ${clean(entry.inventoryStatus || 'unknown')} — ${clean(entry.reason)}`);
     const changes = entry.changes;
     if (Array.isArray(changes)) for (const change of changes) lines.push(`    ${formatChange(change)}`);
     else if (changes != null) lines.push(`    ${formatChange(changes)}`);
   }
-  if (lines.length > 2000) return [...lines.slice(0, 1999), '  … preview truncated; use the final copy report for the complete list.'];
+  for (const limitation of preview.destinationLimitations ?? []) lines.push(`  Destination limitation: ${clean(limitation)}`);
+  if (lines.length > 2000) return ['Preview is too large to review safely. Reduce the selection before continuing.'];
   return lines;
 }
 
@@ -92,15 +109,16 @@ export async function pickAdvancedItems(inventory, { input = process.stdin, outp
   let result = null;
   let previewLinesCache = [];
   let previewPage = 0;
+  let previewReviewable = true;
   let resolveResult;
   const done = new Promise(resolve => { resolveResult = resolve; });
 
   const rowsNow = () => makeRows({ items }, expanded, query.toLowerCase());
-  const writeLines = lines => {
+  const writeLines = (lines, { fitWidth = true } = {}) => {
     if (isTTY) output.write('\x1b[2J\x1b[H');
     else output.write('\n--- Advanced profile picker ---\n');
     const width = Math.max(20, Math.min(200, Number(output.columns) || 80));
-    for (const line of lines) output.write(`${line.length > width ? `${line.slice(0, width - 1)}…` : line}\n`);
+    for (const line of lines) output.write(`${fitWidth && line.length > width ? `${line.slice(0, width - 1)}…` : line}\n`);
   };
   const draw = () => {
     const rows = rowsNow();
@@ -119,9 +137,10 @@ export async function pickAdvancedItems(inventory, { input = process.stdin, outp
       else {
         const item = row.item;
         const checkbox = selected.has(item.id) ? '[x]' : '[ ]';
-        const eligible = item.copyable === true;
-        const suffix = eligible ? '' : ` — unavailable${item.reason ? `: ${clean(item.reason, 100)}` : ''}`;
+        const eligible = item.copyable === true || item.setup === true;
+        const suffix = item.setup === true ? ' — manual setup' : eligible ? '' : ` — unavailable${item.reason ? `: ${clean(item.reason, 100)}` : ''}`;
         lines.push(`${marker} ${checkbox} ${clean(item.label || item.id, 140)}${suffix}`);
+        if (item.setup === true) lines.push(`    ${clean(item.steps?.[0] || 'Review setup guidance', 180)}`);
       }
     }
     if (start > 0) lines.push('  …');
@@ -142,7 +161,7 @@ export async function pickAdvancedItems(inventory, { input = process.stdin, outp
     writeLines([
       `Preview page ${previewPage + 1}/${pageCount} (${previewLinesCache.length} lines). Up/down or space pages; another key returns.`,
       ...previewLinesCache.slice(start, start + pageSize),
-    ]);
+    ], { fitWidth: false });
   };
   const showPreview = async (idList, prefix = []) => {
     if (typeof review !== 'function') return;
@@ -151,11 +170,16 @@ export async function pickAdvancedItems(inventory, { input = process.stdin, outp
     try {
       const preview = await review(idList);
       if (closed) return;
-      previewLinesCache = [...prefix, ...previewLines(preview)];
+      previewReviewable = reviewSize(preview) <= MAX_REVIEW_CHARS;
+      const rendered = previewLines(preview);
+      if (rendered[0] === 'Preview is too large to review safely. Reduce the selection before continuing.') previewReviewable = false;
+      previewLinesCache = [...prefix, ...rendered];
+      if (!previewReviewable) previewLinesCache.push('Review exceeds the safe display limit. Reduce the selection before continuing.');
       previewPage = 0;
       drawPreview();
     } catch (error) {
       if (closed) return;
+      previewReviewable = false;
       previewLinesCache = [`Could not build preview: ${clean(error?.message || error, 240)}`];
       previewPage = 0;
       drawPreview();
@@ -163,14 +187,18 @@ export async function pickAdvancedItems(inventory, { input = process.stdin, outp
       busy = false;
       if (!closed) waitingPreview = true;
     }
+    return previewReviewable;
   };
   const showItemDetails = async item => {
     const details = [
       `Details: ${clean(item.label || item.id, 120)}`,
       `Category: ${clean(item.category || 'Other', 120)}`,
-      `Availability: ${item.copyable === true ? 'available to copy' : `unavailable${item.reason ? ` — ${clean(item.reason, 220)}` : ''}`}`,
+      `Availability: ${item.setup === true ? 'manual setup guidance' : item.copyable === true ? 'available to copy' : `unavailable${item.reason ? ` — ${clean(item.reason, 8192)}` : ''}`}`,
     ];
-    for (const [key, label] of [['scope', 'Scope'], ['origin', 'Origin'], ['path', 'Source path'], ['conversationId', 'Thread ID'], ['cwd', 'Project'], ['updatedAt', 'Updated']]) if (item[key] != null) details.push(`${label}: ${clean(item[key], 220)}`);
+    for (const [key, label] of [['scope', 'Scope'], ['origin', 'Origin'], ['path', 'Source path'], ['conversationId', 'Thread ID'], ['cwd', 'Project'], ['updatedAt', 'Updated']]) if (item[key] != null) details.push(`${label}: ${clean(item[key], 8192)}`);
+    for (const [key, label] of [['pluginIdentity', 'Plugin identity'], ['marketplace', 'Marketplace'], ['marketplaceLocator', 'Marketplace locator'], ['marketplaceSourceType', 'Marketplace source type'], ['sourceVersion', 'Source manifest version'], ['versionEvidence', 'Version evidence'], ['installedVersion', 'Installed version'], ['enabled', 'Source config enabled state'], ['status', 'Source config state'], ['destinationStatus', 'Destination definition'], ['definitionStatus', 'Definition state'], ['integration', 'Integration']])
+      if (item[key] != null) details.push(`${label}: ${clean(item[key], 8192)}`);
+    if (item.setup === true) for (const step of item.steps ?? []) details.push(`Setup: ${clean(step, 8192)}`);
     if (item.copyable === true && review) await showPreview([item.id], details.concat(['']));
     else {
       previewLinesCache = details;
@@ -226,7 +254,7 @@ export async function pickAdvancedItems(inventory, { input = process.stdin, outp
     }
     if (key === ' ') {
       const row = rowsNow()[cursor];
-      if (row?.type === 'item' && row.item.copyable === true) {
+      if (row?.type === 'item' && (row.item.copyable === true || row.item.setup === true)) {
         if (selected.has(row.item.id)) selected.delete(row.item.id); else selected.add(row.item.id);
       } else if (row?.type === 'category') {
         if (expanded.has(row.category)) expanded.delete(row.category); else expanded.add(row.category);
@@ -239,9 +267,9 @@ export async function pickAdvancedItems(inventory, { input = process.stdin, outp
         expanded.has(row.category) ? expanded.delete(row.category) : expanded.add(row.category);
         draw(); return;
       }
-      if (!selected.size) { writeLines(['Select at least one available item, or press q to cancel.']); return; }
+      // Empty selection is a valid minimal profile/no-op copy. Cancellation is q/Esc.
       const ids = items.filter(item => selected.has(item.id)).map(item => item.id);
-      if (review) await showPreview(ids);
+      if (review && !await showPreview(ids)) return;
       finish(ids);
     }
   };

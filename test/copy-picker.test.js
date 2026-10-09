@@ -17,6 +17,7 @@ test('copy component picker accepts names, numbers, all, and preserves canonical
   assert.deepEqual(parseCopySelection('all', components), components);
   assert.deepEqual((await choose('2, 1\n')).selected, ['config', 'instructions']);
   assert.match((await choose('all\n')).shown, /History, authentication, desktop data, skills, and plugins are not copied/);
+  assert.match((await choose('all\n')).shown, /Destination-only settings and items are kept/);
 });
 
 test('copy component picker retries invalid values and permits cancellation', async () => {

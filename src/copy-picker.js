@@ -33,6 +33,7 @@ export async function pickCopyComponents(components, { input = process.stdin, ou
   const writeMenu = () => {
     output.write('\nChoose native settings to copy\n');
     components.forEach((component, index) => output.write(`${index + 1}. ${display(component)}${descriptions[component] ? ' — ' + descriptions[component] : ''}\n`));
+    output.write('Destination-only settings and items are kept; this does not synchronize or delete by absence.\n');
     output.write('History, authentication, desktop data, skills, and plugins are not copied.\n');
     output.write('Numbers or names separated by commas; all; q: cancel\n> ');
   };

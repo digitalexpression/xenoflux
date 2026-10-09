@@ -167,6 +167,46 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
     })).stdout);
     if (comparison.state !== 'native-settings-comparison' || comparison.summary.changed !== 0)
       throw new Error('Installed xfx did not complete its detached read-only native settings comparison');
+    // Exercise the shipped copy engine against disposable native homes only.
+    const { Store } = await import(pathToFileURL(join(installedRoot, 'src', 'profiles.js')).href);
+    const { inspectProfile } = await import(pathToFileURL(join(installedRoot, 'src', 'profile-inventory.js')).href);
+    const { planCopy, applyCopy, planUndo, undoCopy } = await import(pathToFileURL(join(installedRoot, 'src', 'native-copy.js')).href);
+    const sourceSkill = join(readonlyHome, '.codex', 'skills', 'smoke-skill');
+    const targetSkill = join(native.home, 'skills', 'smoke-skill');
+    await mkdir(sourceSkill, { recursive: true, mode: 0o700 });
+    await mkdir(join(targetSkill, 'obsolete-empty'), { recursive: true, mode: 0o700 });
+    const skill = '---\nname: smoke-skill\ndescription: Disposable package verification.\n---\nRead the bundled marker.\n';
+    await writeFile(join(readonlyHome, '.codex', 'config.toml'), 'model = "smoke-source"\n', { mode: 0o600 });
+    await writeFile(join(sourceSkill, 'SKILL.md'), skill, { mode: 0o600 });
+    await writeFile(join(sourceSkill, 'marker.txt'), 'smoke-marker\n', { mode: 0o600 });
+    await writeFile(join(targetSkill, 'SKILL.md'), 'Original skill.\n', { mode: 0o600 });
+    await writeFile(join(targetSkill, 'obsolete-script'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+    const originalConfig = await readFile(join(native.home, 'config.toml'), 'utf8');
+    const copyStore = new Store(store);
+    const inventory = await inspectProfile(copyStore, 'Default', { defaultUserHome: readonlyHome, copyOnly: true });
+    const selection = inventory.items.filter(item => item.copyable &&
+      ((item.category === 'config' && item.label === 'model') ||
+       (item.category === 'skill' && item.label === 'smoke-skill'))).map(item => item.id);
+    if (selection.length !== 2) throw new Error('Installed xfx did not discover its selected copy fixtures');
+    const copyOptions = { defaultUserHome: readonlyHome, selection, lockPath: join(temporary, 'copy.lock'),
+      runtime: { assertIdle: async () => {} } };
+    const copyPreview = await planCopy(copyStore, 'Default', 'smoke', copyOptions);
+    const copied = await applyCopy(copyStore, 'Default', 'smoke', { ...copyOptions, expectedHash: copyPreview.hash });
+    if (copied.status !== 'applied' || await exists(join(targetSkill, 'obsolete-script')) ||
+      await exists(join(targetSkill, 'obsolete-empty')) ||
+      (await readFile(join(targetSkill, 'SKILL.md'), 'utf8')) !== skill ||
+      (await readFile(join(targetSkill, 'marker.txt'), 'utf8')) !== 'smoke-marker\n' ||
+      !(await readFile(join(native.home, 'config.toml'), 'utf8')).includes('smoke-source'))
+      throw new Error('Installed xfx did not apply an exact selected package/config update');
+    const undoPreview = await planUndo(copyStore, copied.id);
+    await undoCopy(copyStore, copied.id, { ...copyOptions, expectedHash: undoPreview.hash });
+    if ((await readFile(join(native.home, 'config.toml'), 'utf8')) !== originalConfig ||
+      (await readFile(join(targetSkill, 'SKILL.md'), 'utf8')) !== 'Original skill.\n' ||
+      (await readFile(join(targetSkill, 'obsolete-script'), 'utf8')) !== '#!/bin/sh\nexit 0\n' ||
+      ((await stat(join(targetSkill, 'obsolete-script'))).mode & 0o777) !== 0o700 ||
+      !(await stat(join(targetSkill, 'obsolete-empty'))).isDirectory() ||
+      await exists(join(targetSkill, 'marker.txt')))
+      throw new Error('Installed xfx did not restore its exact pre-copy package/config state');
     const fixture = join(temporary, 'paired fixture');
     const { PairedPathTransaction } = await import(pathToFileURL(join(installedRoot, 'src', 'paired-path-transaction.js')).href);
     const lab = createPairedPathFixture(fixture, PairedPathTransaction);

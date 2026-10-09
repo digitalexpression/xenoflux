@@ -18,7 +18,7 @@ import { preparePairedActivation, readPairedPlan, planActivationTarget, register
 import { COPY_COMPONENTS, planCopy, applyCopy, planUndo, undoCopy } from '../src/native-copy.js';
 import { pickCopyComponents, confirmCopyAction } from '../src/copy-picker.js';
 import { inspectProfile } from '../src/profile-inventory.js';
-import { selectAdvancedCopy } from '../src/advanced-command.js';
+import { selectAdvancedCopy, reviewAdvancedConflicts } from '../src/advanced-command.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
 import { confirmClientShutdown } from '../src/client-shutdown.js';
 import { createLogStorage } from '../src/log-storage.js';
@@ -68,7 +68,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
 
 Store: --store, XFX_HOME, or ~/.xfx/controller.
 Comparison covers copyable native settings only; skills/plugins/MCP and effective repository configuration are excluded.
-Advanced copy preserves unselected items; category copy replaces selected categories.
+All copy modes preserve unselected settings and destination-only items; selected skill packages are replaced exactly.
 Default is supported by inspect, compare/copy and the desktop picker. Native sign-in never clones credentials or history.
 --close-clients permits graceful shutdown for desktop control, copy --apply, or profile create/signin --apply.
 Mutation prompts and external-terminal checks still apply. Read-only operations never quit applications.
@@ -167,10 +167,15 @@ try {
       if (options['--advanced'] && options['--include'] !== undefined) throw new Error('--advanced cannot be combined with --include');
       if (options['--advanced'] && (json || !process.stdin.isTTY || !process.stdout.isTTY))
         throw new Error('Advanced selection requires an interactive terminal; use profile inspect NAME --json for inventory');
-      let include, selection;
+      let include, selection, setupGuidance = [], limitations = [];
       if (options['--advanced']) {
-        selection = await selectAdvancedCopy(store, source, target);
-        if (!selection) { result = { status: 'cancelled' }; process.exitCode = 130; }
+        const picked = await selectAdvancedCopy(store, source, target);
+        if (!picked) { result = { status: 'cancelled' }; process.exitCode = 130; }
+        else {
+          selection = Array.isArray(picked) ? picked : picked.selection;
+          setupGuidance = Array.isArray(picked) ? [] : picked.setup ?? [];
+          limitations = Array.isArray(picked) ? [] : picked.limitations ?? [];
+        }
       } else if (!undo) {
         if (options['--include'] !== undefined) {
           include = options['--include'].split(',').map(value => value.trim());
@@ -184,15 +189,36 @@ try {
         }
       }
       if (!result) {
-        const copyOptions = { ...(selection ? { selection } : { include }), defaultUserHome: homedir() };
-        const preview = undo ? await planUndo(store, target, copyOptions) : await planCopy(store, source, target, copyOptions);
-        if (!options['--apply']) result = preview;
+        let copyOptions = { ...(selection ? { selection } : { include }), defaultUserHome: homedir() };
+        let preview = undo ? await planUndo(store, target, copyOptions) : await planCopy(store, source, target, copyOptions);
+        let skipped = [];
+        if (options['--apply'] && !undo && preview.items?.some(item => item.status === 'conflict')) {
+          const ids = preview.items.map(item => item.id).filter(Boolean);
+          const reviewed = await reviewAdvancedConflicts(preview, ids);
+          if (!reviewed) { result = { status: 'cancelled' }; process.exitCode = 130; }
+          else {
+            skipped = reviewed.skipped;
+            copyOptions = { selection: reviewed.selection, defaultUserHome: copyOptions.defaultUserHome };
+            if (reviewed.selection.length) {
+              const priorComponents = preview.components;
+              preview = await planCopy(store, source, target, copyOptions);
+              if (priorComponents) preview.components = priorComponents;
+            } else preview = { ...preview, status: 'unchanged', items: [], changes: [], hash: undefined };
+            preview.skipped = skipped;
+          }
+        }
+        if (result) { /* conflict review was cancelled */ }
+        else {
+        const review = { ...preview, ...(options['--advanced'] ? { setup: setupGuidance, limitations } : {}), skipped };
+        const hasWrites = (preview.changes ?? []).some(change => change.action !== 'identical')
+          || (preview.items ?? []).some(item => !['identical', 'unchanged', 'skipped', 'kept'].includes(item.status));
+        if (!options['--apply'] || (options['--apply'] && !undo && !hasWrites)) result = options['--apply'] && !undo ? { ...review, status: 'unchanged' } : review;
         else {
           const controller = new AbortController(), abort = () => controller.abort();
           const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT', 'SIGTSTP'];
           for (const signal of signals) process.on(signal, abort);
           try {
-            process.stdout.write(`${displayJSON(preview)}\n`);
+            process.stdout.write(`${displayJSON(review)}\n`);
             process.stdout.write('Return to Default through desktop restore first if a named desktop is selected. Blocking applications will be offered a graceful quit; standalone terminal Codex sessions must be closed manually.\n');
             const action = undo ? 'undo' : 'copy';
             if (!await confirmCopyAction(action, { signal: controller.signal })) { result = { status: 'cancelled' }; process.exitCode = 130; }
@@ -201,8 +227,10 @@ try {
                 runtime: clientRuntime(controller.signal), signal: controller.signal };
               result = undo ? await undoCopy(store, target, mutationOptions)
                 : await applyCopy(store, source, target, { ...copyOptions, ...mutationOptions });
+              if (!undo) result = { ...result, skipped, ...(options['--advanced'] ? { setup: setupGuidance, limitations } : {}) };
             }
           } finally { for (const signal of signals) process.off(signal, abort); }
+        }
         }
       }
     } else if (command === 'desktop') {

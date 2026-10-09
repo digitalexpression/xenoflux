@@ -12,8 +12,9 @@ import { acquire, release, globalLock, privateDirectory, readJSON, record, exist
 import { createDesktopRuntime } from './desktop-runtime.js';
 import { redactText, redactValue } from './redact.js';
 import { MAX_COPIED_NATIVE_CONFIG_BYTES, MAX_NATIVE_CONFIG_BYTES } from './native-config.js';
-import { buildAdvancedCopy, validateAdvancedSelection, persistAdvancedFiles, validateAdvancedFiles,
-  writeAdvanced, matchesAdvanced, snapshotAdvanced, cleanupAdvancedDirectories } from './advanced-copy.js';
+import { buildAdvancedCopy, selectAdvancedComponents, validateAdvancedSelection, persistAdvancedFiles, validateAdvancedFiles,
+  writeAdvanced, matchesAdvanced, snapshotAdvanced, cleanupAdvancedDirectories, matchesAdvancedPackages,
+  applyAdvancedPackageDirectories } from './advanced-copy.js';
 export { validateAdvancedSelection };
 
 
@@ -39,9 +40,9 @@ function overlap(a, b) {
   return inside(a, b) || inside(b, a);
 }
 function selection(include) {
-  const list = typeof include === 'string' ? include.split(',').map(s => s.trim()) : include;
-  if (!Array.isArray(list) || !list.length || list.some(x => !COPY_COMPONENTS.includes(x)) || new Set(list).size !== list.length)
-    throw new Error('Choose --include config,instructions,agents (any nonempty subset). Other components are not supported.');
+  const list = include === undefined ? [...COPY_COMPONENTS] : typeof include === 'string' ? include.split(',').map(s => s.trim()) : include;
+  if (!Array.isArray(list) || list.some(x => !COPY_COMPONENTS.includes(x)) || new Set(list).size !== list.length)
+    throw new Error('Choose --include config,instructions,agents (any subset, including empty). Other components are not supported.');
   return COPY_COMPONENTS.filter(x => list.includes(x));
 }
 // Shared by the read-only settings comparison.  Keeping component selection
@@ -166,99 +167,25 @@ async function build(store, sourceName, targetName, { include, selection: select
       throw new Error('Source, destination and backup storage must be separate');
     const built = await buildAdvancedCopy(store, sourceName, targetName, selectedItems, { defaultUserHome });
     return { report: built.report, plan: { source, target, components: ['advanced'], selection: selectedItems,
-      files: built.plan.files.filter(f => f.before === null || !f.before.equals(f.after) || f.beforeMode !== f.afterMode),
-      createdDirectories: built.plan.createdDirectories ?? [], defaultUserHome } };
+      files: built.plan.files.filter(f => f.before === null || f.after === null || !f.before.equals(f.after) || f.beforeMode !== f.afterMode),
+      packages:built.plan.packages??[], createdDirectories: built.plan.createdDirectories ?? [], defaultUserHome } };
   }
   const components = selection(include);
   await safeStore(store);
   const source = await endpoint(store, sourceName, defaultUserHome), target = await endpoint(store, targetName, defaultUserHome, true);
   if (overlap(source.home, target.home) || overlap(store.directory, target.home) || overlap(store.directory, source.home))
     throw new Error('Source, destination and backup storage must be separate');
-  const files = [], copiedKeys = [], preservedKeys = [];
-  async function add(path, after) {
-    if (!relativeFile(path)) throw new Error('Unsupported settings path');
-    if (after !== null && Buffer.byteLength(after) > MAX_FILE)
-      throw new Error('Selected settings exceed the bounded file limit: ' + path);
-    const prior = await textFile(join(target.home, path)), before = prior?.content ?? null;
-    noSecrets(before, path); noSecrets(after, path);
-    if (before !== after) files.push({ path, before, beforeMode: prior?.mode ?? null, after });
-  }
-  if (components.includes('config') || components.includes('agents')) {
-    const sourceConfig = await textFile(join(source.home, 'config.toml'));
-    if (!sourceConfig) throw new Error('Source configuration is missing');
-    const from = toml(sourceConfig.content, 'source config');
-    const prior = await textFile(join(target.home, 'config.toml'));
-    if (!prior) throw new Error('Destination configuration is missing');
-    // Parse a separate editable copy to preserve TOML dates and table prototypes.
-    const before = toml(prior.content, 'destination config'), after = toml(prior.content, 'destination config');
-    if ([from, before].some(config => (config.model_provider ?? 'openai') !== 'openai'
-      || Object.hasOwn(config.model_providers ?? {}, 'openai')))
-      throw new Error('Config and agent copies do not support custom model providers; select instructions instead');
-    if (components.includes('config')) {
-      const values = projected(from, CONFIG_KEYS, 'config');
-      for (const key of CONFIG_KEYS) { delete after[key]; if (Object.hasOwn(values, key)) after[key] = values[key]; }
-      // Named homes are selected through a CODEX_HOME symlink. Keep that
-      // required root-level setting enabled regardless of the imported source.
-      after.allow_symlinked_codex_home = true;
-      copiedKeys.push(...Object.keys(values));
-    }
-    if (components.includes('agents')) {
-      for (const config of [from, before]) for (const key of ['agents', 'features']) {
-        const value = config[key];
-        if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value) || value instanceof Date))
-          throw new Error(`Agent copies require a TOML table for ${key}`);
-      }
-      const settings = projected(from.agents ?? {}, AGENT_KEYS, 'agents');
-      // Unsupported agent role references can point outside this home. Do not silently retain them.
-      if (Object.keys(before.agents ?? {}).some(k => !AGENT_KEYS.includes(k))
-        || Object.keys(from.agents ?? {}).some(k => !AGENT_KEYS.includes(k)))
-        throw new Error('Unsupported agent settings or role references; inspect before copying agents');
-      if (Object.keys(settings).length) after.agents = Object.assign(Object.create(null), settings); else delete after.agents;
-      if (Object.hasOwn(from.features ?? {}, 'multi_agent')) {
-        if (typeof from.features.multi_agent !== 'boolean') throw new Error('Invalid multi_agent setting');
-        after.features ??= Object.create(null);
-        after.features.multi_agent = from.features.multi_agent;
-      } else if (after.features) delete after.features.multi_agent;
-      copiedKeys.push('agents', 'features.multi_agent');
-    }
-    preservedKeys.push(...Object.keys(before).filter(k => !(components.includes('config') && (CONFIG_KEYS.includes(k) || k === 'allow_symlinked_codex_home')) && !(components.includes('agents') && ['agents', 'features'].includes(k))));
-    if (components.includes('agents') && before.features) preservedKeys.push('features (except multi_agent)');
-    if (!equal(before, after)) await add('config.toml', stringify(after));
-  }
-  if (components.includes('instructions')) {
-    for (const path of ['AGENTS.md', 'AGENTS.override.md']) await add(path, (await textFile(join(source.home, path)))?.content ?? null);
-  }
-  if (components.includes('agents')) {
-    const sources = await agentFiles(source.home), targets = await agentFiles(target.home);
-    for (const path of [...new Set([...sources, ...targets])].sort()) {
-      let content = sources.includes(path) ? (await textFile(join(source.home, path)))?.content ?? null : null;
-      if (content !== null) {
-        const role = toml(content, path);
-        if (Object.keys(role).some(k => !ROLE_KEYS.includes(k)) || typeof role.name !== 'string'
-          || typeof role.description !== 'string' || typeof role.developer_instructions !== 'string'
-          || Object.values(role).some(v => !scalar(v))) throw new Error('Unsupported or incomplete agent definition: ' + path);
-      }
-      await add(path, content);
-    }
-  }
-  if (files.length > MAX_FILES || files.reduce((n, f) => n + Buffer.byteLength(f.before ?? '') + Buffer.byteLength(f.after ?? ''), 0) > MAX_TOTAL)
-    throw new Error('Selected settings exceed the bounded backup limit');
-  const plan = { source, target, components, files, defaultUserHome };
-  const report = { status: 'preview', hash: digest(plan), source: { name: source.name, home: source.home },
-    target: { name: target.name, home: target.home }, components,
-    changes: files.map(f => ({ path: f.path, action: f.before === null ? 'add' : f.after === null ? 'remove' : 'replace',
-      beforeSha256: f.before === null ? null : hash(f.before), afterSha256: f.after === null ? null : hash(f.after) })),
-    config: { scope: 'General model, reasoning and permission settings, plus enabling symlinked Codex homes; selected agent settings are separate.',
-      copiedKeys, preservedKeys, enforcedKeys: components.includes('config') ? ['allow_symlinked_codex_home'] : [],
-      formatting: 'Changed config.toml is serialized; its comments and formatting are not retained.' },
-    excluded: ['sign-in and credentials', 'history and memories', 'desktop state', 'skills and plugins',
-      'MCP servers, hooks and notifications', 'repository files', 'storage routing'],
-    notes: ['Selected instruction/agent categories replace their destination counterparts, including removing absent source files.',
-      'References inside instruction prose are unchanged; referenced skills and external tools are not cloned.',
-      'Restore Default through the desktop picker before closing clients if a named desktop is selected.',
-      'Apply/undo can gracefully close known blocking Codex and VS Code clients after confirmation. Close standalone CLI or unknown clients yourself.',
-      'Restart and use a fresh task to evaluate changed settings.'] };
-  return { plan, report };
+  const selected=await selectAdvancedComponents(store,sourceName,components,{defaultUserHome});
+  const built=await buildAdvancedCopy(store,sourceName,targetName,selected,{defaultUserHome});
+  const configItems=built.report.items.filter(item=>item.path?.startsWith('config.toml')||item.changes?.some(change=>change.path.startsWith('config.toml:')));
+  const copiedKeys=configItems.filter(item=>item.status!=='identical').map(item=>item.label);
+  return {report:{...built.report,components,
+    ...(components.includes('config')||components.includes('agents')?{config:{scope:'Selected supported source config values and agent settings; absent source values and all unselected destination values are preserved.',copiedKeys,enforcedKeys:built.report.notes.some(note=>note.includes('allow_symlinked_codex_home'))?['allow_symlinked_codex_home']:[]}}:{}),
+    notes:[...built.report.notes,'Category selection uses the same item planner; source-absent destination items are preserved.']},
+    plan:{...built.plan,source,target,components,selection:selected,
+      files:built.plan.files.filter(f=>f.before===null||f.after===null||!f.before.equals(f.after)||f.beforeMode!==f.afterMode),
+      defaultUserHome}};
+
 }
 export async function planCopy(store, source, target, options = {}) { return (await build(store, source, target, options)).report; }
 
@@ -311,24 +238,42 @@ async function validateTarget(store, j) {
 }
 function journalPayload(j) {
   const base = { source: j.source, target: j.target, components: j.components, files: j.files, defaultUserHome: j.defaultUserHome };
-  return j.schemaVersion === 2 ? { ...base, selection: j.selection, createdDirectories: j.createdDirectories } : base;
+  return j.schemaVersion >= 2 ? { ...base, selection: j.selection, createdDirectories: j.createdDirectories,
+    ...(j.schemaVersion>=3?{packages:j.packages}: {}) } : base;
 }
 async function readJournal(store, id) {
   await safeStore(store);
   const path = await journalPath(store, id);
   await privateDirectory(dirname(path));
   const j = await readJSON(path);
-  if (![1, 2].includes(j.schemaVersion) || j.kind !== 'native-settings-copy' || !uuid.test(j.id ?? '') || !path.endsWith('/' + j.id + '/journal.json')
+  if (![1, 2, 3].includes(j.schemaVersion) || j.kind !== 'native-settings-copy' || !uuid.test(j.id ?? '') || !path.endsWith('/' + j.id + '/journal.json')
     || j.storePath !== store.directory || !['prepared', 'applied', 'undone'].includes(j.phase)
     || !Array.isArray(j.files) || new Set(j.files.map(f => f.path)).size !== j.files.length
     || j.payloadHash !== digest(journalPayload(j))) throw new Error('Invalid settings-copy journal');
-  if (j.schemaVersion === 2) {
-    if (!Array.isArray(j.selection) || !j.selection.length || j.selection.some(id => typeof id !== 'string')
+  if (j.schemaVersion >= 2) {
+    if (!Array.isArray(j.selection) || (j.schemaVersion===2&&!j.selection.length) || j.selection.some(id => typeof id !== 'string')
       || !Array.isArray(j.createdDirectories) || j.createdDirectories.length > 3072
       || j.createdDirectories.some(dir => typeof dir !== 'string' || !/^(?:agents|rules|skills)(?:\/[A-Za-z0-9_.-]+)*$/.test(dir)
         || dir.split('/').some(part => part === '.' || part === '..')))
       throw new Error('Invalid advanced-copy journal');
     await validateAdvancedFiles(dirname(path), j.files);
+    if(j.schemaVersion>=3) {
+      if(!Array.isArray(j.packages)||j.packages.length>MAX_FILES) throw new Error('Invalid skill package journal');
+      const packagePaths=new Set();
+      for(const p of j.packages) {
+        if(typeof p.path!=='string'||!/^skills\/[A-Za-z0-9_-]+$/.test(p.path)||packagePaths.has(p.path)) throw new Error('Invalid skill package journal path');
+        packagePaths.add(p.path);
+        for(const side of [p.before,p.after]) if(!side||!Array.isArray(side.files)||!Array.isArray(side.directories)
+          ||side.files.length>256||side.directories.length>256
+          ||new Set(side.files.map(f=>f.path)).size!==side.files.length||new Set(side.directories.map(d=>d.path)).size!==side.directories.length
+          ||side.files.some(f=>typeof f.path!=='string'||!f.path.startsWith(p.path+'/')||f.path.split('/').some(part=>!part||part==='.'||part==='..'||!/^[A-Za-z0-9_.-]+$/.test(part))
+            ||!/^[a-f0-9]{64}$/.test(f.sha256)||!Number.isInteger(f.mode)||f.mode<0||f.mode>0o777||(f.mode&0o022)!==0)
+          ||side.directories.some(d=>typeof d.path!=='string'||!(d.path===p.path||d.path.startsWith(p.path+'/'))
+            ||d.path.split('/').some(part=>!part||part==='.'||part==='..'||!/^[A-Za-z0-9_.-]+$/.test(part))
+            ||!Number.isInteger(d.mode)||d.mode<0||d.mode>0o777||(d.mode&0o022)!==0||(d.mode&0o700)!==0o700))
+          throw new Error('Invalid skill package journal manifest');
+      }
+    }
   } else if (j.files.length > MAX_FILES
     || j.files.some(f => !relativeFile(f.path) || ![f.before, f.after].every(x => x === null || typeof x === 'string')
       || (f.beforeMode !== null && (!Number.isInteger(f.beforeMode) || f.beforeMode < 0 || f.beforeMode > 0o777 || (f.beforeMode & 0o022))))
@@ -362,7 +307,8 @@ async function matchesFile(home, f, direction, allowBoth = false, payloadDirecto
 }
 async function restoreFiles(store, j, path, { allowBoth = false, runtime, checkpoint = async () => {} } = {}) {
   await validateTarget(store, j);
-  const payloadDirectory = j.schemaVersion === 2 ? dirname(path) : null;
+  const payloadDirectory = j.schemaVersion >= 2 ? dirname(path) : null;
+  if(j.schemaVersion>=3) await matchesAdvancedPackages(j.target.home,j.packages,'after',allowBoth);
   for (const f of j.files) await matchesFile(j.target.home, f, 'after', allowBoth, payloadDirectory);
   for (const f of [...j.files].reverse()) {
     await runtime.assertIdle({ cliExecutables: [j.target.executable] });
@@ -370,6 +316,10 @@ async function restoreFiles(store, j, path, { allowBoth = false, runtime, checkp
     await matchesFile(j.target.home, f, 'after', allowBoth, payloadDirectory);
     await writeSetting(j.target.home, f, true, payloadDirectory);
     await checkpoint('undo-file', f.path);
+  }
+  if(j.schemaVersion>=3) {
+    await applyAdvancedPackageDirectories(j.target.home,j.packages,true);
+    await matchesAdvancedPackages(j.target.home,j.packages,'before');
   }
   if (payloadDirectory) await cleanupAdvancedDirectories(j.target.home, j.createdDirectories);
   j.phase = 'undone'; j.undoneAt = new Date().toISOString(); await record(path, j);
@@ -383,8 +333,9 @@ async function clearPending(store, id) {
 export async function applyCopy(store, source, target, options = {}) {
   const initial = await build(store, source, target, options);
   if (options.expectedHash && initial.report.hash !== options.expectedHash) throw new Error('Copy preview changed; preview again');
-  if (!initial.plan.files.length) return { ...initial.report, status: 'unchanged' };
-  const j = { schemaVersion: options.selection === undefined ? 1 : 2, kind: 'native-settings-copy', id: randomUUID(), storePath: store.directory,
+  const packageChanges=(initial.plan.packages??[]).some(p=>JSON.stringify(p.before)!==JSON.stringify(p.after));
+  if (!initial.plan.files.length&&!packageChanges) return { ...initial.report, status: 'unchanged' };
+  const j = { schemaVersion: 3, kind: 'native-settings-copy', id: randomUUID(), storePath: store.directory,
     phase: 'prepared', createdAt: new Date().toISOString(), ...initial.plan };
   j.payloadHash = digest(journalPayload(j));
   const verifyInputs = async () => {
@@ -397,15 +348,16 @@ export async function applyCopy(store, source, target, options = {}) {
     await safeStore(store, true);
     const dir = join(rootPath(store), j.id); await privateDirectory(dir, true);
     const path = join(dir, 'journal.json');
-    if (j.schemaVersion === 2) {
+    if (j.schemaVersion >= 2) {
       j.files = await persistAdvancedFiles(dir, initial.plan.files);
       j.payloadHash = digest(journalPayload(j));
     }
-    const payloadDirectory = j.schemaVersion === 2 ? dir : null;
+    const payloadDirectory = j.schemaVersion >= 2 ? dir : null;
     if (Buffer.byteLength(JSON.stringify(j)) > 900000) throw new Error('Copy journal exceeds metadata limit');
     await record(path, j);
     await record(pendingPath(store), { id: j.id });
     try {
+      if(j.schemaVersion>=3) await matchesAdvancedPackages(j.target.home,j.packages,'before');
       for (const f of j.files) {
         if (options.signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
         await runtime.assertIdle({ cliExecutables: [j.target.executable] });
@@ -413,6 +365,10 @@ export async function applyCopy(store, source, target, options = {}) {
         await matchesFile(j.target.home, f, 'before', false, payloadDirectory);
         await writeSetting(j.target.home, f, false, payloadDirectory);
         await options.checkpoint?.('copy-file', f.path);
+      }
+      if(j.schemaVersion>=3) {
+        await applyAdvancedPackageDirectories(j.target.home,j.packages,false);
+        await matchesAdvancedPackages(j.target.home,j.packages,'after');
       }
       j.phase = 'applied'; j.appliedAt = new Date().toISOString(); await record(path, j);
       await clearPending(store, j.id);
@@ -423,8 +379,8 @@ export async function applyCopy(store, source, target, options = {}) {
       try {
         await restoreFiles(store, j, path, { allowBoth: true, runtime });
         await clearPending(store, j.id);
-      } catch {
-        throw new Error('Copy incomplete; preserve backups and run copy undo ' + j.id + ' after closing clients');
+      } catch (recoveryError) {
+        throw new Error('Copy incomplete; preserve backups and run copy undo ' + j.id + ' after closing clients: ' + recoveryError.message);
       }
       throw new Error('Copy failed and prior settings were restored. Backup ID: ' + j.id);
     }
@@ -433,11 +389,18 @@ export async function applyCopy(store, source, target, options = {}) {
 export async function planUndo(store, id) {
   const { journal: j } = await readJournal(store, id);
   const current = [];
-  for (const f of j.files) current.push(j.schemaVersion === 2
+  for (const f of j.files) current.push(j.schemaVersion >= 2
     ? { path: f.path, ...await snapshotAdvanced(j.target.home, f) }
     : { path: f.path, content: (await textFile(join(j.target.home, f.path)))?.content ?? null });
+  if(j.schemaVersion>=3) await matchesAdvancedPackages(j.target.home,j.packages,j.phase==='undone'?'before':'after',j.phase==='prepared'||Boolean(j.undoStarted));
+  const changes=j.files.map(f=>({path:f.path,action:f.before===null?'remove':'restore'}));
+  if(j.schemaVersion>=3) for(const pkg of j.packages) {
+    const before=new Map(pkg.before.directories.map(d=>[d.path,d.mode])), after=new Map(pkg.after.directories.map(d=>[d.path,d.mode]));
+    for(const path of new Set([...before.keys(),...after.keys()])) if(before.get(path)!==after.get(path))
+      changes.push({path,action:before.has(path)?after.has(path)?'restore-directory-mode':'restore-directory': 'remove-directory'});
+  }
   return { status: 'preview', id: j.id, phase: j.phase, target: { name: j.target.name, home: j.target.home },
-    hash: digest({ journal: j, current }), changes: j.files.map(f => ({ path: f.path, action: f.before === null ? 'remove' : 'restore' })),
+    hash: digest({ journal: j, current }), changes,
     notes: ['Undo restores copied settings only. Newer edits are preserved by refusing conflicts. History and sign-in remain untouched.'] };
 }
 export async function undoCopy(store, id, options = {}) {
@@ -453,7 +416,8 @@ export async function undoCopy(store, id, options = {}) {
     if (j.phase !== 'undone') {
       // Validate an ordinary undo before recording recovery authority. A later
       // interrupted undo may contain any mix of its before/after file contents.
-      for (const f of j.files) await matchesFile(j.target.home, f, 'after', j.phase === 'prepared' || Boolean(j.undoStarted), j.schemaVersion === 2 ? dirname(path) : null);
+      for (const f of j.files) await matchesFile(j.target.home, f, 'after', j.phase === 'prepared' || Boolean(j.undoStarted), j.schemaVersion >= 2 ? dirname(path) : null);
+      if(j.schemaVersion>=3) await matchesAdvancedPackages(j.target.home,j.packages,'after',j.phase==='prepared'||Boolean(j.undoStarted));
     }
     return j.phase !== 'undone';
   };

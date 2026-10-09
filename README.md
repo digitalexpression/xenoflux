@@ -69,7 +69,13 @@ xfx copy Default Research --advanced --apply --close-clients
 xfx profile create Research --from Default --advanced --apply --close-clients
 ```
 
-Advanced mode supports configuration keys, instruction files, individual agents, standalone skills and rules. It preserves unselected destination items and reviews replacement conflicts. Other categories remain visible with transfer limitations. See [Advanced copying](docs/ADVANCED-COPY.md) for selection controls, discovery scope and recovery.
+Create a fresh profile or seed one from selected source items; later copies are
+reviewed updates, not synchronization. Advanced mode supports configuration keys,
+instruction files, individual agents, standalone skills and rules. All copy entry
+points preserve unselected destination items. Selected skill replacement is exact,
+including previewed package-local deletions and undo. Plugins, hooks and MCP receive
+optional native/manual setup guidance only. See [Advanced copying](docs/ADVANCED-COPY.md)
+for controls, compatibility changes, discovery limits and recovery.
 
 The preview is read-only. A copy or undo records its backup and refuses to overwrite an intervening native change. Restore the desktop to `Default` before applying a copy. The category-based copy surface excludes skills, plugins, MCP configuration, credentials, histories, and repository files. Advanced mode adds standalone skills and rules; it does not copy native history or integrations.
 
