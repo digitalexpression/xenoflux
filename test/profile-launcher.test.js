@@ -259,6 +259,27 @@ test('refuses a source app that no longer matches its inspection identity', asyn
   await assert.rejects(prepareProfileApp(store, plan, { ...options, verifyOriginal: async () => ({ ...plan.app, asarSha256: '0'.repeat(64) }) }), { code: 'PROFILE_APP_SOURCE_CHANGED' });
 });
 
+test('fails closed when signed executable entitlement metadata is malformed or unavailable', async t => {
+  for (const mode of ['malformed', 'unclosed', 'array', 'missing-blob', 'unavailable']) {
+    const f = await fixture(t);
+    const { signApp: _mockSigner, ...options } = f.options;
+    options.execFile = async (command, args, settings) => {
+      if (command === '/usr/bin/codesign' && args[0] === '--display' && args.includes('--entitlements')
+          && args.at(-1).endsWith('/Contents/MacOS/Codex')) {
+        if (mode === 'malformed') return { stdout: '<plist><dict><broken></dict></plist>' };
+        if (mode === 'unclosed') return { stdout: '<plist><dict><key>com.apple.security.cs.allow-jit</key><true/>' };
+        if (mode === 'array') return { stdout: '<plist><array><string>unexpected</string></array></plist>' };
+        if (mode === 'missing-blob') return { stdout: 'unexpected successful output', stderr: '' };
+        throw Object.assign(new Error('codesign metadata lookup failed'), { stderr: 'signature metadata unavailable' });
+      }
+      return f.options.execFile(command, args, settings);
+    };
+    await assert.rejects(prepareProfileApp(f.store, f.plan, options), {
+      code: mode === 'unavailable' ? 'PROFILE_ENTITLEMENTS_UNAVAILABLE' : 'PROFILE_ENTITLEMENTS_INVALID',
+    });
+  }
+});
+
 test('real Swift bootstrap routes the disposable signed app and execs it in the same pid', {
   skip: process.platform !== 'darwin' && 'requires macOS AppKit and codesign',
 }, async t => {
@@ -296,6 +317,8 @@ test('real Swift bootstrap routes the disposable signed app and execs it in the 
   const prepared = await prepareProfileApp(store, plan, options);
   await validateProfileApp(store, plan, prepared.application);
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', prepared.application.appPath]);
+  const bootstrapEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', prepared.bootstrapExecutable], { encoding: 'utf8' });
+  assert.doesNotMatch(bootstrapEntitlements, /<key>/, 'native bootstrap must not inherit vendor entitlements');
 
   const child = spawnSync(prepared.bootstrapExecutable, ['--profile-run'], {
     encoding: 'utf8', timeout: 10000,
@@ -317,4 +340,64 @@ test('real Swift bootstrap routes the disposable signed app and execs it in the 
   const reused = await prepareProfileApp(store, plan, options);
   assert.deepEqual(reused, prepared, 'a validated bundle must be reused without another copy or signature replacement');
   await validateProfileApp(store, plan, reused.application);
+
+  // A second disposable source carries Electron-specific grants. Deep signing
+  // must retain them on the vendor executable while keeping them off the shim.
+  const secondID = profileB;
+  const secondSourceApp = join(root, 'fixture-vendor-with-entitlements', 'FakeCodex.app');
+  const secondContents = join(secondSourceApp, 'Contents');
+  await mkdir(join(secondContents, 'MacOS'), { recursive: true, mode: 0o700 });
+  await mkdir(join(secondContents, 'Resources'), { recursive: true, mode: 0o700 });
+  const secondExecutable = join(secondContents, 'MacOS', 'Codex');
+  execFileSync('/usr/bin/clang', ['-O2', source, '-o', secondExecutable]);
+  const nestedHelper = join(secondContents, 'Helpers', 'FakeHelper.app');
+  const nestedHelperExecutable = join(nestedHelper, 'Contents', 'MacOS', 'Helper');
+  await mkdir(join(nestedHelper, 'Contents', 'MacOS'), { recursive: true, mode: 0o700 });
+  execFileSync('/usr/bin/clang', ['-O2', source, '-o', nestedHelperExecutable]);
+  const nestedInfoJson = join(root, 'nested-helper-info.json');
+  await writeFile(nestedInfoJson, JSON.stringify({
+    CFBundleIdentifier: 'com.openai.codex.helper', CFBundleExecutable: 'Helper', CFBundlePackageType: 'APPL',
+  }));
+  execFileSync('/usr/bin/plutil', ['-convert', 'xml1', '-o', join(nestedHelper, 'Contents', 'Info.plist'), nestedInfoJson]);
+  const nestedFramework = join(secondContents, 'Frameworks', 'FakeRuntime.framework');
+  await mkdir(nestedFramework, { recursive: true, mode: 0o700 });
+  const nestedFrameworkExecutable = join(nestedFramework, 'FakeRuntime');
+  execFileSync('/usr/bin/clang', ['-O2', source, '-o', nestedFrameworkExecutable]);
+  const frameworkInfoJson = join(root, 'nested-framework-info.json');
+  await writeFile(frameworkInfoJson, JSON.stringify({
+    CFBundleIdentifier: 'com.openai.codex.runtime', CFBundleExecutable: 'FakeRuntime', CFBundlePackageType: 'FMWK',
+  }));
+  execFileSync('/usr/bin/plutil', ['-convert', 'xml1', '-o', join(nestedFramework, 'Info.plist'), frameworkInfoJson]);
+  await writeFile(join(secondContents, 'Resources', 'app.asar'), asar, { mode: 0o600 });
+  await writeFile(plistJson, JSON.stringify({ CFBundleName: 'FakeCodex', CFBundleDisplayName: 'FakeCodex',
+    CFBundleIdentifier: 'com.openai.codex', CFBundleExecutable: 'Codex', CFBundlePackageType: 'APPL',
+    CFBundleShortVersionString: '1.0', CFBundleVersion: '1' }));
+  execFileSync('/usr/bin/plutil', ['-convert', 'xml1', '-o', join(secondContents, 'Info.plist'), plistJson]);
+  const entitlementsPath = join(root, 'vendor-entitlements.plist');
+  await writeFile(entitlementsPath, `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>com.apple.application-identifier</key><string>2DC432GLL2.com.openai.codex</string><key>com.apple.developer.team-identifier</key><string>2DC432GLL2</string><key>com.apple.security.application-groups</key><array><string>group.com.openai.codex</string></array><key>keychain-access-groups</key><array><string>2DC432GLL2.com.openai.codex</string></array><key>com.apple.security.device.camera</key><true/><key>com.apple.security.cs.allow-jit</key><true/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/><key>com.apple.security.cs.disable-library-validation</key><true/><key>com.apple.security.get-task-allow</key><true/><key>com.example.unrelated</key><true/></dict></plist>`);
+  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--options', 'runtime', '--entitlements', entitlementsPath, '--timestamp=none', secondSourceApp]);
+  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', secondSourceApp]);
+  const secondAppPath = await realpath(secondSourceApp), secondExecutablePath = await realpath(secondExecutable);
+  const secondApp = { appPath: secondAppPath, bundleId: 'com.openai.codex', executable: secondExecutablePath, asarSha256: digest(asar) };
+  const secondPlan = { profileId: secondID, name: 'Entitlement Probe', nativeRoot: join(root, 'native', secondID), app: secondApp };
+  const secondPrepared = await prepareProfileApp(store, secondPlan, {
+    ...options, verifyOriginal: async sourcePath => ({ ...secondApp, appPath: sourcePath }),
+  });
+  await validateProfileApp(store, secondPlan, secondPrepared.application);
+  const secondBootstrapEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', secondPrepared.bootstrapExecutable], { encoding: 'utf8' });
+  const secondVendorEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', secondPrepared.application.executable], { encoding: 'utf8' });
+  const nestedClonedHelper = join(secondPrepared.application.appPath, 'Contents', 'Helpers', 'FakeHelper.app', 'Contents', 'MacOS', 'Helper');
+  const nestedHelperEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', nestedClonedHelper], { encoding: 'utf8' });
+  const nestedClonedFramework = join(secondPrepared.application.appPath, 'Contents', 'Frameworks', 'FakeRuntime.framework', 'FakeRuntime');
+  const nestedFrameworkEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', nestedClonedFramework], { encoding: 'utf8' });
+  assert.doesNotMatch(secondBootstrapEntitlements, /<key>/, 'deep signing must not reattach vendor grants to the bootstrap');
+  assert.match(secondVendorEntitlements, /com\.apple\.security\.cs\.allow-jit/, 'vendor runtime grants should remain on the Electron executable');
+  assert.match(secondVendorEntitlements, /com\.apple\.security\.cs\.disable-library-validation/);
+  for (const [label, output] of [['vendor', secondVendorEntitlements], ['nested helper', nestedHelperEntitlements], ['nested framework', nestedFrameworkEntitlements]]) {
+    assert.match(output, /com\.apple\.security\.cs\.allow-jit/, `${label} should retain its Electron JIT grant`);
+    for (const restricted of ['application-identifier', 'developer-team-identifier', 'application-groups', 'keychain-access-groups',
+      'security.device.camera', 'security.get-task-allow', 'com.example.unrelated'])
+      assert.doesNotMatch(output, new RegExp(restricted.replaceAll('.', '\\.'), 'i'), `${label} must not retain ${restricted}`);
+  }
+  assert.match(nestedHelperEntitlements, /com\.apple\.security\.cs\.allow-unsigned-executable-memory/);
 });

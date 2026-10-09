@@ -50,6 +50,33 @@ test('invalid helper receipt cannot be replaced by process-delta attribution', a
   await assert.rejects(rt.open(plan, { helperExecutable: helper, application }), { code: 'DESKTOP_OPEN_RECEIPT_INVALID' });
 });
 
+test('native launch errors retain macOS diagnostics without adopting a simultaneous main', async () => {
+  let reads = 0;
+  const cause = Object.assign(new Error('native helper exited'), {
+    stderr: 'Unable to launch the requested profile instance: NSOSStatusErrorDomain (-10810): Launch failed.\n',
+  });
+  const rt = createDesktopInstanceRuntime(opts({
+    processSnapshot: async () => ++reads === 1 ? [self, caller] : [self, caller, copiedMain],
+    execFile: async () => { throw cause; },
+  }));
+  await assert.rejects(rt.open(plan, { helperExecutable: helper, application }), error => {
+    assert.equal(error.code, 'DESKTOP_OPEN_FAILED');
+    assert.match(error.message, /NSOSStatusErrorDomain \(-10810\): Launch failed\./);
+    assert.equal(error.cause, cause);
+    return true;
+  });
+  assert.equal(reads, 1);
+});
+
+test('a killed native launch helper reports its timeout', async () => {
+  const rt = createDesktopInstanceRuntime(opts({
+    processSnapshot: async () => [self, caller],
+    execFile: async () => { throw Object.assign(new Error('timeout'), { killed: true, stderr: '' }); },
+  }));
+  await assert.rejects(rt.open(plan, { helperExecutable: helper, application }), error =>
+    error.code === 'DESKTOP_OPEN_FAILED' && error.message.includes('Native launch helper timed out.'));
+});
+
 test('open refuses a plan bound to a different inspected app before launching', async () => {
   let calls = 0;
   const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, caller], execFile: async () => { calls++; return { stdout: '' }; } }));

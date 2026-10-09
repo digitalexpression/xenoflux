@@ -2,72 +2,70 @@
 
 Updated: 2026-10-09. Branch: `codex/concurrent-profiles`.
 
-The user authorized development of concurrent profiles, preserving the running
-ordinary Codex session. Default keeps standard paths, including `~/.codex`; named
-profiles use fixed homes under `~/.xfx/profiles`. The legacy alias switch/restore
-engine and migration support remain removed. Current named-instance recovery is
-retained to release only a stopped instance's exact reservation.
+The user authorized development while preserving the ordinary running Codex
+session. Default keeps standard paths, including `~/.codex`; named profiles use
+fixed homes under `~/.xfx/profiles`. Legacy alias switching and migration remain
+removed. Current named-instance recovery releases only a stopped instance's
+exact reservation.
 
 ## Current result
 
-The first user-operated native test opened RC3 Check and Advanced Check alongside
-the ordinary app. Cmd+Tab selected their windows, but each profile added a persistent
-blank-icon launcher beside a generically named ChatGPT process. Both close commands
-reported `PROCESS_IDENTITY_CHANGED`. Supplied recording and process journals were
-inspected read-only. No user app was opened, focused, closed, replaced or signed by
-this development turn; live profile homes and installed xfx remain untouched.
+The first native test could select separate profile windows through Cmd+Tab but
+showed generic app names, companion launcher entries, and close identity errors.
+The replacement copies the verified vendor app into one private `Codex · NAME.app`
+with a distinct bundle ID and retained icon/resources. The bootstrap execs its
+copied vendor binary in the same PID. Finder uses an exact-PID reservation
+handshake; no persistent companion app remains. Stopped copies refresh after
+verified source/helper changes. Runtime observation excludes zombies and close
+rechecks a target after quit-helper errors while retaining PID-reuse protection.
 
-The revised implementation copies the verified installed vendor app into one private
-`Codex · NAME.app` per profile, retaining its icon/resources and assigning a distinct
-bundle ID. The Swift bootstrap execs its copied vendor binary in the same PID with
-fixed profile paths. Finder launches first obtain an exact-PID reservation handshake
-from the controller. There is no persistent companion app. CLI opens refresh stopped
-copies after verified app/helper changes; Finder refuses a copy that needs refresh.
-Copied apps are locally signed and validated against private ownership/content
-records. Closing does not depend on the current installed source still being present.
+The copy builder's discovered-source identity bug was fixed in `1bf2a1c`.
+The user's next opens failed with `DESKTOP_OPEN_FAILED`; both named journals
+remained `opening` with no main and observed stopped. Read-only macOS logs for
+19:38:45–19:38:59 local time showed amfid error -424: the ad-hoc signed bootstrap
+contained restricted vendor entitlements. LaunchServices failed before main spawn.
 
-Runtime observation excludes exited zombie rows and close rechecks a target after a
-quit-helper error, draining recorded live children when the main has already exited.
-Live executable changes and PID reuse still preserve ownership and fail control.
-Only the interrupted prototype record shape remains readable for close/recovery;
-opening a still-live prototype instance refuses to create a second app.
+The corrected signer gives the bootstrap no entitlements. It clears copied vendor
+claims, restores only source-present allow-jit, unsigned-memory and
+library-validation runtime grants per executable, then deeply reseals nested
+frameworks/helpers and the outer app. Unknown or malformed signing metadata fails
+preparation. Native launch errors now retain macOS diagnostics or report timeout.
+Swift uses POSIX realpath to match Node's canonical process identity; the native
+fixture caught Foundation's `/var` versus `/private/var` path difference.
 
-## Verification and blocker
+## Verification
 
-`npm run check`, `npm test` (359 tests) and `git diff --check` pass. A macOS fixture compiled the real
-Swift source, copied/signed/deep-verified a disposable fake vendor app, validated and
-reused it, and directly executed the bootstrap. The fake vendor proved fixed path
-routing and same PID after exec. No LaunchServices GUI operation was invoked. Static
-review findings for unique bundle ID acceptance, quit-helper exit races and stale
-copy reuse were fixed and rechecked. Tests now use isolated maintenance guard paths
-instead of consulting the user's live reserved instances.
+`npm run check`, `npm test` (362 passed, 1 opt-in test skipped), and
+`git diff --check` pass. The separately enabled native LaunchServices fixture
+passed with the final signer. It uses a windowless, self-terminating fake AppKit
+vendor under a temporary directory and proves same-PID exec, exact canonical
+receipt, named bundle ID, and fixed profile routes. Nested framework/helper
+signature and entitlement regressions also pass. Independent bounded review
+found no material issue after the fixes.
 
-The installed `/Applications/ChatGPT.app` fails strict signature verification both
-as a bundle and as its main executable, and codesign reports an invalid entitlements
-blob. Its Info.plist, executable and app.asar hashes stayed unchanged during checks.
-It was not copied or repaired. This blocks a real-source build/launch check; the
-fixture does not prove Cmd+Tab names, icon count, sign-in or native LaunchServices.
+Current publisher inspection of `/Applications/ChatGPT.app` passes in both
+sandboxed and unsandboxed checks. Earlier transient strict-signature failures
+are not the current blocker; their cause remains unresolved. Version
+`26.1002.52244`, build `13536`, app.asar SHA-256
+`40efd7acdf03a24817fcd7f35684fc2173b154df06774243cb4ab227e36fa915`.
+A disposable real-source copy passed production preparation, ownership validation
+and deep strict signature verification. Its bootstrap has no entitlements; its
+vendor main retains allow-jit and unsigned-memory only. It was not launched.
 
-The next user test failed with `APP_IDENTITY_MISMATCH` before an instance opened.
-The copy builder incorrectly passed the fixed `/Applications/Codex.app` identity
-to its second inspection of the discovered `/Applications/ChatGPT.app`. It now
-verifies against the already discovered plan identity using the same injectable
-system I/O. Regression coverage exercises that default verifier, publisher rejection
-and invalid signature rejection. One plain inspector call reported success, but
-repeated inspector/direct checks still failed strict signature verification;
-the cause of that one-off success is unresolved. No signature check was bypassed.
+No installed/default Codex app or live profile app was opened, focused, closed,
+replaced or signed by these checks. Live profiles and journals, Default paths,
+and installed xfx remain unchanged. Only disposable fixture apps were launched;
+they exited naturally and their temporary files were removed.
 
 ## Next action
 
-The original named-app implementation is `7e05de5`; the discovered-source identity
-fix is `1bf2a1c`. The updated local candidate is under
-`release-artifacts/concurrent-profiles-discovery-fix-2026-10-09/`; its manifest
-records that source revision and hashes. Detached offline package and installation
-lifecycle smoke passed. The prior native-fix package is superseded.
-Once a verified installed app
-is available and the user is ready for native testing, recover the stopped RC3 Check
-and Advanced Check prototype records, then open them with the revised development
-CLI. Follow `docs/CONCURRENT-DESKTOPS.md`: exactly one named/icon-bearing Dock and
-Cmd+Tab entry per profile, correct profile paths and focus, Finder/Dock reopen,
-graceful close/recovery, and preservation of the ordinary running app. Native
-acceptance remains pending; do not claim it from process lists or fixture tests.
+The new local candidate will be under
+`release-artifacts/concurrent-profiles-signing-fix-2026-10-09/`; its manifest records
+the committed source revision and hashes. It supersedes the discovery-fix package.
+
+Using the existing development CLI helper, recover the stopped RC3 Check and
+Advanced Check reservations, then open both again. Follow
+`docs/CONCURRENT-DESKTOPS.md`: exactly one named/icon-bearing Dock and Cmd+Tab entry
+per profile, correct profile focus/routes, Finder/Dock reopen, graceful close,
+and preservation of the ordinary app. Real Codex native acceptance remains
+pending; fixture and signature checks do not establish it.

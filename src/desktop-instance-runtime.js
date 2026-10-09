@@ -205,7 +205,13 @@ export function createDesktopInstanceRuntime({
       result = await execFile(helperExecutable, args, {
         cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: userHome }, encoding: 'utf8', maxBuffer: 65536, timeout: openTimeoutMs,
       });
-    } catch { throw fail('DESKTOP_OPEN_FAILED'); }
+    } catch (cause) {
+      const error = fail('DESKTOP_OPEN_FAILED');
+      const details = typeof cause.stderr === 'string' ? cause.stderr.trim().slice(0, 4096) : '';
+      error.message += `: ${cause.killed ? 'Native launch helper timed out.' : details || 'Native launch helper failed without diagnostics.'}`;
+      error.cause = cause;
+      throw error;
+    }
     try {
       const output = result?.stdout;
       if (typeof output !== 'string' || result.stderr || !output.trim()) throw new Error();

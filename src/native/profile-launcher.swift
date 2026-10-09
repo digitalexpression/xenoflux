@@ -9,7 +9,11 @@ struct TargetIdentity {
 }
 
 func resolvedPath(_ url: URL) -> String {
-    url.standardizedFileURL.resolvingSymlinksInPath().path
+    // Foundation can prefer /var over its /private/var filesystem target.
+    // Match the controller's POSIX realpath identity, including in temp stores.
+    guard let path = url.path.withCString({ realpath($0, nil) }) else { return url.path }
+    defer { free(path) }
+    return String(cString: path)
 }
 
 func executablePath(_ pid: pid_t) -> String? {
@@ -62,18 +66,23 @@ func openApplicationOneShot(_ args: [String]) -> Never {
         "CODEX_ELECTRON_USER_DATA_PATH": args[5], "HOME": args[7], "TMPDIR": args[9]]
     var completed = false
     var launched: NSRunningApplication?
-    var failed = false
+    var launchError: NSError?
     NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { application, error in
-        DispatchQueue.main.async { launched = application; failed = error != nil; completed = true }
+        DispatchQueue.main.async { launched = application; launchError = error as NSError?; completed = true }
     }
     let deadline = Date(timeIntervalSinceNow: 15)
     while !completed && Date() < deadline {
         _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     }
-    guard completed, !failed, let application = launched,
+    guard completed, launchError == nil, let application = launched,
           application.processIdentifier > 0, application.processIdentifier != getpid(),
           let launchDate = application.launchDate else {
-        fputs("Unable to launch the requested profile instance.\n", stderr); exit(EXIT_FAILURE)
+        if let error = launchError {
+            fputs("Unable to launch the requested profile instance: \(error.domain) (\(error.code)): \(error.localizedDescription)\n", stderr)
+        } else {
+            fputs("Unable to launch the requested profile instance: macOS returned no live application before the launch deadline.\n", stderr)
+        }
+        exit(EXIT_FAILURE)
     }
     // LaunchServices starts the bootstrap. exec replaces it in the same PID,
     // so inspect the kernel path rather than cached CFBundleExecutable metadata.
@@ -83,7 +92,7 @@ func openApplicationOneShot(_ args: [String]) -> Never {
         _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     }
     guard validatedApplication(target) != nil else {
-        fputs("Unable to verify the requested profile instance.\n", stderr); exit(EXIT_FAILURE)
+        fputs("Unable to verify the requested profile instance: PID \(target.pid), expected executable \(target.executable), observed \(executablePath(target.pid) ?? "stopped").\n", stderr); exit(EXIT_FAILURE)
     }
     let result: [String: Any] = ["pid": target.pid, "executable": target.executable, "startSeconds": target.startSeconds]
     guard let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),

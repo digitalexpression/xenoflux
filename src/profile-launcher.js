@@ -174,27 +174,90 @@ async function updatePlistDefault(path, { set, remove }, execFile, writeFile, rm
 async function verifySignature(path, execFile) {
   await execFile('/usr/bin/codesign', ['--verify', '--deep', '--strict', path], { encoding: 'utf8', timeout: 30000 });
 }
-async function signDefault(path, sourcePath, sourceExecutable, bootstrapExecutable, execFile, writeFile, rm) {
-  let entitlementsPath;
-  const extracted = await execFile('/usr/bin/codesign', ['--display', '--entitlements', ':-', sourceExecutable], { encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 30000 });
-  const output = [extracted.stdout, extracted.stderr].find(value => value?.includes('<plist'));
-  const entitlements = output ? output.slice(output.indexOf('<plist'), output.indexOf('</plist>') + '</plist>'.length) : null;
+const electronRuntimeEntitlements = new Set([
+  'com.apple.security.cs.allow-jit',
+  'com.apple.security.cs.allow-unsigned-executable-memory',
+  'com.apple.security.cs.disable-library-validation',
+]);
+async function plistEntitlementsFromText(text, tempRoot, { writeFile, rm, execFile }) {
+  const start = text.indexOf('<plist');
+  const end = text.indexOf('</plist>', start);
+  if (start < 0) return {};
+  if (end < 0) fail('PROFILE_ENTITLEMENTS_INVALID');
+  const file = join(tempRoot, `.xfx-entitlements-${randomUUID()}.plist`);
   try {
-    if (entitlements) {
-      entitlementsPath = `${path}.xfx-entitlements-${randomUUID()}.plist`;
-      await writeFile(entitlementsPath, entitlements, { flag: 'wx', mode: 0o600 });
-      await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--entitlements', entitlementsPath, bootstrapExecutable], { encoding: 'utf8', timeout: 30000 });
-    } else {
-      await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', bootstrapExecutable], { encoding: 'utf8', timeout: 30000 });
-    }
-    // Preserve the entitlements/flags just placed on the bootstrap and on copied
-    // nested vendor code while replacing the copied app's outer signature.
-    await execFile('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--preserve-metadata=entitlements,flags,runtime', path], { encoding: 'utf8', timeout: 120000 });
-  } finally {
-    if (entitlementsPath) await rm(entitlementsPath, { force: true });
+    await writeFile(file, text.slice(start, end + '</plist>'.length), { flag: 'wx', mode: 0o600 });
+    const { stdout } = await execFile('/usr/bin/plutil', ['-convert', 'json', '-o', '-', file], { encoding: 'utf8', timeout: 30000 });
+    const parsed = JSON.parse(stdout);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail('PROFILE_ENTITLEMENTS_INVALID');
+    return parsed;
+  } catch { fail('PROFILE_ENTITLEMENTS_INVALID'); }
+  finally { await rm(file, { force: true }); }
+}
+async function signedEntitlements(path, tempRoot, io) {
+  let result;
+  try {
+    result = await io.execFile('/usr/bin/codesign', ['--display', '--entitlements', ':-', path], {
+      encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 30000,
+    });
+  } catch (error) {
+    const diagnostics = `${error.stderr ?? ''} ${error.message ?? ''}`;
+    if (/code object is not signed at all/i.test(diagnostics)) return {};
+    fail('PROFILE_ENTITLEMENTS_UNAVAILABLE');
   }
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+  if (!output.includes('<plist')) {
+    const diagnostic = `${result.stderr ?? ''}`;
+    if (diagnostic.includes(`Executable=${path}`) && /warning: Specifying ':' in the path is deprecated/.test(diagnostic)) return {};
+    fail('PROFILE_ENTITLEMENTS_INVALID');
+  }
+  return await plistEntitlementsFromText(output, tempRoot, io);
+}
+function runtimeEntitlements(entitlements) {
+  return Object.fromEntries([...electronRuntimeEntitlements]
+    .filter(key => entitlements[key] === true).map(key => [key, true]));
+}
+async function collectCodeEntitlements(root, io) {
+  const found = [];
+  async function visit(dir) {
+    for (const entry of await nodeReaddir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.isFile()) {
+        const info = await io.lstat(path);
+        if (!(info.mode & 0o111)) continue;
+        const entitlements = runtimeEntitlements(await signedEntitlements(path, root, io));
+        if (Object.keys(entitlements).length) found.push({ path, entitlements });
+      }
+    }
+  }
+  await visit(join(root, 'Contents'));
+  return found;
+}
+async function signDefault(path, bootstrapExecutable, execFile, writeFile, rm) {
+  const io = { execFile, writeFile, rm };
+  // This small Swift process uses AppKit only to request LaunchServices; it must
+  // not inherit the vendor app's restricted entitlements or application groups.
+  await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', bootstrapExecutable], { encoding: 'utf8', timeout: 30000 });
+  // Keep only Electron's runtime grants on each executable that had them in
+  // the source. Vendor identity, groups, device, and unknown grants are dropped.
+  const saved = await collectCodeEntitlements(path, { ...io, lstat: nodeLstat });
+  await execFile('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--preserve-metadata=flags,runtime', path], { encoding: 'utf8', timeout: 120000 });
+  for (const item of saved) {
+    const plist = join(path, `.xfx-runtime-${randomUUID()}.plist`);
+    try {
+      const body = Object.entries(item.entitlements).map(([key]) => `<key>${key}</key><true/>`).join('');
+      await writeFile(plist, `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>${body}</dict></plist>`, { flag: 'wx', mode: 0o600 });
+      await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--entitlements', plist, item.path], { encoding: 'utf8', timeout: 30000 });
+    } finally { await rm(plist, { force: true }); }
+  }
+  // Re-seal nested containers after restoring their filtered executable grants.
+  await execFile('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--preserve-metadata=entitlements,flags,runtime', path], { encoding: 'utf8', timeout: 120000 });
   await verifySignature(path, execFile);
-  void sourcePath;
+  const bootstrapEntitlements = await execFile('/usr/bin/codesign', ['--display', '--entitlements', ':-', bootstrapExecutable], {
+    encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 30000,
+  });
+  if (/<key>/.test(`${bootstrapEntitlements.stdout ?? ''}${bootstrapEntitlements.stderr ?? ''}`)) fail('PROFILE_BOOTSTRAP_ENTITLEMENTS_PRESENT');
 }
 function validateInput(store, plan, nodeExecutable, entryPoint, source) {
   if (!store || !absoluteCanonical(store.directory) || !plan || !uuid.test(plan.profileId ?? '') || !safeText(plan.name)
@@ -234,7 +297,7 @@ export async function prepareProfileApp(store, plan, {
   verifyOriginal: verifyOriginalFn = async (appPath, expected) => inspectDesktopApp({ appPath, expected, execFile, readFile, realpath }),
   copyApp = (from, to) => nodeCp(from, to, { recursive: true, verbatimSymlinks: true, mode: fsConstants.COPYFILE_FICLONE }),
   updatePlist = (path, operations) => updatePlistDefault(path, operations, execFile, writeFile, rm),
-  signApp = (path, sourcePath, context) => signDefault(path, sourcePath, context.sourceExecutable, context.bootstrapExecutable, execFile, writeFile, rm),
+  signApp = (path, sourcePath, context) => signDefault(path, context.bootstrapExecutable, execFile, writeFile, rm),
   mkdir = nodeMkdir, lstat = nodeLstat, realpath = nodeRealpath, readFile = nodeReadFile, readdir = nodeReaddir,
   readlink = nodeReadlink, writeFile = nodeWriteFile, rename = nodeRename, rm = nodeRm, chmod = nodeChmod,
 } = {}) {

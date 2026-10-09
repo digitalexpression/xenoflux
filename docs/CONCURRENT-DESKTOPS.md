@@ -65,9 +65,16 @@ reservation. It does not close or launch apps.
 ## Deferred native acceptance
 
 Development checks use mocked native operations and disposable homes. On macOS,
-a locally signed fixture verifies compilation, copy validation, fixed-path routing
-and same-PID bootstrap execution without opening a GUI. Installation, live profile
-changes, sign-in, native LaunchServices behavior and Cmd+Tab remain outside those checks.
+locally signed fixtures verify compilation, nested framework/helper signatures,
+fixed-path routing and same-PID bootstrap execution. An opt-in, windowless AppKit
+fixture also exercises the real LaunchServices path and exits automatically:
+
+```sh
+XFX_NATIVE_PROFILE_OPEN=1 node --test test/native-profile-open.test.js
+```
+
+That fixture uses a synthetic vendor app. Real Codex sign-in, profile data,
+Dock/Cmd+Tab labels and activation still require the acceptance checks below.
 
 When native testing is authorized, use disposable profiles with recognizable
 settings and fresh chats. Verify:
@@ -87,13 +94,23 @@ native concurrency support. Retest native launch and activation after app update
 The first native test on 2026-10-09 verified separate profile windows could be
 selected through Cmd+Tab. It also exposed generic `ChatGPT` names, duplicate
 launcher entries and `PROCESS_IDENTITY_CHANGED` during close. The replacement
-app design and close fixes require a new native test. During development the
-installed `/Applications/ChatGPT.app` failed strict signature verification,
-including verification of its main executable; it was left untouched. A verified
-installed app is required before testing the new copied-app launch.
+app design and close fixes require a new native test.
 
 A follow-up test exposed a second verification bug: the copy builder checked the
 discovered `ChatGPT.app` against the fixed `Codex.app` path and rejected its identity.
 The builder now verifies the discovered path and executable while retaining the
-publisher signature requirement. Repeated signature checks still fail on the current
-installation; an isolated successful inspection was not reproducible.
+publisher signature requirement.
+
+The next native attempt reached app preparation but macOS refused to spawn the
+bootstrap: AMFI reported restricted vendor entitlements on an ad-hoc signed app.
+Profile copies now remove those vendor identity/group claims. The bootstrap has
+no entitlements; copied executables retain only source-present Electron runtime
+grants for JIT, unsigned executable memory and library validation. The signing
+pass reseals nested frameworks after restoring those grants. Unexpected or
+unreadable entitlement metadata stops preparation. Native launch failures now
+include the macOS error or timeout diagnostics.
+
+Current publisher verification of `/Applications/ChatGPT.app` passes, and a
+disposable copy of that real app passed preparation and deep signature validation.
+The corrected LaunchServices fixture also passed. The installed app and live
+profile state were unchanged; real Codex was not launched by these checks.
