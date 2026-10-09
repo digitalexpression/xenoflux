@@ -178,7 +178,12 @@ export function createRamLogs({ disk = createRamDisk(), mountPath = RAM_DISK_PAT
             else originals.push(null);
             await checkedFile(target + suffix);
           }
-          await noHandles([...suffixes.map(s => source + s), ...suffixes.map(s => sourceBase + s), ...suffixes.map(s => target + s)], signal);
+          // An owned link may survive a reboot while its RAM database does not.
+          // lsof cannot resolve that link; still check every existing sidecar.
+          const sourcePaths = linked === target && !await checkedFile(target)
+            ? suffixes.slice(1).map(suffix => source + suffix)
+            : suffixes.map(suffix => source + suffix);
+          await noHandles([...sourcePaths, ...suffixes.map(suffix => target + suffix)], signal);
           await checkMount();
           const created = [];
           let committed = false;

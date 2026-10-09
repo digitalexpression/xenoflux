@@ -221,3 +221,33 @@ test('disk logs reopen after RAM and the old registry are gone, before replaceme
   assert.ok((await lstat(source)).isFile());
   await assert.rejects(lstat(join(f.root,'new-registry')), {code:'ENOENT'});
 });
+
+test('preparation after RAM loss skips the dangling main link but checks existing sidecars', async t => {
+  const f = await fixture(t), source = join(f.home, 'logs_2.sqlite');
+  await f.manager.prepareHome(f); await f.unmount();
+  await writeFile(source + '-wal', 'local diagnostic sidecar');
+  let checked = [];
+  const busy = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk,
+    execFile: async (_file, args) => { checked = args.slice(args.indexOf('--') + 1); return { stdout: 'p42\n', stderr: '' }; } });
+  await assert.rejects(busy.prepareHome(f), /Quit applications/);
+  assert.deepEqual(checked, [source + '-wal']);
+  assert.equal(await readFile(source + '-wal', 'utf8'), 'local diagnostic sidecar');
+  assert.equal(await readlink(source), f.target);
+  await rm(source + '-wal');
+  const idle = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk,
+    execFile: async () => assert.fail('a dangling main link with no sidecars must not be sent to lsof') });
+  await idle.prepareHome(f);
+  assert.equal(await readlink(source), f.target);
+  assert.ok((await lstat(f.target)).isFile());
+});
+
+test('native handle probe accepts preparation after a lost RAM target', async t => {
+  try { await lstat('/usr/sbin/lsof'); } catch { return t.skip('native lsof unavailable'); }
+  const f = await fixture(t);
+  await f.manager.prepareHome(f); await f.unmount();
+  await writeFile(join(f.home, 'logs_2.sqlite-wal'), 'closed fixture sidecar');
+  const native = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk });
+  await native.prepareHome(f);
+  assert.equal(await readlink(join(f.home, 'logs_2.sqlite')), f.target);
+  assert.ok((await lstat(f.target)).isFile());
+});
