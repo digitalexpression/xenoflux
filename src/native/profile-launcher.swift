@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Darwin
 
 struct TargetIdentity {
     let pid: pid_t
@@ -7,36 +8,40 @@ struct TargetIdentity {
     let startSeconds: Int
 }
 
-func resolvedPath(_ url: URL) -> String? {
+func resolvedPath(_ url: URL) -> String {
     url.standardizedFileURL.resolvingSymlinksInPath().path
+}
+
+func executablePath(_ pid: pid_t) -> String? {
+    // PROC_PIDPATHINFO_MAXSIZE is the C expression 4 * MAXPATHLEN;
+    // Swift does not import that macro expression from proc_info.h.
+    var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+    return resolvedPath(URL(fileURLWithPath: String(cString: buffer)))
 }
 
 func validatedApplication(_ target: TargetIdentity) -> NSRunningApplication? {
     guard target.pid > 0, target.pid != getpid(), let app = NSRunningApplication(processIdentifier: target.pid),
-          !app.isTerminated, let executableURL = app.executableURL,
-          resolvedPath(executableURL) == resolvedPath(URL(fileURLWithPath: target.executable)),
+          !app.isTerminated, executablePath(target.pid) == resolvedPath(URL(fileURLWithPath: target.executable)),
           let launched = app.launchDate,
           Int(floor(launched.timeIntervalSince1970)) == target.startSeconds else { return nil }
     return app
 }
 
 func safeAbsolutePath(_ value: String) -> Bool {
-    value.hasPrefix("/") && !value.contains("\0") && !value.contains("\n") && !value.contains("\r")
+    value.hasPrefix("/") && !value.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
 }
 
 func parseTarget(_ args: [String], mode: String) -> TargetIdentity? {
     guard args.count == 6, args[0] == mode, let pid = Int32(args[1]), pid > 0,
           args[2] == "--target-executable", args[4] == "--target-start-seconds",
-          let start = Int(args[5]), start >= 0, args[3].hasPrefix("/"), !args[3].contains("\0") else { return nil }
+          let start = Int(args[5]), start >= 0, safeAbsolutePath(args[3]) else { return nil }
     return TargetIdentity(pid: pid, executable: args[3], startSeconds: start)
 }
 
 func oneShot(_ args: [String]) -> Never {
     guard let mode = args.first, mode == "--focus-pid" || mode == "--quit-pid",
-          let target = parseTarget(args, mode: mode), validatedApplication(target) != nil else {
-        exit(EXIT_FAILURE)
-    }
-    guard let app = validatedApplication(target) else { exit(EXIT_FAILURE) }
+          let target = parseTarget(args, mode: mode), let app = validatedApplication(target) else { exit(EXIT_FAILURE) }
     let ok = mode == "--focus-pid" ? app.activate(options: [.activateAllWindows]) : app.terminate()
     exit(ok ? EXIT_SUCCESS : EXIT_FAILURE)
 }
@@ -45,219 +50,130 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     guard args.count == 12, args[0] == "--open-app",
           args[2] == "--home", args[4] == "--desktop-data", args[6] == "--user-home",
           args[8] == "--temporary", args[10] == "--target-executable",
-          safeAbsolutePath(args[1]), safeAbsolutePath(args[3]), safeAbsolutePath(args[5]),
-          safeAbsolutePath(args[7]), safeAbsolutePath(args[9]), safeAbsolutePath(args[11]) else {
-        fputs("Invalid profile launch request.\n", stderr)
-        exit(EXIT_FAILURE)
+          [args[1], args[3], args[5], args[7], args[9], args[11]].allSatisfy(safeAbsolutePath) else {
+        fputs("Invalid profile launch request.\n", stderr); exit(EXIT_FAILURE)
     }
-
     let appURL = URL(fileURLWithPath: args[1]).standardizedFileURL
     let expectedExecutable = resolvedPath(URL(fileURLWithPath: args[11]))
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.createsNewApplicationInstance = true
-    configuration.arguments = ["--user-data-dir=\(args[5])"]
-    configuration.environment = [
-        "CODEX_HOME": args[3],
-        "CODEX_ELECTRON_USER_DATA_PATH": args[5],
-        "CODEX_SQLITE_HOME": args[3],
-        "HOME": args[7],
-        "TMPDIR": args[9]
-    ]
-
+    configuration.arguments = ["--profile-run"]
+    configuration.environment = ["CODEX_HOME": args[3], "CODEX_SQLITE_HOME": args[3],
+        "CODEX_ELECTRON_USER_DATA_PATH": args[5], "HOME": args[7], "TMPDIR": args[9]]
     var completed = false
     var launched: NSRunningApplication?
     var failed = false
     NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { application, error in
-        DispatchQueue.main.async {
-            launched = application
-            failed = error != nil
-            completed = true
-        }
+        DispatchQueue.main.async { launched = application; failed = error != nil; completed = true }
     }
-
     let deadline = Date(timeIntervalSinceNow: 15)
     while !completed && Date() < deadline {
         _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     }
     guard completed, !failed, let application = launched,
           application.processIdentifier > 0, application.processIdentifier != getpid(),
-          !application.isTerminated, let executableURL = application.executableURL,
-          let actualExecutable = resolvedPath(executableURL),
-          let expectedExecutable, actualExecutable == expectedExecutable,
           let launchDate = application.launchDate else {
-        fputs("Unable to launch the requested profile instance.\n", stderr)
-        exit(EXIT_FAILURE)
+        fputs("Unable to launch the requested profile instance.\n", stderr); exit(EXIT_FAILURE)
     }
-
-    let startSeconds = Int(floor(launchDate.timeIntervalSince1970))
-    let target = TargetIdentity(pid: application.processIdentifier, executable: actualExecutable, startSeconds: startSeconds)
-    guard let observed = validatedApplication(target), observed.processIdentifier == application.processIdentifier else {
-        fputs("Unable to verify the requested profile instance.\n", stderr)
-        exit(EXIT_FAILURE)
+    // LaunchServices starts the bootstrap. exec replaces it in the same PID,
+    // so inspect the kernel path rather than cached CFBundleExecutable metadata.
+    let target = TargetIdentity(pid: application.processIdentifier, executable: expectedExecutable,
+        startSeconds: Int(floor(launchDate.timeIntervalSince1970)))
+    while validatedApplication(target) == nil && Date() < deadline && !application.isTerminated {
+        _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+    }
+    guard validatedApplication(target) != nil else {
+        fputs("Unable to verify the requested profile instance.\n", stderr); exit(EXIT_FAILURE)
     }
     let result: [String: Any] = ["pid": target.pid, "executable": target.executable, "startSeconds": target.startSeconds]
     guard let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),
-          let json = String(data: data, encoding: .utf8) else {
-        fputs("Unable to report the profile instance identity.\n", stderr)
-        exit(EXIT_FAILURE)
-    }
+          let json = String(data: data, encoding: .utf8) else { exit(EXIT_FAILURE) }
     print(json)
     exit(EXIT_SUCCESS)
+}
+
+struct ProfileMetadata {
+    let store: String
+    let profileID: String
+    let node: String
+    let entry: String
+    let nativeRoot: String
+    let vendorExecutable: String
+}
+
+func metadataFromBundle() -> ProfileMetadata? {
+    guard let info = Bundle.main.infoDictionary,
+          let store = info["XfxStore"] as? String,
+          let profile = info["XfxProfileId"] as? String, UUID(uuidString: profile) != nil,
+          let node = info["XfxNode"] as? String,
+          let entry = info["XfxEntryPoint"] as? String,
+          let root = info["XfxNativeRoot"] as? String,
+          let vendor = info["XfxVendorExecutable"] as? String,
+          [store, node, entry, root].allSatisfy(safeAbsolutePath),
+          !vendor.isEmpty, vendor != ".", vendor != "..", !vendor.contains("/"),
+          !vendor.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { return nil }
+    let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(vendor)")
+    return ProfileMetadata(store: store, profileID: profile, node: node, entry: entry,
+        nativeRoot: root, vendorExecutable: resolvedPath(executable))
+}
+
+func executeProfile(_ metadata: ProfileMetadata) -> Never {
+    let home = metadata.nativeRoot + "/codex-home"
+    let desktopData = metadata.nativeRoot + "/desktop-data"
+    setenv("CODEX_HOME", home, 1)
+    setenv("CODEX_SQLITE_HOME", home, 1)
+    setenv("CODEX_ELECTRON_USER_DATA_PATH", desktopData, 1)
+    setenv("HOME", metadata.nativeRoot + "/user-home", 1)
+    setenv("TMPDIR", metadata.nativeRoot + "/tmp", 1)
+    unsetenv("XFX_DESKTOP_LAUNCHER_PID")
+    unsetenv("XFX_DESKTOP_LAUNCHER_EXECUTABLE")
+    let args = [metadata.vendorExecutable, "--user-data-dir=\(desktopData)"]
+    let pointers = args.map { strdup($0) } + [nil]
+    pointers.withUnsafeBufferPointer { _ = execv(metadata.vendorExecutable, $0.baseAddress!) }
+    fputs("Unable to execute this profile's Codex app.\n", stderr)
+    exit(EXIT_FAILURE)
+}
+
+func openFromFinder(_ metadata: ProfileMetadata) -> Never {
+    // Reserve this profile before replacing ourselves. The controller waits
+    // for this exact PID to become the vendor app, then records ownership.
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: metadata.node)
+    process.arguments = [metadata.entry, "--store", metadata.store, "--json", "desktop", "open", metadata.profileID]
+    var environment = ProcessInfo.processInfo.environment
+    environment["XFX_DESKTOP_LAUNCHER_PID"] = String(getpid())
+    environment["XFX_DESKTOP_LAUNCHER_EXECUTABLE"] = executablePath(getpid())
+    process.environment = environment
+    let output = Pipe()
+    process.standardOutput = output
+    process.standardError = FileHandle.standardError
+    do { try process.run() } catch {
+        fputs("Unable to start the profile controller.\n", stderr); exit(EXIT_FAILURE)
+    }
+    var data = Data()
+    while data.count < 4096 {
+        let byte = output.fileHandleForReading.readData(ofLength: 1)
+        guard !byte.isEmpty else { break }
+        if byte[0] == 10 { break }
+        data.append(byte)
+    }
+    guard let reply = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          reply["kind"] as? String == "xfx-profile-bootstrap", reply["profileId"] as? String == metadata.profileID,
+          reply["pid"] as? Int == Int(getpid()), let status = reply["status"] as? String else {
+        fputs("The controller did not authorize this profile launch.\n", stderr); exit(EXIT_FAILURE)
+    }
+    output.fileHandleForReading.closeFile()
+    if status == "already-running" { exit(EXIT_SUCCESS) }
+    guard status == "launch" else { exit(EXIT_FAILURE) }
+    executeProfile(metadata)
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 if arguments.first == "--open-app" { openApplicationOneShot(arguments) }
 if arguments.first == "--focus-pid" || arguments.first == "--quit-pid" { oneShot(arguments) }
-
-struct LauncherMetadata {
-    let store: String
-    let profileID: String
-    let node: String
-    let entry: String
+guard let metadata = metadataFromBundle() else {
+    fputs("This profile app is missing its controller settings.\n", stderr); exit(EXIT_FAILURE)
 }
-
-func ownExecutable() -> String {
-    URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.resolvingSymlinksInPath().path
-}
-
-func metadataFromBundle() -> LauncherMetadata? {
-    guard let info = Bundle.main.infoDictionary,
-          let store = info["XfxStore"] as? String,
-          let profile = info["XfxProfileId"] as? String,
-          let node = info["XfxNode"] as? String,
-          let entry = info["XfxEntryPoint"] as? String,
-          [store, node, entry].allSatisfy({ $0.hasPrefix("/") }) else { return nil }
-    return LauncherMetadata(store: store, profileID: profile, node: node, entry: entry)
-}
-
-final class LauncherDelegate: NSObject, NSApplicationDelegate {
-    private var target: TargetIdentity?
-    private var timer: Timer?
-    private var resolving = false
-    private var showingError = false
-    private var app: NSApplication { NSApplication.shared }
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        app.setActivationPolicy(.regular)
-        buildMenu()
-        if let target = parseTarget(arguments, mode: "--target-pid"), validatedApplication(target) != nil {
-            self.target = target
-            timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.pollTarget() }
-            forwardFocus()
-        } else if arguments.isEmpty {
-            resolveTargetFromController()
-        } else {
-            showError("The requested Codex process could not be verified.")
-        }
-    }
-
-    func applicationDidBecomeActive(_ notification: Notification) { forwardFocus() }
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        forwardFocus()
-        return true
-    }
-
-    private func buildMenu() {
-        let main = NSMenu()
-        let root = NSMenuItem()
-        main.addItem(root)
-        let menu = NSMenu()
-        let focus = NSMenuItem(title: "Focus Codex", action: #selector(focusTarget), keyEquivalent: "")
-        focus.target = self
-        menu.addItem(focus)
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit Codex", action: #selector(quitTarget), keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-        root.submenu = menu
-        app.mainMenu = main
-    }
-
-    @objc private func focusTarget() { forwardFocus() }
-    @objc private func quitTarget() {
-        guard let target, validatedApplication(target) != nil else { app.terminate(nil); return }
-        if validatedApplication(target)?.terminate() == true {
-            // Keep this small launcher alive until the original app is actually gone.
-            pollTarget()
-        } else {
-            showError("Codex did not accept the quit request. Dismiss its quit confirmation and try again.")
-        }
-    }
-
-    private func pollTarget() {
-        guard let target else { return }
-        guard validatedApplication(target) != nil else { timer?.invalidate(); timer = nil; app.terminate(nil); return }
-    }
-
-    private func forwardFocus() {
-        guard let target, let running = validatedApplication(target) else { return }
-        _ = running.activate(options: [.activateAllWindows])
-    }
-
-    private func resolveTargetFromController() {
-        guard !resolving, let metadata = metadataFromBundle() else {
-            showError("This profile launcher is missing its controller settings.")
-            return
-        }
-        resolving = true
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: metadata.node)
-        process.arguments = [metadata.entry, "--store", metadata.store, "--json", "desktop", "open", metadata.profileID]
-        var environment = ProcessInfo.processInfo.environment
-        environment["XFX_DESKTOP_LAUNCHER_PID"] = String(getpid())
-        environment["XFX_DESKTOP_LAUNCHER_EXECUTABLE"] = ownExecutable()
-        process.environment = environment
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        process.terminationHandler = { [weak self] child in
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.resolving = false
-                guard child.terminationStatus == 0,
-                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let main = object["main"] as? [String: Any],
-                      let pid = main["pid"] as? Int, let executable = main["executable"] as? String,
-                      let start = Self.startSeconds(object["mainStartSeconds"]) else {
-                    self.showError("Could not open this profile's Codex instance.")
-                    return
-                }
-                let target = TargetIdentity(pid: pid_t(pid), executable: executable, startSeconds: start)
-                guard validatedApplication(target) != nil else {
-                    self.showError("The profile's Codex instance could not be verified.")
-                    return
-                }
-                self.target = target
-                self.timer?.invalidate()
-                self.timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.pollTarget() }
-                self.forwardFocus()
-            }
-        }
-        do { try process.run() }
-        catch { resolving = false; showError("Could not open this profile's Codex instance.") }
-    }
-
-    private func showError(_ message: String) {
-        guard !showingError else { return }
-        showingError = true
-        let alert = NSAlert()
-        alert.messageText = "Profile launcher"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-        showingError = false
-    }
-
-    private static func startSeconds(_ value: Any?) -> Int? {
-        if let number = value as? NSNumber { return number.intValue }
-        if let string = value as? String { return Int(string) }
-        return nil
-    }
-}
-
-let application = NSApplication.shared
-let delegate = LauncherDelegate()
-application.delegate = delegate
-application.run()
+if arguments == ["--profile-run"] { executeProfile(metadata) }
+guard arguments.isEmpty else { exit(EXIT_FAILURE) }
+openFromFinder(metadata)

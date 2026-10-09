@@ -69,6 +69,7 @@ Mutation prompts and external-terminal checks still apply. Read-only operations 
 const argv = process.argv.slice(2);
 const options = {}, args = [];
 let json = false;
+let bootstrapReplied = false;
 try {
   for (let i = 0; i < argv.length; i++) {
     const value = argv[i];
@@ -230,7 +231,14 @@ try {
       if (!counts[operation]?.includes(targets.length))
         throw new Error('Invalid desktop command; run xfx --help');
       if (operation === 'open') result = options['--dry-run']
-        ? await desktopInstancePlan(store, targets[0]) : await openDesktopInstance(store, targets[0]);
+        ? await desktopInstancePlan(store, targets[0]) : await openDesktopInstance(store, targets[0], {
+          onBootstrapReady: async reply => {
+            // The Finder bootstrap is waiting on this line before exec. Once
+            // authorized it closes the pipe; do not write the ordinary result.
+            await new Promise((resolve, reject) => process.stdout.write(`${JSON.stringify(reply)}\n`, error => error ? reject(error) : resolve()));
+            bootstrapReplied = true;
+          },
+        });
       else if (operation === 'list') {
         result = await listDesktopInstances(store, { observe: options['--observe'] ?? false });
         if (result.instances.some(instance => instance.observed?.status === 'unavailable')) process.exitCode = 2;
@@ -320,7 +328,8 @@ try {
         : await compareHomes(store, ...params, { include });
       if ((result.summary ?? result.comparison?.summary)?.unavailable > 0) process.exitCode = 2;
     }
-    if (!json && command === 'profile' && params[0] === 'list') process.stdout.write(result.length ? result.map(p => `${p.name.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')}  [${p.state}]${p.home ? `  ${p.home}` : ''}`).join('\n') + '\n' : 'No profiles. Use xfx profile create NAME.\n');
+    if (bootstrapReplied) { /* The controller records completion after the bootstrap exec. */ }
+    else if (!json && command === 'profile' && params[0] === 'list') process.stdout.write(result.length ? result.map(p => `${p.name.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')}  [${p.state}]${p.home ? `  ${p.home}` : ''}`).join('\n') + '\n' : 'No profiles. Use xfx profile create NAME.\n');
     else if (!json && command === 'history') {
       const display = value => String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
       const when = value => { const d = new Date(value*1000); return Number.isFinite(d.getTime()) ? d.toISOString() : 'unknown date'; };

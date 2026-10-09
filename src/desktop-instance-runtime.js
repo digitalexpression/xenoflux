@@ -5,21 +5,38 @@ import { execFile as nodeExecFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { userInfo as nodeUserInfo } from 'node:os';
 import { lstat as nodeLstat, realpath as nodeRealpath } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { DESKTOP_APP, inspectDesktopApp, sameDesktopApp } from './desktop-runtime.js';
 
 const execFileDefault = promisify(nodeExecFile);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const fail = (code, remainingProcesses = []) => Object.assign(new Error(code), { code, remainingProcesses });
+const absoluteCanonical = value => typeof value === 'string' && value.startsWith('/') && resolve(value) === value && !/[\x00-\x1f\x7f]/.test(value);
+function identityChanged(previous, current) {
+  const fields = current
+    ? ['pid', 'startedAt', 'uid', 'executable'].filter(field => previous?.[field] !== current[field])
+    : ['presence'];
+  const describe = row => row ? `PID ${row.pid} (started ${row.startedAt}, UID ${row.uid}, executable ${row.executable})` : 'no current process row';
+  const difference = { previous: previous ? { pid: previous.pid, startedAt: previous.startedAt, uid: previous.uid, executable: previous.executable } : null,
+    current: current ? { pid: current.pid, startedAt: current.startedAt, uid: current.uid, executable: current.executable } : null, fields };
+  const error = fail('PROCESS_IDENTITY_CHANGED', current ? [current] : []);
+  error.message = `PROCESS_IDENTITY_CHANGED: ${describe(previous)} became ${describe(current)}; changed fields: ${fields.join(', ') || 'presence'}`;
+  error.identityChange = difference;
+  return error;
+}
 
 function parsePs(stdout) {
   if (typeof stdout !== 'string') throw fail('PROCESS_OBSERVATION_INVALID');
   const rows = [];
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
-    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+?)\s*$/);
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+?)\s*$/);
     if (!m) throw fail('PROCESS_OBSERVATION_INVALID');
-    rows.push({ pid: +m[1], ppid: +m[2], uid: +m[3], startedAt: m[4], executable: m[5] });
+    // A zombie retains a PID and start time but no longer has a live executable
+    // or open resources. Do not compare its ps command label with the former
+    // executable identity or try to control it.
+    if (m[5].startsWith('Z')) continue;
+    rows.push({ pid: +m[1], ppid: +m[2], uid: +m[3], startedAt: m[4], executable: m[6] });
   }
   return rows;
 }
@@ -80,11 +97,16 @@ export function createDesktopInstanceRuntime({
   async function snapshot() {
     let rows;
     try {
-      rows = processSnapshot ? await processSnapshot() : parsePs((await execFile('/bin/ps', ['-axo', 'pid=,ppid=,uid=,lstart=,comm='], {
+      rows = processSnapshot ? await processSnapshot() : parsePs((await execFile('/bin/ps', ['-axo', 'pid=,ppid=,uid=,lstart=,state=,comm='], {
         encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: systemTimeoutMs,
         env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' },
       })).stdout);
     } catch (e) { if (e?.code === 'PROCESS_OBSERVATION_INVALID') throw e; throw fail('PROCESS_INSPECTION_FAILED'); }
+    if (Array.isArray(rows)) {
+      for (const row of rows) if (row?.state !== undefined && (typeof row.state !== 'string' || !/^[A-Z][A-Za-z+<>]*$/.test(row.state)))
+        throw fail('PROCESS_OBSERVATION_INVALID');
+      rows = rows.filter(row => !row?.state?.startsWith('Z'));
+    }
     return validateRows(rows).filter(row => row.uid === uid);
   }
   function ancestors(rows) {
@@ -108,25 +130,76 @@ export function createDesktopInstanceRuntime({
     }
     return [...selected.values()];
   }
+  function appDescendants(rows, root, excludePid) {
+    const selected = new Map([[root.pid, root]]), excluded = new Set();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const row of rows) {
+        if (selected.has(row.pid) || excluded.has(row.pid)) continue;
+        if (selected.has(row.ppid)) {
+          if (row.pid === excludePid) excluded.add(row.pid);
+          else selected.set(row.pid, row);
+          changed = true;
+        } else if (excluded.has(row.ppid)) { excluded.add(row.pid); changed = true; }
+      }
+    }
+    return [...selected.values()];
+  }
   function validateTarget(rows, main) {
     if (!main || !Number.isSafeInteger(main.pid) || main.pid < 1 || main.uid !== uid || !main.startedAt || !main.executable)
       throw fail('INVALID_TARGET');
     if (ancestors(rows).has(main.pid)) throw fail('SELF_HOSTED', [main]);
     const current = rows.find(r => r.pid === main.pid);
-    if (!current || !matchesProcessIdentity(current, main)) throw fail('PROCESS_IDENTITY_CHANGED', current ? [current] : []);
+    if (!current || !matchesProcessIdentity(current, main)) throw identityChanged(main, current);
     return current;
   }
-  async function open(plan, { helperExecutable } = {}) {
+  async function open(plan, { helperExecutable, application, bootstrap, onBootstrapReady } = {}) {
     const inspected = await inspectApp();
     const before = await snapshot();
     if (!sameDesktopApp(plan?.app, inspected)) throw fail('APP_IDENTITY_CHANGED');
-    const appPath = plan?.appPath ?? plan?.app?.appPath;
     const userHome = plan?.userHome ?? userInfo().homedir;
-    if (![plan?.home, plan?.desktopData, userHome, plan?.temporary, appPath, helperExecutable]
-      .every(x => typeof x === 'string' && x.startsWith('/') && !/[\x00-\x1f\x7f]/.test(x))) throw fail('INVALID_PLAN');
-    if (appPath !== inspected.appPath) throw fail('APP_IDENTITY_CHANGED');
-    const args = ['--open-app', appPath, '--home', plan.home, '--desktop-data', plan.desktopData,
-      '--user-home', userHome, '--temporary', plan.temporary, '--target-executable', inspected.executable];
+    if (![plan?.home, plan?.desktopData, userHome, plan?.temporary, helperExecutable,
+      application?.appPath, application?.executable].every(absoluteCanonical)
+      || typeof application?.bundleId !== 'string' || !application.bundleId) throw fail('INVALID_PLAN');
+    const vendorName = basename(inspected.executable);
+    if (!sameDesktopApp(plan.app, inspected) || application.bundleId !== `com.xenoflux.profile.${String(plan.profileId ?? '').toLowerCase()}`
+      || application.appPath === inspected.appPath || !basename(application.appPath).startsWith('Codex · ')
+      || !basename(application.appPath).endsWith('.app')
+      || application.executable !== join(application.appPath, 'Contents', 'MacOS', vendorName)) throw fail('APP_IDENTITY_CHANGED');
+    const bootstrapExecutable = join(application.appPath, 'Contents', 'MacOS', 'XfxProfileLauncher');
+    if (bootstrap != null) {
+      if (!bootstrap || !Number.isSafeInteger(bootstrap.pid) || bootstrap.pid <= 0
+        || !Number.isSafeInteger(bootstrap.ppid) || bootstrap.ppid < 0 || bootstrap.uid !== uid
+        || typeof bootstrap.startedAt !== 'string' || !bootstrap.startedAt
+        || bootstrap.executable !== bootstrapExecutable || typeof onBootstrapReady !== 'function') throw fail('PROFILE_BOOTSTRAP_INVALID');
+      const observed = before.find(row => row.pid === bootstrap.pid);
+      if (!observed || !matchesProcessIdentity(observed, bootstrap) || observed.ppid !== bootstrap.ppid)
+        throw identityChanged(bootstrap, observed);
+      const caller = before.find(row => row.pid === currentPid);
+      if (!caller || caller.ppid !== bootstrap.pid) throw fail('PROFILE_BOOTSTRAP_CALLER_MISMATCH', [observed]);
+      await onBootstrapReady({ kind: 'xfx-profile-bootstrap', status: 'launch', profileId: plan.profileId, pid: bootstrap.pid });
+      const deadline = now() + openTimeoutMs;
+      while (now() <= deadline) {
+        const after = await snapshot();
+        const row = after.find(item => item.pid === bootstrap.pid);
+        if (!row) throw fail('PROFILE_BOOTSTRAP_EXITED', []);
+        if (row.uid !== bootstrap.uid || row.startedAt !== bootstrap.startedAt)
+          throw identityChanged(bootstrap, row);
+        if (row.executable === application.executable) {
+          const main = row;
+          const processes = appDescendants(after, main, currentPid);
+          const owned = ownedFor(main);
+          for (const process of processes) owned.set(process.pid, process);
+          return { main, processes };
+        }
+        if (row.executable !== bootstrapExecutable) throw identityChanged(bootstrap, row);
+        await sleep(pollIntervalMs);
+      }
+      throw fail('DESKTOP_OPEN_TIMEOUT', []);
+    }
+    const args = ['--open-app', application.appPath, '--home', plan.home, '--desktop-data', plan.desktopData,
+      '--user-home', userHome, '--temporary', plan.temporary, '--target-executable', application.executable];
     let receipt, result;
     try {
       result = await execFile(helperExecutable, args, {
@@ -141,7 +214,7 @@ export function createDesktopInstanceRuntime({
         || !Number.isSafeInteger(receipt.pid) || receipt.pid < 1
         || typeof receipt.executable !== 'string' || !receipt.executable.startsWith('/') || /[\x00-\x1f\x7f]/.test(receipt.executable)
         || !Number.isSafeInteger(receipt.startSeconds) || receipt.startSeconds < 0
-        || receipt.executable !== inspected.executable) throw new Error();
+        || receipt.executable !== application.executable) throw new Error();
     } catch { throw fail('DESKTOP_OPEN_RECEIPT_INVALID'); }
     const prior = new Set(before.map(processIdentity));
     const deadline = now() + openTimeoutMs;
@@ -172,12 +245,12 @@ export function createDesktopInstanceRuntime({
     }
     const rows = await snapshot();
     const samePid = rows.find(r => r.pid === main?.pid);
-    if (samePid && !matchesProcessIdentity(samePid, main)) return { status: 'identity-changed', processes: [samePid] };
+    if (samePid && !matchesProcessIdentity(samePid, main)) return { status: 'identity-changed', processes: [samePid], identityChange: identityChanged(main, samePid).identityChange };
     const liveTracked = [];
     for (const [pid, previous] of owned) {
       const row = rows.find(r => r.pid === pid);
       if (!row) continue;
-      if (!matchesProcessIdentity(row, previous)) return { status: 'identity-changed', processes: [row] };
+      if (!matchesProcessIdentity(row, previous)) return { status: 'identity-changed', processes: [row], identityChange: identityChanged(previous, row).identityChange };
       if (pid !== main?.pid) liveTracked.push(row);
     }
     if (!samePid) return liveTracked.length
@@ -266,23 +339,37 @@ export function createDesktopInstanceRuntime({
   async function close(main, { helperExecutable } = {}) {
     const owned = ownedFor(main);
     const before = await snapshot();
-    validateTarget(before, main);
-    for (const row of descendants(before, main)) owned.set(row.pid, row);
-    await control('--quit-pid', main, helperExecutable);
+    const beforeMain = before.find(row => row.pid === main?.pid);
+    if (beforeMain && !matchesProcessIdentity(beforeMain, main)) throw identityChanged(main, beforeMain);
+    if (beforeMain) {
+      validateTarget(before, main);
+      for (const row of descendants(before, main)) owned.set(row.pid, row);
+      try { await control('--quit-pid', main, helperExecutable); }
+      catch (error) {
+        // The app may exit after our preflight but before the native helper
+        // validates it. Recheck before treating that helper failure as natural
+        // completion; a live exact target keeps the original helper error.
+        const afterFailure = await snapshot();
+        const current = afterFailure.find(row => row.pid === main.pid);
+        if (current && !matchesProcessIdentity(current, main)) throw identityChanged(main, current);
+        if (current) throw error;
+      }
+    }
     const deadline = now() + closeTimeoutMs;
     while (now() <= deadline) {
       const rows = await snapshot();
       const byPid = new Map(rows.map(r => [r.pid, r]));
       const root = byPid.get(main.pid);
-      if (root && !matchesProcessIdentity(root, main)) throw fail('PROCESS_IDENTITY_CHANGED', [root]);
+      if (root && !matchesProcessIdentity(root, main)) throw identityChanged(main, root);
       const liveOwned = [];
       for (const [pid, previous] of owned) {
         const row = byPid.get(pid);
         if (!row) continue;
-        if (!matchesProcessIdentity(row, previous)) throw fail('PROCESS_IDENTITY_CHANGED', [row]);
+        if (!matchesProcessIdentity(row, previous)) throw identityChanged(previous, row);
         if (pid !== main.pid) {
           const parent = owned.get(row.ppid);
-          if (!parent || !byPid.has(row.ppid) || !matchesProcessIdentity(byPid.get(row.ppid), parent))
+          const endedMainParent = row.ppid === main.pid && !root && matchesProcessIdentity(parent, main);
+          if (!endedMainParent && (!parent || !byPid.has(row.ppid) || !matchesProcessIdentity(byPid.get(row.ppid), parent)))
             throw fail('PROCESS_TREE_AMBIGUOUS', [row]);
         }
         liveOwned.push(row);
@@ -297,23 +384,5 @@ export function createDesktopInstanceRuntime({
       || descendants(rows, main).some(child => child.pid === r.pid));
     throw fail('DESKTOP_CLOSE_TIMEOUT', remaining);
   }
-  async function openLauncher({ launcherApp, launcherExecutable }, main) {
-    const rows = await snapshot(); validateTarget(rows, main);
-    if (![launcherApp, launcherExecutable].every(x => typeof x === 'string' && x.startsWith('/'))) throw fail('INVALID_LAUNCHER');
-    const before = await snapshot();
-    try { await execFile('/usr/bin/open', ['-n', launcherApp, '--args', '--target-pid', String(main.pid), '--target-executable', main.executable,
-      '--target-start-seconds', targetStartSeconds(main.startedAt)], { cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, encoding: 'utf8', maxBuffer: 65536, timeout: systemTimeoutMs }); }
-    catch { throw fail('LAUNCHER_OPEN_FAILED'); }
-    const deadline = now() + openTimeoutMs;
-    while (now() <= deadline) {
-      const after = await snapshot();
-      const old = new Set(before.map(processIdentity));
-      const mains = after.filter(r => r.executable === launcherExecutable && !old.has(processIdentity(r)));
-      if (mains.length > 1) throw fail('LAUNCHER_OPEN_AMBIGUOUS', mains);
-      if (mains.length === 1) return mains[0];
-      await sleep(pollIntervalMs);
-    }
-    throw fail('LAUNCHER_OPEN_TIMEOUT');
-  }
-  return { inspectApp, snapshot, open, observe, focus, close, openLauncher, assertResourcesIdle };
+  return { inspectApp, snapshot, open, observe, focus, close, assertResourcesIdle };
 }

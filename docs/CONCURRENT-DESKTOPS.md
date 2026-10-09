@@ -17,17 +17,22 @@ xfx desktop recover NAME --dry-run
 xfx desktop recover NAME
 ```
 
-`open` starts the requested profile with explicit home, SQLite, user-home and
-UI-data routing, then opens its `Codex · NAME` launcher. Opening a running
-profile focuses its recorded instance. Each launcher forwards activation to
-that process and can be opened through Finder or kept in the Dock. The signed
-vendor application is not copied or modified. Profile sign-in and settings stay
-with that profile.
+`open` prepares a private copy of the verified installed app named `Codex · NAME`,
+with its own bundle identity and the original icon and resources. The bootstrap
+sets the profile's home, SQLite, user-home and UI-data paths, then replaces itself
+with Codex in the same PID. There is no persistent companion application.
+Opening a running profile focuses its recorded instance. The profile app can be
+opened through Finder or kept in the Dock; its bootstrap asks Xenoflux to reserve
+the profile before starting Codex. Profile sign-in and settings stay with that
+profile. The installed app remains unchanged.
 
 The first launch requires Xcode Command Line Tools for the small AppKit helper.
-Generated launchers and records live under `CONTROLLER/desktop-instances`,
-outside native homes. Renaming a profile changes its launcher label after the
-desktop stops and is next prepared.
+Generated apps and records live under `CONTROLLER/desktop-instances`, outside
+native homes. The copy attempts filesystem cloning where available and otherwise
+copies files; it never hardlinks the installed app. Renaming a profile changes its
+app label after the desktop stops and is next prepared. A later CLI open refreshes
+a stopped copy when the verified installed app or bootstrap changes. If Finder
+requests an outdated copy, open it with `xfx desktop open NAME` to refresh it first.
 
 ## Isolation and recovery
 
@@ -38,14 +43,17 @@ concurrently. A short operation lock serializes changes to Xenoflux desktop
 state. Raw Codex processes can bypass Xenoflux reservations, so open and cleanup
 also inspect the selected profile's resource handles.
 
-The native launch uses the application instance returned by macOS for that
-request. It does not adopt unrelated or preexisting processes. A private receipt
+The CLI native launch uses the application instance returned by macOS for that
+request. Finder launches verify their bootstrap's exact PID and controller
+parentage, then wait for that same process to become the profile's Codex binary.
+Neither route adopts unrelated or preexisting processes. A private receipt
 binds the process to its requested profile paths. Focus, close, and recovery
 verify the receipt and recorded process identity. The AppKit helper checks the
 executable and launch time before activating or requesting a graceful quit.
 Control from inside the target process ancestry is refused.
 
-Close waits for the recorded process tree and profile handles to drain before
+Close treats exited zombie process rows as stopped and waits for remaining
+recorded processes and profile handles to drain before
 releasing the reservation. Timeouts, reused identities, detached helpers, or
 ambiguous launches preserve the record and reservation. If an app is quit
 normally outside Xenoflux, `open NAME` can reconcile its stopped, idle record.
@@ -56,16 +64,18 @@ reservation. It does not close or launch apps.
 
 ## Deferred native acceptance
 
-Development checks use mocked native operations and disposable homes. The
-Swift helper is compiled but not executed. Installation, live profile changes,
-sign-in, and native launches remain outside those checks.
+Development checks use mocked native operations and disposable homes. On macOS,
+a locally signed fixture verifies compilation, copy validation, fixed-path routing
+and same-PID bootstrap execution without opening a GUI. Installation, live profile
+changes, sign-in, native LaunchServices behavior and Cmd+Tab remain outside those checks.
 
 When native testing is authorized, use disposable profiles with recognizable
 settings and fresh chats. Verify:
 
 - Two profile desktops stay open alongside the ordinary Codex desktop, with
   separate profile home, SQLite, UI-data and enabled diagnostic-log targets.
-- Each named launcher appears in Cmd+Tab and focuses the correct window.
+- Each profile adds exactly one app entry in Dock and Cmd+Tab, named
+  `Codex · NAME`, with the Codex icon, and focuses the correct window.
 - Reopening from Finder and the Dock retains the intended profile and history.
 - Two additional CLI profiles run simultaneously with their own homes.
 - Closing one desktop preserves other clients; normal quit, cancelled quit,
@@ -73,3 +83,11 @@ settings and fresh chats. Verify:
 
 Record the exact desktop/backend versions and observed outcomes before claiming
 native concurrency support. Retest native launch and activation after app updates.
+
+The first native test on 2026-10-09 verified separate profile windows could be
+selected through Cmd+Tab. It also exposed generic `ChatGPT` names, duplicate
+launcher entries and `PROCESS_IDENTITY_CHANGED` during close. The replacement
+app design and close fixes require a new native test. During development the
+installed `/Applications/ChatGPT.app` failed strict signature verification,
+including verification of its main executable; it was left untouched. A verified
+installed app is required before testing the new copied-app launch.

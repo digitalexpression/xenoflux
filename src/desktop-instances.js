@@ -3,12 +3,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, readdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { resolveHome } from './homes.js';
 import { find } from './profiles.js';
 import { DESKTOP_APP } from './desktop-runtime.js';
 import { createDesktopInstanceRuntime, processIdentity, targetStartSeconds } from './desktop-instance-runtime.js';
-import { prepareProfileLauncher } from './profile-launcher.js';
+import { prepareProfileApp, validateProfileApp } from './profile-launcher.js';
 import { reserveInstanceControl, releaseInstanceControl } from './desktop-instance-guard.js';
 import { createLogStorage } from './log-storage.js';
 import { ramLogTarget } from './ram-logs.js';
@@ -22,6 +22,7 @@ const paths = (store, id) => ({ root: join(store.directory, 'desktop-instances')
 const receiptPath = (store, state) => join(paths(store, state.profileId).root, `${state.profileId}.${state.runId}.launch`);
 const rowValid = row => row && Number.isSafeInteger(row.pid) && row.pid > 0 && Number.isSafeInteger(row.ppid) && row.ppid >= 0
   && row.uid === process.getuid() && typeof row.startedAt === 'string' && Number.isFinite(Date.parse(row.startedAt)) && absolute(row.executable);
+const applicationOf = state => state.launcherPaths?.application ?? state.plan.app;
 
 function validateState(state, store, id) {
   const p = state?.plan;
@@ -35,22 +36,34 @@ function validateState(state, store, id) {
     || p.userHome !== join(p.nativeRoot, 'user-home') || !absolute(p.app?.appPath) || p.app?.bundleId !== DESKTOP_APP.bundleId
     || !absolute(p.app.executable) || relative(join(p.app.appPath, 'Contents', 'MacOS'), p.app.executable).includes('/')
     || !p.app.executable.startsWith(`${p.app.appPath}/Contents/MacOS/`)
-    || (state.main !== null && (!rowValid(state.main) || state.main.executable !== p.app.executable))
+    || (state.main !== null && (!rowValid(state.main) || state.main.executable !== applicationOf(state).executable))
     || !Array.isArray(state.processes) || !state.processes.every(rowValid) || !Array.isArray(state.baselineMains) || !state.baselineMains.every(rowValid)
     || (state.launcher !== null && !rowValid(state.launcher))) throw new Error('Invalid desktop instance record; preserving its reservation');
   if (state.main && state.baselineMains.some(row => processIdentity(row) === processIdentity(state.main)))
     throw new Error('Desktop instance refers to a preexisting process; preserving its reservation');
   if (state.launcherPaths) validateLauncherPaths(state.launcherPaths, store, id);
-  if (state.phase === 'running' && (!state.main || !state.launcherPaths || !state.launcher))
+  if (state.phase === 'running' && (!state.main || !state.launcherPaths || (!state.launcherPaths.application && !state.launcher)))
     throw new Error('Desktop instance has incomplete running identity; preserve its record');
   return state;
 }
 function validateLauncherPaths(launcher, store, id) {
-  const expectedApp = join(paths(store, id).root, 'apps', `${id}.app`);
   const helperRelative = relative(join(paths(store, id).root, 'native'), launcher.helperExecutable ?? '');
-  if (launcher.launcherApp !== expectedApp || launcher.launcherExecutable !== join(expectedApp, 'Contents', 'MacOS', 'XfxProfileLauncher')
-    || !/^[a-f0-9]{64}\/XfxProfileLauncher$/.test(helperRelative) || !/^[a-f0-9]{64}$/.test(launcher.helperSha256 ?? ''))
+  if (!/^[a-f0-9]{64}\/XfxProfileLauncher$/.test(helperRelative) || !/^[a-f0-9]{64}$/.test(launcher.helperSha256 ?? ''))
     throw new Error('Invalid profile launcher binding; preserving the desktop instance');
+  const app = launcher.application;
+  if (app) {
+    if (!absolute(app.appPath) || dirname(app.appPath) !== join(paths(store, id).root, 'apps', id)
+      || !basename(app.appPath).startsWith('Codex · ') || !basename(app.appPath).endsWith('.app')
+      || app.bundleId !== `com.xenoflux.profile.${id.toLowerCase()}`
+      || !absolute(app.executable) || dirname(app.executable) !== join(app.appPath, 'Contents', 'MacOS')
+      || launcher.bootstrapExecutable !== join(app.appPath, 'Contents', 'MacOS', 'XfxProfileLauncher'))
+      throw new Error('Invalid profile app binding; preserving the desktop instance');
+  } else {
+    // Retain only enough authority to close/recover the interrupted native test.
+    const previousApp = join(paths(store, id).root, 'apps', `${id}.app`);
+    if (launcher.launcherApp !== previousApp || launcher.launcherExecutable !== join(previousApp, 'Contents', 'MacOS', 'XfxProfileLauncher'))
+      throw new Error('Invalid profile launcher binding; preserving the desktop instance');
+  }
 }
 async function pinnedHelper(state) {
   const path = state.launcherPaths.helperExecutable;
@@ -61,6 +74,12 @@ async function pinnedHelper(state) {
     || createHash('sha256').update(await readFile(path)).digest('hex') !== state.launcherPaths.helperSha256)
     throw new Error('Profile launcher helper changed; preserving the desktop instance');
   return path;
+}
+async function pinnedApplication(store, state, validateApp) {
+  const validated = await validateApp(store, state.plan, state.launcherPaths.application);
+  if (validated && (validated.bootstrapExecutable !== state.launcherPaths.bootstrapExecutable
+    || validated.helperSha256 !== state.launcherPaths.helperSha256))
+    throw new Error('Profile app binding changed; preserving the desktop instance');
 }
 async function readState(store, id) {
   const root = paths(store, id).root;
@@ -102,7 +121,8 @@ function launchReceipt(state, main = state.main) {
   const p = state.plan;
   return { schemaVersion: 1, kind: 'desktop-instance-launch', runId: state.runId, profileId: state.profileId,
     home: p.home, desktopData: p.desktopData, userHome: p.userHome, temporary: p.temporary,
-    app: { appPath: p.app.appPath, bundleId: p.app.bundleId, executable: p.app.executable }, main };
+    app: { appPath: p.app.appPath, bundleId: p.app.bundleId, executable: p.app.executable },
+    ...(state.launcherPaths?.application ? { application: state.launcherPaths.application } : {}), main };
 }
 async function assertLaunchReceipt(store, state) {
   if (!state.main || !equal(await readJSON(receiptPath(store, state)), launchReceipt(state)))
@@ -113,7 +133,8 @@ async function observation(state, runtime) {
   if (state.main) return runtime.observe(state.main, { trackedProcesses: state.processes });
   if (state.phase === 'opening') {
     const baseline = new Set(state.baselineMains.map(processIdentity));
-    const unknown = (await runtime.snapshot()).filter(row => row.executable === state.plan.app.executable && !baseline.has(processIdentity(row)));
+    const unknown = (await runtime.snapshot()).filter(row => [applicationOf(state).executable, state.launcherPaths?.bootstrapExecutable].includes(row.executable)
+      && !baseline.has(processIdentity(row)));
     if (unknown.length) return { status: 'unknown-launch', processes: unknown };
   }
   return { status: 'stopped', processes: [] };
@@ -127,7 +148,8 @@ async function finishStopped(store, state, runtime, options) {
   await releaseInstanceControl(state.owner, options);
   // A separate write-once receipt survives interruption without extending the
   // shared lock format. Once the instance is stopped it no longer authorizes control.
-  await unlink(receiptPath(store, state)).catch(error => { if (error.code !== 'ENOENT') throw error; });
+  const receipt = receiptPath(store, state);
+  if (await exists(receipt) && state.main && equal(await readJSON(receipt), launchReceipt(state))) await unlink(receipt);
 }
 
 // Serialize profile lifecycle and maintenance operations across controller stores.
@@ -157,23 +179,25 @@ export async function desktopInstancePlan(store, name, { runtime = createDesktop
 }
 function result(state, status) {
   return { status, profileId: state.profileId, name: state.plan.name, main: state.main,
-    mainStartSeconds: state.main ? targetStartSeconds(state.main.startedAt) : null, launcher: state.launcher,
-    launcherApp: state.launcherPaths?.launcherApp ?? null, home: state.plan.home, desktopData: state.plan.desktopData,
+    mainStartSeconds: state.main ? targetStartSeconds(state.main.startedAt) : null,
+    application: state.launcherPaths?.application ?? null, applicationPath: state.launcherPaths?.application?.appPath ?? null,
+    home: state.plan.home, desktopData: state.plan.desktopData,
     liveHomeChanged: false, nativeAcceptance: 'pending' };
 }
 async function launcherCaller(runtime, launcherPaths, env) {
   const pid = env.XFX_DESKTOP_LAUNCHER_PID, executable = env.XFX_DESKTOP_LAUNCHER_EXECUTABLE;
   if (pid === undefined && executable === undefined) return null;
-  if (!/^[1-9]\d*$/.test(pid ?? '') || executable !== launcherPaths.launcherExecutable)
+  if (!/^[1-9]\d*$/.test(pid ?? '') || executable !== launcherPaths.bootstrapExecutable)
     throw new Error('Invalid profile launcher caller');
   const row = (await runtime.snapshot()).find(row => row.pid === Number(pid));
-  if (!rowValid(row) || row.executable !== executable) throw new Error('Profile launcher caller is unavailable or changed');
+  if (!rowValid(row) || row.executable !== executable || row.pid !== process.ppid)
+    throw new Error('Profile launcher caller is unavailable or changed');
   return row;
 }
 
 export async function openDesktopInstance(store, name, {
-  runtime = createDesktopInstanceRuntime(), prepareLauncher = prepareProfileLauncher, ramLogs,
-  launcherEnvironment = process.env, ...options
+  runtime = createDesktopInstanceRuntime(), prepareLauncher = prepareProfileApp, validateApp = validateProfileApp, ramLogs,
+  launcherEnvironment = process.env, onBootstrapReady, ...options
 } = {}) {
   const id = find(await store.read(), name).id;
   return withOperation(store, id, options, async () => {
@@ -185,16 +209,16 @@ export async function openDesktopInstance(store, name, {
       await reserveInstanceControl(state.owner, options);
       const observed = await observation(state, runtime);
       if (['opening', 'running'].includes(state.phase) && state.main && state.launcherPaths && observed.status === 'running' && !observed.orphaned) {
+        if (!state.launcherPaths.application) throw new Error('Close or recover the previous desktop test before opening the named app');
         await assertLaunchReceipt(store, state);
+        await pinnedApplication(store, state, validateApp);
         state.processes = observed.processes;
         const helperExecutable = await pinnedHelper(state);
         const caller = await launcherCaller(runtime, state.launcherPaths, launcherEnvironment);
-        if (caller) state.launcher = caller;
-        else if (!state.launcher || (await runtime.observe(state.launcher)).status === 'stopped')
-          state.launcher = await runtime.openLauncher(state.launcherPaths, state.main);
-        else if ((await runtime.observe(state.launcher)).status !== 'running') throw new Error('Profile launcher identity changed; preserve the desktop instance');
+        if (caller && typeof onBootstrapReady !== 'function') throw new Error('Profile bootstrap needs a controller handshake');
         await runtime.focus(state.main, { helperExecutable });
         await save(store, state, 'running');
+        if (caller) await onBootstrapReady({ kind: 'xfx-profile-bootstrap', status: 'already-running', profileId: id, pid: caller.pid });
         return result(state, 'focused');
       }
       if (observed.status !== 'stopped') throw new Error('Desktop launch is incomplete or still running; use desktop recover PROFILE after it stops');
@@ -217,22 +241,25 @@ export async function openDesktopInstance(store, name, {
       await assertBinding(store, state);
       await runtime.assertResourcesIdle(resources(plan));
       await privateDirectory(plan.desktopData, true);
-      state.launcherPaths = await prepareLauncher(store, plan);
+      state.launcherPaths = await prepareLauncher(store, plan, {
+        allowRebuild: launcherEnvironment.XFX_DESKTOP_LAUNCHER_PID === undefined,
+      });
       validateLauncherPaths(state.launcherPaths, store, id);
-      state.launcher = await launcherCaller(runtime, state.launcherPaths, launcherEnvironment);
+      await pinnedApplication(store, state, validateApp);
+      const bootstrap = await launcherCaller(runtime, state.launcherPaths, launcherEnvironment);
+      if (bootstrap && typeof onBootstrapReady !== 'function') throw new Error('Profile bootstrap needs a controller handshake');
       const helperExecutable = await pinnedHelper(state);
       await (ramLogs ?? createLogStorage()).prepareHome({ home: plan.home, key: plan.environmentId });
-      state.baselineMains = (await runtime.snapshot()).filter(row => row.executable === plan.app.executable);
+      state.baselineMains = (await runtime.snapshot()).filter(row => row.executable === state.launcherPaths.application.executable);
       await save(store, state, 'opening'); launchAttempted = true;
-      const opened = await runtime.open(plan, { helperExecutable });
-      if (!rowValid(opened.main) || opened.main.executable !== plan.app.executable || !opened.processes?.every(rowValid))
+      const opened = await runtime.open(plan, { helperExecutable, application: state.launcherPaths.application, bootstrap: bootstrap ?? undefined, onBootstrapReady });
+      if (!rowValid(opened.main) || opened.main.executable !== state.launcherPaths.application.executable || !opened.processes?.every(rowValid))
         throw new Error('Desktop returned incomplete process ownership; preserving its reservation');
       if (state.baselineMains.some(row => processIdentity(row) === processIdentity(opened.main)))
         throw new Error('Desktop returned a preexisting process; preserving its reservation');
       await writeFile(receiptPath(store, state), JSON.stringify(launchReceipt(state, opened.main)), { flag: 'wx', mode: 0o600 });
       state.main = opened.main; state.processes = opened.processes;
       await save(store, state);
-      if (!state.launcher) state.launcher = await runtime.openLauncher(state.launcherPaths, state.main);
       await save(store, state, 'running');
       return result(state, 'opened');
     } catch (error) {
@@ -247,24 +274,26 @@ export async function openDesktopInstance(store, name, {
   });
 }
 
-export async function focusDesktopInstance(store, name, { runtime = createDesktopInstanceRuntime(), ...options } = {}) {
+export async function focusDesktopInstance(store, name, { runtime = createDesktopInstanceRuntime(), validateApp = validateProfileApp, ...options } = {}) {
   const id = find(await store.read(), name).id;
   return withOperation(store, id, options, async () => {
     const state = await readState(store, id);
     if (!state || state.phase !== 'running') throw new Error('No running desktop instance is recorded for this profile');
+    if (!state.launcherPaths.application) throw new Error('Close or recover the previous desktop test before opening the named app');
     await assertBinding(store, state);
     if (!await ownedReservation(state)) throw new Error('Desktop instance reservation is missing; preserving state');
     await reserveInstanceControl(state.owner, options);
     const observed = await observation(state, runtime);
     if (observed.status !== 'running' || observed.orphaned) throw new Error('Desktop instance is unavailable or its process identity changed');
     await assertLaunchReceipt(store, state);
+    await pinnedApplication(store, state, validateApp);
     await runtime.focus(state.main, { helperExecutable: await pinnedHelper(state) });
     state.processes = observed.processes; await save(store, state);
     return result(state, 'focused');
   });
 }
 
-export async function closeDesktopInstance(store, name, { runtime = createDesktopInstanceRuntime(), ...options } = {}) {
+export async function closeDesktopInstance(store, name, { runtime = createDesktopInstanceRuntime(), validateApp = validateProfileApp, ...options } = {}) {
   const id = find(await store.read(), name).id;
   return withOperation(store, id, options, async () => {
     const state = await readState(store, id);
@@ -280,6 +309,7 @@ export async function closeDesktopInstance(store, name, { runtime = createDeskto
     if (observed.status !== 'stopped') {
       if (observed.status !== 'running' || observed.orphaned || !state.main) throw new Error('Desktop ownership is uncertain; it was not closed');
       await assertLaunchReceipt(store, state);
+      if (state.launcherPaths.application) await pinnedApplication(store, state, validateApp);
       state.processes = observed.processes; await save(store, state, 'closing');
       await runtime.close(state.main, { helperExecutable: await pinnedHelper(state) });
     }

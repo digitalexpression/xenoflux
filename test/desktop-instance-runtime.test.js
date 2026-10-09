@@ -7,7 +7,13 @@ const self = { pid: 10, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:00 2026'
 const caller = { pid: 20, ppid: 10, uid: 501, startedAt: 'Fri Oct  9 10:00:01 2026', executable: DESKTOP_APP.executable };
 const ownMain = { pid: 30, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:02 2026', executable: DESKTOP_APP.executable };
 const helper = '/fixture/Launcher.app/Contents/MacOS/Launcher';
-const plan = { home: '/fixture/home', desktopData: '/fixture/data', temporary: '/fixture/tmp', userHome: '/Users/test', app: { ...DESKTOP_APP } };
+const plan = { profileId: '12345678-abcd-4abc-8def-1234567890ab', home: '/fixture/home', desktopData: '/fixture/data', temporary: '/fixture/tmp', userHome: '/Users/test', app: { ...DESKTOP_APP } };
+const application = {
+  appPath: '/fixture/Codex · Research.app', bundleId: 'com.xenoflux.profile.12345678-abcd-4abc-8def-1234567890ab',
+  executable: '/fixture/Codex · Research.app/Contents/MacOS/Codex',
+};
+const bootstrapExecutable = '/fixture/Codex · Research.app/Contents/MacOS/XfxProfileLauncher';
+const copiedMain = { ...ownMain, executable: application.executable };
 const inspected = async () => ({ ...DESKTOP_APP });
 const opts = extra => ({ currentPid: 10, userInfo: () => ({ uid: 501, homedir: '/Users/test' }), inspectApp: inspected, ...extra });
 
@@ -16,13 +22,13 @@ test('request receipt selects the opened main while ignoring simultaneous unrela
   const child = { ...ownMain, pid: 31, ppid: 30, executable: '/fixture/Codex Helper' };
   const unrelated = { ...ownMain, pid: 40, startedAt: 'Fri Oct  9 10:00:04 2026' };
   const rt = createDesktopInstanceRuntime(opts({
-    processSnapshot: async () => ++reads === 1 ? [self, caller] : [self, caller, ownMain, child, unrelated],
-    execFile: async (file, args, options) => { call = { file, args, options }; return { stdout: JSON.stringify({ pid: ownMain.pid, executable: ownMain.executable, startSeconds: Number(targetStartSeconds(ownMain.startedAt)) }), stderr: '' }; },
+    processSnapshot: async () => ++reads === 1 ? [self, caller] : [self, caller, copiedMain, child, unrelated],
+    execFile: async (file, args, options) => { call = { file, args, options }; return { stdout: JSON.stringify({ pid: copiedMain.pid, executable: copiedMain.executable, startSeconds: Number(targetStartSeconds(copiedMain.startedAt)) }), stderr: '' }; },
   }));
-  const result = await rt.open(plan, { helperExecutable: helper });
-  assert.deepEqual(result, { main: ownMain, processes: [ownMain, child] });
+  const result = await rt.open(plan, { helperExecutable: helper, application });
+  assert.deepEqual(result, { main: copiedMain, processes: [copiedMain, child] });
   assert.equal(call.file, helper);
-  assert.deepEqual(call.args, ['--open-app', DESKTOP_APP.appPath, '--home', '/fixture/home', '--desktop-data', '/fixture/data', '--user-home', '/Users/test', '--temporary', '/fixture/tmp', '--target-executable', DESKTOP_APP.executable]);
+  assert.deepEqual(call.args, ['--open-app', application.appPath, '--home', '/fixture/home', '--desktop-data', '/fixture/data', '--user-home', '/Users/test', '--temporary', '/fixture/tmp', '--target-executable', application.executable]);
   assert.equal(call.options.timeout, 15000);
   assert.equal(call.options.env.HOME, '/Users/test');
 });
@@ -30,25 +36,62 @@ test('request receipt selects the opened main while ignoring simultaneous unrela
 test('a receipt naming a preexisting main is refused', async () => {
   let calls = 0;
   const rt = createDesktopInstanceRuntime(opts({
-    processSnapshot: async () => [self, caller, ownMain],
-    execFile: async () => { calls++; return { stdout: JSON.stringify({ pid: ownMain.pid, executable: ownMain.executable, startSeconds: Number(targetStartSeconds(ownMain.startedAt)) }), stderr: '' }; },
+    processSnapshot: async () => [self, caller, copiedMain],
+    execFile: async () => { calls++; return { stdout: JSON.stringify({ pid: copiedMain.pid, executable: copiedMain.executable, startSeconds: Number(targetStartSeconds(copiedMain.startedAt)) }), stderr: '' }; },
   }));
-  await assert.rejects(rt.open(plan, { helperExecutable: helper }), { code: 'DESKTOP_OPEN_PREEXISTING' });
+  await assert.rejects(rt.open(plan, { helperExecutable: helper, application }), { code: 'DESKTOP_OPEN_PREEXISTING' });
   assert.equal(calls, 1);
 });
 
 test('invalid helper receipt cannot be replaced by process-delta attribution', async () => {
   let reads = 0;
-  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => ++reads === 1 ? [self, caller] : [self, caller, ownMain],
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => ++reads === 1 ? [self, caller] : [self, caller, copiedMain],
     execFile: async () => ({ stdout: 'not json', stderr: '' }) }));
-  await assert.rejects(rt.open(plan, { helperExecutable: helper }), { code: 'DESKTOP_OPEN_RECEIPT_INVALID' });
+  await assert.rejects(rt.open(plan, { helperExecutable: helper, application }), { code: 'DESKTOP_OPEN_RECEIPT_INVALID' });
 });
 
 test('open refuses a plan bound to a different inspected app before launching', async () => {
   let calls = 0;
   const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, caller], execFile: async () => { calls++; return { stdout: '' }; } }));
-  await assert.rejects(rt.open({ ...plan, app: { ...DESKTOP_APP, appPath: '/other/Codex.app' } }, { helperExecutable: helper }), { code: 'APP_IDENTITY_CHANGED' });
+  await assert.rejects(rt.open({ ...plan, app: { ...DESKTOP_APP, appPath: '/other/Codex.app' } }, { helperExecutable: helper, application }), { code: 'APP_IDENTITY_CHANGED' });
   assert.equal(calls, 0);
+});
+
+test('Finder bootstrap authorizes only the exact bootstrap PID and waits for its same-PID exec', async () => {
+  const bootstrap = { pid: 60, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:01 2026', executable: bootstrapExecutable };
+  let rows = [{ ...self, ppid: bootstrap.pid }, bootstrap], authorized;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows, execFile: async () => assert.fail('bootstrap path must not invoke helper'),
+    sleep: async () => {} }));
+  const result = await rt.open(plan, {
+    helperExecutable: helper, application, bootstrap,
+    onBootstrapReady: async message => {
+      authorized = message;
+      rows = [{ ...self, ppid: bootstrap.pid }, { ...bootstrap, executable: application.executable },
+        { pid: 61, ppid: bootstrap.pid, uid: 501, startedAt: 'Fri Oct  9 10:00:02 2026', executable: '/fixture/renderer' }];
+    },
+  });
+  assert.deepEqual(authorized, { kind: 'xfx-profile-bootstrap', status: 'launch', profileId: plan.profileId, pid: 60 });
+  assert.equal(result.main.pid, bootstrap.pid);
+  assert.equal(result.main.executable, application.executable);
+  assert.deepEqual(result.processes.map(row => row.pid), [60, 61]);
+});
+
+test('bootstrap refuses a changed identity before notifying the Finder caller', async () => {
+  const bootstrap = { pid: 60, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:01 2026', executable: bootstrapExecutable };
+  let notified = false;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [{ ...bootstrap, startedAt: 'Fri Oct  9 10:03:00 2026' }, self] }));
+  await assert.rejects(rt.open(plan, { helperExecutable: helper, application, bootstrap,
+    onBootstrapReady: async () => { notified = true; } }), { code: 'PROCESS_IDENTITY_CHANGED' });
+  assert.equal(notified, false);
+});
+
+test('bootstrap does not adopt another copied main when the authorized PID does not exec', async () => {
+  const bootstrap = { pid: 60, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:01 2026', executable: bootstrapExecutable };
+  const unrelated = { ...copiedMain, pid: 62 };
+  let rows = [{ ...self, ppid: bootstrap.pid }, bootstrap], tick = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+    now: () => tick, sleep: async ms => { tick += ms; rows = [{ ...self, ppid: bootstrap.pid }, bootstrap, unrelated]; }, openTimeoutMs: 2, pollIntervalMs: 1 }));
+  await assert.rejects(rt.open(plan, { helperExecutable: helper, application, bootstrap, onBootstrapReady: async () => {} }), { code: 'DESKTOP_OPEN_TIMEOUT' });
 });
 
 test('focus and graceful close target exact pid, executable, and start identity', async () => {
@@ -62,6 +105,85 @@ test('focus and graceful close target exact pid, executable, and start identity'
   assert.equal(calls[0][0], helper);
   assert.deepEqual(calls[0][1], ['--focus-pid', '30', '--target-executable', DESKTOP_APP.executable, '--target-start-seconds', targetStartSeconds(ownMain.startedAt)]);
   assert.deepEqual(calls[1][1], ['--quit-pid', '30', '--target-executable', DESKTOP_APP.executable, '--target-start-seconds', targetStartSeconds(ownMain.startedAt)]);
+});
+
+test('close ignores dead zombie command labels after issuing one graceful quit', async () => {
+  const child = { ...ownMain, pid: 31, ppid: ownMain.pid, executable: '/usr/bin/ditto' };
+  let rows = [self, ownMain, child], quits = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+    execFile: async file => {
+      if (file === helper) {
+        quits++;
+        rows = [self, { ...ownMain, state: 'Z', executable: '<defunct>' }, { ...child, state: 'Z', executable: '<defunct>' }];
+      }
+      return { stdout: '' };
+    }, sleep: async () => {} }));
+  const result = await rt.close(ownMain, { helperExecutable: helper });
+  assert.deepEqual(result, { status: 'stopped', processes: [] });
+  assert.equal(quits, 1);
+});
+
+test('close drains recorded children when quit helper loses a race with main exit', async () => {
+  const child = { ...ownMain, pid: 31, ppid: ownMain.pid, executable: '/fixture/app-server' };
+  let rows = [self, ownMain, child], helperCalls = 0, sleeps = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+    execFile: async file => {
+      if (file === helper) {
+        helperCalls++;
+        rows = [self, child];
+        throw Object.assign(new Error('target exited before helper validation'), { code: 1 });
+      }
+      return { stdout: '' };
+    }, sleep: async () => { sleeps++; rows = [self]; } }));
+  assert.deepEqual(await rt.close(ownMain, { helperExecutable: helper }), { status: 'stopped', processes: [] });
+  assert.equal(helperCalls, 1);
+  assert.equal(sleeps, 1);
+});
+
+test('close preserves helper failure while the exact main remains live', async () => {
+  let calls = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, ownMain],
+    execFile: async () => { calls++; throw Object.assign(new Error('helper failed'), { code: 1 }); } }));
+  await assert.rejects(rt.close(ownMain, { helperExecutable: helper }), { code: 'DESKTOP_QUIT_FAILED' });
+  assert.equal(calls, 1);
+});
+
+test('an already exited zombie main is treated as stopped without a native quit request', async () => {
+  let calls = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, { ...ownMain, state: 'Z', executable: '<defunct>' }],
+    execFile: async () => { calls++; return { stdout: '' }; } }));
+  assert.deepEqual(await rt.close(ownMain, { helperExecutable: helper }), { status: 'stopped', processes: [] });
+  assert.equal(calls, 0);
+});
+
+test('close waits for a live child whose known main parent has exited, without signaling the zombie', async () => {
+  const child = { ...ownMain, pid: 31, ppid: ownMain.pid, executable: '/fixture/app-server' };
+  let rows = [self, { ...ownMain, state: 'Z', executable: '<defunct>' }, child], sleeps = 0, calls = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+    execFile: async () => { calls++; return { stdout: '' }; },
+    sleep: async () => { if (++sleeps === 1) rows = [self, { ...ownMain, state: 'Z', executable: '<defunct>' }]; } }));
+  assert.deepEqual(await rt.close(ownMain, { helperExecutable: helper }), { status: 'stopped', processes: [] });
+  assert.equal(calls, 0);
+});
+
+test('live tracked executable changes remain explicit identity failures with field diagnostics', async () => {
+  const child = { ...ownMain, pid: 31, ppid: ownMain.pid, executable: '/fixture/old-helper' };
+  const changed = { ...child, executable: '/fixture/new-helper' };
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, ownMain, changed] }));
+  const result = await rt.observe(ownMain, { trackedProcesses: [ownMain, child] });
+  assert.equal(result.status, 'identity-changed');
+  assert.deepEqual(result.identityChange.fields, ['executable']);
+  assert.equal(result.identityChange.previous.executable, child.executable);
+  assert.equal(result.identityChange.current.executable, changed.executable);
+});
+
+test('ps snapshot requests process state and excludes zombie command labels', async () => {
+  const rt = createDesktopInstanceRuntime(opts({ execFile: async (file, args) => {
+    assert.equal(file, '/bin/ps');
+    assert.deepEqual(args, ['-axo', 'pid=,ppid=,uid=,lstart=,state=,comm=']);
+    return { stdout: `10 1 501 Fri Oct  9 10:00:00 2026 S /usr/bin/node\n30 1 501 Fri Oct  9 10:00:02 2026 Z <defunct>\n` };
+  } }));
+  assert.deepEqual(await rt.snapshot(), [self]);
 });
 
 test('pid reuse and caller-ancestor targets are rejected before invoking helper', async () => {
@@ -133,18 +255,13 @@ test('observe keeps a formerly owned helper that escaped the live main tree', as
   assert.deepEqual(result.processes.map(row => row.pid), [30, 33]);
 });
 
-test('closing one profile ignores another profile and its separately tracked launcher', async () => {
+test('closing one profile ignores another profile main', async () => {
   const other = { ...ownMain, pid: 40, startedAt: 'Fri Oct  9 10:00:04 2026' };
-  const launcher = { pid: 50, ppid: self.pid, uid: 501, startedAt: 'Fri Oct  9 10:00:05 2026', executable: '/fixture/launcher' };
   let rows = [self, ownMain, other];
   const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
-    execFile: async (file) => {
-      if (file === '/usr/bin/open') rows = [...rows, launcher];
-      return { stdout: '' };
-    }, sleep: async () => { rows = [self, other, launcher]; } }));
+    execFile: async () => ({ stdout: '' }), sleep: async () => { rows = [self, other]; } }));
   await rt.observe(ownMain);
   await rt.observe(other);
-  assert.deepEqual(await rt.openLauncher({ launcherApp: '/fixture/Launcher.app', launcherExecutable: launcher.executable }, ownMain), launcher);
   assert.equal((await rt.close(ownMain, { helperExecutable: helper })).status, 'stopped');
-  assert.deepEqual(rows.map(row => row.pid), [10, 40, 50]);
+  assert.deepEqual(rows.map(row => row.pid), [10, 40]);
 });

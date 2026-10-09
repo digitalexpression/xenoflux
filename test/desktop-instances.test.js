@@ -5,14 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { Store, create } from '../src/profiles.js';
 import { registerHome } from '../src/homes.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { launchHome } from '../src/launcher.js';
 import { removeProfile, unbindNativeHome } from '../src/profile-removal.js';
-import { prepareProfileLauncher } from '../src/profile-launcher.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
 import { assertNoConcurrentDesktops } from '../src/desktop-instance-guard.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
@@ -45,9 +44,17 @@ async function fixture(t) {
     inspectApp: async () => app,
     snapshot: async () => structuredClone(rows),
     assertResourcesIdle: async paths => { calls.push({ operation: 'idle', paths }); },
-    open: async (plan, { helperExecutable }) => {
-      const main = row(nextPid++), helper = row(nextPid++, '/fixture/codex-app-server', main.pid);
-      rows.push(main, helper); calls.push({ operation: 'open', plan, helperExecutable });
+    open: async (plan, { application, bootstrap, onBootstrapReady }) => {
+      if (bootstrap) {
+        const main = rows.find(entry => entry.pid === bootstrap.pid);
+        if (!main) throw new Error('bootstrap disappeared');
+        await onBootstrapReady({ kind: 'xfx-profile-bootstrap', pid: bootstrap.pid });
+        main.executable = application.executable;
+        calls.push({ operation: 'open', plan, application, bootstrap });
+        return { main, processes: [main] };
+      }
+      const main = row(nextPid++, application.executable), helper = row(nextPid++, '/fixture/codex-app-server', main.pid);
+      rows.push(main, helper); calls.push({ operation: 'open', plan, application });
       return { main, processes: [main, helper] };
     },
     observe: async (main, { trackedProcesses = [] } = {}) => {
@@ -59,19 +66,30 @@ async function fixture(t) {
       }
       return { status: 'running', processes: rows.filter(entry => entry.pid === current.pid || entry.ppid === current.pid) };
     },
-    openLauncher: async (paths, main) => {
-      const launcher = row(nextPid++, paths.launcherExecutable); rows.push(launcher);
-      calls.push({ operation: 'launcher', paths, main }); return launcher;
-    },
     focus: async main => { calls.push({ operation: 'focus', main }); },
     close: async main => {
       calls.push({ operation: 'close', main });
       for (let i = rows.length - 1; i >= 0; i--) if (rows[i].pid === main.pid || rows[i].ppid === main.pid) rows.splice(i, 1);
     },
   };
-  const prepareLauncher = (store, plan) => prepareProfileLauncher(store, plan, { build: async ({ output }) => writeFile(output, '#!/bin/sh\nexit 99\n', { mode: 0o700 }) });
+  const prepareLauncher = async (store, plan) => {
+    const appPath = join(store.directory, 'desktop-instances', 'apps', plan.profileId, `Codex · ${plan.name}.app`);
+    const executable = join(appPath, 'Contents', 'MacOS', 'Codex');
+    const bootstrapExecutable = join(appPath, 'Contents', 'MacOS', 'XfxProfileLauncher');
+    const helperSha256 = createHash('sha256').update('desktop-instance-test-helper').digest('hex');
+    const helperExecutable = join(store.directory, 'desktop-instances', 'native', helperSha256, 'XfxProfileLauncher');
+    for (const directory of [join(store.directory, 'desktop-instances'), join(store.directory, 'desktop-instances', 'apps'),
+      join(store.directory, 'desktop-instances', 'apps', plan.profileId), join(appPath, 'Contents', 'MacOS'),
+      join(store.directory, 'desktop-instances', 'native', helperSha256)]) await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(executable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    await writeFile(bootstrapExecutable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    await writeFile(helperExecutable, 'desktop-instance-test-helper', { mode: 0o700 });
+    return { application: { appPath, bundleId: `com.xenoflux.profile.${plan.profileId.toLowerCase()}`, executable },
+      bootstrapExecutable, helperExecutable, helperSha256 };
+  };
   const ramLogs = { prepareHome: async args => { calls.push({ operation: 'logs', ...args }); } };
-  const options = { runtime, prepareLauncher, ramLogs, defaultUserHome, lockPath: join(root, 'desktop.lock'), launcherEnvironment: {} };
+  const options = { runtime, prepareLauncher, validateApp: async () => {}, ramLogs, defaultUserHome,
+    lockPath: join(root, 'desktop.lock'), launcherEnvironment: {} };
   return { root, store, homes, original, rows, calls, runtime, options, aliases, ramLogs };
 }
 const statePath = (f, id) => join(f.store.directory, 'desktop-instances', `${id}.json`);
@@ -132,6 +150,50 @@ test('profile deletion and unbinding preserve an interrupted instance even witho
   assert.deepEqual((await listDesktopInstances(f.store)).instances, []);
 });
 
+test('a stopped prototype closing record recovers only its own reservation before a fresh app opens', async t => {
+  const f = await fixture(t), opened = await openDesktopInstance(f.store, 'A', f.options);
+  const journalPath = statePath(f, opened.profileId), state = JSON.parse(await readFile(journalPath));
+  const legacyApp = join(f.store.directory, 'desktop-instances', 'apps', `${opened.profileId}.app`);
+  const legacyMain = { ...opened.main, executable: state.plan.app.executable };
+  const legacyLauncher = join(legacyApp, 'Contents', 'MacOS', 'XfxProfileLauncher');
+  const legacyLauncherProcess = row(30, legacyLauncher);
+  state.phase = 'running';
+  state.launcherPaths = { launcherApp: legacyApp, launcherExecutable: legacyLauncher,
+    helperExecutable: state.launcherPaths.helperExecutable, helperSha256: state.launcherPaths.helperSha256 };
+  state.launcher = legacyLauncherProcess;
+  state.main = legacyMain;
+  state.processes = state.processes.map(process => process.pid === legacyMain.pid
+    ? legacyMain : process);
+  await writeFile(journalPath, JSON.stringify(state), { mode: 0o600 });
+  const receiptPath = join(f.store.directory, 'desktop-instances', `${state.profileId}.${state.runId}.launch`);
+  await writeFile(receiptPath, JSON.stringify({ schemaVersion: 1, kind: 'desktop-instance-launch',
+    runId: state.runId, profileId: state.profileId, home: state.plan.home, desktopData: state.plan.desktopData,
+    userHome: state.plan.userHome, temporary: state.plan.temporary,
+    app: { appPath: state.plan.app.appPath, bundleId: state.plan.app.bundleId, executable: state.plan.app.executable },
+    main: legacyMain }), { mode: 0o600 });
+  const opensBefore = f.calls.filter(call => call.operation === 'open').length;
+
+  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /Close or recover the previous desktop test/);
+  assert.equal(f.calls.filter(call => call.operation === 'open').length, opensBefore);
+  await access(lockPath(f, 'A'));
+
+  state.phase = 'closing';
+  state.launcher = null;
+  await writeFile(journalPath, JSON.stringify(state), { mode: 0o600 });
+  await f.runtime.close(legacyMain);
+  const recovered = await recoverDesktopInstance(f.store, 'A', f.options);
+  assert.equal(recovered.status, 'recovered');
+  await assert.rejects(access(lockPath(f, 'A')), { code: 'ENOENT' });
+  await assert.rejects(access(receiptPath), { code: 'ENOENT' });
+  await assertNoConcurrentDesktops({ lockPath: f.options.lockPath });
+
+  const fresh = await openDesktopInstance(f.store, 'A', f.options);
+  assert.equal(fresh.status, 'opened');
+  assert.equal(fresh.application.appPath, join(f.store.directory, 'desktop-instances', 'apps', fresh.profileId,
+    `Codex · ${fresh.name}.app`));
+  assert.equal(f.calls.filter(call => call.operation === 'open').length, opensBefore + 1);
+});
+
 test('an unreadable desktop journal prevents deleting or unbinding its profile', async t => {
   const f = await fixture(t), opened = await openDesktopInstance(f.store, 'A', f.options);
   await rm(lockPath(f, 'A'), { recursive: true });
@@ -190,23 +252,42 @@ for (const operation of ['installation', 'log cleanup']) test(`${operation} excl
   assert.equal((await openDesktopInstance(f.store, 'A', f.options)).status, 'opened');
 });
 
-test('a failed launcher attachment preserves ownership and a retry completes the same desktop', async t => {
-  const f = await fixture(t), attach = f.runtime.openLauncher;
-  f.runtime.openLauncher = async () => { throw new Error('attach failed'); };
+test('a launch receipt collision preserves ownership and a retry uses a fresh receipt', async t => {
+  const f = await fixture(t), open = f.runtime.open;
+  let collisionPath, launchedMain;
+  f.runtime.open = async (...args) => {
+    const id = (await f.store.read()).profiles.find(profile => profile.name === 'A').id;
+    const state = JSON.parse(await readFile(statePath(f, id)));
+    collisionPath = join(f.store.directory, 'desktop-instances', `${state.profileId}.${state.runId}.launch`);
+    await writeFile(collisionPath, '{"fixture":"preexisting receipt"}\\n', { flag: 'wx', mode: 0o600 });
+    const opened = await open(...args);
+    launchedMain = opened.main;
+    return opened;
+  };
   await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /reservation preserved/);
   await access(lockPath(f, 'A'));
   const id = (await f.store.read()).profiles.find(profile => profile.name === 'A').id;
   const interrupted = JSON.parse(await readFile(statePath(f, id)));
-  assert.equal(interrupted.phase, 'opening'); assert.ok(interrupted.main);
-  f.runtime.openLauncher = attach;
+  assert.equal(interrupted.phase, 'opening'); assert.equal(interrupted.main, null);
+  await assert.rejects(recoverDesktopInstance(f.store, 'A', f.options), /ownership is uncertain/);
+  await access(lockPath(f, 'A'));
+  assert.equal(await readFile(collisionPath, 'utf8'), '{"fixture":"preexisting receipt"}\\n');
+  await f.runtime.close(launchedMain);
+  f.runtime.open = open;
+  await recoverDesktopInstance(f.store, 'A', f.options);
+  assert.equal(await readFile(collisionPath, 'utf8'), '{"fixture":"preexisting receipt"}\\n');
   const retry = await openDesktopInstance(f.store, 'A', f.options);
-  assert.equal(retry.main.pid, interrupted.main.pid); assert.equal(retry.status, 'focused');
-  assert.equal(f.calls.filter(call => call.operation === 'open').length, 1);
+  assert.notEqual(retry.main.pid, launchedMain.pid); assert.equal(retry.status, 'opened');
+  assert.equal(f.calls.filter(call => call.operation === 'open').length, 2);
+  assert.equal(await readFile(collisionPath, 'utf8'), '{"fixture":"preexisting receipt"}\\n');
 });
 
 test('ambiguous launch and orphan writers preserve the reservation until stopped and idle', async t => {
   const f = await fixture(t);
-  f.runtime.open = async () => { f.rows.push(row(200), row(201)); throw new Error('ambiguous'); };
+  f.runtime.open = async (plan, { application }) => {
+    f.rows.push(row(200, application.executable), row(201, '/fixture/codex-app-server', 200));
+    throw new Error('ambiguous');
+  };
   await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /reservation preserved/);
   await assert.rejects(recoverDesktopInstance(f.store, 'A', f.options), /ownership is uncertain/);
   f.rows.splice(1);
@@ -238,11 +319,11 @@ test('changed journal identity or routing cannot authorize control of another de
     await writeFile(path, JSON.stringify(state), { mode: 0o600 });
   };
   await saveChanged(state => { state.main = f.original; });
-  await assert.rejects(closeDesktopInstance(f.store, 'A', f.options), /preexisting process/);
+  await assert.rejects(closeDesktopInstance(f.store, 'A', f.options), /Invalid desktop instance record|preexisting process/);
   const unrelated = row(500); f.rows.push(unrelated);
   await saveChanged(state => { state.main = unrelated; state.processes = [unrelated]; });
-  await assert.rejects(closeDesktopInstance(f.store, 'A', f.options), /receipt is missing or changed/);
-  await assert.rejects(focusDesktopInstance(f.store, 'A', f.options), /receipt is missing or changed/);
+  await assert.rejects(closeDesktopInstance(f.store, 'A', f.options), /Invalid desktop instance record|receipt is missing or changed/);
+  await assert.rejects(focusDesktopInstance(f.store, 'A', f.options), /Invalid desktop instance record|receipt is missing or changed/);
   await saveChanged(state => { state.plan.userHome = f.options.defaultUserHome; });
   await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /Invalid desktop instance record/);
   await saveChanged(state => { state.plan.app.bundleId = 'unrelated.app'; });

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -139,21 +139,44 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
     // Exercise shipped desktop preparation and copy against disposable homes.
     const { Store } = await import(pathToFileURL(join(installedRoot, 'src', 'profiles.js')).href);
     const { desktopInstancePlan } = await import(pathToFileURL(join(installedRoot, 'src', 'desktop-instances.js')).href);
-    const { prepareProfileLauncher } = await import(pathToFileURL(join(installedRoot, 'src', 'profile-launcher.js')).href);
+    const { prepareProfileApp } = await import(pathToFileURL(join(installedRoot, 'src', 'profile-launcher.js')).href);
     const instanceList = JSON.parse((await run(installed, ['--json', '--store', store, 'desktop', 'list'])).stdout);
     if (instanceList.instances.length || instanceList.observation !== 'last-recorded')
       throw new Error('Installed xfx did not read its empty desktop instance inventory');
-    const desktopPlan = await desktopInstancePlan(new Store(store), 'smoke', { runtime: {
-      inspectApp: async () => ({ appPath: '/fixture/Codex.app', bundleId: 'com.openai.codex', executable: '/fixture/Codex.app/Contents/MacOS/Codex' }),
-    }, lockPath: join(temporary, 'desktop-preview.lock'), defaultUserHome: readonlyHome });
+    const vendorApp = join(temporary, 'Codex.app'), vendorContents = join(vendorApp, 'Contents');
+    const vendorExecutable = join(vendorContents, 'MacOS', 'Codex');
+    const vendorAsar = join(vendorContents, 'Resources', 'app.asar');
+    await mkdir(join(vendorContents, 'MacOS'), { recursive: true, mode: 0o700 });
+    await mkdir(join(vendorContents, 'Resources'), { recursive: true, mode: 0o700 });
+    await writeFile(vendorExecutable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    await writeFile(vendorAsar, 'detached vendor archive fixture', { mode: 0o600 });
+    await writeFile(join(vendorContents, 'Info.plist'), JSON.stringify({ CFBundleName: 'Codex',
+      CFBundleDisplayName: 'Codex', CFBundleIdentifier: 'com.openai.codex', CFBundleExecutable: 'Codex',
+      CFBundlePackageType: 'APPL' }), { mode: 0o600 });
+    const vendor = { appPath: await realpath(vendorApp), bundleId: 'com.openai.codex', executable: vendorExecutable,
+      asarSha256: createHash('sha256').update(await readFile(vendorAsar)).digest('hex') };
+    const desktopPlan = await desktopInstancePlan(new Store(store), 'smoke', { runtime: { inspectApp: async () => vendor } });
     if (desktopPlan.userHome !== join(native.root, 'user-home') || desktopPlan.home !== native.home)
       throw new Error('Installed desktop plan did not retain its profile routing');
-    const profileLauncher = await prepareProfileLauncher(new Store(store), desktopPlan, { build: async ({ output }) => {
-      // Package verification must never execute a native client or its helper.
-      await writeFile(output, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
-    } });
-    if (!(await readFile(join(profileLauncher.launcherApp, 'Contents', 'Info.plist'), 'utf8')).includes('Codex · smoke'))
-      throw new Error('Installed xfx did not prepare its named launcher bundle');
+    const profileApp = await prepareProfileApp(new Store(store), desktopPlan, { nodeExecutable: process.execPath,
+      entryPoint: join(installedRoot, 'bin', 'xfx.js'), verifyOriginal: async sourcePath => ({ ...vendor, appPath: sourcePath }),
+      copyApp: (sourcePath, destination) => cp(sourcePath, destination, { recursive: true, verbatimSymlinks: true }),
+      updatePlist: async (path, { set, remove }) => {
+        const plist = JSON.parse(await readFile(path, 'utf8'));
+        for (const key of remove) delete plist[key];
+        Object.assign(plist, set);
+        await writeFile(path, JSON.stringify(plist), { mode: 0o600 });
+      }, signApp: async () => {}, execFile: async (command, args) => {
+        if (command === '/usr/bin/plutil') return { stdout: await readFile(args.at(-1), 'utf8') };
+        if (command === '/usr/bin/codesign') return { stdout: '' };
+        throw new Error(`unexpected profile-app command: ${command}`);
+      }, build: async ({ output }) => {
+        // Package verification must never execute a native client or its helper.
+        await writeFile(output, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+      } });
+    if (profileApp.application.bundleId !== `com.xenoflux.profile.${desktopPlan.profileId.toLowerCase()}`
+      || !(await readFile(join(profileApp.application.appPath, 'Contents', 'Info.plist'), 'utf8')).includes('Codex · smoke'))
+      throw new Error('Installed xfx did not prepare its profile-specific application bundle');
     const { inspectProfile } = await import(pathToFileURL(join(installedRoot, 'src', 'profile-inventory.js')).href);
     const { planCopy, applyCopy, planUndo, undoCopy } = await import(pathToFileURL(join(installedRoot, 'src', 'native-copy.js')).href);
     const sourceSkill = join(readonlyHome, '.codex', 'skills', 'smoke-skill');

@@ -39,7 +39,8 @@ async function fixture(t) {
   await put(b.home, 'AGENTS.override.md', 'An old overriding instruction.\n');
   await put(b.home, 'auth.json', 'credential sentinel');
   await put(b.home, 'history.jsonl', 'history sentinel');
-  const options = { include: ['instructions'], defaultUserHome, lockPath: join(root, 'desktop.lock'), runtime: { assertIdle: async () => {} } };
+  const options = { include: ['instructions'], defaultUserHome, lockPath: join(root, 'desktop.lock'),
+    concurrentLockPath: join(root, 'desktop-concurrent.lock'), runtime: { assertIdle: async () => {} } };
   return { root, store, a, b, defaultProfile, options };
 }
 
@@ -93,6 +94,7 @@ test('copy and a fresh undo runtime both accept verified orphan reporters withou
   const calls = [];
   const runtime = () => createDesktopRuntime({
     expected: DESKTOP_APP,
+    concurrentLockPath: f.options.concurrentLockPath,
     readFile: async () => Buffer.from('copy crashpad fixture'),
     realpath: async () => fixtureCrashReporter,
     processSnapshot: async () => [34503, 34505].map(pid => ({ pid, ppid: 1, uid: process.getuid(),

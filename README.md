@@ -97,9 +97,11 @@ or desktop; the same profile cannot run in both at once. Named desktop commands 
 change the Default profile paths or close other clients.
 Closing a profile refuses to target a Codex process that hosts the invoking command.
 
-An owned launcher named `Codex · PROFILE` forwards activation to that profile's
-Codex process. The first open compiles its small AppKit helper with the installed
-Xcode Command Line Tools, then reuses it. The vendor app is left intact. Native
+An owned app named `Codex · PROFILE` contains a private copy of the verified
+installed Codex app, retaining its icon and resources. A small bootstrap becomes
+Codex in the same process, so a profile needs one Dock and Cmd+Tab entry. The first
+open requires Xcode Command Line Tools and prepares a locally signed copy. The
+installed app remains intact. Native
 Cmd+Tab, Dock reopening, and profile routing remain acceptance checks pending on
 the target Mac; fixture checks and helper compilation do not establish them.
 

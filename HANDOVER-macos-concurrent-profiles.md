@@ -1,49 +1,61 @@
 # Concurrent profile desktop development
 
-Updated: 2026-10-09. Branch: `codex/concurrent-profiles`, based on `60d6f612`.
+Updated: 2026-10-09. Branch: `codex/concurrent-profiles`.
 
-The user authorized development and requested the clean concurrent model without
-legacy switching, restoration, backward compatibility or migration support. Native
-testing is deferred because another long-running Codex session must remain open.
-No native launch, focus, shutdown, installation, live profile deletion or publication
-was performed during development.
+The user authorized development of concurrent profiles, preserving the running
+ordinary Codex session. Default keeps standard paths, including `~/.codex`; named
+profiles use fixed homes under `~/.xfx/profiles`. The legacy alias switch/restore
+engine and migration support remain removed. Current named-instance recovery is
+retained to release only a stopped instance's exact reservation.
 
-Default keeps Codex's standard paths, including `~/.codex`. Named profiles use fixed
-homes under `~/.xfx/profiles` by default. Separate AppKit launchers (`Codex · NAME`)
-forward activation to a process-specific desktop instance. The signed vendor app is
-not copied or modified. Each profile is exclusive across its managed CLI and desktop;
-different profiles can run concurrently.
+## Current result
 
-The legacy alias engine, paired-path transactions, activation plans, desktop picker,
-`desktop current`, `restore`, no-name `recover`, retired flags, release recovery
-helpers and alias-recorded history repair were removed. Copy journals now require
-the current v3 format. Named-instance and interrupted CLI/sign-in recovery remain.
-Historical metadata is not consulted. Existing profile data need not be deleted to
-simplify the code and was left untouched. Read-only inspection found ordinary
-Default home/UI directories and a restored historical selection record.
+The first user-operated native test opened RC3 Check and Advanced Check alongside
+the ordinary app. Cmd+Tab selected their windows, but each profile added a persistent
+blank-icon launcher beside a generically named ChatGPT process. Both close commands
+reported `PROCESS_IDENTITY_CHANGED`. Supplied recording and process journals were
+inspected read-only. No user app was opened, focused, closed, replaced or signed by
+this development turn; live profile homes and installed xfx remain untouched.
 
-Current operations share a short `.operation` guard. Per-home reservations and exact
-instance-owner markers prevent maintenance from quitting named desktops. Removal
-and unbinding preserve nonclosed or unreadable desktop journals even if a run lock
-is missing; a closed journal can release only its matching leftover control marker.
+The revised implementation copies the verified installed vendor app into one private
+`Codex · NAME.app` per profile, retaining its icon/resources and assigning a distinct
+bundle ID. The Swift bootstrap execs its copied vendor binary in the same PID with
+fixed profile paths. Finder launches first obtain an exact-PID reservation handshake
+from the controller. There is no persistent companion app. CLI opens refresh stopped
+copies after verified app/helper changes; Finder refuses a copy that needs refresh.
+Copied apps are locally signed and validated against private ownership/content
+records. Closing does not depend on the current installed source still being present.
 
-Implementation commit: `c5a5636`. Verification passed: `npm run check`, `npm test`
-(344 tests), `git diff --check`, and scoped static reviews after the removal guard fix.
-Fixtures cover two desktop and two CLI profiles alongside an original desktop,
-exact-process control, interrupted launches, stale reservations, and maintenance
-exclusion. The unchanged production Swift helper was compiled previously in a
-disposable controller without execution. These checks do not prove native behavior.
+Runtime observation excludes exited zombie rows and close rechecks a target after a
+quit-helper error, draining recorded live children when the main has already exited.
+Live executable changes and PID reuse still preserve ownership and fail control.
+Only the interrupted prototype record shape remains readable for close/recovery;
+opening a still-live prototype instance refuses to create a second app.
 
-Current candidate:
-`release-artifacts/concurrent-profiles-clean-2026-10-09/xenoflux-0.3.0-rc.7.tgz`.
-Its manifest records `c5a5636` and package/dependency hashes. Detached offline package
-smoke passed, including installed-command, current copy/undo, named-desktop routing
-and launcher-generation fixtures, and disposable installation lifecycle. The fake
-compiler/helper did not launch a native client. Earlier concurrent-profile candidates
-are superseded by this build. Installed xfx remains unchanged.
+## Verification and blocker
 
-Next action: when the user is ready, invoke the extracted candidate with disposable
-profiles and follow `docs/CONCURRENT-DESKTOPS.md`. Verify native Cmd+Tab, effective
-profile routing, sign-in, Finder/Dock reopen, and graceful quit/cancellation while
-preserving the ordinary desktop. Record exact versions and observed outcomes before
-claiming native concurrency support.
+`npm run check`, `npm test` (358 tests) and `git diff --check` pass. A macOS fixture compiled the real
+Swift source, copied/signed/deep-verified a disposable fake vendor app, validated and
+reused it, and directly executed the bootstrap. The fake vendor proved fixed path
+routing and same PID after exec. No LaunchServices GUI operation was invoked. Static
+review findings for unique bundle ID acceptance, quit-helper exit races and stale
+copy reuse were fixed and rechecked. Tests now use isolated maintenance guard paths
+instead of consulting the user's live reserved instances.
+
+The installed `/Applications/ChatGPT.app` fails strict signature verification both
+as a bundle and as its main executable, and codesign reports an invalid entitlements
+blob. Its Info.plist, executable and app.asar hashes stayed unchanged during checks.
+It was not copied or repaired. This blocks a real-source build/launch check; the
+fixture does not prove Cmd+Tab names, icon count, sign-in or native LaunchServices.
+
+## Next action
+
+Use the local candidate under
+`release-artifacts/concurrent-profiles-native-fix-2026-10-09/` after packaging.
+Its manifest records the source revision and hashes. Once a verified installed app
+is available and the user is ready for native testing, recover the stopped RC3 Check
+and Advanced Check prototype records, then open them with the revised development
+CLI. Follow `docs/CONCURRENT-DESKTOPS.md`: exactly one named/icon-bearing Dock and
+Cmd+Tab entry per profile, correct profile paths and focus, Finder/Dock reopen,
+graceful close/recovery, and preservation of the ordinary running app. Native
+acceptance remains pending; do not claim it from process lists or fixture tests.

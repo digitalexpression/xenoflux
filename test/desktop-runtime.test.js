@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createDesktopRuntime, DESKTOP_APP, DesktopRuntimeError, inspectDesktopApp, sameDesktopApp } from '../src/desktop-runtime.js';
+import { randomUUID } from 'node:crypto';
+import { createDesktopRuntime as createRuntime, DESKTOP_APP, DesktopRuntimeError, inspectDesktopApp, sameDesktopApp } from '../src/desktop-runtime.js';
+
+const createDesktopRuntime = options => createRuntime({
+  concurrentLockPath: join(tmpdir(), `xfx-desktop-runtime-test-${randomUUID()}.lock`),
+  ...options,
+});
 
 const fixtureApp = { ...DESKTOP_APP, version: '26.908.70816', build: '9275',
   crashReporter: `${DESKTOP_APP.appPath}/Contents/Frameworks/Codex Framework.framework/Versions/152.0.7977.83/Helpers/browser_crashpad_handler` };
