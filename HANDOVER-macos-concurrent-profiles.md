@@ -41,11 +41,12 @@ Native app inspected during planning: `/Applications/ChatGPT.app`, bundle ID
 `com.openai.codex`, version `26.1002.52244`, build `13536`. This is inspection evidence
 only. Installed `xfx` and the user's current clients/profiles remain untouched.
 
-Initial implementation commit: `0e5aca2`. Its older candidate under
-`release-artifacts/concurrent-profiles-2026-10-09` predates retirement. Rebuild the
-current candidate under `release-artifacts/concurrent-profiles-default-paths-2026-10-09`; use the new manifest's revision
-and package/dependency hashes. The initial detached package smoke passed offline
-installed-package fixtures and installation lifecycle. The package smoke
+Current implementation commit: `63c719b` (retirement over `0e5aca2`). The current
+candidate is `release-artifacts/concurrent-profiles-default-paths-2026-10-09/xenoflux-0.3.0-rc.7.tgz`;
+its manifest records that revision and the package/dependency hashes. Detached
+offline package smoke passed, including installed-package fixtures and installation
+lifecycle. The older candidate under `release-artifacts/concurrent-profiles-2026-10-09`
+predates retirement and is superseded. The package smoke
 also checks desktop inventory, profile routing plans and generated launcher bundles
 using a fake compiler; neither that fake helper nor any native client is executed.
 No global install, app replacement, native launch, profile change or publication occurred.
