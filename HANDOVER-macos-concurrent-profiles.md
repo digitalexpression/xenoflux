@@ -2,56 +2,48 @@
 
 Updated: 2026-10-09. Branch: `codex/concurrent-profiles`, based on `60d6f612`.
 
-User authorized development and deferred native testing because another long-running
-Codex session must remain open. Do not close, focus, launch or reinstall native
-clients, change live profiles/aliases/log storage, or publish as part of this work.
+The user authorized development and requested the clean concurrent model without
+legacy switching, restoration, backward compatibility or migration support. Native
+testing is deferred because another long-running Codex session must remain open.
+No native launch, focus, shutdown, installation, live profile deletion or publication
+was performed during development.
 
-Implemented fixed-path desktop instances with per-profile reservations and a
-process-specific runtime, named AppKit launchers, CLI commands and disposable
-verification. Existing CLI launches are reused. The user subsequently requested
-retiring legacy desktop switching so Default keeps its ordinary paths. Public
-`switch`, desktop `pick`, `activate`, `activation-plan` and `add-target` now reject
-requests before store lookup or client work. Guided setup creates no activation
-plan; it offers `desktop open NAME` after sign-in. The obsolete desktop picker and
-generated switch helper were removed. Historical readers/transactions and
-`current`, `restore`, no-name `recover` remain for existing state.
+Default keeps Codex's standard paths, including `~/.codex`. Named profiles use fixed
+homes under `~/.xfx/profiles` by default. Separate AppKit launchers (`Codex · NAME`)
+forward activation to a process-specific desktop instance. The signed vendor app is
+not copied or modified. Each profile is exclusive across its managed CLI and desktop;
+different profiles can run concurrently.
 
-Named planning/opening requires active or interrupted legacy selections restored
-first, including a selection reserved by another controller store. This is a code
-gate, not an automatic migration. Existing live aliases have not been restored.
+The legacy alias engine, paired-path transactions, activation plans, desktop picker,
+`desktop current`, `restore`, no-name `recover`, retired flags, release recovery
+helpers and alias-recorded history repair were removed. Copy journals now require
+the current v3 format. Named-instance and interrupted CLI/sign-in recovery remain.
+Historical metadata is not consulted. Existing profile data need not be deleted to
+simplify the code and was left untouched. Read-only inspection found ordinary
+Default home/UI directories and a restored historical selection record.
 
-Verification: `npm run check`, `npm test` (513 passing tests), and `git diff --check`
-passed after retirement. Compatibility recovery tests are retained; the removed
-picker's tests were replaced by public command retirement, guided setup and legacy
-selection gate checks. The production launcher builder compiled the unchanged Swift helper successfully in
-a disposable controller without executing it. Fixtures cover two desktops plus two
-CLI profiles alongside an original desktop, exact-process focus/close, failed launch
-recovery, journal/receipt changes, and exclusion of legacy quit/installation races.
-Independent source review findings were resolved; its last narrow review reported
-no remaining material issue, including the retirement entry points and retained
-recovery flow. These checks do not prove native Desktop behavior.
+Current operations share a short `.operation` guard. Per-home reservations and exact
+instance-owner markers prevent maintenance from quitting named desktops. Removal
+and unbinding preserve nonclosed or unreadable desktop journals even if a run lock
+is missing; a closed journal can release only its matching leftover control marker.
 
-The implementation launches the untouched signed vendor app through a macOS request
-that returns its exact process, binding `CODEX_HOME`, SQLite, UI data, `HOME` and tmp
-to a profile. A separate named regular AppKit launcher forwards activation to it.
-Each profile remains exclusive across managed CLI and Desktop clients. Global
-control-owner markers prevent legacy bundle-wide quits across controller stores.
+Implementation commit: `c5a5636`. Verification passed: `npm run check`, `npm test`
+(344 tests), `git diff --check`, and scoped static reviews after the removal guard fix.
+Fixtures cover two desktop and two CLI profiles alongside an original desktop,
+exact-process control, interrupted launches, stale reservations, and maintenance
+exclusion. The unchanged production Swift helper was compiled previously in a
+disposable controller without execution. These checks do not prove native behavior.
 
-Native app inspected during planning: `/Applications/ChatGPT.app`, bundle ID
-`com.openai.codex`, version `26.1002.52244`, build `13536`. This is inspection evidence
-only. Installed `xfx` and the user's current clients/profiles remain untouched.
+Current candidate:
+`release-artifacts/concurrent-profiles-clean-2026-10-09/xenoflux-0.3.0-rc.7.tgz`.
+Its manifest records `c5a5636` and package/dependency hashes. Detached offline package
+smoke passed, including installed-command, current copy/undo, named-desktop routing
+and launcher-generation fixtures, and disposable installation lifecycle. The fake
+compiler/helper did not launch a native client. Earlier concurrent-profile candidates
+are superseded by this build. Installed xfx remains unchanged.
 
-Current implementation commit: `63c719b` (retirement over `0e5aca2`). The current
-candidate is `release-artifacts/concurrent-profiles-default-paths-2026-10-09/xenoflux-0.3.0-rc.7.tgz`;
-its manifest records that revision and the package/dependency hashes. Detached
-offline package smoke passed, including installed-package fixtures and installation
-lifecycle. The older candidate under `release-artifacts/concurrent-profiles-2026-10-09`
-predates retirement and is superseded. The package smoke
-also checks desktop inventory, profile routing plans and generated launcher bundles
-using a fake compiler; neither that fake helper nor any native client is executed.
-No global install, app replacement, native launch, profile change or publication occurred.
-
-Native Cmd+Tab, effective profile routing, sign-in, Finder/Dock reopen and graceful
-quit/cancellation remain deferred until the user is ready. Use the acceptance cases
-in `docs/CONCURRENT-DESKTOPS.md` with disposable profiles; do not change the live
-session to claim readiness.
+Next action: when the user is ready, invoke the extracted candidate with disposable
+profiles and follow `docs/CONCURRENT-DESKTOPS.md`. Verify native Cmd+Tab, effective
+profile routing, sign-in, Finder/Dock reopen, and graceful quit/cancellation while
+preserving the ordinary desktop. Record exact versions and observed outcomes before
+claiming native concurrency support.
