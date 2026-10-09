@@ -110,3 +110,10 @@ test('profile recovery validates arguments and requires an external terminal for
   assert.match(f.run('profile', 'recover', 'work', '--close-clients').stderr, /not supported/);
   await assert.rejects(stat(f.store), { code: 'ENOENT' });
 });
+
+test('RAM-log recovery requires an external terminal without creating controller state',async t=>{
+  const f=await fixture(t), result=f.run('ramlogs','recover','--close-clients');
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/external interactive terminal/);
+  await assert.rejects(stat(f.store),{code:'ENOENT'});
+});

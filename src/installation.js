@@ -113,6 +113,9 @@ export function createInstallation({ home, source = new URL('..', import.meta.ur
     privateOwned(await lstat(target.root), true, `Xenoflux root ${target.root}`);
     const stage = `${target.app}.stage-${randomUUID()}`;
     const previous = `${target.app}.previous-${randomUUID()}`;
+    let installedVersion = 'the requested version';
+    let appInstalled = false;
+    let launcherInstalled = false;
     try {
       await mkdir(stage, { mode: 0o700 });
       for (const name of ['bin', 'src', 'LICENSE', 'package.json']) {
@@ -122,6 +125,7 @@ export function createInstallation({ home, source = new URL('..', import.meta.ur
       const dependencyRoot = dirname(dirname(createRequire(join(sourceRoot, 'package.json')).resolve('smol-toml')));
       const dependency = JSON.parse(await readFile(join(dependencyRoot, 'package.json'), 'utf8'));
       const manifest = JSON.parse(await readFile(join(sourceRoot, 'package.json'), 'utf8'));
+      installedVersion = manifest.version;
       if (dependency.name !== 'smol-toml' || dependency.version !== manifest.dependencies['smol-toml'])
         throw new Error('The installed TOML dependency does not match the package manifest');
       await cp(dependencyRoot, join(stage, 'node_modules', 'smol-toml'),
@@ -132,12 +136,20 @@ export function createInstallation({ home, source = new URL('..', import.meta.ur
       if (hadApp) await rename(target.app, previous);
       try { await rename(stage, target.app); }
       catch (error) { if (hadApp) await rename(previous, target.app); throw error; }
+      appInstalled = true;
       if (hadApp) await rm(previous, { recursive: true, force: true });
       await atomicFile(target.bin, `#!/bin/sh\n${ENTRY_MARKER}\nexec node ${shellQuote(join(target.app, 'bin', 'xfx.js'))} "$@"\n`, 0o700);
-      const ram = await enable({ env, backgroundPath });
+      launcherInstalled = true;
+      const ram = await enable({ env, backgroundPath, allowUnsupported: true });
       return { app: target.app, bin: target.bin, node, ramStartup: ram.ramStartup, enabled: ram.enabled };
     } catch (error) {
       await rm(stage, { recursive: true, force: true }).catch(() => {});
+      if (appInstalled && !launcherInstalled) {
+        throw new Error(`Xenoflux ${installedVersion} app is installed at ${target.app}, but installation did not complete before launcher setup finished. ${error.message}`, { cause: error });
+      }
+      if (appInstalled && launcherInstalled) {
+        throw new Error(`Xenoflux ${installedVersion} is installed, but RAM-log setup failed. ${error.message}`, { cause: error });
+      }
       throw error;
     }
   }
@@ -163,7 +175,7 @@ export function createInstallation({ home, source = new URL('..', import.meta.ur
     return { environment: { HOME: environment.HOME, PATH: path } };
   }
 
-  async function enable({ env = defaultEnv, backgroundPath } = {}) {
+  async function enable({ env = defaultEnv, backgroundPath, allowUnsupported = false } = {}) {
     const target = paths(env);
     if (!await ownedApp(target.app)) throw new Error('Install xfx before enabling RAM logs');
     // Fresh settings use the caller's PATH. Preserve a working saved PATH,
@@ -182,6 +194,10 @@ export function createInstallation({ home, source = new URL('..', import.meta.ur
     }
     if (!ramStartup.enabled) {
       await disable({ env });
+      if (!allowUnsupported) {
+        throw new Error(`RAM-log enable failed; logs remain in disk mode. ${ramStartup.reason}. Run xfx ramlogs status to confirm the installation state before retrying.`,
+          { cause: new Error(ramStartup.reason) });
+      }
       return { enabled: false, ramStartup };
     }
     const ownedPlist = await assertOwnedService(target, serviceEnv);

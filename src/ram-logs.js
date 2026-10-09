@@ -1,6 +1,6 @@
 // Disposable diagnostics only. Native configuration, credentials, state and
 // conversation history never move. The registry contains directory keys only.
-import { access, chmod, copyFile, lstat, mkdir, open, readdir, readlink, realpath, rename, symlink, unlink } from 'node:fs/promises';
+import { access, chmod, copyFile, lstat, mkdir, open, readdir, readFile, readlink, realpath, rename, symlink, unlink, writeFile } from 'node:fs/promises';
 import { constants, createReadStream } from 'node:fs';
 import { execFile as nodeExecFile } from 'node:child_process';
 import { hostname, userInfo } from 'node:os';
@@ -326,5 +326,127 @@ export function createRamLogs({ disk = createRamDisk(), mountPath = RAM_DISK_PAT
       throw failed(`RAM log restoration failed: ${e.message}`);
     }
   }
-  return { ensureMounted, prepareHome, restoreHome, inspect };
+  async function archiveHome({ home, key, recoveryRoot, signal }) {
+    let owner, lock, archivePath;
+    try {
+      cancelled(signal); await validateHome(home);
+      if (typeof recoveryRoot !== 'string' || resolve(recoveryRoot) !== recoveryRoot)
+        throw failed('Invalid diagnostic recovery directory');
+      const source = join(home, database), target = targetFor(key);
+      await privateDir(recoveryRoot, true);
+      await privateDir(registry, true, true); await privateDir(join(registry, key), true);
+      lock = join(registry, `.prepare-${key}`);
+      owner = { kind: 'ram-log-preparation', key, host: hostname(), pid: process.pid, runId: randomUUID() };
+      if (await exists(lock)) throw failed('Another RAM log preparation is running or needs inspection');
+      await acquire(lock, owner, true);
+      try {
+        return await withMounted(signal, async checkMount => {
+          const ramDir = join(mountPath, `xenoflux-${uid}`, key);
+          const entries = await readdir(ramDir);
+          const allowed = new Set(suffixes.map(s => database + s));
+          if (entries.some(name => !allowed.has(name))) throw failed('Unexpected entries in RAM diagnostic directory; preserving all files');
+          const originals = [];
+          for (const suffix of suffixes) {
+            const path = target + suffix, stat = await checkedFile(path);
+            if (stat) originals.push({ path, suffix, stat, hash: await digest(path) });
+          }
+          const diskFiles = [];
+          for (const suffix of suffixes) {
+            const diskPath = source + suffix;
+            if (suffix === '') {
+              const mainEntry = await lstat(diskPath).catch(e => { if (e.code === 'ENOENT') return null; throw e; });
+              if (mainEntry?.isSymbolicLink() || (mainEntry && !mainEntry.isFile()))
+                throw failed('Archive recovery requires an ordinary disk-backed diagnostic log file');
+            }
+            const stat = await checkedFile(diskPath);
+            diskFiles.push({ path: diskPath, stat, hash: stat ? await digest(diskPath) : null });
+          }
+          const diskMain = diskFiles[0];
+          if (!diskMain.stat && !originals.length && !diskFiles.some(item => item.stat))
+            return { archived: false, files: [], persistent: true };
+          if (!diskMain.stat || diskMain.stat.isSymbolicLink())
+            throw failed('Archive recovery requires an ordinary disk-backed diagnostic log file');
+          await noHandles([...suffixes.map(s => source + s), ...suffixes.map(s => target + s)], signal);
+          await checkMount(); cancelled(signal);
+          archivePath = join(recoveryRoot, `xenoflux-ramlogs-${key}-${randomUUID()}`);
+          await mkdir(archivePath, { mode: 0o700 }); await privateDir(archivePath);
+          const copied = [];
+          const diskArchive = join(archivePath, 'disk');
+          await mkdir(diskArchive, { mode: 0o700 }); await privateDir(diskArchive);
+          const diskCopies = [];
+          for (const item of diskFiles) {
+            if (!item.stat) continue;
+            cancelled(signal); await checkMount();
+            const name = database + (item.path === source ? '' : item.path.slice(source.length));
+            const dest = join(diskArchive, name);
+            await copyFile(item.path, dest, constants.COPYFILE_EXCL);
+            await chmod(dest, item.stat.mode & 0o777);
+            const saved = await lstat(dest);
+            if (!saved.isFile() || saved.isSymbolicLink() || saved.uid !== uid
+              || (saved.mode & 0o777) !== (item.stat.mode & 0o777) || await digest(dest) !== item.hash)
+              throw failed('Disk diagnostic archive verification failed; preserving originals');
+            diskCopies.push({ path: dest, mode: item.stat.mode & 0o777, sha256: item.hash });
+          }
+          for (const item of originals) {
+            cancelled(signal); await checkMount();
+            const dest = join(archivePath, database + item.suffix);
+            await copyFile(item.path, dest, constants.COPYFILE_EXCL);
+            await chmod(dest, item.stat.mode & 0o777);
+            const saved = await lstat(dest);
+            if (!saved.isFile() || saved.isSymbolicLink() || saved.uid !== uid
+              || (saved.mode & 0o777) !== (item.stat.mode & 0o777) || await digest(dest) !== item.hash)
+              throw failed('RAM diagnostic archive verification failed; preserving originals');
+            copied.push({ path: dest, mode: item.stat.mode & 0o777, sha256: item.hash });
+          }
+          const manifest = {
+            version: 1, key, home, createdAt: new Date().toISOString(),
+            files: originals.map((item, i) => ({ kind: 'ram',
+              source: item.path, archive: copied[i].path, mode: copied[i].mode,
+              sha256: item.hash, device: item.stat.dev, inode: item.stat.ino,
+            })),
+            diskFiles: diskFiles.filter(item => item.stat).map((item, i) => ({ kind: 'disk',
+              source: item.path, archive: diskCopies[i].path, mode: diskCopies[i].mode,
+              sha256: item.hash, device: item.stat.dev, inode: item.stat.ino,
+            })),
+          };
+          await writeFile(join(archivePath, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`,
+            { flag: 'wx', mode: 0o600 });
+          const expectedNames = new Set(originals.map(item => database + item.suffix));
+          await noHandles([...suffixes.map(s => source + s), ...suffixes.map(s => target + s)], signal);
+          const finalNames = await readdir(ramDir);
+          if (finalNames.length !== expectedNames.size || finalNames.some(name => !expectedNames.has(name)))
+            throw failed('RAM diagnostic directory changed during archiving; preserving originals and archive');
+          for (const item of diskFiles) {
+            const current = await checkedFile(item.path);
+            if (Boolean(current) !== Boolean(item.stat) || (current && (!sameNode(item.stat, current)
+              || await digest(item.path) !== item.hash)))
+              throw failed('Disk diagnostic files changed during archiving; preserving originals and archive');
+          }
+          for (const item of originals) {
+            cancelled(signal); await checkMount();
+            const current = await lstat(item.path);
+            if (!sameNode(item.stat, current) || await digest(item.path) !== item.hash)
+              throw failed('RAM diagnostic contents changed during archiving; preserving originals and archive');
+          }
+          for (const item of originals) {
+            cancelled(signal); await checkMount();
+            const current = await lstat(item.path);
+            if (!sameNode(item.stat, current) || await digest(item.path) !== item.hash)
+              throw failed('RAM diagnostic contents changed during archiving; preserving remaining originals and archive');
+            await unlink(item.path);
+          }
+          return { archived: true, archive: archivePath, files: copied, diskFiles: diskCopies, persistent: true };
+        });
+      } finally { await release(lock, owner); }
+    } catch (e) {
+      if (signal?.aborted || e.code === 'CANCELLED' || e.name === 'AbortError')
+        throw Object.assign(new Error(`RAM log archiving cancelled; recovery files were preserved${archivePath ? ` at ${archivePath}` : ''}`), { code: 'CANCELLED' });
+      if (e.code === 'RAM_LOGS_UNAVAILABLE') {
+        if (!archivePath) throw e;
+        throw failed(`${e.message}; recovery archive retained at ${archivePath}`);
+      }
+      throw failed(`RAM log archiving failed${archivePath ? `; recovery archive retained at ${archivePath}` : ''}: ${e.message}`);
+    }
+  }
+  return { ensureMounted, prepareHome, restoreHome, archiveHome, inspect };
 }

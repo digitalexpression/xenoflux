@@ -64,6 +64,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   install [--background-path PATH] | uninstall
   ramlogs enable [--background-path PATH] | ramlogs disable
   ramlogs ensure | ramlogs status | ramlogs inspect NAME
+  ramlogs recover [--background-path PATH]  (archive old RAM logs, then enable)
   ramlogs restore-home HOME --key KEY
 
 Store: --store, XFX_HOME, or ~/.xfx/controller.
@@ -100,11 +101,11 @@ try {
     const grouped = ['profile', 'desktop', 'ramlogs'].includes(command);
     if (!grouped && !Object.hasOwn(arity, command)) throw new Error(`Unknown command: ${command}`);
     if (!grouped && params.length !== arity[command]) throw new Error(`Invalid arguments for ${command}; run xfx --help`);
-    const installing = ['install', 'uninstall'].includes(command) || (command === 'ramlogs' && ['enable', 'disable', 'restore-home'].includes(params[0]));
+    const installing = ['install', 'uninstall'].includes(command) || (command === 'ramlogs' && ['enable', 'disable', 'restore-home', 'recover'].includes(params[0]));
     const settingUp = command === 'profile' && ['create', 'signin'].includes(params[0]);
     const recoveringProfile = command === 'profile' && params[0] === 'recover';
     const allowedOptions = {
-      '--background-path': command === 'install' || (command === 'ramlogs' && params[0] === 'enable'),
+      '--background-path': command === 'install' || (command === 'ramlogs' && ['enable', 'recover'].includes(params[0])),
       '--key': command === 'ramlogs' && params[0] === 'restore-home',
       '--description': settingUp && params[0] === 'create',
       '--repo': ['launch', 'pick'].includes(command),
