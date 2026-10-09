@@ -59,9 +59,10 @@ they exited naturally and their temporary files were removed.
 
 ## Next action
 
-The new local candidate will be under
+The fix is committed as `ca5471a`. The new local candidate is under
 `release-artifacts/concurrent-profiles-signing-fix-2026-10-09/`; its manifest records
-the committed source revision and hashes. It supersedes the discovery-fix package.
+that source revision and hashes. Detached offline installed-package fixture and
+installation lifecycle smoke passed. It supersedes the discovery-fix package.
 
 Using the existing development CLI helper, recover the stopped RC3 Check and
 Advanced Check reservations, then open both again. Follow
