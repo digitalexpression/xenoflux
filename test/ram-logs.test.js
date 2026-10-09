@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createRamLogs, ramLogTarget } from '../src/ram-logs.js';
 
 async function fixture(t, key = randomUUID()) {
@@ -221,3 +221,142 @@ test('disk logs reopen after RAM and the old registry are gone, before replaceme
   assert.ok((await lstat(source)).isFile());
   await assert.rejects(lstat(join(f.root,'new-registry')), {code:'ENOENT'});
 });
+
+test('preparation after RAM loss skips the dangling main link but checks existing sidecars', async t => {
+  const f = await fixture(t), source = join(f.home, 'logs_2.sqlite');
+  await f.manager.prepareHome(f); await f.unmount();
+  await writeFile(source + '-wal', 'local diagnostic sidecar');
+  let checked = [];
+  const busy = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk,
+    execFile: async (_file, args) => { checked = args.slice(args.indexOf('--') + 1); return { stdout: 'p42\n', stderr: '' }; } });
+  await assert.rejects(busy.prepareHome(f), /Quit applications/);
+  assert.deepEqual(checked, [source + '-wal']);
+  assert.equal(await readFile(source + '-wal', 'utf8'), 'local diagnostic sidecar');
+  assert.equal(await readlink(source), f.target);
+  await rm(source + '-wal');
+  const idle = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk,
+    execFile: async () => assert.fail('a dangling main link with no sidecars must not be sent to lsof') });
+  await idle.prepareHome(f);
+  assert.equal(await readlink(source), f.target);
+  assert.ok((await lstat(f.target)).isFile());
+});
+
+test('native handle probe accepts preparation after a lost RAM target', async t => {
+  try { await lstat('/usr/sbin/lsof'); } catch { return t.skip('native lsof unavailable'); }
+  const f = await fixture(t);
+  await f.manager.prepareHome(f); await f.unmount();
+  await writeFile(join(f.home, 'logs_2.sqlite-wal'), 'closed fixture sidecar');
+  const native = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk });
+  await native.prepareHome(f);
+  assert.equal(await readlink(join(f.home, 'logs_2.sqlite')), f.target);
+  assert.ok((await lstat(f.target)).isFile());
+});
+
+test('explicit archive recovery preserves disk logs and archives the complete RAM file set', async t => {
+  const f = await fixture(t), source = join(f.home, 'logs_2.sqlite'), recoveryRoot = join(f.root, 'recovery');
+  await f.manager.prepareHome(f);
+  await rm(source); await writeFile(source, 'disk main'); await writeFile(source + '-wal', 'disk WAL');
+  await writeFile(f.target, 'RAM main'); await writeFile(f.target + '-wal', 'RAM WAL');
+  await writeFile(f.target + '-shm', 'RAM SHM');
+  const result = await f.manager.archiveHome({ ...f, recoveryRoot });
+  assert.equal(result.archived, true);
+  assert.deepEqual(result.files.map(file => file.sha256).length, 3);
+  assert.equal(await readFile(join(result.archive, 'logs_2.sqlite'), 'utf8'), 'RAM main');
+  assert.equal(await readFile(join(result.archive, 'logs_2.sqlite-wal'), 'utf8'), 'RAM WAL');
+  assert.equal(await readFile(join(result.archive, 'logs_2.sqlite-shm'), 'utf8'), 'RAM SHM');
+  assert.equal(await readFile(join(result.archive, 'disk', 'logs_2.sqlite'), 'utf8'), 'disk main');
+  assert.equal(await readFile(join(result.archive, 'disk', 'logs_2.sqlite-wal'), 'utf8'), 'disk WAL');
+  const manifest = JSON.parse(await readFile(join(result.archive, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.files.length, 3);
+  assert.equal(manifest.files[0].source, f.target);
+  assert.equal(manifest.files[0].sha256, result.files[0].sha256);
+  assert.equal(manifest.diskFiles.length, 2);
+  assert.equal(manifest.diskFiles[0].sha256, resultHash('disk main'));
+  assert.equal(await readFile(source, 'utf8'), 'disk main');
+  assert.equal(await readFile(source + '-wal', 'utf8'), 'disk WAL');
+  await assert.rejects(lstat(f.target), { code: 'ENOENT' });
+  const diskOnly = await f.manager.archiveHome({ ...f, recoveryRoot });
+  assert.equal(diskOnly.archived, true);
+  assert.equal(diskOnly.files.length, 0);
+  assert.equal(await readFile(join(diskOnly.archive, 'disk', 'logs_2.sqlite'), 'utf8'), 'disk main');
+});
+
+test('archive recovery fails closed for busy logs, unexpected entries, and unsafe disk files', async t => {
+  const f = await fixture(t), source = join(f.home, 'logs_2.sqlite'), recoveryRoot = join(f.root, 'recovery');
+  await f.manager.prepareHome(f); await rm(source); await writeFile(source, 'disk'); await writeFile(f.target, 'RAM');
+  f.setBusy(true);
+  await assert.rejects(f.manager.archiveHome({ ...f, recoveryRoot }), /Quit applications/);
+  assert.equal(await readFile(f.target, 'utf8'), 'RAM');
+  f.setBusy(false);
+  await writeFile(join(f.mountPath, `xenoflux-${process.getuid()}`, f.key, 'unexpected'), 'keep');
+  await assert.rejects(f.manager.archiveHome({ ...f, recoveryRoot }), /Unexpected entries/);
+  assert.equal(await readFile(f.target, 'utf8'), 'RAM');
+  await rm(join(f.mountPath, `xenoflux-${process.getuid()}`, f.key, 'unexpected'));
+  await rm(source); await symlink(join(f.root, 'elsewhere'), source);
+  await assert.rejects(f.manager.archiveHome({ ...f, recoveryRoot }), /ordinary disk-backed/);
+  assert.equal(await readlink(source), join(f.root, 'elsewhere'));
+});
+
+test('archive recovery retains its copy and original when RAM contents change during copying', async t => {
+  const f = await fixture(t), source = join(f.home, 'logs_2.sqlite'), recoveryRoot = join(f.root, 'recovery');
+  await f.manager.prepareHome(f); await rm(source); await writeFile(source, 'disk'); await writeFile(f.target, 'before');
+  const changing = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk,
+    execFile: async () => { await writeFile(f.target, 'after'); return { stdout: '', stderr: '' }; } });
+  await assert.rejects(changing.archiveHome({ ...f, recoveryRoot }), error => {
+    assert.match(error.message, /archive verification failed/);
+    assert.match(error.message, /recovery archive retained at/);
+    return true;
+  });
+  assert.equal(await readFile(f.target, 'utf8'), 'after');
+  const archives = await import('node:fs/promises').then(fs => fs.readdir(recoveryRoot));
+  assert.equal(archives.length, 1);
+  assert.equal(await readFile(join(recoveryRoot, archives[0], 'logs_2.sqlite'), 'utf8'), 'after');
+  assert.equal(await readFile(source, 'utf8'), 'disk');
+});
+
+test('archive recovery records its archive path and manifest if disk logs change before deletion', async t => {
+  const f = await fixture(t), source = join(f.home, 'logs_2.sqlite'), recoveryRoot = join(f.root, 'recovery');
+  await f.manager.prepareHome(f); await rm(source); await writeFile(source, 'disk before'); await writeFile(f.target, 'RAM');
+  let probes = 0;
+  const changing = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk,
+    execFile: async () => {
+      if (++probes === 2) await writeFile(source, 'disk after');
+      return { stdout: '', stderr: '' };
+    } });
+  await assert.rejects(changing.archiveHome({ ...f, recoveryRoot }), error => {
+    assert.match(error.message, /Disk diagnostic files changed during archiving/);
+    assert.match(error.message, /recovery archive retained at (.+)$/);
+    return true;
+  });
+  assert.equal(await readFile(source, 'utf8'), 'disk after');
+  assert.equal(await readFile(f.target, 'utf8'), 'RAM');
+  const [directory] = await import('node:fs/promises').then(fs => fs.readdir(recoveryRoot));
+  const manifest = JSON.parse(await readFile(join(recoveryRoot, directory, 'manifest.json'), 'utf8'));
+  assert.equal(manifest.files[0].sha256, resultHash('RAM'));
+});
+
+test('archive recovery snapshots disk-only diagnostics and allows a fresh missing-log home', async t => {
+  const f = await fixture(t), recoveryRoot = join(f.root, 'recovery');
+  assert.deepEqual(await f.manager.archiveHome({ ...f, recoveryRoot }), { archived: false, files: [], persistent: true });
+  await f.manager.ensureMounted();
+  const source = join(f.home, 'logs_2.sqlite');
+  await writeFile(source, 'disk only main'); await writeFile(source + '-wal', 'disk only WAL');
+  const result = await f.manager.archiveHome({ ...f, recoveryRoot });
+  assert.equal(result.files.length, 0);
+  assert.equal(result.diskFiles.length, 2);
+  assert.equal(await readFile(join(result.archive, 'disk', 'logs_2.sqlite'), 'utf8'), 'disk only main');
+  assert.equal(await readFile(join(result.archive, 'disk', 'logs_2.sqlite-wal'), 'utf8'), 'disk only WAL');
+});
+
+test('archive recovery refuses RAM-only diagnostics without an ordinary disk main', async t => {
+  const f = await fixture(t), recoveryRoot = join(f.root, 'recovery');
+  await f.manager.ensureMounted();
+  await mkdir(join(f.mountPath, `xenoflux-${process.getuid()}`, f.key), { recursive: true, mode: 0o700 });
+  await writeFile(f.target, 'RAM only');
+  await assert.rejects(f.manager.archiveHome({ ...f, recoveryRoot }), /ordinary disk-backed diagnostic log/);
+  assert.equal(await readFile(f.target, 'utf8'), 'RAM only');
+});
+
+function resultHash(value) {
+  return createHash('sha256').update(value).digest('hex');
+}

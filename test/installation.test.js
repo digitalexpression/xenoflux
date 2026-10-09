@@ -44,6 +44,22 @@ test('missing or unsupported Node fails before installation writes', async t => 
   await assert.rejects(access(userPaths(f.home).app));
 });
 
+test('launcher setup failure reports that the package is installed', async t => {
+  let home;
+  const f = await fixture(t, { execute: async (file, args, options) => {
+    if (args[0]?.includes('.stage-')) {
+      await mkdir(join(home, '.local', 'bin'), { recursive: true });
+      await mkdir(userPaths(home).bin);
+    }
+    return { stdout: 'v22.13.0\\n' };
+  } });
+  home = f.home;
+  await assert.rejects(f.instance.install({ env: f.env }),
+    /Xenoflux .* app is installed at .* but installation did not complete before launcher setup finished/);
+  await access(userPaths(f.home).app);
+  await access(userPaths(f.home).bin);
+});
+
 test('enable prepares links before registering the service and records only a supported background Node', async t => {
   const f = await fixture(t);
   await f.instance.install({ env: f.env });
@@ -117,9 +133,24 @@ test('missing background Node leaves RAM startup explicitly disabled without pre
   assert.equal(f.calls.some(([kind]) => kind === '/bin/launchctl'), false);
 });
 
+test('explicit enable fails on unsupported background Node after restoring disk mode', async t => {
+  const f = await fixture(t, { check: async ({ env }) => {
+    if (env.PATH === '/usr/bin:/bin') throw new Error('Node is unavailable on PATH');
+    return 'v22.13.0';
+  } });
+  const installed = await f.instance.install({ env: f.env, backgroundPath: '/usr/bin:/bin' });
+  assert.equal(installed.enabled, false);
+  await assert.rejects(f.instance.enable({ env: f.env, backgroundPath: '/usr/bin:/bin' }),
+    /RAM-log enable failed; logs remain in disk mode\. Node is unavailable on PATH\. Run xfx ramlogs status/);
+  assert.equal(f.restored.length, 2);
+  assert.equal(f.calls.filter(([kind]) => kind === 'settings').at(-1)[1].enabled, false);
+});
+
 test('service failure reports failure and restores a consistent disabled disk mode', async t => {
   const f = await fixture(t, { runService: async () => { throw new Error('bootstrap failed'); } });
-  await assert.rejects(f.instance.install({ env: f.env }), /bootstrap failed/);
+  await assert.rejects(f.instance.install({ env: f.env }), /Xenoflux .* is installed, but RAM-log setup failed\. RAM-log enable failed; disk logs restored\. bootstrap failed/);
+  await access(userPaths(f.home).app);
+  await access(userPaths(f.home).bin);
   assert.equal(f.prepared.length, 1);
   assert.equal(f.restored.length, 1);
   assert.deepEqual(f.calls.filter(([kind]) => kind === 'settings').at(-1)[1], { enabled: false, backgroundPath: '/fixture/node:/usr/bin:/bin' });

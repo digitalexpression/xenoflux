@@ -84,3 +84,69 @@ test('Node prerequisite checks use the passed environment and never pin an execu
   assert.deepEqual(seen[2].env, {HOME:'/fixture/user',PATH:'/fixture/bin:/bin'});
   await assert.rejects(checkNode({execute: async () => ({stdout:'v20.0.0'})}), /22.13.0/);
 });
+
+for (const recoveryFailure of [false, true]) test(`service failure, archive recovery and retry use native environment IDs (retry fails: ${recoveryFailure})`, async t => {
+  const { readFile, readlink, readdir } = await import('node:fs/promises');
+  const { create } = await import('../src/profiles.js');
+  const { registerHome, resolveHome } = await import('../src/homes.js');
+  const { prepareNativeHome } = await import('../test-support/native-home-fixture.js');
+  const { createRamLogs, ramLogTarget } = await import('../src/ram-logs.js');
+  const { createInstallation } = await import('../src/installation.js');
+  const f = await fixture(t), executable=join(f.home,'codex');
+  await writeFile(executable,'#!/bin/sh\nexit 0\n',{mode:0o700});
+  const homes=[{name:'Default',key:'default',home:join(f.home,'.codex')}];
+  for(const name of ['First','Second']) {
+    const native=await prepareNativeHome({directory:join(f.home,name),executable,codexVersion:'0.153.4'});
+    await f.store.update(data=>create(data,name));
+    await registerHome(f.store,name,native.root,{executable,version:'0.153.4'});
+    const {profile,environment}=await resolveHome(f.store,name);
+    assert.notEqual(profile.id,environment.id);
+    homes.push({name,key:environment.id,home:environment.home});
+  }
+  for(const h of homes)await writeFile(join(h.home,'logs_2.sqlite'),'old '+h.name,{mode:0o600});
+  const mountPath=join(f.home,'ram'),registry=join(f.home,'.xfx','ramlogs','homes');
+  const disk={ensure:async()=>{await mkdir(mountPath,{recursive:true,mode:0o700});return mountPath;},inspect:async()=>({mounted:true})};
+  const logs=createRamLogs({mountPath,registry,disk,execFile:async()=>({stdout:'',stderr:''})});
+  let failService=true,loaded=false,settings={enabled:false,backgroundPath:'/usr/bin:/bin'};
+  const installation=options=>createInstallation({...options,check:async()=> 'v24.0.0',execute:async()=>({stdout:''}),
+    readLogSettings:()=>settings,writeLogSettings:async value=>{settings=value;},serviceLoaded:async()=>loaded,
+    runService:async(_file,args)=>{if(args[0]==='bootstrap'){if(failService)throw Error('synthetic service failure');loaded=true;}else if(args[0]==='bootout')loaded=false;}});
+  const options={...f,userHome:f.home,logs,installation,nodeCheck:async()=>{}};
+  await assert.rejects(installationCommand(f.store,'install',options),/is installed, but RAM-log setup failed.*synthetic service failure/);
+  assert.equal(settings.enabled,false);assert.equal(loaded,false);
+  for(const h of homes){assert.ok((await lstat(join(h.home,'logs_2.sqlite'))).isFile());await writeFile(join(h.home,'logs_2.sqlite'),'new '+h.name);}
+  failService=false;
+  await assert.rejects(installationCommand(f.store,'enable',options),/Default.*different contents.*ramlogs recover/);
+  for(const h of homes)assert.equal(await readFile(join(h.home,'logs_2.sqlite'),'utf8'),'new '+h.name);
+  if (recoveryFailure) {
+    failService=true;
+    await assert.rejects(installationCommand(f.store,'recover',options), /synthetic service failure.*Diagnostic archives preserved/);
+    assert.equal(settings.enabled,false); assert.equal(loaded,false);
+    const archiveRoot=join(f.home,'.xfx','ramlogs','recovery');
+    const archives=await readdir(archiveRoot);
+    assert.equal(archives.length,3);
+    for(const directory of archives) {
+      const manifest=JSON.parse(await readFile(join(archiveRoot,directory,'manifest.json'),'utf8'));
+      const h=homes.find(home=>home.key===manifest.key);
+      assert.equal(await readFile(join(archiveRoot,directory,'disk','logs_2.sqlite'),'utf8'),'new '+h.name);
+      assert.equal(await readFile(join(archiveRoot,directory,'logs_2.sqlite'),'utf8'),'old '+h.name);
+    }
+    for(const h of homes) await writeFile(join(h.home,'logs_2.sqlite'),'new '+h.name);
+    failService=false;
+  }
+  const result=await installationCommand(f.store,'recover',options);
+  assert.equal(result.enabled,true);assert.equal(loaded,true);assert.equal(settings.enabled,true);
+  assert.equal(result.archives.length,3);
+  for(const h of homes){
+    const archive=result.archives.find(a=>a.name===h.name);
+    assert.equal(await readFile(join(archive.archive,'logs_2.sqlite'),'utf8'),(recoveryFailure?'new ':'old ')+h.name);
+    assert.equal(await readFile(join(archive.archive,'disk','logs_2.sqlite'),'utf8'),'new '+h.name);
+    assert.equal(await readlink(join(h.home,'logs_2.sqlite')),ramLogTarget(h.key,{mountPath}));
+    assert.equal(await readFile(join(h.home,'logs_2.sqlite'),'utf8'),'new '+h.name);
+  }
+  const quitCount=f.events.filter(e=>e==='quit').length;
+  await assert.rejects(installationCommand(f.store,'recover',options),/already linked/);
+  assert.equal(f.events.filter(e=>e==='quit').length,quitCount);
+  await assert.rejects(lstat(f.lockPath),{code:'ENOENT'});
+  assert.equal((await readdir(join(f.home,'.xfx','ramlogs','recovery'))).length,recoveryFailure?6:3);
+});
