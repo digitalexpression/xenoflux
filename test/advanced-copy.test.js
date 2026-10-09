@@ -268,3 +268,38 @@ test('empty selection is a no-op without client preparation or a journal',async 
   await writeFile(config,`model="${secret}"\n`,{mode:0o600});
   await assert.rejects(validateAdvancedSelection(f.store,'Default',options.selection,options),/Credential-like content in selected setting/);
 });
+
+test('source OpenAI provider overrides refuse category and stale item selections before mutation',async t=>{
+  const f=await fixture(t);
+  const selected=await item(f.store,'Default','config','model',f.defaultUserHome);
+  const source='model = "custom-model"\n[model_providers.openai]\nbase_url = "https://example.invalid/v1"\n';
+  await writeFile(join(f.source,'config.toml'),source);
+  const namedConfig=parse((await read(join(f.a.home,'config.toml'))).toString());
+  await writeFile(join(f.a.home,'config.toml'),stringify({...namedConfig,...parse(source)}));
+  const before=await read(join(f.b.home,'config.toml'));
+  for(const name of ['Default','A']) {
+    const inv=await inspectProfile(f.store,name,{...f.options,copyOnly:true});
+    assert.equal(inv.items.some(x=>x.category==='config'&&x.copyable),false);
+    await assert.rejects(planCopy(f.store,name,'B',{...f.options,include:['config']}),/custom model providers/i);
+    await assert.rejects(applyCopy(f.store,name,'B',{...f.options,include:['config']}),/custom model providers/i);
+  }
+  await assert.rejects(planCopy(f.store,'Default','B',{...f.options,selection:[selected.id]}),/no longer available or copyable/);
+  assert.deepEqual(await read(join(f.b.home,'config.toml')),before);
+});
+
+test('preview reports unsupported and uncertain retained destination inventory without reading its contents',async t=>{
+  const f=await fixture(t);
+  await mkdir(join(f.b.home,'agents'),{recursive:true});
+  await writeFile(join(f.b.home,'agents','local-extra.toml'),'unsupported_role_field = "private body"\n');
+  await symlink(join(f.root,'unavailable-rules'),join(f.b.home,'rules'));
+  const selected=await item(f.store,'Default','config','model',f.defaultUserHome);
+  const preview=await planCopy(f.store,'Default','B',{...f.options,selection:[selected.id]});
+  const agent=preview.kept.find(x=>x.label==='local-extra.toml');
+  assert.equal(agent.status,'kept'); assert.equal(agent.inventoryStatus,'unsupported');
+  assert.match(agent.reason,/unsupported or unsafe/i);
+  assert.equal(agent.destinationPath,join(f.b.home,'agents','local-extra.toml'));
+  assert.equal(preview.kept.find(x=>x.label==='rules').inventoryStatus,'unsupported');
+  assert.ok(preview.destinationLimitations.some(x=>x.includes('Copy discovery is limited')));
+  assert.equal(preview.kept.some(x=>x.label==='model'&&x.scope==='profile'),false);
+  assert.equal(JSON.stringify(preview).includes('private body'),false);
+});

@@ -145,6 +145,8 @@ async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint)
   if (t.kind === 'config') {
     const f = await readSafe(expected, { text: true }); if (!f) throw new Error('Selected config source is missing');
     const config = parse(f.content), key = t.key;
+    if ((config.model_provider ?? 'openai') !== 'openai' || Object.hasOwn(config.model_providers ?? {}, 'openai'))
+      throw new Error('Config copy does not support custom model providers in the source');
     if (typeof key !== 'string' || !/^(?:[A-Za-z_][\w-]*|agents\.[A-Za-z_][\w-]*|features\.multi_agent)$/.test(key)) throw new Error('Unsupported config key');
     const value = key.includes('.') ? key.split('.').reduce((o,k) => o?.[k], config) : config[key];
     if (!['string','number','boolean'].includes(typeof value) && !(Array.isArray(value) && value.every(x => typeof x === 'string'))) throw new Error('Unsupported selected config value');
@@ -277,13 +279,18 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
   const packages=items.filter(x=>x._package).map(x=>x._package);
   const selectedConfigKeys=new Set(configItems.map(item=>item.transfer.key));
   const selectedPaths=items.filter(item=>item.transfer.kind!=='config').map(item=>item.transfer.path);
-  const kept=destinationInventory.items.filter(item=>item.copyable&&item.transfer&&(()=>{
-    if(item.transfer.kind==='config') return !selectedConfigKeys.has(item.transfer.key);
-    return !selectedPaths.some(path=>item.transfer.path===path||item.transfer.path.startsWith(path+'/')||path.startsWith(item.transfer.path+'/'));
-  })()).map(item=>({id:item.id,label:item.label,category:item.category,origin:item.origin,scope:item.scope,destinationPath:item.transfer.sourcePath,status:'kept'}));
+  const kept=destinationInventory.items.filter(item=>{
+    if(item.status==='missing') return false;
+    if(item.scope!=='profile'||item.origin!==targetEndpoint.name) return true;
+    if(item.category==='config') return !selectedConfigKeys.has(item.transfer?.key??item.label);
+    const path=item.transfer?.path??relative(targetEndpoint.home,item.path??targetEndpoint.home);
+    return !selectedPaths.some(selected=>path===selected||path.startsWith(selected+'/'));
+  }).map(item=>({id:item.id,label:item.label,category:item.category,origin:item.origin,scope:item.scope,
+    destinationPath:item.transfer?.sourcePath??item.path,status:'kept',inventoryStatus:item.status,
+    ...(item.reason?{reason:item.reason}:{})}));
   const plan={source:sourceEndpoint,target:targetEndpoint,selection:items.map(x=>x.id),files:payloads,packages,createdDirectories:[...new Set(createdDirectories)]};
   const hash=createHash('sha256').update(JSON.stringify({source:plan.source,target:plan.target,selection:plan.selection,packages,createdDirectories:plan.createdDirectories,files:payloads.map(f=>({path:f.path,before:f.before&&sha(f.before),beforeMode:f.beforeMode,after:f.after&&sha(f.after),afterMode:f.afterMode}))})).digest('hex');
-  return {plan,report:{status:'preview',hash,source:inventory.profile,target:{name:targetEndpoint.name,home:targetEndpoint.home},items:reports,kept,changes:[
+  return {plan,report:{status:'preview',hash,source:inventory.profile,target:{name:targetEndpoint.name,home:targetEndpoint.home},items:reports,kept,destinationLimitations:destinationInventory.limitations,changes:[
     ...payloads.filter(f=>f.before===null||f.after===null||!f.before.equals(f.after)||f.beforeMode!==f.afterMode).map(f=>({path:f.path,action:f.after===null?'remove':f.before===null?'add':'replace',beforeSha256:f.before&&sha(f.before),afterSha256:f.after&&sha(f.after),beforeMode:f.beforeMode,afterMode:f.afterMode})),
     ...packages.flatMap(p=>p.directoryChanges.map(d=>({path:d.path,action:d.after===null?'remove-directory':d.before===null?'add-directory':'directory-mode',beforeMode:d.before,afterMode:d.after})))
   ],notes:['Selected skill packages are replaced exactly; destination-only package files are removed.',...(configItems.some(i=>i._enforcedSymlink)?['Config copy enables the required allow_symlinked_codex_home flag.']:[])]}};

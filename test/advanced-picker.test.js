@@ -218,3 +218,16 @@ exit [lindex $result 3]`;
   assert.match(io.shown(),/Updated: 2026-09-28/);
   io.input.end(); await pending;
 });
+
+test('preview renders retained unsupported items and destination discovery limits',async()=>{
+  const io=streams();
+  const pending=pickAdvancedItems({items:[]},{...io,review:async()=>({items:[],
+    kept:[{label:'local-extra.toml',status:'kept',inventoryStatus:'unsupported',reason:'Unsupported or unsafe agent definition',origin:'B',scope:'profile',destinationPath:'/B/agents/local-extra.toml'}],
+    destinationLimitations:['Destination enumeration is partial.']})});
+  io.input.write('\r');
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(io.shown(),/local-extra.toml — kept/);
+  assert.match(io.shown(),/Inventory: unsupported — Unsupported or unsafe agent definition/);
+  assert.match(io.shown(),/Destination limitation: Destination enumeration is partial/);
+  io.input.write('q'); io.input.end(); await pending;
+});

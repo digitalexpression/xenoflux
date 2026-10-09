@@ -76,10 +76,12 @@ function previewLines(preview) {
     const location = entry.sourcePath ?? entry.destinationPath ?? entry.path;
     const locationLabel = entry.sourcePath ? 'Source' : 'Destination';
     lines.push(`    Origin: ${clean(entry.origin || 'unknown')} | Scope: ${clean(entry.scope || 'unknown')} | ${locationLabel}: ${clean(location || 'unknown')}`);
+    if (entry.reason) lines.push(`    Inventory: ${clean(entry.inventoryStatus || 'unknown')} — ${clean(entry.reason)}`);
     const changes = entry.changes;
     if (Array.isArray(changes)) for (const change of changes) lines.push(`    ${formatChange(change)}`);
     else if (changes != null) lines.push(`    ${formatChange(changes)}`);
   }
+  for (const limitation of preview.destinationLimitations ?? []) lines.push(`  Destination limitation: ${clean(limitation)}`);
   if (lines.length > 2000) return ['Preview is too large to review safely. Reduce the selection before continuing.'];
   return lines;
 }

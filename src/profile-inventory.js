@@ -95,7 +95,7 @@ async function settings(home, items, scope, origin) {
     try {
       const content=await safeText(configPath); if(content===null) throw new Error('unsafe config');
       const config = parse(content);
-      if (config.model_provider && config.model_provider !== 'openai') throw new Error('custom model provider is unsupported');
+      if ((config.model_provider ?? 'openai') !== 'openai' || Object.hasOwn(config.model_providers ?? {}, 'openai')) throw new Error('custom model provider is unsupported');
       for (const key of CONFIG_KEYS) if (Object.hasOwn(config, key)) {
         const value = safeConfigValue(config[key]);
         const eligible=['profile','user'].includes(scope);
