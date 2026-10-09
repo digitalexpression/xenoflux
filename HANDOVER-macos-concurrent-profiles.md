@@ -50,9 +50,10 @@ fixture does not prove Cmd+Tab names, icon count, sign-in or native LaunchServic
 
 ## Next action
 
-Use the local candidate under
-`release-artifacts/concurrent-profiles-native-fix-2026-10-09/` after packaging.
-Its manifest records the source revision and hashes. Once a verified installed app
+Implementation commit: `7e05de5`. The local candidate under
+`release-artifacts/concurrent-profiles-native-fix-2026-10-09/` was built from that
+revision; detached offline installed-package and installation-lifecycle fixture
+smoke passed. Its manifest records the source revision and hashes. Once a verified installed app
 is available and the user is ready for native testing, recover the stopped RC3 Check
 and Advanced Check prototype records, then open them with the revised development
 CLI. Follow `docs/CONCURRENT-DESKTOPS.md`: exactly one named/icon-bearing Dock and
