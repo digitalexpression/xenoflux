@@ -60,9 +60,10 @@ the cause of that one-off success is unresolved. No signature check was bypassed
 ## Next action
 
 The original named-app implementation is `7e05de5`; the discovered-source identity
-fix is a later commit. The updated local candidate is under
+fix is `1bf2a1c`. The updated local candidate is under
 `release-artifacts/concurrent-profiles-discovery-fix-2026-10-09/`; its manifest
-records the source revision and hashes. The prior native-fix package is superseded.
+records that source revision and hashes. Detached offline package and installation
+lifecycle smoke passed. The prior native-fix package is superseded.
 Once a verified installed app
 is available and the user is ready for native testing, recover the stopped RC3 Check
 and Advanced Check prototype records, then open them with the revised development
