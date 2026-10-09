@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { basename } from 'node:path';
 import { createLogStorage } from './log-storage.js';
+import { assertNoConcurrentDesktops } from './desktop-instance-guard.js';
 
 const execFileDefault = promisify(nodeExecFile);
 export const DESKTOP_APP = Object.freeze({
@@ -192,6 +193,7 @@ export function createDesktopRuntime({
   signal,
   onProgress = () => {},
   ramLogs = createLogStorage(),
+  concurrentLockPath,
 } = {}) {
   if (!validAbsolute(appPath) || typeof bundleId !== 'string' || !bundleId || !validAbsolute(executable) ||
     typeof execFile !== 'function' || typeof lstat !== 'function' || (processSnapshot !== undefined && typeof processSnapshot !== 'function') ||
@@ -444,6 +446,7 @@ export function createDesktopRuntime({
   async function prepareClients({ cliExecutables = [], includeDesktop = false } = {}) {
     if (!Array.isArray(cliExecutables) || !cliExecutables.every(validAbsolute) || typeof includeDesktop !== 'boolean') throw error('INVALID_OPTIONS');
     aborted();
+    if (includeDesktop) await assertNoConcurrentDesktops({ lockPath: concurrentLockPath });
     let desktop = await observed();
     // Copy/import can be called before the desktop has been inspected. Match
     // assertIdle's retained-crashpad handling so an already-exited desktop does
@@ -606,13 +609,17 @@ export function createDesktopRuntime({
 
   async function stop({ signal: quitSignal } = {}) {
     if (quitSignal?.aborted) throw error('CANCELLED');
+    await assertNoConcurrentDesktops({ lockPath: concurrentLockPath });
     await assertExternal();
     const before = await observed();
     if (!before.entries.length) return before.entries;
     // A re-parented helper has no app main left to receive a graceful quit.
     // Sending an Apple event in that state can itself activate the app, so the
     // controller must recover the leftover explicitly instead of guessing.
-    if (!before.entries.some(row => row.executable === executable)) throw error('DESKTOP_RUNNING', before.entries);
+    const mains = before.entries.filter(row => row.executable === executable);
+    // This legacy controller addresses a shared bundle ID. Concurrent profile
+    // instances must be closed individually through their recorded PID instead.
+    if (mains.length !== 1 || mains[0].uid !== currentUid()) throw error('DESKTOP_RUNNING', before.entries);
     // The native confirmation is interactive; a five-second system-command
     // budget is unsuitable while a person is deciding whether to end tasks.
     try { await execFile('/usr/bin/osascript', ['-e', `tell application id "${bundleId}" to quit`], { cwd: '/', env: safeSystemEnvironment(), encoding: 'utf8', maxBuffer: 65536, timeout: quitTimeoutMs, ...(quitSignal ? { signal: quitSignal } : {}) }); }

@@ -167,8 +167,24 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
     })).stdout);
     if (comparison.state !== 'native-settings-comparison' || comparison.summary.changed !== 0)
       throw new Error('Installed xfx did not complete its detached read-only native settings comparison');
-    // Exercise the shipped copy engine against disposable native homes only.
+    // Exercise shipped desktop preparation and copy against disposable homes.
     const { Store } = await import(pathToFileURL(join(installedRoot, 'src', 'profiles.js')).href);
+    const { desktopInstancePlan } = await import(pathToFileURL(join(installedRoot, 'src', 'desktop-instances.js')).href);
+    const { prepareProfileLauncher } = await import(pathToFileURL(join(installedRoot, 'src', 'profile-launcher.js')).href);
+    const instanceList = JSON.parse((await run(installed, ['--json', '--store', store, 'desktop', 'list'])).stdout);
+    if (instanceList.instances.length || instanceList.observation !== 'last-recorded')
+      throw new Error('Installed xfx did not read its empty desktop instance inventory');
+    const desktopPlan = await desktopInstancePlan(new Store(store), 'smoke', { runtime: {
+      inspectApp: async () => ({ appPath: '/fixture/Codex.app', bundleId: 'com.openai.codex', executable: '/fixture/Codex.app/Contents/MacOS/Codex' }),
+    } });
+    if (desktopPlan.userHome !== join(native.root, 'user-home') || desktopPlan.home !== native.home)
+      throw new Error('Installed desktop plan did not retain its profile routing');
+    const profileLauncher = await prepareProfileLauncher(new Store(store), desktopPlan, { build: async ({ output }) => {
+      // Package verification must never execute a native client or its helper.
+      await writeFile(output, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    } });
+    if (!(await readFile(join(profileLauncher.launcherApp, 'Contents', 'Info.plist'), 'utf8')).includes('Codex · smoke'))
+      throw new Error('Installed xfx did not prepare its named launcher bundle');
     const { inspectProfile } = await import(pathToFileURL(join(installedRoot, 'src', 'profile-inventory.js')).href);
     const { planCopy, applyCopy, planUndo, undoCopy } = await import(pathToFileURL(join(installedRoot, 'src', 'native-copy.js')).href);
     const sourceSkill = join(readonlyHome, '.codex', 'skills', 'smoke-skill');

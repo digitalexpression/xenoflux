@@ -10,6 +10,7 @@ import { recoverSelection } from './desktop-selection.js';
 import { acquire, release, exists, globalLock } from './metadata.js';
 import { userPaths } from './paths.js';
 import { checkNode } from './node-runtime.js';
+import { assertNoConcurrentDesktops } from './desktop-instance-guard.js';
 
 // Installation changes diagnostic log routing only after restoring ordinary
 // native paths and taking the same writer reservations as other xfx operations.
@@ -34,13 +35,19 @@ export async function installationCommand(store, operation, {
       throw new Error(`${home.name}: RAM logs are already linked; inspect status and disable RAM logging before recovery`);
   }
   const cliExecutables = homes.filter(home => home.executable).map(home => home.executable);
-  await runtime.prepareClients({ cliExecutables, includeDesktop: true });
-  await runtime.assertIdle({ cliExecutables });
+  const owner = { kind: 'log-storage', pid: process.pid, host: hostname(), runId: randomUUID(), storePath: store.directory };
+  // Hold the same launch-operation guard from the ownership check through any
+  // bundle-wide quit. Otherwise a named instance could launch between them.
+  await acquire(lockPath + '.selection', owner, true);
+  try {
+    await assertNoConcurrentDesktops({ lockPath });
+    await runtime.prepareClients({ cliExecutables, includeDesktop: true });
+    await runtime.assertIdle({ cliExecutables });
+  } finally { await release(lockPath + '.selection', owner); }
   if (await exists(join(store.directory, 'desktop-selection', 'session.json'))
     || await exists(join(store.directory, 'activation', 'manifest.json'))) {
     await recoverSelection(store, { runtime, noOpen: true, defaultUserHome: userHome, signal, lockPath });
   }
-  const owner = { kind: 'log-storage', pid: process.pid, host: hostname(), runId: randomUUID(), storePath: store.directory };
   const locks = [lockPath + '.selection', lockPath, ...homes.filter(home => home.root).map(home => join(home.root, '.run-lock'))];
   const held = [];
   const archives = [];
@@ -80,12 +87,12 @@ export async function restoreHomeLogs(home, key, {
   runtime = createDesktopRuntime(), logs = createRamLogs(), lockPath = globalLock(), signal,
 } = {}) {
   await runtime.assertExternal();
-  await runtime.prepareClients({ includeDesktop: true });
-  await runtime.assertIdle({ resourcePaths: [home] });
   const owner = { kind: 'log-storage', pid: process.pid, host: hostname(), runId: randomUUID() };
   const held = [];
   try {
     for (const path of [lockPath + '.selection', lockPath]) { await acquire(path, owner, true); held.push(path); }
+    await assertNoConcurrentDesktops({ lockPath });
+    await runtime.prepareClients({ includeDesktop: true });
     await runtime.assertIdle({ resourcePaths: [home] });
     return await logs.restoreHome({ home, key, signal });
   } finally { for (const path of held.reverse()) await release(path, owner); }

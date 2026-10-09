@@ -28,6 +28,8 @@ import { profileCommand } from '../src/profile-command.js';
 import { createInstallation } from '../src/installation.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
 import { readLogSettings } from '../src/log-storage.js';
+import { desktopInstancePlan, openDesktopInstance, focusDesktopInstance, closeDesktopInstance,
+  recoverDesktopInstance, listDesktopInstances } from '../src/desktop-instances.js';
 
 // Preserve JSON values while escaping terminal C1 controls in native metadata.
 const displayJSON = value => JSON.stringify(value, null, 2).replace(/[\x7f-\x9f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
@@ -55,6 +57,9 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   history [--profile NAME] [--search TEXT] [--limit COUNT] [--archived]
   pick [--repo DIRECTORY] [--dry-run] [--viewer EXECUTABLE]
   desktop switch NAME [--dry-run] | desktop pick [--dry-run]
+  desktop open NAME [--dry-run]          Open or focus a concurrent profile desktop
+  desktop list [--observe] | desktop focus NAME | desktop close NAME
+  desktop recover NAME [--dry-run]       Release a stopped concurrent instance's reservation
   desktop current [--observe] | desktop restore | desktop recover [--no-open]
   desktop activate NAME --dry-run [--desktop-data PATH]
   desktop activation-plan NAME [NAME ...]
@@ -117,14 +122,16 @@ try {
       '--include': command === 'compare' || (command === 'copy' && params[0] !== 'undo') || (settingUp && params[0] === 'create'),
       '--apply': command === 'copy' || settingUp || recoveringProfile,
       '--dry-run': ['launch', 'resume', 'pick', 'copy'].includes(command) || settingUp
-        || (command === 'desktop' && ['switch', 'pick', 'activate', 'add-target'].includes(params[0])),
-      '--observe': command === 'desktop' && params[0] === 'current',
+        || (command === 'desktop' && (['switch', 'pick', 'activate', 'add-target', 'open'].includes(params[0])
+          || (params[0] === 'recover' && params.length === 2))),
+      '--observe': command === 'desktop' && ['current', 'list'].includes(params[0]),
       '--no-open': command === 'desktop' && params[0] === 'recover' && params.length === 1,
       '--desktop-data': command === 'desktop' && params[0] === 'activate',
       '--approved-plan': command === 'desktop' && ['activate', 'add-target'].includes(params[0]),
       '--profile': command === 'history', '--search': command === 'history', '--limit': command === 'history', '--archived': command === 'history',
       '--close-clients': !options['--dry-run'] && ((command === 'copy' && options['--apply'])
-        || installing || (settingUp && options['--apply']) || (command === 'desktop' && ['switch','pick','restore','recover','activate'].includes(params[0]))),
+        || installing || (settingUp && options['--apply']) || (command === 'desktop' && ['switch','pick','restore','recover','activate'].includes(params[0])
+          && !(params[0] === 'recover' && params.length === 2))),
     };
     for (const [flag, allowed] of Object.entries(allowedOptions)) {
       if (options[flag] !== undefined && !allowed) throw new Error(`${flag} is not supported by ${command}`);
@@ -236,7 +243,7 @@ try {
       }
     } else if (command === 'desktop') {
       const [operation, ...targets] = params;
-      const counts = { recover: [0], 'add-target': [1], switch: [1], pick: [0], current: [0], restore: [0], activate: [1], 'activation-plan': [] };
+      const counts = { recover: [0, 1], open: [1], focus: [1], close: [1], list: [0], 'add-target': [1], switch: [1], pick: [0], current: [0], restore: [0], activate: [1], 'activation-plan': [] };
       if (operation === 'activation-plan' ? !targets.length : !counts[operation]?.includes(targets.length))
         throw new Error('Invalid desktop command; run xfx --help');
       if (options['--no-open'] && options['--close-clients'])
@@ -245,7 +252,18 @@ try {
         throw new Error('An approved plan cannot be combined with dry-run or path overrides');
       if (['activate','add-target'].includes(operation) && !options['--dry-run'] && !options['--approved-plan'])
         throw new Error('Persistent activation is not enabled without an approved plan; use desktop activate PROFILE --dry-run to preview');
-      if (operation === 'activate' && options['--dry-run']) {
+      if (operation === 'open') result = options['--dry-run']
+        ? await desktopInstancePlan(store, targets[0]) : await openDesktopInstance(store, targets[0]);
+      else if (operation === 'list') {
+        result = await listDesktopInstances(store, { observe: options['--observe'] ?? false });
+        if (result.instances.some(instance => instance.observed?.status === 'unavailable')) process.exitCode = 2;
+      }
+      else if (operation === 'focus') result = await focusDesktopInstance(store, targets[0]);
+      else if (operation === 'close') result = await closeDesktopInstance(store, targets[0]);
+      else if (operation === 'recover' && targets.length === 1) result = options['--dry-run']
+        ? { ...(await desktopInstancePlan(store, targets[0])), status: 'recovery-preview', applyChecks: 'pending', opensDesktop: false }
+        : await recoverDesktopInstance(store, targets[0]);
+      else if (operation === 'activate' && options['--dry-run']) {
         result = await activationPlan(store, targets[0], { desktopData: options['--desktop-data'] });
         if (result.status === 'blocked-preview') process.exitCode = 2;
       }

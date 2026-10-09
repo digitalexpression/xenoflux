@@ -92,6 +92,36 @@ xfx desktop recover --no-open
 
 Paired selection changes the Codex home and desktop-data path together. If an interruption leaves a pending operation, recovery keeps its journal and reservation until both paths agree. `desktop recover --no-open` requires all clients to be stopped already and does not reopen Codex.
 
+## Concurrent desktops
+
+Open separate named profiles alongside an existing Codex session:
+
+```sh
+xfx desktop open Research --dry-run
+xfx desktop open Research
+xfx desktop open Personal
+xfx desktop list --observe
+xfx desktop focus Research
+xfx desktop close Personal
+```
+
+Each managed instance keeps fixed profile storage paths and an exclusive reservation.
+Opening a running profile focuses it. Other profiles can run concurrently in the CLI
+or desktop; the same profile cannot run in both at once. These commands do not change
+the default aliases or close other clients, and can run from an existing Codex chat.
+Closing a profile refuses to target a Codex process that hosts the invoking command.
+
+An owned launcher named `Codex · PROFILE` forwards activation to that profile's
+Codex process. The first open compiles its small AppKit helper with the installed
+Xcode Command Line Tools, then reuses it. The vendor app is left intact. Native
+Cmd+Tab, Dock reopening, and profile routing remain acceptance checks pending on
+the target Mac; fixture checks and helper compilation do not establish them.
+
+`xfx desktop recover NAME` releases only a stopped instance's verified reservation;
+it does not quit or reopen an app. Unfinished alias selection still requires the
+existing recovery command. See [concurrent desktop operation](docs/CONCURRENT-DESKTOPS.md)
+for the test boundary and recovery details.
+
 ## RAM logs
 
 RAM logs are optional and disposable at reboot. Only diagnostic logs move; native settings, sign-in data, conversations, and state databases remain on disk. Xenoflux prepares native log routing only after it confirms the relevant clients are idle.

@@ -316,6 +316,19 @@ test('refuses control when running inside the desktop process ancestry', async (
   await assert.rejects(runtime.assertExternal(), { code: 'SELF_HOSTED' });
 });
 
+test('legacy bundle-wide quit refuses multiple desktop mains before sending an Apple event', async () => {
+  let quitCalls = 0;
+  const runtime = createDesktopRuntime({ ...appOptions,
+    processSnapshot: async () => [self, main, { ...main, pid: 110 }],
+    execFile: async (path, args) => {
+      if (path === '/usr/bin/osascript') { quitCalls++; throw new Error('must not quit either instance'); }
+      return fixedApp(path, args);
+    },
+  });
+  await assert.rejects(runtime.stop(), { code: 'DESKTOP_RUNNING' });
+  assert.equal(quitCalls, 0);
+});
+
 test('stop uses a graceful fixed Apple event, waits for every descendant, and rejects PID reuse', async () => {
   const calls = []; let step = 0; let tick = 0;
   const initial = [self, main, child];

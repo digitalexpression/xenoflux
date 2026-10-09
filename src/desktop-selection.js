@@ -7,6 +7,7 @@ import { resolveHome, loadHomeBinding } from './homes.js';
 import { createDesktopRuntime, DESKTOP_APP, sameDesktopApp } from './desktop-runtime.js';
 import { globalLock, exists, privateDirectory, readJSON, record, acquire, release } from './metadata.js';
 import { attachPairedRuntime, pairedStatus } from './desktop-paired.js';
+import { assertNoConcurrentDesktops } from './desktop-instance-guard.js';
 
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -319,6 +320,7 @@ async function operate(store, operation, name, { runtime = createDesktopRuntime(
     return created;
   };
   try {
+    await assertNoConcurrentDesktops({ lockPath });
     session = await readSession(store);
     if (session) await validateReservations(session);
     // A desktop auto-update changes the on-disk pin while an old launch-only
