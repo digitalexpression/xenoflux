@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import { Store, create } from '../src/profiles.js';
 import { registerHome } from '../src/homes.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
@@ -74,6 +76,36 @@ async function fixture(t) {
 }
 const statePath = (f, id) => join(f.store.directory, 'desktop-instances', `${id}.json`);
 const lockPath = (f, name) => join(f.homes[name].root, '.run-lock');
+
+test('named desktop planning and opening require an existing legacy selection to be restored first', async t => {
+  const f = await fixture(t), profile = (await f.store.read()).profiles.find(profile => profile.name === 'A');
+  const directory = join(f.store.directory, 'desktop-selection'), journalPath = join(directory, 'session.json'), runId = randomUUID();
+  await mkdir(directory, { mode: 0o700 });
+  const journal = { schemaVersion: 1, kind: 'desktop-selection-session', id: runId, phase: 'active',
+    owner: { kind: 'desktop-selection', host: hostname(), pid: process.pid, runId, storePath: f.store.directory, journalPath },
+    active: { profileId: profile.id, name: profile.name, nativeRoot: profile.native.root, home: f.homes.A.home, desktopData: join(f.homes.A.root, 'desktop-data') },
+    target: null, reservedRoots: [profile.native.root], reservedBindings: [profile.native], trackedProcesses: [f.original] };
+  await writeFile(journalPath, JSON.stringify(journal), { mode: 0o600 });
+  const before = await readFile(journalPath);
+  await assert.rejects(desktopInstancePlan(f.store, 'B', f.options), /Restore Default/);
+  await assert.rejects(openDesktopInstance(f.store, 'B', f.options), /Restore Default/);
+  assert.deepEqual(await readFile(journalPath), before);
+  assert.equal(f.calls.length, 0);
+  await assert.rejects(access(join(f.store.directory, 'desktop-instances')), { code: 'ENOENT' });
+  for (const path of f.aliases) assert.equal(await readFile(join(path, 'preserved.txt'), 'utf8'), 'existing-session');
+});
+
+test('a legacy reservation from another controller cannot be bypassed by a named desktop', async t => {
+  const f = await fixture(t), owner = { kind: 'desktop-selection', storePath: join(f.root, 'other-controller'), runId: randomUUID() };
+  await mkdir(f.options.lockPath, { mode: 0o700 });
+  const path = join(f.options.lockPath, 'owner.json');
+  await writeFile(path, JSON.stringify(owner), { mode: 0o600 });
+  const before = await readFile(path);
+  await assert.rejects(desktopInstancePlan(f.store, 'A', f.options), /original controller store/);
+  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /original controller store/);
+  assert.deepEqual(await readFile(path), before);
+  assert.equal(f.calls.length, 0);
+});
 
 test('two fixed-home desktops coexist with the original and two simultaneously running CLI profiles', async t => {
   const f = await fixture(t), originalStore = await readFile(f.store.file);

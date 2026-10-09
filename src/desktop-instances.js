@@ -140,7 +140,21 @@ async function withOperation(store, id, options, action) {
   try { return await action(); } finally { await release(guardPath, owner); }
 }
 
-export async function desktopInstancePlan(store, name, { runtime = createDesktopInstanceRuntime() } = {}) {
+async function assertDefaultDesktop(store, { defaultUserHome, lockPath = globalLock() } = {}) {
+  const legacy = await currentDesktop(store, { defaultUserHome });
+  if (legacy.recoveryRequired) throw new Error('Existing desktop selection needs recovery; its paths and clients were left unchanged');
+  if (legacy.activeProfile || (legacy.pairedActivation && legacy.pairedActivation.selected !== 'Default'))
+    throw new Error('A legacy desktop selection is still active. Restore Default with desktop restore or desktop recover --no-open before opening a named desktop.');
+  if (await exists(lockPath)) {
+    await privateDirectory(lockPath);
+    const owner = await readJSON(join(lockPath, 'owner.json'));
+    if (owner.kind === 'desktop-selection')
+      throw new Error('Default paths are reserved by a legacy desktop selection. Restore or recover that selection with its original controller store before opening a named desktop.');
+  }
+}
+
+export async function desktopInstancePlan(store, name, { runtime = createDesktopInstanceRuntime(), defaultUserHome = userInfo().homedir, lockPath } = {}) {
+  await assertDefaultDesktop(store, { defaultUserHome, lockPath });
   const { profile, native, environment } = await resolveHome(store, name);
   return { profileId: profile.id, name: profile.name, environmentId: environment.id, nativeRoot: native.root,
     home: environment.home, desktopData: environment.desktopData, temporary: environment.launch.env.TMPDIR, userHome: environment.launch.env.HOME,
@@ -169,8 +183,7 @@ export async function openDesktopInstance(store, name, {
 } = {}) {
   const id = find(await store.read(), name).id;
   return withOperation(store, id, options, async () => {
-    const legacy = await currentDesktop(store, { defaultUserHome });
-    if (legacy.recoveryRequired) throw new Error('Existing desktop selection needs recovery; its paths and clients were left unchanged');
+    await assertDefaultDesktop(store, { defaultUserHome, lockPath: options.lockPath });
     let state = await readState(store, id);
     if (state?.phase === 'closed') await releaseInstanceControl(state.owner, options);
     if (state && state.phase !== 'closed') {
@@ -194,7 +207,7 @@ export async function openDesktopInstance(store, name, {
       if (observed.status !== 'stopped') throw new Error('Desktop launch is incomplete or still running; use desktop recover PROFILE after it stops');
       await finishStopped(store, state, runtime, options);
     }
-    const plan = await desktopInstancePlan(store, id, { runtime, defaultUserHome });
+    const plan = await desktopInstancePlan(store, id, { runtime, defaultUserHome, lockPath: options.lockPath });
     await privateDirectory(store.directory); await privateDirectory(paths(store, id).root, true);
     const runId = randomUUID();
     const owner = { kind: 'desktop-instance', host: hostname(), pid: process.pid, runId, storePath: store.directory,

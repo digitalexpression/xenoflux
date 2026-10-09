@@ -50,8 +50,6 @@ fi
 `;
   const executable = 'xfx_executable=${XFX_EXECUTABLE:-xfx}\n';
   return {
-    'xfx-desktop-switch.command': `${preamble}${executable}exec "$xfx_executable" --store "$1" desktop pick
-`,
     'xfx-desktop-recover.command': `${preamble}${executable}exec "$xfx_executable" --store "$1" desktop recover --no-open
 `,
   };
@@ -176,7 +174,7 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
       throw new Error('Installed xfx did not read its empty desktop instance inventory');
     const desktopPlan = await desktopInstancePlan(new Store(store), 'smoke', { runtime: {
       inspectApp: async () => ({ appPath: '/fixture/Codex.app', bundleId: 'com.openai.codex', executable: '/fixture/Codex.app/Contents/MacOS/Codex' }),
-    } });
+    }, lockPath: join(temporary, 'desktop-preview.lock'), defaultUserHome: readonlyHome });
     if (desktopPlan.userHome !== join(native.root, 'user-home') || desktopPlan.home !== native.home)
       throw new Error('Installed desktop plan did not retain its profile routing');
     const profileLauncher = await prepareProfileLauncher(new Store(store), desktopPlan, { build: async ({ output }) => {

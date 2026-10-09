@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { readFile } from 'node:fs/promises';
 import { Store, renameProfile, bind, unbind, find } from '../src/profiles.js';
 import { removeProfile } from '../src/profile-removal.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
@@ -11,10 +10,7 @@ import { launchPlan, launchHome } from '../src/launcher.js';
 import { pickProfile } from '../src/picker.js';
 import { listHistory } from '../src/history.js';
 import { desktopReady } from '../src/desktop.js';
-import { selectionPlan, currentDesktop, restoreDesktop, recoverSelection, switchDesktop } from '../src/desktop-selection.js';
-import { pickDesktop, desktopChoicePlan, selectDesktop } from '../src/desktop-picker.js';
-import { activationPlan } from '../src/activation.js';
-import { preparePairedActivation, readPairedPlan, planActivationTarget, registerActivationTarget } from '../src/desktop-paired.js';
+import { currentDesktop, restoreDesktop, recoverSelection } from '../src/desktop-selection.js';
 import { COPY_COMPONENTS, planCopy, applyCopy, planUndo, undoCopy } from '../src/native-copy.js';
 import { pickCopyComponents, confirmCopyAction } from '../src/copy-picker.js';
 import { inspectProfile } from '../src/profile-inventory.js';
@@ -56,16 +52,10 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   resume NAME TASK_ID [--dry-run]
   history [--profile NAME] [--search TEXT] [--limit COUNT] [--archived]
   pick [--repo DIRECTORY] [--dry-run] [--viewer EXECUTABLE]
-  desktop switch NAME [--dry-run] | desktop pick [--dry-run]
   desktop open NAME [--dry-run]          Open or focus a concurrent profile desktop
   desktop list [--observe] | desktop focus NAME | desktop close NAME
   desktop recover NAME [--dry-run]       Release a stopped concurrent instance's reservation
   desktop current [--observe] | desktop restore | desktop recover [--no-open]
-  desktop activate NAME --dry-run [--desktop-data PATH]
-  desktop activation-plan NAME [NAME ...]
-  desktop activate NAME --approved-plan FILE
-  desktop add-target NAME --dry-run
-  desktop add-target NAME --approved-plan FILE
   install [--background-path PATH] | uninstall
   ramlogs enable [--background-path PATH] | ramlogs disable
   ramlogs ensure | ramlogs status | ramlogs inspect NAME
@@ -75,7 +65,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
 Store: --store, XFX_HOME, or ~/.xfx/controller.
 Comparison covers copyable native settings only; skills/plugins/MCP and effective repository configuration are excluded.
 All copy modes preserve unselected settings and destination-only items; selected skill packages are replaced exactly.
-Default is supported by inspect, compare/copy and the desktop picker. Native sign-in never clones credentials or history.
+Default remains at Codex's standard paths; named profiles use isolated homes under the Xenoflux profile store. Native sign-in never clones credentials or history.
 --close-clients permits graceful shutdown for desktop control, copy --apply, or profile create/signin --apply.
 Mutation prompts and external-terminal checks still apply. Read-only operations never quit applications.
 `;
@@ -102,6 +92,9 @@ try {
   if (options.help || !args.length) { process.stdout.write(help); }
   else {
     const [command, ...params] = args;
+    const retiredDesktopCommands = new Set(['switch', 'pick', 'activate', 'activation-plan', 'add-target']);
+    if (command === 'desktop' && retiredDesktopCommands.has(params[0]))
+      throw new Error(`Legacy desktop ${params[0]} is retired; use "xfx desktop open NAME" for a named profile. Use "xfx desktop current", "xfx desktop restore", or "xfx desktop recover" to inspect or recover an existing legacy selection.`);
     const arity = { copy: 2, compare: 2, launch: 1, resume: 2, history: 0, pick: 0, install: 0, uninstall: 0 };
     const grouped = ['profile', 'desktop', 'ramlogs'].includes(command);
     if (!grouped && !Object.hasOwn(arity, command)) throw new Error(`Unknown command: ${command}`);
@@ -122,15 +115,15 @@ try {
       '--include': command === 'compare' || (command === 'copy' && params[0] !== 'undo') || (settingUp && params[0] === 'create'),
       '--apply': command === 'copy' || settingUp || recoveringProfile,
       '--dry-run': ['launch', 'resume', 'pick', 'copy'].includes(command) || settingUp
-        || (command === 'desktop' && (['switch', 'pick', 'activate', 'add-target', 'open'].includes(params[0])
+        || (command === 'desktop' && (params[0] === 'open'
           || (params[0] === 'recover' && params.length === 2))),
       '--observe': command === 'desktop' && ['current', 'list'].includes(params[0]),
       '--no-open': command === 'desktop' && params[0] === 'recover' && params.length === 1,
-      '--desktop-data': command === 'desktop' && params[0] === 'activate',
-      '--approved-plan': command === 'desktop' && ['activate', 'add-target'].includes(params[0]),
+      '--desktop-data': false,
+      '--approved-plan': false,
       '--profile': command === 'history', '--search': command === 'history', '--limit': command === 'history', '--archived': command === 'history',
       '--close-clients': !options['--dry-run'] && ((command === 'copy' && options['--apply'])
-        || installing || (settingUp && options['--apply']) || (command === 'desktop' && ['switch','pick','restore','recover','activate'].includes(params[0])
+        || installing || (settingUp && options['--apply']) || (command === 'desktop' && ['restore','recover'].includes(params[0])
           && !(params[0] === 'recover' && params.length === 2))),
     };
     for (const [flag, allowed] of Object.entries(allowedOptions)) {
@@ -243,15 +236,11 @@ try {
       }
     } else if (command === 'desktop') {
       const [operation, ...targets] = params;
-      const counts = { recover: [0, 1], open: [1], focus: [1], close: [1], list: [0], 'add-target': [1], switch: [1], pick: [0], current: [0], restore: [0], activate: [1], 'activation-plan': [] };
-      if (operation === 'activation-plan' ? !targets.length : !counts[operation]?.includes(targets.length))
+      const counts = { recover: [0, 1], open: [1], focus: [1], close: [1], list: [0], current: [0], restore: [0] };
+      if (!counts[operation]?.includes(targets.length))
         throw new Error('Invalid desktop command; run xfx --help');
       if (options['--no-open'] && options['--close-clients'])
         throw new Error('--no-open requires already stopped clients and cannot be combined with --close-clients');
-      if (['activate','add-target'].includes(operation) && options['--approved-plan'] && (options['--dry-run'] || options['--desktop-data']))
-        throw new Error('An approved plan cannot be combined with dry-run or path overrides');
-      if (['activate','add-target'].includes(operation) && !options['--dry-run'] && !options['--approved-plan'])
-        throw new Error('Persistent activation is not enabled without an approved plan; use desktop activate PROFILE --dry-run to preview');
       if (operation === 'open') result = options['--dry-run']
         ? await desktopInstancePlan(store, targets[0]) : await openDesktopInstance(store, targets[0]);
       else if (operation === 'list') {
@@ -263,42 +252,20 @@ try {
       else if (operation === 'recover' && targets.length === 1) result = options['--dry-run']
         ? { ...(await desktopInstancePlan(store, targets[0])), status: 'recovery-preview', applyChecks: 'pending', opensDesktop: false }
         : await recoverDesktopInstance(store, targets[0]);
-      else if (operation === 'activate' && options['--dry-run']) {
-        result = await activationPlan(store, targets[0], { desktopData: options['--desktop-data'] });
-        if (result.status === 'blocked-preview') process.exitCode = 2;
-      }
-      else if (operation === 'activation-plan') result = await preparePairedActivation(store, targets);
-      else if (operation === 'add-target' && options['--dry-run']) result = await planActivationTarget(store, targets[0]);
       else if (operation === 'current') {
         result = await currentDesktop(store, { observe: options['--observe'] ?? false });
         if (result.observedDesktop?.status === 'unavailable') process.exitCode = 2;
       }
-      else if (operation === 'switch' && options['--dry-run']) result = await selectionPlan(store, targets[0]);
       else {
-        if (!process.stdin.isTTY || !process.stdout.isTTY || json) throw new Error('Desktop control requires an external interactive terminal; use desktop switch PROFILE --dry-run to preview');
+        if (!process.stdin.isTTY || !process.stdout.isTTY || json) throw new Error('Desktop recovery requires an external interactive terminal');
         const controller = new AbortController(), abort = () => controller.abort();
         const signals = ['SIGINT','SIGTERM','SIGHUP','SIGQUIT','SIGTSTP'];
         for (const signal of signals) process.on(signal, abort);
         try {
           const control = { signal: controller.signal, ready: desktopReady({ noOpen: options['--no-open'] ?? false }),
             runtime: clientRuntime(controller.signal), onProgress: progress };
-          if (operation === 'activate') result = await switchDesktop(store, targets[0], { ...control,
-            requestedActivationPlan: await readPairedPlan(resolve(options['--approved-plan']), store) });
-          else if (operation === 'add-target') {
-            const proposal = JSON.parse(await readFile(resolve(options['--approved-plan']), 'utf8'));
-            if (proposal.extensionOf?.targetProfileId !== find(await store.read(), targets[0]).id)
-              throw new Error('Approved plan names a different target profile');
-            await control.runtime.assertExternal();
-            result = await registerActivationTarget(store, proposal);
-          }
-          else if (operation === 'recover') result = await recoverSelection(store, { ...control, noOpen: options['--no-open'] ?? false });
+          if (operation === 'recover') result = await recoverSelection(store, { ...control, noOpen: options['--no-open'] ?? false });
           else if (operation === 'restore') result = await restoreDesktop(store, control);
-          else {
-            const selected = operation === 'pick' ? await pickDesktop(store, { signal: controller.signal })
-              : { kind: 'profile', profileId: targets[0] };
-            result = selected === null ? { status: 'cancelled' } : options['--dry-run']
-              ? await desktopChoicePlan(store, selected) : await selectDesktop(store, selected, control);
-          }
           if (result.status === 'cancelled') process.exitCode = 130;
         } finally { for (const signal of signals) process.off(signal, abort); }
       }

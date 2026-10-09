@@ -10,7 +10,7 @@ import { helperTemplates, manifestFor, parseArguments } from '../scripts/local-r
 
 test('local release helper templates use the installed executable and a caller-selected store', () => {
   const templates = helperTemplates();
-  assert.deepEqual(Object.keys(templates), ['xfx-desktop-switch.command', 'xfx-desktop-recover.command']);
+  assert.deepEqual(Object.keys(templates), ['xfx-desktop-recover.command']);
   for (const template of Object.values(templates)) {
     assert.match(template, /Usage: \$0 STORE_DIRECTORY/);
     assert.match(template, /XFX_EXECUTABLE:-xfx/);
@@ -40,7 +40,7 @@ test('generated helpers pass a store with shell syntax as one literal argument',
     });
     const args = (await readFile(output, 'utf8')).trimEnd().split('\n');
     assert.deepEqual(args.slice(0, 2), ['--store', store]);
-    assert.deepEqual(args.slice(2), name.includes('recover') ? ['desktop', 'recover', '--no-open'] : ['desktop', 'pick']);
+    assert.deepEqual(args.slice(2), ['desktop', 'recover', '--no-open']);
   }
 });
 

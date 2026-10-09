@@ -79,18 +79,21 @@ for controls, compatibility changes, discovery limits and recovery.
 
 The preview is read-only. A copy or undo records its backup and refuses to overwrite an intervening native change. Restore the desktop to `Default` before applying a copy. The category-based copy surface excludes skills, plugins, MCP configuration, credentials, histories, and repository files. Advanced mode adds standalone skills and rules; it does not copy native history or integrations.
 
-## Desktop selection and recovery
+## Desktop profiles and recovery
 
-Use an external terminal for desktop operations because Xenoflux may offer to quit supported clients gracefully. It never force-kills arbitrary processes; standalone terminal Codex sessions must be closed manually.
+The `Default` profile uses Codex's standard paths, including `~/.codex`. By default, named profiles use isolated homes under `~/.xfx/profiles`; profile creation and registration can use another chosen base path. An older alias selection may remain active until you explicitly restore it. Use an external terminal for desktop recovery; Xenoflux never force-kills arbitrary processes.
 
 ```sh
-xfx desktop pick
+xfx desktop open Research
+xfx desktop list --observe
+xfx desktop focus Research
+xfx desktop close Research
 xfx desktop current --observe
 xfx desktop restore --close-clients
 xfx desktop recover --no-open
 ```
 
-Paired selection changes the Codex home and desktop-data path together. If an interruption leaves a pending operation, recovery keeps its journal and reservation until both paths agree. `desktop recover --no-open` requires all clients to be stopped already and does not reopen Codex.
+The legacy `desktop switch`, `desktop pick`, `desktop activate`, `desktop activation-plan` and `desktop add-target` commands are retired. New named-profile desktops use `desktop open NAME`; `current`, `restore` and the no-name `recover` remain for an existing legacy selection. Restore an active legacy selection before opening a named desktop. For an unfinished selection, use `desktop recover --no-open`, then restore. Recovery with `--no-open` requires all clients to be stopped already and does not reopen Codex.
 
 ## Concurrent desktops
 
@@ -118,8 +121,8 @@ Cmd+Tab, Dock reopening, and profile routing remain acceptance checks pending on
 the target Mac; fixture checks and helper compilation do not establish them.
 
 `xfx desktop recover NAME` releases only a stopped instance's verified reservation;
-it does not quit or reopen an app. Unfinished alias selection still requires the
-existing recovery command. See [concurrent desktop operation](docs/CONCURRENT-DESKTOPS.md)
+it does not quit or reopen an app. For an existing alias selection, use the no-name
+`xfx desktop recover` command. See [concurrent desktop operation](docs/CONCURRENT-DESKTOPS.md)
 for the test boundary and recovery details.
 
 ## RAM logs

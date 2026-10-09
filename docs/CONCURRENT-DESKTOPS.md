@@ -3,7 +3,10 @@
 Development implementation; native acceptance is pending. Each named desktop and
 CLI instance uses its profile's existing native home. A profile has one managed
 client reservation at a time. Configuration overlays supplied by Codex's native
-`--profile` option are separate from Xenoflux native homes.
+`--profile` option are separate from Xenoflux native homes. The `Default` profile
+uses Codex's standard paths, including `~/.codex`. Named profiles use
+`~/.xfx/profiles` by default, but creation or registration may choose another base.
+An existing alias selection may remain active until explicitly restored.
 
 ## Commands
 
@@ -31,12 +34,13 @@ applications and records live under `CONTROLLER/desktop-instances`, outside the
 native homes. Profile renames take effect in the launcher when it is next prepared
 after its desktop stops. A running launcher retains its original display label.
 
-The new commands leave other clients and the default path aliases unchanged. A
-stable existing paired selection on another profile may stay active. A pending
-legacy selection blocks opening until its existing recovery is completed. Legacy
-bundle-wide quit refuses any outstanding concurrent-instance control reservation,
-including another controller store, as well as multiple main processes. Close or
-recover named instances before returning to alias-based selection.
+Named profile desktops leave the default path aliases unchanged. Restore any active
+legacy selection before opening a named desktop. For an unfinished selection, run
+no-name `recover --no-open` first, then restore. The legacy `switch`, `pick`, `activate`,
+`activation-plan` and `add-target` selection commands are retired; `current`,
+`restore` and no-name `recover` remain to inspect or reconcile existing selection
+state. A legacy desktop reservation is shared across controller stores, so an active
+selection in another store also blocks named opening until it is restored.
 
 ## Ownership and recovery
 
@@ -64,11 +68,14 @@ record and reservation. List output distinguishes saved state from live process
 observation; neither proves effective runtime configuration.
 
 If the app was quit normally outside Xenoflux, `open NAME` can reconcile its stopped,
-idle record before reopening. For an interrupted operation, use `desktop recover
-NAME` once that instance has stopped. Recovery validates the original binding,
+idle record before reopening. For an interrupted named-instance operation, use
+`desktop recover NAME` once that instance has stopped. For an interrupted legacy
+selection, use no-name `desktop recover`; `desktop restore` returns to the standard
+default paths. Named-instance recovery validates the original binding,
 journal and exact reservation owner, checks remaining processes and open handles,
-and releases only its own reservation. It does not close other clients or launch
-anything. An ambiguous launch preserves ownership; newly observed but unattributed
+and releases only its own reservation without closing other clients or launching
+anything. Legacy `recover --no-open` requires clients already stopped and does
+not reopen Codex. An ambiguous launch preserves ownership; newly observed but unattributed
 desktop mains block cleanup until they have stopped. Preserve records when identity
 or ownership cannot be established.
 
