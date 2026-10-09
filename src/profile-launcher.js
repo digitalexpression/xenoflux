@@ -230,7 +230,8 @@ function applicationFor(appPath, bundleId, executable) { return { appPath, bundl
 export async function prepareProfileApp(store, plan, {
   build, nodeExecutable = process.execPath, entryPoint = fileURLToPath(new URL('../bin/xfx.js', import.meta.url)),
   allowRebuild = true,
-  source = sourceDefault, execFile = execFileDefault, verifyOriginal: verifyOriginalFn = async appPath => inspectDesktopApp({ appPath, expected: DESKTOP_APP }),
+  source = sourceDefault, execFile = execFileDefault,
+  verifyOriginal: verifyOriginalFn = async (appPath, expected) => inspectDesktopApp({ appPath, expected, execFile, readFile, realpath }),
   copyApp = (from, to) => nodeCp(from, to, { recursive: true, verbatimSymlinks: true, mode: fsConstants.COPYFILE_FICLONE }),
   updatePlist = (path, operations) => updatePlistDefault(path, operations, execFile, writeFile, rm),
   signApp = (path, sourcePath, context) => signDefault(path, sourcePath, context.sourceExecutable, context.bootstrapExecutable, execFile, writeFile, rm),

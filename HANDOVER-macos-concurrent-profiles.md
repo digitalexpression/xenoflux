@@ -34,7 +34,7 @@ opening a still-live prototype instance refuses to create a second app.
 
 ## Verification and blocker
 
-`npm run check`, `npm test` (358 tests) and `git diff --check` pass. A macOS fixture compiled the real
+`npm run check`, `npm test` (359 tests) and `git diff --check` pass. A macOS fixture compiled the real
 Swift source, copied/signed/deep-verified a disposable fake vendor app, validated and
 reused it, and directly executed the bootstrap. The fake vendor proved fixed path
 routing and same PID after exec. No LaunchServices GUI operation was invoked. Static
@@ -48,12 +48,22 @@ blob. Its Info.plist, executable and app.asar hashes stayed unchanged during che
 It was not copied or repaired. This blocks a real-source build/launch check; the
 fixture does not prove Cmd+Tab names, icon count, sign-in or native LaunchServices.
 
+The next user test failed with `APP_IDENTITY_MISMATCH` before an instance opened.
+The copy builder incorrectly passed the fixed `/Applications/Codex.app` identity
+to its second inspection of the discovered `/Applications/ChatGPT.app`. It now
+verifies against the already discovered plan identity using the same injectable
+system I/O. Regression coverage exercises that default verifier, publisher rejection
+and invalid signature rejection. One plain inspector call reported success, but
+repeated inspector/direct checks still failed strict signature verification;
+the cause of that one-off success is unresolved. No signature check was bypassed.
+
 ## Next action
 
-Implementation commit: `7e05de5`. The local candidate under
-`release-artifacts/concurrent-profiles-native-fix-2026-10-09/` was built from that
-revision; detached offline installed-package and installation-lifecycle fixture
-smoke passed. Its manifest records the source revision and hashes. Once a verified installed app
+The original named-app implementation is `7e05de5`; the discovered-source identity
+fix is a later commit. The updated local candidate is under
+`release-artifacts/concurrent-profiles-discovery-fix-2026-10-09/`; its manifest
+records the source revision and hashes. The prior native-fix package is superseded.
+Once a verified installed app
 is available and the user is ready for native testing, recover the stopped RC3 Check
 and Advanced Check prototype records, then open them with the revised development
 CLI. Follow `docs/CONCURRENT-DESKTOPS.md`: exactly one named/icon-bearing Dock and

@@ -91,3 +91,9 @@ app design and close fixes require a new native test. During development the
 installed `/Applications/ChatGPT.app` failed strict signature verification,
 including verification of its main executable; it was left untouched. A verified
 installed app is required before testing the new copied-app launch.
+
+A follow-up test exposed a second verification bug: the copy builder checked the
+discovered `ChatGPT.app` against the fixed `Codex.app` path and rejected its identity.
+The builder now verifies the discovered path and executable while retaining the
+publisher signature requirement. Repeated signature checks still fail on the current
+installation; an isolated successful inspection was not reproducible.

@@ -86,6 +86,41 @@ test('clones a verified vendor bundle into a labelled private app while preservi
   assert.equal(validated.helperSha256, prepared.helperSha256);
 });
 
+test('the default source verifier uses the discovered bundle path and executable', async t => {
+  const f = await fixture(t);
+  f.plan.app.executable = join(f.sourceApp, 'Contents', 'MacOS', 'Codex');
+  const reporter = join(f.sourceApp, 'Contents', 'Frameworks', 'Codex Framework.framework', 'Versions', '155.0.8059.27', 'Helpers', 'browser_crashpad_handler');
+  await mkdir(join(reporter, '..'), { recursive: true, mode: 0o700 });
+  await writeFile(reporter, 'fixture crash reporter', { mode: 0o700 });
+  await symlink('Versions/155.0.8059.27/Helpers', join(f.sourceApp, 'Contents', 'Frameworks', 'Codex Framework.framework', 'Helpers'));
+  const infoPath = join(f.sourceApp, 'Contents', 'Info.plist');
+  const info = JSON.parse(await readFile(infoPath, 'utf8'));
+  Object.assign(info, { CFBundleShortVersionString: '26.1002.52244', CFBundleVersion: '13536' });
+  await writeFile(infoPath, JSON.stringify(info), { mode: 0o600 });
+  const { verifyOriginal: _override, ...options } = f.options;
+  const commands = [];
+  options.execFile = async (command, args, settings) => {
+    commands.push({ command, args, settings });
+    return f.options.execFile(command, args, settings);
+  };
+  const prepared = await prepareProfileApp(f.store, f.plan, options);
+  assert.equal(prepared.application.executable.endsWith('/Contents/MacOS/Codex'), true);
+  const sourceSignature = commands.find(call => call.command === '/usr/bin/codesign' && call.args.at(-1) === f.sourceApp);
+  assert.ok(sourceSignature, 'the discovered source still requires publisher signature verification');
+  assert.match(sourceSignature.args.find(arg => arg.startsWith('-R=')), /com\.openai\.codex/);
+
+  info.CFBundleIdentifier = 'other.publisher';
+  await writeFile(infoPath, JSON.stringify(info), { mode: 0o600 });
+  await assert.rejects(prepareProfileApp(f.store, f.plan, options), { code: 'APP_IDENTITY_MISMATCH' });
+  info.CFBundleIdentifier = f.plan.app.bundleId;
+  await writeFile(infoPath, JSON.stringify(info), { mode: 0o600 });
+  options.execFile = async (command, args, settings) => {
+    if (command === '/usr/bin/codesign' && args.at(-1) === f.sourceApp) throw new Error('invalid source signature');
+    return f.options.execFile(command, args, settings);
+  };
+  await assert.rejects(prepareProfileApp(f.store, f.plan, options), { code: 'APP_SIGNATURE_INVALID' });
+});
+
 test('default bundle copy creates independent files rather than links into the source app', async t => {
   const { store, plan, options, sourceApp } = await fixture(t);
   const prepared = await prepareProfileApp(store, plan, { ...options, copyApp: undefined });
