@@ -18,46 +18,48 @@ function run(args) {
   });
 }
 
-test('retired desktop selection commands fail before looking up or creating a controller', async t => {
+test('legacy desktop controls have no CLI path and do not create a controller', async t => {
   const root = await mkdtemp(join(tmpdir(), 'xfx-desktop-retirement-'));
   t.after(() => rm(root, { force: true, recursive: true }));
   const store = join(root, 'missing-store');
   const cases = [
-    [['desktop', 'switch', 'Research', '--dry-run'], 'switch'],
-    [['desktop', 'pick', '--dry-run'], 'pick'],
-    [['desktop', 'activate', 'Research', '--dry-run'], 'activate'],
-    [['desktop', 'activate', 'Research', '--approved-plan', join(root, 'plan.json')], 'activate'],
-    [['desktop', 'activate', 'Research', '--desktop-data', join(root, 'data')], 'activate'],
-    [['desktop', 'activation-plan', 'Research'], 'activation-plan'],
-    [['desktop', 'add-target', 'Research', '--approved-plan', join(root, 'plan.json')], 'add-target'],
+    [['desktop', 'switch', 'Research', '--dry-run']],
+    [['desktop', 'pick', '--dry-run']],
+    [['desktop', 'activate', 'Research', '--dry-run']],
+    [['desktop', 'activation-plan', 'Research']],
+    [['desktop', 'add-target', 'Research']],
+    [['desktop', 'current', '--observe']],
+    [['desktop', 'restore']],
+    [['desktop', 'recover']],
+    [['desktop', 'recover', '--no-open']],
   ];
-  for (const [args, operation] of cases) {
+  for (const [args] of cases) {
     const result = await run(['--store', store, ...args]);
     assert.equal(result.code, 1, args.join(' ') + ': ' + result.stderr);
-    assert.match(result.stderr, new RegExp('Legacy desktop ' + operation + ' is retired'));
-    assert.match(result.stderr, /xfx desktop open NAME/);
+    assert.ok(/Invalid desktop command|Unknown option: --no-open|is not supported by desktop/.test(result.stderr), result.stderr);
     await assert.rejects(access(store));
   }
 });
 
-test('help keeps supported controls without advertising retired desktop selection', async () => {
+test('help advertises only named desktop controls while retaining the CLI picker', async () => {
   const result = await run(['--help']);
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /desktop open NAME/);
-  assert.match(result.stdout, /desktop current \[--observe\] \| desktop restore \| desktop recover/);
-  for (const retired of ['desktop switch', 'desktop pick', 'desktop activate', 'desktop activation-plan', 'desktop add-target'])
+  assert.match(result.stdout, /desktop recover NAME/);
+  for (const retired of ['desktop switch', 'desktop pick', 'desktop activate', 'desktop activation-plan', 'desktop add-target',
+    'desktop current', 'desktop restore', 'desktop recover --no-open'])
     assert.doesNotMatch(result.stdout, new RegExp(retired));
   assert.match(result.stdout, /pick \[--repo DIRECTORY\]/);
 });
 
-test('retired desktop-only options are rejected on supported commands before controller lookup', async t => {
+test('removed desktop-only options are unknown on supported commands before controller lookup', async t => {
   const root = await mkdtemp(join(tmpdir(), 'xfx-desktop-options-'));
   t.after(() => rm(root, { force: true, recursive: true }));
   const store = join(root, 'missing-store');
   for (const [option, value] of [['--approved-plan', join(root, 'plan.json')], ['--desktop-data', join(root, 'data')]]) {
     const result = await run(['--store', store, 'desktop', 'open', 'Research', option, value]);
     assert.equal(result.code, 1, option + ': ' + result.stderr);
-    assert.match(result.stderr, new RegExp(option + ' is not supported by desktop'));
+    assert.match(result.stderr, new RegExp('Unknown option: ' + option));
     await assert.rejects(access(store));
   }
 });

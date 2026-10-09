@@ -1,15 +1,11 @@
-// Bounded ownership for an externally launched Codex desktop app.  This is
-// deliberately not a general process manager: it only observes the selected
-// bundle, asks that bundle to quit gracefully, and launches that bundle with a
-// supplied environment.  It never reads command arguments, environments,
-// credentials, or application data.
+// Observe Codex clients and close verified blockers before local maintenance.
+// Process inspection excludes arguments, environments, credentials and app data.
 import { execFile as nodeExecFile } from 'node:child_process';
 import { lstat as nodeLstat, readFile as nodeReadFile, realpath as nodeRealpath } from 'node:fs/promises';
 import { userInfo as nodeUserInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { basename } from 'node:path';
-import { createLogStorage } from './log-storage.js';
 import { assertNoConcurrentDesktops } from './desktop-instance-guard.js';
 
 const execFileDefault = promisify(nodeExecFile);
@@ -43,9 +39,6 @@ const MESSAGES = {
   CLIENT_QUIT_FAILED: 'A blocking client did not complete the quit request. Dismiss its quit confirmation before retrying.',
   CANCELLED: 'Client shutdown was cancelled',
   PROCESS_IDENTITY_CHANGED: 'Codex desktop process identity changed while waiting',
-  DESKTOP_OPEN_FAILED: 'Unable to open the Codex desktop app',
-  DESKTOP_OPEN_TIMEOUT: 'Codex desktop did not expose one main process before the timeout',
-  DESKTOP_OPEN_AMBIGUOUS: 'Codex desktop exposed more than one main process',
 };
 
 export class DesktopRuntimeError extends Error {
@@ -165,7 +158,7 @@ export async function inspectDesktopApp({
 }
 
 /**
- * Create the desktop side of a profile-switch controller.  All process and
+ * Create the client-maintenance runtime. All process and
  * command operations can be injected for tests; production defaults use only
  * macOS system tools with sanitized environments.
  */
@@ -184,7 +177,6 @@ export function createDesktopRuntime({
   currentPid = process.pid,
   userInfo = nodeUserInfo,
   stopTimeoutMs = 10000,
-  openTimeoutMs = 15000,
   pollIntervalMs = 100,
   systemTimeoutMs = 5000,
   quitTimeoutMs = 60000,
@@ -192,13 +184,12 @@ export function createDesktopRuntime({
   confirmCloseClients,
   signal,
   onProgress = () => {},
-  ramLogs = createLogStorage(),
   concurrentLockPath,
 } = {}) {
   if (!validAbsolute(appPath) || typeof bundleId !== 'string' || !bundleId || !validAbsolute(executable) ||
     typeof execFile !== 'function' || typeof lstat !== 'function' || (processSnapshot !== undefined && typeof processSnapshot !== 'function') ||
     typeof sleep !== 'function' || typeof now !== 'function' || !Number.isSafeInteger(currentPid) || currentPid <= 0 ||
-    typeof userInfo !== 'function' || ![stopTimeoutMs, openTimeoutMs, pollIntervalMs, systemTimeoutMs, quitTimeoutMs].every(v => Number.isFinite(v) && v > 0) ||
+    typeof userInfo !== 'function' || ![stopTimeoutMs, pollIntervalMs, systemTimeoutMs, quitTimeoutMs].every(v => Number.isFinite(v) && v > 0) ||
     typeof closeClients !== 'boolean' || (confirmCloseClients !== undefined && typeof confirmCloseClients !== 'function') || typeof onProgress !== 'function' ||
     (signal !== undefined && (!signal || typeof signal !== 'object' || typeof signal.aborted !== 'boolean'))) throw error('INVALID_OPTIONS');
 
@@ -529,20 +520,9 @@ export function createDesktopRuntime({
     return { clients: publicDescriptors };
   }
 
-  // A pre-quit usability check. The running desktop and its descendants are
-  // expected here; the strict post-quit assertIdle check still requires them gone.
-  async function assertNoOtherClients(options = {}) {
-    if (!options || typeof options !== 'object' || Array.isArray(options)
-      || !Array.isArray(options.cliExecutables ?? []) || !(options.cliExecutables ?? []).every(validAbsolute)) throw error('INVALID_OPTIONS');
-    const desktop = await observed();
-    const clients = cliClients(desktop.all, options.cliExecutables ?? [], new Set(desktop.entries.map(row => row.pid)));
-    if (clients.length) throw error('CLI_RUNNING', clients);
-    return { otherClients: [] };
-  }
-
   /**
    * Confirm no managed desktop, same-user standalone CLI, or explicit shared
-   * resource handle can race a paired home/alias change. This is inspection
+   * resource handle can race a native-home change. This is inspection
    * only: it never closes a handle, kills a process, or walks a directory.
    */
   async function assertIdle(options = {}) {
@@ -593,11 +573,6 @@ export function createDesktopRuntime({
     return true;
   }
 
-  async function command(path, args, env) {
-    try { await execFile(path, args, { cwd: '/', env, encoding: 'utf8', maxBuffer: 65536, timeout: systemTimeoutMs }); }
-    catch { throw error('DESKTOP_OPEN_FAILED'); }
-  }
-
   function identitiesStillMatch(initial, all) {
     const byPid = new Map(all.map(row => [row.pid, row]));
     for (const old of initial) {
@@ -617,8 +592,8 @@ export function createDesktopRuntime({
     // Sending an Apple event in that state can itself activate the app, so the
     // controller must recover the leftover explicitly instead of guessing.
     const mains = before.entries.filter(row => row.executable === executable);
-    // This legacy controller addresses a shared bundle ID. Concurrent profile
-    // instances must be closed individually through their recorded PID instead.
+    // Named instances close through their verified PID. Maintenance may address
+    // the default bundle only when no named instance is reserved.
     if (mains.length !== 1 || mains[0].uid !== currentUid()) throw error('DESKTOP_RUNNING', before.entries);
     // The native confirmation is interactive; a five-second system-command
     // budget is unsuitable while a person is deciding whether to end tasks.
@@ -641,54 +616,6 @@ export function createDesktopRuntime({
     }
   }
 
-  function validPlan(plan) {
-    return plan && typeof plan === 'object' && validAbsolute(plan.home) && validAbsolute(plan.desktopData) && plan.env &&
-      validAbsolute(plan.env.HOME) && validAbsolute(plan.env.TMPDIR);
-  }
-
-  async function waitForOneMain() {
-    const until = now() + openTimeoutMs;
-    while (true) {
-      const next = await observed();
-      const mains = next.entries.filter(row => row.executable === executable);
-      if (mains.length === 1) return next.entries;
-      if (mains.length > 1) throw error('DESKTOP_OPEN_AMBIGUOUS');
-      if (now() >= until) throw error('DESKTOP_OPEN_TIMEOUT');
-      await sleep(pollIntervalMs);
-    }
-  }
-
-  async function open(plan) {
-    if (!validPlan(plan)) throw error('INVALID_OPTIONS');
-    await assertExternal();
-    const before = await observed();
-    if (before.entries.length) throw error('DESKTOP_RUNNING', before.entries);
-    const env = safeSystemEnvironment();
-    const args = ['-n', '--env', `CODEX_HOME=${plan.home}`, '--env', `CODEX_ELECTRON_USER_DATA_PATH=${plan.desktopData}`,
-      '--env', `CODEX_SQLITE_HOME=${plan.home}`, '--env', `HOME=${plan.env.HOME}`, '--env', `TMPDIR=${plan.env.TMPDIR}`,
-      appPath, '--args', `--user-data-dir=${plan.desktopData}`];
-    await command('/usr/bin/open', args, env);
-    return waitForOneMain();
-  }
-
-  async function restore() {
-    await assertExternal();
-    const before = await observed();
-    if (before.entries.length) throw error('DESKTOP_RUNNING', before.entries);
-    let home;
-    try { home = userInfo().homedir; } catch { throw error('INVALID_OPTIONS'); }
-    if (!validAbsolute(home)) throw error('INVALID_OPTIONS');
-    await command('/usr/bin/open', [appPath], safeSystemEnvironment(home));
-    return waitForOneMain();
-  }
-
-  function seedTracked(entries) {
-    const normalized = normalizeRows(entries);
-    tracked = new Map(normalized.map(row => [identity(row), row]));
-  }
-
-  return { inspectApp, assertExternal, assertNoOtherClients, assertIdle, prepareClients, snapshot, seedTracked, stop, open, restore,
-    ensureLogStorage: options => ramLogs.ensureMounted(options),
-    ensureHomeLogs: options => ramLogs.prepareHome(options),
+  return { inspectApp, assertExternal, assertIdle, prepareClients, snapshot, stop,
     retainedCrashpad: () => retained.map(row => ({ ...row })) };
 }

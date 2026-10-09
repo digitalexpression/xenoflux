@@ -42,5 +42,3 @@ Use `xfx install --close-clients` to reinstall from an installed bundle, or prov
 Keep the four release files until installation has been checked. If interruption during app replacement leaves `xfx` unavailable, rerun `node install.mjs --close-clients` from that directory in an external terminal. A RAM-service setup failure can leave the new CLI installed with disk logs; inspect its status before retrying. Installation does not promise atomic rollback of every completed step.
 
 The automated checks cover package construction and disposable fixtures. Before relying on an installation, complete the manual acceptance on the target Mac: native profile sign-in, a graceful client shutdown, and a reboot with the RAM-log service enabled.
-
-The rc.3 build passed user-operated acceptance on one Mac: native sign-in, client shutdown, paired desktop selection, Dock reopening, Default restoration, copy/undo, RAM routing, and automatic RAM preparation after reboot. That run supplied the terminal PATH explicitly. rc.4 adds automatic terminal-PATH discovery; its fixture checks do not constitute a new live-Mac acceptance run.

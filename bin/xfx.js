@@ -9,8 +9,6 @@ import { registerHome, unbindHome, listHomes } from '../src/homes.js';
 import { launchPlan, launchHome } from '../src/launcher.js';
 import { pickProfile } from '../src/picker.js';
 import { listHistory } from '../src/history.js';
-import { desktopReady } from '../src/desktop.js';
-import { currentDesktop, restoreDesktop, recoverSelection } from '../src/desktop-selection.js';
 import { COPY_COMPONENTS, planCopy, applyCopy, planUndo, undoCopy } from '../src/native-copy.js';
 import { pickCopyComponents, confirmCopyAction } from '../src/copy-picker.js';
 import { inspectProfile } from '../src/profile-inventory.js';
@@ -54,8 +52,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   pick [--repo DIRECTORY] [--dry-run] [--viewer EXECUTABLE]
   desktop open NAME [--dry-run]          Open or focus a concurrent profile desktop
   desktop list [--observe] | desktop focus NAME | desktop close NAME
-  desktop recover NAME [--dry-run]       Release a stopped concurrent instance's reservation
-  desktop current [--observe] | desktop restore | desktop recover [--no-open]
+  desktop recover NAME [--dry-run]       Release a stopped named instance's reservation
   install [--background-path PATH] | uninstall
   ramlogs enable [--background-path PATH] | ramlogs disable
   ramlogs ensure | ramlogs status | ramlogs inspect NAME
@@ -66,7 +63,7 @@ Store: --store, XFX_HOME, or ~/.xfx/controller.
 Comparison covers copyable native settings only; skills/plugins/MCP and effective repository configuration are excluded.
 All copy modes preserve unselected settings and destination-only items; selected skill packages are replaced exactly.
 Default remains at Codex's standard paths; named profiles use isolated homes under the Xenoflux profile store. Native sign-in never clones credentials or history.
---close-clients permits graceful shutdown for desktop control, copy --apply, or profile create/signin --apply.
+--close-clients permits graceful shutdown for copy --apply or profile create/signin --apply.
 Mutation prompts and external-terminal checks still apply. Read-only operations never quit applications.
 `;
 const argv = process.argv.slice(2);
@@ -77,11 +74,11 @@ try {
     const value = argv[i];
     if (value === '--json') { json = true; continue; }
     if (value === '--help' || value === '-h') { options.help = true; continue; }
-    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--no-open', '--advanced'].includes(value)) { options[value] = true; continue; }
+    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--advanced'].includes(value)) { options[value] = true; continue; }
     if (value.startsWith('--')) {
       const equals = value.indexOf('=');
       const flag = equals < 0 ? value : value.slice(0, equals);
-      if (!['--store', '--description', '--repo', '--base', '--from', '--viewer', '--viewer-arg', '--codex', '--codex-version', '--profile', '--search', '--limit', '--desktop-data', '--approved-plan', '--include', '--background-path', '--key'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
+      if (!['--store', '--description', '--repo', '--base', '--from', '--viewer', '--viewer-arg', '--codex', '--codex-version', '--profile', '--search', '--limit', '--include', '--background-path', '--key'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
       if (options[flag] !== undefined && !['--viewer-arg'].includes(flag)) throw new Error(`Repeated option: ${flag}`);
       if (equals < 0 && (argv[i + 1] === undefined || argv[i + 1].startsWith('--'))) throw new Error(`Missing value for ${flag}`);
       const argument = equals < 0 ? argv[++i] : value.slice(equals + 1);
@@ -92,9 +89,6 @@ try {
   if (options.help || !args.length) { process.stdout.write(help); }
   else {
     const [command, ...params] = args;
-    const retiredDesktopCommands = new Set(['switch', 'pick', 'activate', 'activation-plan', 'add-target']);
-    if (command === 'desktop' && retiredDesktopCommands.has(params[0]))
-      throw new Error(`Legacy desktop ${params[0]} is retired; use "xfx desktop open NAME" for a named profile. Use "xfx desktop current", "xfx desktop restore", or "xfx desktop recover" to inspect or recover an existing legacy selection.`);
     const arity = { copy: 2, compare: 2, launch: 1, resume: 2, history: 0, pick: 0, install: 0, uninstall: 0 };
     const grouped = ['profile', 'desktop', 'ramlogs'].includes(command);
     if (!grouped && !Object.hasOwn(arity, command)) throw new Error(`Unknown command: ${command}`);
@@ -117,14 +111,10 @@ try {
       '--dry-run': ['launch', 'resume', 'pick', 'copy'].includes(command) || settingUp
         || (command === 'desktop' && (params[0] === 'open'
           || (params[0] === 'recover' && params.length === 2))),
-      '--observe': command === 'desktop' && ['current', 'list'].includes(params[0]),
-      '--no-open': command === 'desktop' && params[0] === 'recover' && params.length === 1,
-      '--desktop-data': false,
-      '--approved-plan': false,
-      '--profile': command === 'history', '--search': command === 'history', '--limit': command === 'history', '--archived': command === 'history',
+      '--observe': command === 'desktop' && params[0] === 'list',
       '--close-clients': !options['--dry-run'] && ((command === 'copy' && options['--apply'])
-        || installing || (settingUp && options['--apply']) || (command === 'desktop' && ['restore','recover'].includes(params[0])
-          && !(params[0] === 'recover' && params.length === 2))),
+        || installing || (settingUp && options['--apply'])),
+      '--profile': command === 'history', '--search': command === 'history', '--limit': command === 'history', '--archived': command === 'history',
     };
     for (const [flag, allowed] of Object.entries(allowedOptions)) {
       if (options[flag] !== undefined && !allowed) throw new Error(`${flag} is not supported by ${command}`);
@@ -220,7 +210,7 @@ try {
           for (const signal of signals) process.on(signal, abort);
           try {
             process.stdout.write(`${displayJSON(review)}\n`);
-            process.stdout.write('Return to Default through desktop restore first if a named desktop is selected. Blocking applications will be offered a graceful quit; standalone terminal Codex sessions must be closed manually.\n');
+            process.stdout.write('Applying a copy may require a graceful client shutdown; standalone terminal Codex sessions must be closed manually.\n');
             const action = undo ? 'undo' : 'copy';
             if (!await confirmCopyAction(action, { signal: controller.signal })) { result = { status: 'cancelled' }; process.exitCode = 130; }
             else {
@@ -236,11 +226,9 @@ try {
       }
     } else if (command === 'desktop') {
       const [operation, ...targets] = params;
-      const counts = { recover: [0, 1], open: [1], focus: [1], close: [1], list: [0], current: [0], restore: [0] };
+      const counts = { recover: [1], open: [1], focus: [1], close: [1], list: [0] };
       if (!counts[operation]?.includes(targets.length))
         throw new Error('Invalid desktop command; run xfx --help');
-      if (options['--no-open'] && options['--close-clients'])
-        throw new Error('--no-open requires already stopped clients and cannot be combined with --close-clients');
       if (operation === 'open') result = options['--dry-run']
         ? await desktopInstancePlan(store, targets[0]) : await openDesktopInstance(store, targets[0]);
       else if (operation === 'list') {
@@ -249,26 +237,9 @@ try {
       }
       else if (operation === 'focus') result = await focusDesktopInstance(store, targets[0]);
       else if (operation === 'close') result = await closeDesktopInstance(store, targets[0]);
-      else if (operation === 'recover' && targets.length === 1) result = options['--dry-run']
+      else if (operation === 'recover') result = options['--dry-run']
         ? { ...(await desktopInstancePlan(store, targets[0])), status: 'recovery-preview', applyChecks: 'pending', opensDesktop: false }
         : await recoverDesktopInstance(store, targets[0]);
-      else if (operation === 'current') {
-        result = await currentDesktop(store, { observe: options['--observe'] ?? false });
-        if (result.observedDesktop?.status === 'unavailable') process.exitCode = 2;
-      }
-      else {
-        if (!process.stdin.isTTY || !process.stdout.isTTY || json) throw new Error('Desktop recovery requires an external interactive terminal');
-        const controller = new AbortController(), abort = () => controller.abort();
-        const signals = ['SIGINT','SIGTERM','SIGHUP','SIGQUIT','SIGTSTP'];
-        for (const signal of signals) process.on(signal, abort);
-        try {
-          const control = { signal: controller.signal, ready: desktopReady({ noOpen: options['--no-open'] ?? false }),
-            runtime: clientRuntime(controller.signal), onProgress: progress };
-          if (operation === 'recover') result = await recoverSelection(store, { ...control, noOpen: options['--no-open'] ?? false });
-          else if (operation === 'restore') result = await restoreDesktop(store, control);
-          if (result.status === 'cancelled') process.exitCode = 130;
-        } finally { for (const signal of signals) process.off(signal, abort); }
-      }
     } else if (command === 'history') {
       if (options['--limit'] !== undefined && !/^[1-9]\d*$/.test(options['--limit'])) throw new Error('History limit must be a positive integer');
       result = await listHistory(store, { profile: options['--profile'], query: options['--search'],

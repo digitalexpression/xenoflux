@@ -8,7 +8,7 @@ import { runInteractive } from './interactive-process.js';
 import { createLogStorage } from './log-storage.js';
 import { nativePath } from './node-runtime.js';
 
-const knownErrors = new Set(['CANCELLED', 'SPAWN_FAILED', 'SHUTDOWN_FAILED', 'VERSION_MISMATCH', 'EXECUTABLE_CHANGED', 'HOME_CHANGED', 'OUTPUT_LIMIT', 'RPC_TIMEOUT', 'RAM_LOGS_UNAVAILABLE', 'RESUME_INDEX_CHANGED']);
+const knownErrors = new Set(['CANCELLED', 'SPAWN_FAILED', 'SHUTDOWN_FAILED', 'VERSION_MISMATCH', 'EXECUTABLE_CHANGED', 'HOME_CHANGED', 'OUTPUT_LIMIT', 'RPC_TIMEOUT', 'RAM_LOGS_UNAVAILABLE']);
 async function privateDirectory(path) {
   const s = await lstat(path);
   if (!s.isDirectory() || s.isSymbolicLink() || await realpath(path) !== path || (s.mode & 0o077)
@@ -22,7 +22,7 @@ async function record(path, value) {
 
 export async function launchPlan(store, name, terminalEnvironment = process.env, { repository, resumeId } = {}) {
   const { profile, native, environment } = await resolveHome(store, name);
-  let cwd = environment.cwd, resumeIndexRepair;
+  let cwd = environment.cwd;
   if (repository !== undefined) {
     if (typeof repository !== 'string' || !repository.trim() || /[\x00-\x1f\x7f]/.test(repository)) throw new Error('Invalid repository path');
     cwd = await realpath(repository);
@@ -38,8 +38,6 @@ export async function launchPlan(store, name, terminalEnvironment = process.env,
       throw new Error('Bind the task repository to this profile before resuming it');
     if (repository !== undefined && cwd !== entry.cwd) throw new Error('Selected repository differs from the saved task workspace');
     cwd = entry.cwd;
-    if (entry.recordedRolloutPath) resumeIndexRepair = { from: entry.recordedRolloutPath, to: entry.rolloutPath,
-      createdAt: entry.createdAt, updatedAt: entry.updatedAt };
   }
   if (typeof cwd !== 'string' || /[\x00-\x1f\x7f]/.test(cwd) || await realpath(cwd) !== cwd || !(await stat(cwd)).isDirectory())
     throw new Error('The saved workspace is no longer available at its canonical path');
@@ -58,7 +56,6 @@ export async function launchPlan(store, name, terminalEnvironment = process.env,
     native: structuredClone(profile.native),
     args: [...(resumeId ? ['resume', resumeId] : []), '--no-alt-screen', '--cd', cwd, '-c', `sqlite_home=${JSON.stringify(environment.home)}`], env,
     operation: resumeId ? 'resume' : 'launch', ...(resumeId ? { resumeId } : {}),
-    ...(resumeIndexRepair ? { resumeIndexRepair } : {}),
     configurationChangedSinceRegistration: false,
     configurationSource: join(environment.home, 'config.toml'),
     desktopChanged: false };
@@ -93,13 +90,6 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     await ramLogs.prepareHome({ home: plan.home, key: plan.environmentId, signal });
     await onStart(plan);
     if (signal?.aborted) throw Object.assign(new Error('Launch cancelled'), { code: 'CANCELLED' });
-    if (plan.resumeIndexRepair) {
-      const { repairResumePath } = await import('./history.js');
-      report.resumeIndexRepair = { ...plan.resumeIndexRepair, status: 'pending' };
-      await record(reportPath, report);
-      report.resumeIndexRepair = await repairResumePath(store, plan);
-      await record(reportPath, report);
-    }
     const result = await run({ executable: plan.executable, args: plan.args, cwd: plan.cwd, env: plan.env, signal,
       async onSpawn(pid) { report.pid = pid; report.status = 'running'; await record(reportPath, report); } });
     Object.assign(report, result);

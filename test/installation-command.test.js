@@ -29,13 +29,14 @@ test('installation holds native authority during routing and releases it on fail
     logs: { prepareHome: async ({home,key}) => {
       assert.equal(home, join(f.home, '.codex')); assert.equal(key, 'default');
       assert.ok((await lstat(f.lockPath)).isDirectory());
+      assert.ok((await lstat(f.lockPath + '.operation')).isDirectory());
       f.events.push('prepare'); throw new Error('mount failed');
     } },
     installation: ({ prepareLogs }) => ({ install: prepareLogs }),
   }), /mount failed/);
   assert.deepEqual(f.events.slice(0, 4), ['node', 'external', 'quit', 'idle']);
   await assert.rejects(lstat(f.lockPath), {code:'ENOENT'});
-  await assert.rejects(lstat(f.lockPath + '.selection'), {code:'ENOENT'});
+  await assert.rejects(lstat(f.lockPath + '.operation'), {code:'ENOENT'});
 });
 
 test('CLI Node failure precedes client shutdown and controller writes', async t => {
@@ -45,6 +46,18 @@ test('CLI Node failure precedes client shutdown and controller writes', async t 
   }), /missing Node/);
   assert.deepEqual(f.events, []);
   await assert.rejects(lstat(f.store.directory), {code:'ENOENT'});
+});
+
+test('installation no longer imports or runs retired desktop selection recovery', async t => {
+  const f = await fixture(t), sessionDir = join(f.store.directory, 'desktop-selection');
+  await mkdir(sessionDir, { recursive: true, mode: 0o700 });
+  await writeFile(join(sessionDir, 'session.json'), '{retired}', { mode: 0o600 });
+  await mkdir(join(f.store.directory, 'activation'), { mode: 0o700 });
+  await writeFile(join(f.store.directory, 'activation', 'manifest.json'), '{retired}', { mode: 0o600 });
+  const result = await installationCommand(f.store, 'install', { ...f, userHome: f.home,
+    nodeCheck: async () => {}, logs: {}, installation: () => ({ install: async () => 'installed' }) });
+  assert.equal(result, 'installed');
+  assert.deepEqual(f.events, ['external', 'quit', 'idle']);
 });
 
 test('disk log cleanup does not read a controller and rejects a self-hosted operation', async t => {

@@ -5,12 +5,11 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createPairedPathFixture } from '../test-support/paired-path-fixture.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const usage = `Usage: npm run local-release -- --output DIRECTORY [--smoke] [--helpers DIRECTORY]
+const usage = `Usage: npm run local-release -- --output DIRECTORY [--smoke]
 
 Builds the current Xenoflux package locally, writes a SHA-256 manifest beside it,
 and optionally verifies a detached offline installation using the checked-out
@@ -18,7 +17,6 @@ smol-toml dependency. It never installs xfx globally or changes profile stores.
 
   --output DIRECTORY  New directory for the tarball and manifest.
   --smoke             Verify a detached offline install and disposable fixture lifecycle.
-  --helpers DIRECTORY New directory for external-terminal helper templates.
 `;
 
 function argument(value, name) {
@@ -32,27 +30,10 @@ export function parseArguments(argv) {
     const value = argv[index];
     if (value === '--help' || value === '-h') options.help = true;
     else if (value === '--smoke') options.smoke = true;
-    else if (value === '--output' || value === '--helpers') options[value.slice(2)] = argument(argv[++index], value);
+    else if (value === '--output') options.output = argument(argv[++index], value);
     else throw new Error(`Unknown option: ${value}`);
   }
   return options;
-}
-
-export function helperTemplates() {
-  const preamble = `#!/bin/sh
-set -eu
-
-if [ "$#" -ne 1 ]; then
-  printf '%s\\n' "Usage: $0 STORE_DIRECTORY" >&2
-  exit 64
-fi
-
-`;
-  const executable = 'xfx_executable=${XFX_EXECUTABLE:-xfx}\n';
-  return {
-    'xfx-desktop-recover.command': `${preamble}${executable}exec "$xfx_executable" --store "$1" desktop recover --no-open
-`,
-  };
 }
 
 export function manifestFor({ packageName, version, tarball, sha256, dependencies, sourceRevision, smoke }) {
@@ -113,16 +94,6 @@ async function pack(directory, destination, cache) {
   if (!Array.isArray(entries) || entries.length !== 1 || typeof entries[0].filename !== 'string')
     throw new Error('npm pack did not return exactly one tarball');
   return entries[0];
-}
-
-async function writeHelpers(directory) {
-  const target = await newDirectory(resolve(directory), 'Helper directory');
-  for (const [name, contents] of Object.entries(helperTemplates())) {
-    const path = join(target, name);
-    await writeFile(path, contents, { mode: 0o700 });
-    await chmod(path, 0o700);
-  }
-  return target;
 }
 
 async function writeInstaller(directory) {
@@ -221,26 +192,6 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
       !(await stat(join(targetSkill, 'obsolete-empty'))).isDirectory() ||
       await exists(join(targetSkill, 'marker.txt')))
       throw new Error('Installed xfx did not restore its exact pre-copy package/config state');
-    const fixture = join(temporary, 'paired fixture');
-    const { PairedPathTransaction } = await import(pathToFileURL(join(installedRoot, 'src', 'paired-path-transaction.js')).href);
-    const lab = createPairedPathFixture(fixture, PairedPathTransaction);
-    const initial = await lab.init();
-    const original = await Promise.all(initial.components.map(async component => {
-      const info = await stat(component.alias);
-      return { device: info.dev, inode: info.ino };
-    }));
-    const switched = await lab.switchTo('A');
-    if (switched.selected !== 'A') throw new Error('Installed xfx did not switch its paired fixture');
-    const recovered = await lab.recover();
-    if (recovered.selected !== 'A' || recovered.recovered !== false) throw new Error('Installed xfx did not preserve a committed paired selection during recovery');
-    const restored = await lab.restore();
-    if (restored.selected !== 'Default') throw new Error('Installed xfx did not restore its paired fixture');
-    const restoredIds = await Promise.all(restored.components.map(async component => {
-      const info = await stat(component.alias);
-      return { device: info.dev, inode: info.ino };
-    }));
-    if (JSON.stringify(original) !== JSON.stringify(restoredIds))
-      throw new Error('Installed xfx did not preserve paired fixture identities');
     const { createInstallation } = await import(pathToFileURL(join(installedRoot, 'src', 'installation.js')).href);
     const userHome = join(temporary, 'installation user');
     const controller = join(userHome, '.xfx', 'controller');
@@ -304,8 +255,7 @@ export async function main(argv = process.argv.slice(2)) {
       sourceRevision, smoke });
     const manifestPath = join(output, 'manifest.json');
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 });
-    const helpers = options.helpers ? await writeHelpers(options.helpers) : null;
-    process.stdout.write(JSON.stringify({ status: 'built', output, tarball, manifest: manifestPath, installer, helpers, smoke }, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ status: 'built', output, tarball, manifest: manifestPath, installer, smoke }, null, 2) + '\n');
   } finally { await rm(cache, { force: true, recursive: true }); }
 }
 

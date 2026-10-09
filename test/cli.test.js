@@ -27,7 +27,7 @@ async function fixture(t) {
 test('help and retained read-only commands do not create a controller', async t => {
   const f = await fixture(t);
   assert.deepEqual(f.ok('profile', 'list'), []);
-  assert.deepEqual(f.ok('desktop', 'current'), { status: 'unmanaged', activeProfile: null });
+  assert.deepEqual(f.ok('desktop', 'list'), { instances: [], observation: 'last-recorded', liveHomeChanged: false });
   await assert.rejects(stat(f.store), { code: 'ENOENT' });
   const help = spawnSync(process.execPath, [executable, '--help'], { encoding: 'utf8' });
   assert.equal(help.status, 0);

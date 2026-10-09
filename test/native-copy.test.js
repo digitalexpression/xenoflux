@@ -9,7 +9,7 @@ import { parse, stringify } from 'smol-toml';
 import { Store, create, renameProfile } from '../src/profiles.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome } from '../src/homes.js';
-import { planCopy, applyCopy, planUndo, undoCopy } from '../src/native-copy.js';
+import { planCopy, applyCopy, planUndo, undoCopy, resolveNativeSettingsHome } from '../src/native-copy.js';
 import { createDesktopRuntime, DESKTOP_APP } from '../src/desktop-runtime.js';
 
 const text = path => readFile(path, 'utf8');
@@ -54,6 +54,15 @@ test('preview is read-only and refuses unsupported scope, Default target, and id
   await assert.rejects(planCopy(f.store, 'Default', 'B', { ...f.options, include: ['history'] }), /not supported/);
   await assert.rejects(planCopy(f.store, 'A', 'Default', f.options), /named profile/);
   await assert.rejects(planCopy(f.store, 'A', 'A', f.options), /must be separate/);
+});
+
+test('Default copy always resolves the fixed .codex home and ignores activation metadata', async t => {
+  const f = await fixture(t);
+  const activation = join(f.store.directory, 'activation');
+  await mkdir(activation, { mode: 0o700 });
+  await writeFile(join(activation, 'manifest.json'), 'obsolete activation metadata\n', { mode: 0o600 });
+  const endpoint = await resolveNativeSettingsHome(f.store, 'Default', { defaultUserHome: f.options.defaultUserHome });
+  assert.equal(endpoint.home, join(f.options.defaultUserHome, '.codex'));
 });
 
 test('instruction copy preserves config, credentials and history; undo restores bytes and mode', async t => {
@@ -283,7 +292,7 @@ test('a failed copy rolls back every selected file and releases locks', async t 
   await assert.rejects(applyCopy(f.store, 'Default', 'B', { ...f.options, checkpoint: async () => { throw new Error('injected failure'); } }), /prior settings were restored/);
   assert.equal(await text(join(f.b.home, 'AGENTS.md')), prior);
   assert.equal(await text(join(f.b.home, 'AGENTS.override.md')), 'An old overriding instruction.\n');
-  for (const path of [f.options.lockPath, f.options.lockPath + '.selection', join(f.b.root, '.run-lock'), join(f.store.directory, 'native-copies/pending.json')]) await absent(path);
+  for (const path of [f.options.lockPath, f.options.lockPath + '.operation', join(f.b.root, '.run-lock'), join(f.store.directory, 'native-copies/pending.json')]) await absent(path);
 });
 
 test('interrupted undo resumes through pending without overwriting unrelated edits', async t => {
@@ -300,7 +309,7 @@ test('completed undo recovers its stale locks without asking any applications to
   const f = await fixture(t);
   const result = await applyCopy(f.store, 'Default', 'B', f.options);
   await undoCopy(f.store, result.id, f.options);
-  const locks = [f.options.lockPath + '.selection', f.options.lockPath, join(f.b.root, '.run-lock')];
+  const locks = [f.options.lockPath + '.operation', f.options.lockPath, join(f.b.root, '.run-lock')];
   const owner = { kind: 'native-copy', host: hostname(), pid: 7654321, runId: result.id, storePath: f.store.directory };
   for (const path of locks) {
     await mkdir(path, { mode: 0o700 });
@@ -328,7 +337,7 @@ test('hard exit after a write is recoverable using the recorded pending copy and
   await f.store.update(data => renameProfile(data, 'B', 'Research'));
   await undoCopy(f.store, 'pending', f.options);
   assert.equal(await text(join(f.b.home, 'AGENTS.md')), prior);
-  for (const path of [f.options.lockPath, f.options.lockPath + '.selection', join(f.b.root, '.run-lock')]) await absent(path);
+  for (const path of [f.options.lockPath, f.options.lockPath + '.operation', join(f.b.root, '.run-lock')]) await absent(path);
 });
 
 test('journal tampering and externally rerouted destination files are refused during undo', async t => {

@@ -2,11 +2,10 @@
 // aliases or controls a desktop through its shared bundle identifier.
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, readdir, readFile, realpath, unlink, writeFile } from 'node:fs/promises';
-import { hostname, userInfo } from 'node:os';
+import { hostname } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { resolveHome } from './homes.js';
 import { find } from './profiles.js';
-import { currentDesktop } from './desktop-selection.js';
 import { DESKTOP_APP } from './desktop-runtime.js';
 import { createDesktopInstanceRuntime, processIdentity, targetStartSeconds } from './desktop-instance-runtime.js';
 import { prepareProfileLauncher } from './profile-launcher.js';
@@ -70,6 +69,15 @@ async function readState(store, id) {
   const file = paths(store, id).journal;
   return await exists(file) ? validateState(await readJSON(file), store, id) : null;
 }
+/** Called under the shared operation guard before removing a profile binding. */
+export async function prepareDesktopInstanceRemoval(store, id, options = {}) {
+  const state = await readState(store, id);
+  if (!state) return;
+  if (state.phase !== 'closed')
+    throw new Error('Profile has an unfinished desktop instance; close or recover it before deleting or unbinding the profile');
+  // A crash can leave the control marker after the closed journal is saved.
+  await releaseInstanceControl(state.owner, options);
+}
 async function save(store, state, phase = state.phase) {
   state.phase = phase; state.updatedAt = new Date().toISOString();
   validateState(state, store, state.profileId);
@@ -122,10 +130,10 @@ async function finishStopped(store, state, runtime, options) {
   await unlink(receiptPath(store, state)).catch(error => { if (error.code !== 'ENOENT') throw error; });
 }
 
-// Reuse the selection operation guard so older alias-switching operations cannot
-// run during a launch or cleanup. It is released while the instance is running.
+// Serialize profile lifecycle and maintenance operations across controller stores.
+// The guard is released while an instance is running.
 async function withOperation(store, id, options, action) {
-  const guardPath = `${options.lockPath ?? globalLock()}.selection`;
+  const guardPath = `${options.lockPath ?? globalLock()}.operation`;
   const owner = { kind: 'desktop-instance-operation', host: hostname(), pid: process.pid, runId: randomUUID(),
     storePath: store.directory, profileId: id, journalPath: paths(store, id).journal };
   if (await exists(guardPath)) {
@@ -140,21 +148,7 @@ async function withOperation(store, id, options, action) {
   try { return await action(); } finally { await release(guardPath, owner); }
 }
 
-async function assertDefaultDesktop(store, { defaultUserHome, lockPath = globalLock() } = {}) {
-  const legacy = await currentDesktop(store, { defaultUserHome });
-  if (legacy.recoveryRequired) throw new Error('Existing desktop selection needs recovery; its paths and clients were left unchanged');
-  if (legacy.activeProfile || (legacy.pairedActivation && legacy.pairedActivation.selected !== 'Default'))
-    throw new Error('A legacy desktop selection is still active. Restore Default with desktop restore or desktop recover --no-open before opening a named desktop.');
-  if (await exists(lockPath)) {
-    await privateDirectory(lockPath);
-    const owner = await readJSON(join(lockPath, 'owner.json'));
-    if (owner.kind === 'desktop-selection')
-      throw new Error('Default paths are reserved by a legacy desktop selection. Restore or recover that selection with its original controller store before opening a named desktop.');
-  }
-}
-
-export async function desktopInstancePlan(store, name, { runtime = createDesktopInstanceRuntime(), defaultUserHome = userInfo().homedir, lockPath } = {}) {
-  await assertDefaultDesktop(store, { defaultUserHome, lockPath });
+export async function desktopInstancePlan(store, name, { runtime = createDesktopInstanceRuntime() } = {}) {
   const { profile, native, environment } = await resolveHome(store, name);
   return { profileId: profile.id, name: profile.name, environmentId: environment.id, nativeRoot: native.root,
     home: environment.home, desktopData: environment.desktopData, temporary: environment.launch.env.TMPDIR, userHome: environment.launch.env.HOME,
@@ -179,11 +173,10 @@ async function launcherCaller(runtime, launcherPaths, env) {
 
 export async function openDesktopInstance(store, name, {
   runtime = createDesktopInstanceRuntime(), prepareLauncher = prepareProfileLauncher, ramLogs,
-  defaultUserHome = userInfo().homedir, launcherEnvironment = process.env, ...options
+  launcherEnvironment = process.env, ...options
 } = {}) {
   const id = find(await store.read(), name).id;
   return withOperation(store, id, options, async () => {
-    await assertDefaultDesktop(store, { defaultUserHome, lockPath: options.lockPath });
     let state = await readState(store, id);
     if (state?.phase === 'closed') await releaseInstanceControl(state.owner, options);
     if (state && state.phase !== 'closed') {
@@ -207,7 +200,7 @@ export async function openDesktopInstance(store, name, {
       if (observed.status !== 'stopped') throw new Error('Desktop launch is incomplete or still running; use desktop recover PROFILE after it stops');
       await finishStopped(store, state, runtime, options);
     }
-    const plan = await desktopInstancePlan(store, id, { runtime, defaultUserHome, lockPath: options.lockPath });
+    const plan = await desktopInstancePlan(store, id, { runtime });
     await privateDirectory(store.directory); await privateDirectory(paths(store, id).root, true);
     const runId = randomUUID();
     const owner = { kind: 'desktop-instance', host: hostname(), pid: process.pid, runId, storePath: store.directory,

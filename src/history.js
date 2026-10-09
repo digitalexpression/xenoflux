@@ -1,12 +1,10 @@
 // History discovery is read-only. Actual resume may normalize one validated
 // alias-recorded path in the source index; no credentials or turn bodies are parsed.
-import { lstat, realpath, open } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { lstat, realpath } from 'node:fs/promises';
 import { join, relative, sep, resolve } from 'node:path';
 import { find } from './profiles.js';
 import { resolveHome } from './homes.js';
 import { redactText } from './redact.js';
-import { readPairedPlan } from './desktop-paired.js';
 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const databaseName = 'state_5.sqlite';
@@ -96,17 +94,6 @@ async function rows(database, { limit, archived, query, threadId }) {
   } finally { db.close(); }
 }
 
-async function pairedAliasRoots(store, source) {
-  try {
-    const plan = await readPairedPlan(join(store.directory, 'activation', 'manifest.json'), store);
-    const profile = plan.profiles.find(item => item.profileId === source.profileId && item.environmentId === source.environmentId && item.home === source.home);
-    const codexHome = plan.components.find(item => item.name === 'codex-home');
-    if (!profile || !codexHome || codexHome.targets?.[profile.activationTarget] !== source.home) return [];
-    return [codexHome.alias];
-  } catch { return []; }
-}
-
-
 async function oneHome(store, profile, options) {
   if (!profile.native) return { profileId: profile.id, profileName: profile.name, status: 'unbound', count: 0, reason: 'No native home is bound to this profile.' };
   try {
@@ -116,7 +103,6 @@ async function oneHome(store, profile, options) {
     const result = await rows(database, options);
     if (!Array.isArray(result)) throw new Error('Native history database returned invalid metadata');
     return { profileId: profile.id, profileName: profile.name, environmentId: environment.id, home: environment.home,
-      aliasRoots: await pairedAliasRoots(store, { profileId: profile.id, environmentId: environment.id, home: environment.home }),
       status: 'ready', count: result.length, reason: null, rows: result };
   } catch (error) {
     return { profileId: profile.id, profileName: profile.name, status: 'unavailable', count: 0, reason: error.message === 'Native history database has an unsupported thread schema' ? error.message : 'The bound native history metadata is unavailable.' };
@@ -139,36 +125,24 @@ async function canonicalRegularPath(home, path) {
   } catch { return undefined; }
 }
 
-async function safeRolloutPath(home, value, aliasRoots = []) {
+async function safeRolloutPath(home, value) {
   if (typeof value !== 'string' || value.length > 4096 || /[\x00-\x1f\x7f-\x9f]/.test(value) || !value.startsWith('/')) return undefined;
   if (resolve(value) !== value) return undefined;
-  const direct = await canonicalRegularPath(home, value);
-  if (direct) return direct;
-  const recorded = resolve(value);
-  for (const alias of aliasRoots) {
-    if (typeof alias !== 'string' || !alias.startsWith('/')) continue;
-    const root = resolve(alias);
-    if (!within(root, recorded)) continue;
-    const translated = resolve(home, relative(root, recorded));
-    const sourcePath = await canonicalRegularPath(home, translated);
-    if (sourcePath) return sourcePath;
-  }
-  return undefined;
+  return canonicalRegularPath(home, value);
 }
 
 async function entry(row, source) {
   if (!uuid.test(row?.id ?? '') || typeof row.cwd !== 'string' || row.cwd.length > 4096 || !row.cwd.startsWith('/') || /[\x00-\x1f\x7f-\x9f]/.test(row.cwd)
     || !Number.isSafeInteger(row.created_at) || row.created_at < 0 || !Number.isSafeInteger(row.updated_at) || row.updated_at < 0 || ![0,1].includes(row.archived)) return null;
   const title = cleanTitle(row.title);
-  const rolloutPath = await safeRolloutPath(source.home, row.rollout_path, source.aliasRoots);
+  const rolloutPath = await safeRolloutPath(source.home, row.rollout_path);
   return { id: row.id, profileId: source.profileId, profileName: source.profileName, environmentId: source.environmentId,
     home: source.home, cwd: row.cwd, ...title, createdAt: timestamp(row.created_at), updatedAt: timestamp(row.updated_at),
-    archived: row.archived === 1, ...(rolloutPath ? { rolloutPath,
-      ...(rolloutPath !== row.rollout_path ? { recordedRolloutPath: row.rollout_path } : {}) } : {}), source: 'native-codex-state_5' };
+    archived: row.archived === 1, ...(rolloutPath ? { rolloutPath } : {}), source: 'native-codex-state_5' };
 }
 
 function report(home) {
-  const { rows, aliasRoots, ...value } = home;
+  const { rows, ...value } = home;
   return value;
 }
 
@@ -200,49 +174,4 @@ export async function findHistory(store, profileNameOrId, threadId) {
   const result = found ? await entry(found, home) : null;
   if (found && !result) { home.status = 'partial'; home.reason = 'Some native history metadata rows are malformed.'; }
   return { entry: result, home: report(home) };
-}
-
-/** Called only by the actual launcher while it holds the native-home run lock. */
-export async function repairResumePath(store, plan) {
-  const repair = plan.resumeIndexRepair;
-  if (!repair) return null;
-  const fail = () => { throw Object.assign(new Error('Resume index changed or cannot be safely normalized'), { code: 'RESUME_INDEX_CHANGED' }); };
-  const { entry: current } = await findHistory(store, plan.profileId, plan.resumeId);
-  if (!current || current.archived || current.home !== plan.home || current.environmentId !== plan.environmentId
-    || current.cwd !== plan.cwd || current.rolloutPath !== repair.to || current.recordedRolloutPath !== repair.from
-    || current.createdAt !== repair.createdAt || current.updatedAt !== repair.updatedAt) fail();
-  const database = await checkedDatabase(plan.home);
-  if (!database) fail();
-
-  // Parse only the first (bounded) metadata record, never conversation turns.
-  // An alias path alone is insufficient evidence that this is the selected task.
-  const file = await open(repair.to, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const buffer = Buffer.alloc(1024 * 1024);
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-    const end = buffer.subarray(0, bytesRead).indexOf(10);
-    if (end < 0) fail();
-    let metadata;
-    try { metadata = JSON.parse(buffer.subarray(0, end).toString('utf8')); } catch { fail(); }
-    if (metadata?.type !== 'session_meta' || metadata.payload?.id !== plan.resumeId) fail();
-    if (metadata.payload?.cwd !== plan.cwd) fail();
-    const [opened, atPath] = await Promise.all([file.stat(), lstat(repair.to)]);
-    if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== atPath.dev || opened.ino !== atPath.ino
-      || await canonicalRegularPath(plan.home, repair.to) !== repair.to) fail();
-  } finally { await file.close(); }
-
-  const { DatabaseSync } = await import('node:sqlite');
-  const db = new DatabaseSync(database);
-  try {
-    db.exec('PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=1000; BEGIN IMMEDIATE;');
-    // Native indexes have timestamp triggers. They do not fire for this path
-    // update; roll back if any trigger/cascade causes additional row changes.
-    const before = db.prepare('SELECT total_changes() AS count').get().count;
-    const result = db.prepare(`UPDATE threads SET rollout_path = ?
-      WHERE id = ? AND rollout_path = ? AND cwd = ? AND archived = 0 AND created_at = ? AND updated_at = ?`)
-      .run(repair.to, plan.resumeId, repair.from, plan.cwd, repair.createdAt, repair.updatedAt);
-    if (result.changes !== 1 || db.prepare('SELECT total_changes() AS count').get().count - before !== 1) fail();
-    db.exec('COMMIT;');
-    return { ...repair, status: 'applied', scope: 'selected-thread-rollout-path' };
-  } finally { db.close(); } // An uncommitted transaction rolls back on close.
 }

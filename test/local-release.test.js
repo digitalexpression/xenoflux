@@ -1,54 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { helperTemplates, manifestFor, parseArguments } from '../scripts/local-release.mjs';
-
-test('local release helper templates use the installed executable and a caller-selected store', () => {
-  const templates = helperTemplates();
-  assert.deepEqual(Object.keys(templates), ['xfx-desktop-recover.command']);
-  for (const template of Object.values(templates)) {
-    assert.match(template, /Usage: \$0 STORE_DIRECTORY/);
-    assert.match(template, /XFX_EXECUTABLE:-xfx/);
-    assert.match(template, /"\$xfx_executable" --store "\$1"/);
-    assert.doesNotMatch(template, /node|\/Users\//);
-  }
-  assert.match(templates['xfx-desktop-recover.command'], /desktop recover --no-open/);
-});
-
-test('generated helpers pass a store with shell syntax as one literal argument', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'xfx-local-release-test-'));
-  t.after(() => rm(root, { force: true, recursive: true }));
-  const bin = join(root, 'bin'), output = join(root, 'arguments');
-  await mkdir(bin, { mode: 0o700 });
-  const fake = join(bin, 'xfx');
-  await writeFile(fake, '#!/bin/sh\nprintf "%s\\n" "$@" > "$XFX_ARGUMENTS"\n', { mode: 0o700 });
-  await chmod(fake, 0o700);
-  const store = '/tmp/a store "$HOME" $(not-a-command)';
-  for (const [name, contents] of Object.entries(helperTemplates())) {
-    const helper = join(root, name);
-    await writeFile(helper, contents, { mode: 0o700 });
-    await chmod(helper, 0o700);
-    await new Promise((resolveRun, reject) => {
-      const child = spawn(helper, [store], { env: { ...process.env, PATH: '', XFX_EXECUTABLE: fake, XFX_ARGUMENTS: output } });
-      child.once('error', reject);
-      child.once('close', code => code === 0 ? resolveRun() : reject(new Error(`helper exited ${code}`)));
-    });
-    const args = (await readFile(output, 'utf8')).trimEnd().split('\n');
-    assert.deepEqual(args.slice(0, 2), ['--store', store]);
-    assert.deepEqual(args.slice(2), ['desktop', 'recover', '--no-open']);
-  }
-});
+import { manifestFor, parseArguments } from '../scripts/local-release.mjs';
 
 test('local release arguments and manifests retain only reviewable artifact facts', () => {
-  assert.deepEqual(parseArguments(['--output', '/tmp/release', '--smoke', '--helpers', '/tmp/helpers']), {
-    output: '/tmp/release', smoke: true, helpers: '/tmp/helpers',
+  assert.deepEqual(parseArguments(['--output', '/tmp/release', '--smoke']), {
+    output: '/tmp/release', smoke: true,
   });
   assert.throws(() => parseArguments(['--output']), /Missing value/);
+  assert.throws(() => parseArguments(['--helpers', '/tmp/helpers']), /Unknown option/);
   assert.deepEqual(manifestFor({ packageName: 'xenoflux', version: '0.1.1-rc.1', tarball: 'xenoflux.tgz',
     sha256: 'abc', dependencies: [{ name: 'smol-toml', version: '1.8.0', tarball: 'smol.tgz', sha256: 'def' }],
     sourceRevision: '5ab3e9f', smoke: { status: 'passed' } }), {

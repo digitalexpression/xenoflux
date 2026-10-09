@@ -152,30 +152,6 @@ test('file to directory and directory to file skill transitions are refused duri
   });
 });
 
-test('v1 and v2 copy journals remain readable and undoable',async t=>{
-  const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  for(const version of [1,2]) await t.test(`schema v${version}`,async t=>{
-    const f=await fixture(t),journalDir=join(f.store.directory,'native-copies');
-    await writeFile(join(f.source,'AGENTS.md'),'Source instructions.\n',{mode:0o600});
-    await writeFile(join(f.b.home,'AGENTS.md'),'Destination instructions.\n',{mode:0o600});
-    const original=(await read(join(f.b.home,'AGENTS.md'))).toString();
-    const result=await applyCopy(f.store,'Default','B',f.options),journal=JSON.parse(await readFile(result.backup,'utf8'));
-    journal.schemaVersion=version; delete journal.packages;
-    if(version===1) {
-      const legacyAfter='model = "legacy-v1"\n';
-      journal.files=[{path:'AGENTS.md',before:original,beforeMode:0o600,after:legacyAfter,afterMode:0o600}];
-      await writeFile(join(f.b.home,'AGENTS.md'),legacyAfter,{mode:0o600});
-      delete journal.selection; delete journal.createdDirectories;
-    }
-    const base={source:journal.source,target:journal.target,components:journal.components,files:journal.files,defaultUserHome:journal.defaultUserHome};
-    journal.payloadHash=digest(version===2?{...base,selection:journal.selection,createdDirectories:journal.createdDirectories}:base);
-    await writeFile(result.backup,JSON.stringify(journal),{mode:0o600});
-    await undoCopy(f.store,result.id,f.options);
-    assert.equal((await read(join(f.b.home,'AGENTS.md'))).toString(),original);
-    await assert.rejects(stat(join(journalDir,'pending.json')),{code:'ENOENT'});
-  });
-});
-
 test('same-named skills from different origins cannot target one package, even with distinct package contents',async t=>{
   const f=await fixture(t),profileSkill=join(f.source,'skills','duplicate'),userHome=join(f.defaultUserHome,'.agents'),userSkill=join(userHome,'skills','duplicate');
   await mkdir(profileSkill,{recursive:true,mode:0o700}); await writeFile(join(profileSkill,'SKILL.md'),'Profile copy.\n',{mode:0o600});

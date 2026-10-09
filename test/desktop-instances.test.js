@@ -77,36 +77,6 @@ async function fixture(t) {
 const statePath = (f, id) => join(f.store.directory, 'desktop-instances', `${id}.json`);
 const lockPath = (f, name) => join(f.homes[name].root, '.run-lock');
 
-test('named desktop planning and opening require an existing legacy selection to be restored first', async t => {
-  const f = await fixture(t), profile = (await f.store.read()).profiles.find(profile => profile.name === 'A');
-  const directory = join(f.store.directory, 'desktop-selection'), journalPath = join(directory, 'session.json'), runId = randomUUID();
-  await mkdir(directory, { mode: 0o700 });
-  const journal = { schemaVersion: 1, kind: 'desktop-selection-session', id: runId, phase: 'active',
-    owner: { kind: 'desktop-selection', host: hostname(), pid: process.pid, runId, storePath: f.store.directory, journalPath },
-    active: { profileId: profile.id, name: profile.name, nativeRoot: profile.native.root, home: f.homes.A.home, desktopData: join(f.homes.A.root, 'desktop-data') },
-    target: null, reservedRoots: [profile.native.root], reservedBindings: [profile.native], trackedProcesses: [f.original] };
-  await writeFile(journalPath, JSON.stringify(journal), { mode: 0o600 });
-  const before = await readFile(journalPath);
-  await assert.rejects(desktopInstancePlan(f.store, 'B', f.options), /Restore Default/);
-  await assert.rejects(openDesktopInstance(f.store, 'B', f.options), /Restore Default/);
-  assert.deepEqual(await readFile(journalPath), before);
-  assert.equal(f.calls.length, 0);
-  await assert.rejects(access(join(f.store.directory, 'desktop-instances')), { code: 'ENOENT' });
-  for (const path of f.aliases) assert.equal(await readFile(join(path, 'preserved.txt'), 'utf8'), 'existing-session');
-});
-
-test('a legacy reservation from another controller cannot be bypassed by a named desktop', async t => {
-  const f = await fixture(t), owner = { kind: 'desktop-selection', storePath: join(f.root, 'other-controller'), runId: randomUUID() };
-  await mkdir(f.options.lockPath, { mode: 0o700 });
-  const path = join(f.options.lockPath, 'owner.json');
-  await writeFile(path, JSON.stringify(owner), { mode: 0o600 });
-  const before = await readFile(path);
-  await assert.rejects(desktopInstancePlan(f.store, 'A', f.options), /original controller store/);
-  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /original controller store/);
-  assert.deepEqual(await readFile(path), before);
-  assert.equal(f.calls.length, 0);
-});
-
 test('two fixed-home desktops coexist with the original and two simultaneously running CLI profiles', async t => {
   const f = await fixture(t), originalStore = await readFile(f.store.file);
   const a = await openDesktopInstance(f.store, 'A', f.options), b = await openDesktopInstance(f.store, 'B', f.options);
@@ -140,8 +110,36 @@ test('reopening focuses one owned instance; same-profile CLI and registry remova
   assert.equal(f.calls.filter(call => call.operation === 'open').length, 1);
   await focusDesktopInstance(f.store, 'A', f.options);
   await assert.rejects(launchHome(f.store, 'A', { ramLogs: f.ramLogs, run: async () => { throw new Error('must not launch'); } }), /in use/);
-  await assert.rejects(removeProfile(f.store, 'A', f.options), /locked by a run/);
-  await assert.rejects(unbindNativeHome(f.store, 'A', f.options), /locked by a run/);
+  await assert.rejects(removeProfile(f.store, 'A', f.options), /unfinished desktop instance/);
+  await assert.rejects(unbindNativeHome(f.store, 'A', f.options), /unfinished desktop instance/);
+});
+
+test('profile deletion and unbinding preserve an interrupted instance even without its run lock', async t => {
+  const f = await fixture(t), opened = await openDesktopInstance(f.store, 'A', f.options);
+  await rm(lockPath(f, 'A'), { recursive: true });
+  const registry = await readFile(f.store.file), journal = await readFile(statePath(f, opened.profileId));
+  await assert.rejects(removeProfile(f.store, 'A', f.options), /unfinished desktop instance/);
+  await assert.rejects(unbindNativeHome(f.store, 'A', f.options), /unfinished desktop instance/);
+  assert.deepEqual(await readFile(f.store.file), registry);
+  assert.deepEqual(await readFile(statePath(f, opened.profileId)), journal);
+  await f.runtime.close(opened.main);
+  await recoverDesktopInstance(f.store, 'A', f.options);
+  // Simulate interruption after saving closed state but before marker cleanup.
+  const closed = JSON.parse(await readFile(statePath(f, opened.profileId)));
+  await writeFile(join(f.options.lockPath + '.instances', closed.runId + '.json'), JSON.stringify(closed.owner), { mode: 0o600 });
+  await removeProfile(f.store, 'A', f.options);
+  await assertNoConcurrentDesktops({ lockPath: f.options.lockPath });
+  assert.deepEqual((await listDesktopInstances(f.store)).instances, []);
+});
+
+test('an unreadable desktop journal prevents deleting or unbinding its profile', async t => {
+  const f = await fixture(t), opened = await openDesktopInstance(f.store, 'A', f.options);
+  await rm(lockPath(f, 'A'), { recursive: true });
+  await writeFile(statePath(f, opened.profileId), '{interrupted', { mode: 0o600 });
+  const registry = await readFile(f.store.file);
+  await assert.rejects(removeProfile(f.store, 'A', f.options));
+  await assert.rejects(unbindNativeHome(f.store, 'A', f.options));
+  assert.deepEqual(await readFile(f.store.file), registry);
 });
 
 test('closing and recovering one desktop preserves its sibling and the long-running original', async t => {
@@ -157,16 +155,16 @@ test('closing and recovering one desktop preserves its sibling and the long-runn
   await assert.rejects(access(lockPath(f, 'B')), { code: 'ENOENT' });
 });
 
-test('legacy quit and client preparation cannot target the sole remaining concurrent desktop', async t => {
+test('maintenance quit and client preparation cannot target the sole remaining concurrent desktop', async t => {
   const f = await fixture(t);
   await openDesktopInstance(f.store, 'A', f.options);
   f.rows.splice(f.rows.findIndex(row => row.pid === f.original.pid), 1);
   let nativeCalls = 0;
-  const legacy = createDesktopRuntime({ concurrentLockPath: f.options.lockPath,
+  const maintenance = createDesktopRuntime({ concurrentLockPath: f.options.lockPath,
     processSnapshot: async () => structuredClone(f.rows),
     execFile: async () => { nativeCalls++; throw new Error('native control forbidden'); } });
-  await assert.rejects(legacy.stop(), /Concurrent desktop instances are reserved/);
-  await assert.rejects(legacy.prepareClients({ includeDesktop: true }), /Concurrent desktop instances are reserved/);
+  await assert.rejects(maintenance.stop(), /Concurrent desktop instances are reserved/);
+  await assert.rejects(maintenance.prepareClients({ includeDesktop: true }), /Concurrent desktop instances are reserved/);
   assert.equal(nativeCalls, 0);
   await closeDesktopInstance(f.store, 'A', f.options);
   await assertNoConcurrentDesktops({ lockPath: f.options.lockPath });
@@ -275,7 +273,7 @@ test('planning and public CLI dry-run/list are read-only; new controls reject bl
   const dryRun = JSON.parse((await run(['desktop', 'open', 'A', '--dry-run'])).stdout);
   assert.equal(dryRun.profileId, plan.profileId); assert.equal(dryRun.liveHomeChanged, false);
   assert.deepEqual(JSON.parse((await run(['desktop', 'list', '--observe'])).stdout).instances, []);
-  for (const args of [['desktop', 'close', 'A', '--close-clients'], ['desktop', 'recover', 'A', '--close-clients'], ['desktop', 'open', 'A', '--no-open']])
+  for (const args of [['desktop', 'close', 'A', '--close-clients'], ['desktop', 'recover', 'A', '--close-clients']])
     await assert.rejects(run(args), /not supported/);
   await assert.rejects(access(join(f.store.directory, 'desktop-instances')), { code: 'ENOENT' });
 });

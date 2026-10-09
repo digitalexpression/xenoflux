@@ -20,7 +20,7 @@ profile relationships, a synchronization baseline, or a generic migration framew
    subsequent copies use explicit selections and the same preservation semantics.
    Unselected settings and destination-only items remain unchanged. Category options
    may select supported items but must not implicitly delete destination-only items.
-   `Default` remains a source and restoration destination, not a copy target.
+   `Default` remains a source, not a copy target.
 
 2. **Show the diff before changing an existing profile.** Identify the source,
    destination, item origin, and proposed additions, changes, removals, identical
@@ -124,7 +124,7 @@ The `codex/profile-copy-policy` implementation changes that baseline as follows:
 
 - [Selected skill copy](../src/advanced-copy.js) replaces supported packages exactly,
   including removals and supported directory modes. Its v3 journal supports undo and
-  interruption recovery; the reader retains v1/v2 compatibility. File/directory
+  interruption recovery; all copy journal reads require v3. File/directory
   type transitions, unsafe contents and directories without owner read/write/execute
   permissions are refused before mutation.
 - [Category copy](../src/native-copy.js) selects items through the same planner and

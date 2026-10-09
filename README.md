@@ -29,7 +29,7 @@ The release consists of four files: `xenoflux-VERSION.tgz`, `smol-toml-VERSION.t
 node install.mjs --close-clients
 ```
 
-Xenoflux installs its application files under `~/.xfx/app`, its controller under `~/.xfx/controller`, native profiles under `~/.xfx/profiles`, RAM-log settings under `~/.xfx/ramlogs`, and the `xfx` launcher at `~/.local/bin/xfx`. Add `~/.local/bin` to `PATH` if it is not already present.
+Xenoflux installs its application files under `~/.xfx/app`, its controller under `~/.xfx/controller`, named native profiles under `~/.xfx/profiles` by default, RAM-log settings under `~/.xfx/ramlogs`, and the `xfx` launcher at `~/.local/bin/xfx`. Add `~/.local/bin` to `PATH` if it is not already present.
 
 `xfx install --close-clients` reinstalls from an installed bundle. Use `--background-path PATH` to configure the service’s colon-separated executable search directories. `xfx uninstall --close-clients` removes Xenoflux-managed installation files after a graceful client shutdown. These commands, desktop control, and any setting copy that applies changes require an external interactive terminal.
 
@@ -45,13 +45,13 @@ xfx profile list
 xfx profile inspect Research
 ```
 
-Profiles keep their own settings, sign-in, history, and desktop data. Xenoflux does not copy credentials or conversations between them. Guided creation prepares desktop integration and shows the reviewed command to finish it.
+Profiles keep their own settings, sign-in, history, and desktop data. Xenoflux does not copy credentials or conversations between them. Guided creation prepares a named profile and prints `xfx desktop open NAME` as the next step.
 
-To register an existing native profile directory, use `xfx profile register NAME ROOT --codex EXECUTABLE --codex-version VERSION`. Registration creates its profile record after validating the directory. `profile rename`, `profile delete`, and `profile unbind` change registry metadata while preserving native files. Deletion and native unbinding refuse profiles referenced by activation or unfinished operations so restoration remains possible.
+To register an existing native profile directory, use `xfx profile register NAME ROOT --codex EXECUTABLE --codex-version VERSION`. Registration creates its profile record after validating the directory. `profile rename`, `profile delete`, and `profile unbind` change registry metadata while preserving native files. Deletion and native unbinding refuse profiles with an active named desktop or unfinished operation.
 
 For a forcibly interrupted sign-in or CLI run, follow [profile recovery](docs/PROFILE-RECOVERY.md).
 
-Compare the supported native-setting selections before making a copy. `Default` is the built-in profile at Codex’s normal directories. It is a settings source and the desktop restoration destination; named profiles are stored separately.
+Compare the supported native-setting selections before making a copy. `Default` is the built-in profile at Codex’s normal directories and a settings source; named profiles are stored separately.
 
 ```sh
 xfx compare Default Research --include config,instructions,agents
@@ -75,43 +75,26 @@ instruction files, individual agents, standalone skills and rules. All copy entr
 points preserve unselected destination items. Selected skill replacement is exact,
 including previewed package-local deletions and undo. Plugins, hooks and MCP receive
 optional native/manual setup guidance only. See [Advanced copying](docs/ADVANCED-COPY.md)
-for controls, compatibility changes, discovery limits and recovery.
+for controls, discovery limits and recovery.
 
-The preview is read-only. A copy or undo records its backup and refuses to overwrite an intervening native change. Restore the desktop to `Default` before applying a copy. The category-based copy surface excludes skills, plugins, MCP configuration, credentials, histories, and repository files. Advanced mode adds standalone skills and rules; it does not copy native history or integrations.
+The preview is read-only. A copy or undo records its backup and refuses to overwrite an intervening native change. The category-based copy surface excludes skills, plugins, MCP configuration, credentials, histories, and repository files. Advanced mode adds standalone skills and rules; it does not copy native history or integrations.
 
-## Desktop profiles and recovery
+## Desktop profiles
 
-The `Default` profile uses Codex's standard paths, including `~/.codex`. By default, named profiles use isolated homes under `~/.xfx/profiles`; profile creation and registration can use another chosen base path. An older alias selection may remain active until you explicitly restore it. Use an external terminal for desktop recovery; Xenoflux never force-kills arbitrary processes.
+The `Default` profile uses Codex's standard paths, including `~/.codex`. Named profiles use isolated homes under `~/.xfx/profiles` by default. Use an external terminal for desktop controls; Xenoflux never force-kills arbitrary processes.
 
 ```sh
 xfx desktop open Research
 xfx desktop list --observe
 xfx desktop focus Research
 xfx desktop close Research
-xfx desktop current --observe
-xfx desktop restore --close-clients
-xfx desktop recover --no-open
-```
-
-The legacy `desktop switch`, `desktop pick`, `desktop activate`, `desktop activation-plan` and `desktop add-target` commands are retired. New named-profile desktops use `desktop open NAME`; `current`, `restore` and the no-name `recover` remain for an existing legacy selection. Restore an active legacy selection before opening a named desktop. For an unfinished selection, use `desktop recover --no-open`, then restore. Recovery with `--no-open` requires all clients to be stopped already and does not reopen Codex.
-
-## Concurrent desktops
-
-Open separate named profiles alongside an existing Codex session:
-
-```sh
-xfx desktop open Research --dry-run
-xfx desktop open Research
-xfx desktop open Personal
-xfx desktop list --observe
-xfx desktop focus Research
-xfx desktop close Personal
+xfx desktop recover Research
 ```
 
 Each managed instance keeps fixed profile storage paths and an exclusive reservation.
 Opening a running profile focuses it. Other profiles can run concurrently in the CLI
-or desktop; the same profile cannot run in both at once. These commands do not change
-the default aliases or close other clients, and can run from an existing Codex chat.
+or desktop; the same profile cannot run in both at once. Named desktop commands do not
+change the Default profile paths or close other clients.
 Closing a profile refuses to target a Codex process that hosts the invoking command.
 
 An owned launcher named `Codex · PROFILE` forwards activation to that profile's
@@ -121,8 +104,7 @@ Cmd+Tab, Dock reopening, and profile routing remain acceptance checks pending on
 the target Mac; fixture checks and helper compilation do not establish them.
 
 `xfx desktop recover NAME` releases only a stopped instance's verified reservation;
-it does not quit or reopen an app. For an existing alias selection, use the no-name
-`xfx desktop recover` command. See [concurrent desktop operation](docs/CONCURRENT-DESKTOPS.md)
+it does not quit or reopen an app. See [concurrent desktop operation](docs/CONCURRENT-DESKTOPS.md)
 for the test boundary and recovery details.
 
 ## RAM logs

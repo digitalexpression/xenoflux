@@ -1,4 +1,4 @@
-// Bundle-wide legacy control must stay excluded while any controller owns a
+// Bundle-wide maintenance must stay excluded while any controller owns a
 // concurrent desktop, including one launched from a different profile store.
 import { readdir, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -29,5 +29,5 @@ export async function assertNoConcurrentDesktops({ lockPath = globalLock() } = {
   if (!await exists(directory(lockPath))) return;
   await privateDirectory(directory(lockPath));
   if ((await readdir(directory(lockPath))).length)
-    throw new Error('Concurrent desktop instances are reserved. Close or recover each named instance before using legacy client or alias operations.');
+    throw new Error('Concurrent desktop instances are reserved. Close or recover each named instance before performing client maintenance.');
 }
