@@ -7,7 +7,7 @@ const self = { pid: 10, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:00 2026'
 const caller = { pid: 20, ppid: 10, uid: 501, startedAt: 'Fri Oct  9 10:00:01 2026', executable: DESKTOP_APP.executable };
 const ownMain = { pid: 30, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:02 2026', executable: DESKTOP_APP.executable };
 const helper = '/fixture/Launcher.app/Contents/MacOS/Launcher';
-const plan = { profileId: '12345678-abcd-4abc-8def-1234567890ab', home: '/fixture/home', desktopData: '/fixture/data', temporary: '/fixture/tmp', userHome: '/Users/test', app: { ...DESKTOP_APP } };
+const plan = { profileId: '12345678-abcd-4abc-8def-1234567890ab', home: '/fixture/home', desktopData: '/fixture/data', temporary: '/fixture/tmp', userHome: '/fixture/cli-user-home', app: { ...DESKTOP_APP } };
 const application = {
   appPath: '/fixture/Codex · Research.app', bundleId: 'com.xenoflux.profile.12345678-abcd-4abc-8def-1234567890ab',
   executable: '/fixture/Codex · Research.app/Contents/MacOS/Codex',
@@ -41,6 +41,22 @@ test('a receipt naming a preexisting main is refused', async () => {
   }));
   await assert.rejects(rt.open(plan, { helperExecutable: helper, application }), { code: 'DESKTOP_OPEN_PREEXISTING' });
   assert.equal(calls, 1);
+});
+
+test('receipt mismatches report the exact differing identity and never adopt the process', async () => {
+  let reads = 0;
+  const start = Number(targetStartSeconds(copiedMain.startedAt)) - 5;
+  const rt = createDesktopInstanceRuntime(opts({
+    processSnapshot: async () => ++reads === 1 ? [self] : [self, copiedMain],
+    execFile: async () => ({ stdout: JSON.stringify({ pid: copiedMain.pid, executable: copiedMain.executable, startSeconds: start }), stderr: '' }),
+  }));
+  await assert.rejects(rt.open(plan, { helperExecutable: helper, application }), error => {
+    assert.equal(error.code, 'DESKTOP_OPEN_RECEIPT_MISMATCH');
+    assert.ok(error.message.includes(`start ${start}; observed PID ${copiedMain.pid}`));
+    assert.ok(error.message.includes(`start ${targetStartSeconds(copiedMain.startedAt)}`));
+    assert.deepEqual(error.remainingProcesses, [copiedMain]);
+    return true;
+  });
 });
 
 test('invalid helper receipt cannot be replaced by process-delta attribution', async () => {
@@ -121,6 +137,15 @@ test('bootstrap does not adopt another copied main when the authorized PID does 
   await assert.rejects(rt.open(plan, { helperExecutable: helper, application, bootstrap, onBootstrapReady: async () => {} }), { code: 'DESKTOP_OPEN_TIMEOUT' });
 });
 
+test('Finder bootstrap refuses a replaced PID even when the replacement has the expected vendor path', async () => {
+  const bootstrap = { pid: 60, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:01 2026', executable: bootstrapExecutable };
+  const replacement = { ...bootstrap, startedAt: 'Fri Oct  9 10:03:00 2026', executable: application.executable };
+  let rows = [{ ...self, ppid: bootstrap.pid }, bootstrap];
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows }));
+  await assert.rejects(rt.open(plan, { helperExecutable: helper, application, bootstrap,
+    onBootstrapReady: async () => { rows = [{ ...self, ppid: bootstrap.pid }, replacement]; } }), { code: 'PROCESS_IDENTITY_CHANGED' });
+});
+
 test('focus and graceful close target exact pid, executable, and start identity', async () => {
   const calls = [];
   let rows = [self, caller, ownMain];
@@ -167,6 +192,66 @@ test('close drains recorded children when quit helper loses a race with main exi
   assert.equal(sleeps, 1);
 });
 
+test('after graceful quit close waits through unavailable argv without controlling or adopting its fallback label', async () => {
+  let rows = [self, copiedMain], quits = 0, polls = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+    execFile: async () => { quits++; rows = [self, { ...copiedMain, executable: '(Codex)' }]; return { stdout: '' }; },
+    sleep: async () => { polls++; rows = [self]; },
+  }));
+  assert.deepEqual(await rt.close(copiedMain, { helperExecutable: helper }), { status: 'stopped', processes: [] });
+  assert.equal(quits, 1);
+  assert.equal(polls, 1);
+});
+
+test('an unavailable argv label with a changed process start is still PID reuse', async () => {
+  let rows = [self, copiedMain];
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+    execFile: async () => { rows = [self, { ...copiedMain, startedAt: 'Fri Oct  9 10:03:00 2026', executable: '(Codex)' }]; return { stdout: '' }; },
+  }));
+  await assert.rejects(rt.close(copiedMain, { helperExecutable: helper }), { code: 'PROCESS_IDENTITY_CHANGED' });
+});
+
+test('an unavailable argv label keeps a close pending until it exits, timing out with the reservation intact', async () => {
+  let rows = [self, copiedMain], tick = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows, now: () => tick,
+    execFile: async () => { rows = [self, { ...copiedMain, executable: '(Codex)' }]; return { stdout: '' }; },
+    sleep: async ms => { tick += ms; }, closeTimeoutMs: 2, pollIntervalMs: 1,
+  }));
+  await assert.rejects(rt.close(copiedMain, { helperExecutable: helper }), error => {
+    assert.equal(error.code, 'DESKTOP_CLOSE_TIMEOUT');
+    assert.deepEqual(error.remainingProcesses, [copiedMain]);
+    return true;
+  });
+});
+
+test('close retains a shutdown child discovered while its parent argv is unavailable', async () => {
+  const child = { ...copiedMain, pid: 31, ppid: copiedMain.pid, executable: '/fixture/shutdown-helper' };
+  let rows = [self, copiedMain];
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+    execFile: async () => { rows = [self, { ...copiedMain, executable: '(Codex)' }, child]; return { stdout: '' }; },
+    sleep: async () => { rows = [self, { ...child, ppid: 1 }]; },
+  }));
+  await assert.rejects(rt.close(copiedMain, { helperExecutable: helper }), error => {
+    assert.equal(error.code, 'PROCESS_TREE_AMBIGUOUS');
+    assert.deepEqual(error.remainingProcesses, [{ ...child, ppid: 1 }]);
+    return true;
+  });
+});
+
+test('close timeout retains a detached known child whose argv becomes unavailable', async () => {
+  const child = { ...copiedMain, pid: 31, ppid: copiedMain.pid, executable: '/fixture/shutdown-helper' };
+  let rows = [self, copiedMain, child], tick = 0;
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows, now: () => tick,
+    execFile: async () => { rows = [self, { ...child, ppid: 1, executable: '(shutdown-helper)' }]; return { stdout: '' }; },
+    sleep: async ms => { tick += ms; }, closeTimeoutMs: 2, pollIntervalMs: 1,
+  }));
+  await assert.rejects(rt.close(copiedMain, { helperExecutable: helper }), error => {
+    assert.equal(error.code, 'DESKTOP_CLOSE_TIMEOUT');
+    assert.deepEqual(error.remainingProcesses, [child]);
+    return true;
+  });
+});
+
 test('close preserves helper failure while the exact main remains live', async () => {
   let calls = 0;
   const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, ownMain],
@@ -204,13 +289,17 @@ test('live tracked executable changes remain explicit identity failures with fie
   assert.equal(result.identityChange.current.executable, changed.executable);
 });
 
-test('ps snapshot requests process state and excludes zombie command labels', async () => {
-  const rt = createDesktopInstanceRuntime(opts({ execFile: async (file, args) => {
+test('ps snapshot retains UTF-8 executable names, uses explicit UTC and excludes zombie command labels', async () => {
+  const rt = createDesktopInstanceRuntime(opts({ execFile: async (file, args, options) => {
     assert.equal(file, '/bin/ps');
     assert.deepEqual(args, ['-axo', 'pid=,ppid=,uid=,lstart=,state=,comm=']);
-    return { stdout: `10 1 501 Fri Oct  9 10:00:00 2026 S /usr/bin/node\n30 1 501 Fri Oct  9 10:00:02 2026 Z <defunct>\n` };
+    assert.equal(options.env.LC_ALL, 'en_US.UTF-8');
+    assert.equal(options.env.TZ, 'UTC');
+    return { stdout: `10 1 501 Fri Oct  9 10:00:00 2026 S /usr/bin/node\n30 1 501 Fri Oct  9 10:00:02 2026 Z <defunct>\n60 1 501 Fri Oct  9 10:00:03 2026 S ${application.executable}\n` };
   } }));
-  assert.deepEqual(await rt.snapshot(), [self]);
+  assert.deepEqual(await rt.snapshot(), [{ ...self, startedAt: `${self.startedAt} UTC` },
+    { pid: 60, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:03 2026 UTC', executable: application.executable }]);
+  assert.equal(targetStartSeconds('Fri Oct  9 10:00:03 2026 UTC'), String(Date.UTC(2026, 9, 9, 10, 0, 3) / 1000));
 });
 
 test('pid reuse and caller-ancestor targets are rejected before invoking helper', async () => {

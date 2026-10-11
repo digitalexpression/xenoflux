@@ -36,7 +36,7 @@ function parsePs(stdout) {
     // or open resources. Do not compare its ps command label with the former
     // executable identity or try to control it.
     if (m[5].startsWith('Z')) continue;
-    rows.push({ pid: +m[1], ppid: +m[2], uid: +m[3], startedAt: m[4], executable: m[6] });
+    rows.push({ pid: +m[1], ppid: +m[2], uid: +m[3], startedAt: `${m[4]} UTC`, executable: m[6] });
   }
   return rows;
 }
@@ -60,6 +60,13 @@ export function processIdentity(row) {
 export function matchesProcessIdentity(row, identity) {
   return Boolean(row && identity && row.pid === identity.pid && row.startedAt === identity.startedAt
     && row.uid === identity.uid && row.executable === identity.executable);
+}
+// macOS ps may lose argv before a quitting process becomes a zombie and fall
+// back to `(command)`. This is uncertain executable identity, not a new target:
+// close may only wait for it to disappear, keeping the PID/UID/start guards.
+function awaitingExit(row, identity) {
+  return Boolean(row && identity && row.pid === identity.pid && row.startedAt === identity.startedAt
+    && row.uid === identity.uid && /^\([^\r\n]+\)$/.test(row.executable));
 }
 export function targetStartSeconds(startedAt) {
   const millis = Date.parse(startedAt);
@@ -99,7 +106,9 @@ export function createDesktopInstanceRuntime({
     try {
       rows = processSnapshot ? await processSnapshot() : parsePs((await execFile('/bin/ps', ['-axo', 'pid=,ppid=,uid=,lstart=,state=,comm='], {
         encoding: 'utf8', maxBuffer: 4 * 1024 * 1024, timeout: systemTimeoutMs,
-        env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' },
+        // ASCII locales escape the middle dot in every generated app path.
+        // Use English UTF-8 paths and explicit UTC process timestamps.
+        env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'en_US.UTF-8', TZ: 'UTC' },
       })).stdout);
     } catch (e) { if (e?.code === 'PROCESS_OBSERVATION_INVALID') throw e; throw fail('PROCESS_INSPECTION_FAILED'); }
     if (Array.isArray(rows)) {
@@ -158,7 +167,9 @@ export function createDesktopInstanceRuntime({
     const inspected = await inspectApp();
     const before = await snapshot();
     if (!sameDesktopApp(plan?.app, inspected)) throw fail('APP_IDENTITY_CHANGED');
-    const userHome = plan?.userHome ?? userInfo().homedir;
+    // Desktop needs the real account HOME to locate the macOS login keychain.
+    // plan.userHome remains the isolated CLI route, not the Desktop OS context.
+    const userHome = userInfo().homedir;
     if (![plan?.home, plan?.desktopData, userHome, plan?.temporary, helperExecutable,
       application?.appPath, application?.executable].every(absoluteCanonical)
       || typeof application?.bundleId !== 'string' || !application.bundleId) throw fail('INVALID_PLAN');
@@ -228,8 +239,11 @@ export function createDesktopInstanceRuntime({
       const after = await snapshot();
       const row = after.find(r => r.pid === receipt.pid);
       if (row) {
-        if (row.uid !== uid || row.executable !== receipt.executable || targetStartSeconds(row.startedAt) !== String(receipt.startSeconds))
-          throw fail('DESKTOP_OPEN_RECEIPT_MISMATCH', [row]);
+        if (row.uid !== uid || row.executable !== receipt.executable || targetStartSeconds(row.startedAt) !== String(receipt.startSeconds)) {
+          const error = fail('DESKTOP_OPEN_RECEIPT_MISMATCH', [row]);
+          error.message += `: expected PID ${receipt.pid}, UID ${uid}, executable ${receipt.executable}, start ${receipt.startSeconds}; observed PID ${row.pid}, UID ${row.uid}, executable ${row.executable}, start ${targetStartSeconds(row.startedAt)} (${row.startedAt}).`;
+          throw error;
+        }
         if (prior.has(processIdentity(row))) throw fail('DESKTOP_OPEN_PREEXISTING', [row]);
         const main = row;
         const processes = descendants(after, main);
@@ -357,14 +371,31 @@ export function createDesktopInstanceRuntime({
         // completion; a live exact target keeps the original helper error.
         const afterFailure = await snapshot();
         const current = afterFailure.find(row => row.pid === main.pid);
-        if (current && !matchesProcessIdentity(current, main)) throw identityChanged(main, current);
-        if (current) throw error;
+        if (current && !matchesProcessIdentity(current, main) && !awaitingExit(current, main)) throw identityChanged(main, current);
+        if (current && !awaitingExit(current, main)) throw error;
       }
     }
     const deadline = now() + closeTimeoutMs;
     while (now() <= deadline) {
       const rows = await snapshot();
       const byPid = new Map(rows.map(r => [r.pid, r]));
+      if ([...owned.values()].some(previous => awaitingExit(byPid.get(previous.pid), previous))) {
+        for (const previous of owned.values()) {
+          const current = byPid.get(previous.pid);
+          if (current && !matchesProcessIdentity(current, previous) && !awaitingExit(current, previous))
+            throw identityChanged(previous, current);
+        }
+        // Shutdown can spawn children while argv is unavailable. Retain each
+        // verified descendant so reparenting cannot make it disappear from our
+        // ownership set; an unknown child's missing path stays ambiguous.
+        for (const row of descendants(rows, main)) {
+          if (owned.has(row.pid)) continue;
+          if (!absoluteCanonical(row.executable)) throw fail('PROCESS_TREE_AMBIGUOUS', [main]);
+          owned.set(row.pid, row);
+        }
+        await sleep(pollIntervalMs);
+        continue;
+      }
       const root = byPid.get(main.pid);
       if (root && !matchesProcessIdentity(root, main)) throw identityChanged(main, root);
       const liveOwned = [];
@@ -386,9 +417,11 @@ export function createDesktopInstanceRuntime({
       await sleep(pollIntervalMs);
     }
     const rows = await snapshot();
-    const remaining = rows.filter(r => (owned.has(r.pid) && matchesProcessIdentity(r, owned.get(r.pid)))
+    const remaining = rows.filter(r => (owned.has(r.pid) && (matchesProcessIdentity(r, owned.get(r.pid)) || awaitingExit(r, owned.get(r.pid))))
       || descendants(rows, main).some(child => child.pid === r.pid));
-    throw fail('DESKTOP_CLOSE_TIMEOUT', remaining);
+    // Keep the last verified executable in the reservation when ps cannot read
+    // a quitting process's argv. That fallback label is never a control target.
+    throw fail('DESKTOP_CLOSE_TIMEOUT', remaining.map(row => awaitingExit(row, owned.get(row.pid)) ? owned.get(row.pid) : row));
   }
   return { inspectApp, snapshot, open, observe, focus, close, assertResourcesIdle };
 }

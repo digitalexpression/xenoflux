@@ -24,11 +24,25 @@ func executablePath(_ pid: pid_t) -> String? {
     return resolvedPath(URL(fileURLWithPath: String(cString: buffer)))
 }
 
+func processStartSeconds(_ pid: pid_t) -> Int? {
+    var info = proc_bsdinfo()
+    let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
+          info.pbi_uid == getuid(), info.pbi_start_tvsec > 0,
+          let seconds = Int(exactly: info.pbi_start_tvsec) else { return nil }
+    return seconds
+}
+
+func accountHome() -> String? {
+    guard let account = getpwuid(getuid()), let path = account.pointee.pw_dir else { return nil }
+    let home = String(cString: path)
+    return safeAbsolutePath(home) ? home : nil
+}
+
 func validatedApplication(_ target: TargetIdentity) -> NSRunningApplication? {
     guard target.pid > 0, target.pid != getpid(), let app = NSRunningApplication(processIdentifier: target.pid),
           !app.isTerminated, executablePath(target.pid) == resolvedPath(URL(fileURLWithPath: target.executable)),
-          let launched = app.launchDate,
-          Int(floor(launched.timeIntervalSince1970)) == target.startSeconds else { return nil }
+          processStartSeconds(target.pid) == target.startSeconds else { return nil }
     return app
 }
 
@@ -54,7 +68,8 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     guard args.count == 12, args[0] == "--open-app",
           args[2] == "--home", args[4] == "--desktop-data", args[6] == "--user-home",
           args[8] == "--temporary", args[10] == "--target-executable",
-          [args[1], args[3], args[5], args[7], args[9], args[11]].allSatisfy(safeAbsolutePath) else {
+          [args[1], args[3], args[5], args[7], args[9], args[11]].allSatisfy(safeAbsolutePath),
+          let userHome = accountHome(), args[7] == userHome else {
         fputs("Invalid profile launch request.\n", stderr); exit(EXIT_FAILURE)
     }
     let appURL = URL(fileURLWithPath: args[1]).standardizedFileURL
@@ -63,7 +78,7 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     configuration.createsNewApplicationInstance = true
     configuration.arguments = ["--profile-run"]
     configuration.environment = ["CODEX_HOME": args[3], "CODEX_SQLITE_HOME": args[3],
-        "CODEX_ELECTRON_USER_DATA_PATH": args[5], "HOME": args[7], "TMPDIR": args[9]]
+        "CODEX_ELECTRON_USER_DATA_PATH": args[5], "HOME": userHome, "TMPDIR": args[9]]
     var completed = false
     var launched: NSRunningApplication?
     var launchError: NSError?
@@ -76,7 +91,7 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     }
     guard completed, launchError == nil, let application = launched,
           application.processIdentifier > 0, application.processIdentifier != getpid(),
-          let launchDate = application.launchDate else {
+          let startSeconds = processStartSeconds(application.processIdentifier) else {
         if let error = launchError {
             fputs("Unable to launch the requested profile instance: \(error.domain) (\(error.code)): \(error.localizedDescription)\n", stderr)
         } else {
@@ -87,7 +102,7 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     // LaunchServices starts the bootstrap. exec replaces it in the same PID,
     // so inspect the kernel path rather than cached CFBundleExecutable metadata.
     let target = TargetIdentity(pid: application.processIdentifier, executable: expectedExecutable,
-        startSeconds: Int(floor(launchDate.timeIntervalSince1970)))
+        startSeconds: startSeconds)
     while validatedApplication(target) == nil && Date() < deadline && !application.isTerminated {
         _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     }
@@ -127,12 +142,17 @@ func metadataFromBundle() -> ProfileMetadata? {
 }
 
 func executeProfile(_ metadata: ProfileMetadata) -> Never {
+    guard let userHome = accountHome() else {
+        fputs("Unable to resolve the macOS account home.\n", stderr); exit(EXIT_FAILURE)
+    }
     let home = metadata.nativeRoot + "/codex-home"
     let desktopData = metadata.nativeRoot + "/desktop-data"
     setenv("CODEX_HOME", home, 1)
     setenv("CODEX_SQLITE_HOME", home, 1)
     setenv("CODEX_ELECTRON_USER_DATA_PATH", desktopData, 1)
-    setenv("HOME", metadata.nativeRoot + "/user-home", 1)
+    // Security.framework resolves the login keychain through the account HOME.
+    // Codex storage stays isolated through its explicit home and UI-data routes.
+    setenv("HOME", userHome, 1)
     setenv("TMPDIR", metadata.nativeRoot + "/tmp", 1)
     unsetenv("XFX_DESKTOP_LAUNCHER_PID")
     unsetenv("XFX_DESKTOP_LAUNCHER_EXECUTABLE")

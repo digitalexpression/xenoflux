@@ -4,10 +4,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFile as nodeExecFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { prepareProfileApp } from '../src/profile-launcher.js';
 import { DESKTOP_APP } from '../src/desktop-runtime.js';
+import { createDesktopInstanceRuntime, targetStartSeconds } from '../src/desktop-instance-runtime.js';
 
 const execFile = promisify(nodeExecFile);
 const enabled = process.platform === 'darwin' && process.env.XFX_NATIVE_PROFILE_OPEN === '1';
@@ -119,11 +120,15 @@ defer { dlclose(framework) }
 let environment = ProcessInfo.processInfo.environment
 let home = environment["CODEX_HOME"]!
 let arguments = Array(CommandLine.arguments.dropFirst())
+var bsd = proc_bsdinfo()
+guard proc_pidinfo(getpid(), PROC_PIDTBSDINFO, 0, &bsd, Int32(MemoryLayout<proc_bsdinfo>.size)) == Int32(MemoryLayout<proc_bsdinfo>.size) else { fatalError("No kernel process identity") }
 let report: [String: Any] = [
     "pid": getpid(),
     "bundleId": Bundle.main.bundleIdentifier ?? "",
     "runningBundleId": NSRunningApplication.current.bundleIdentifier ?? "",
     "runningName": NSRunningApplication.current.localizedName ?? "",
+    "kernelStartSeconds": bsd.pbi_start_tvsec,
+    "launchSeconds": Int(floor(NSRunningApplication.current.launchDate!.timeIntervalSince1970)),
     "frameworkLoaded": true,
     "executable": kernelExecutablePath() ?? "",
     "codexHome": home,
@@ -136,7 +141,7 @@ let report: [String: Any] = [
 let reportURL = URL(fileURLWithPath: home).appendingPathComponent("native-open-result.json")
 let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
 try data.write(to: reportURL, options: .atomic)
-DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { app.terminate(nil) }
+DispatchQueue.main.asyncAfter(deadline: .now() + 5) { app.terminate(nil) }
 app.run()
 
 func kernelExecutablePath() -> String? {
@@ -188,7 +193,15 @@ func kernelExecutablePath() -> String? {
     asarSha256: createHash('sha256').update(archive).digest('hex') };
   const plan = { profileId, name: 'Native Fixture', nativeRoot: join(root, 'profile-native'), app };
   const store = { directory: await realpath(storeDirectory) };
+  // Exercise the full controller path across a delayed same-PID exec, using
+  // kernel and ps timestamps as independent ownership checks.
+  const delayedSource = join(root, 'delayed-profile-launcher.swift');
+  const source = await readFile(new URL('../src/native/profile-launcher.swift', import.meta.url), 'utf8');
+  assert.ok(source.includes('let args = [metadata.vendorExecutable,'));
+  await writeFile(delayedSource, source.replace('let args = [metadata.vendorExecutable,',
+    'sleep(2)\n    let args = [metadata.vendorExecutable,'), { mode: 0o600 });
   const prepared = await prepareProfileApp(store, plan, {
+    source: delayedSource,
     verifyOriginal: async sourcePath => ({ ...app, appPath: sourcePath }),
   });
   const copiedClaims = await entitlements(prepared.application.executable);
@@ -204,13 +217,30 @@ func kernelExecutablePath() -> String? {
   for (const path of [home, desktopData, userHome, temporary]) await mkdir(path, { recursive: true, mode: 0o700 });
   reportPath = join(home, 'native-open-result.json');
   launchRequested = true;
-  const opened = await run(prepared.helperExecutable, ['--open-app', prepared.application.appPath,
-    '--home', home, '--desktop-data', desktopData, '--user-home', userHome, '--temporary', temporary,
-    '--target-executable', prepared.application.executable], { timeout: 45000 });
-  const receipt = JSON.parse(opened.stdout.trim());
+  let receipt;
+  const runtime = createDesktopInstanceRuntime({ inspectApp: async () => app,
+    execFile: async (path, args, options) => {
+      const result = await execFile(path, args, options);
+      if (path === prepared.helperExecutable && args[0] === '--open-app') receipt = JSON.parse(result.stdout.trim());
+      if (path === '/bin/ps' && receipt) {
+        const row = result.stdout.split('\n').find(line => line.trim().startsWith(`${receipt.pid} `));
+        if (row?.includes('(Codex)')) t.diagnostic(`Shutdown ps row: ${row.trim()}`);
+      }
+      return result;
+    },
+  });
+  const opened = await runtime.open({ ...plan, home, desktopData, userHome, temporary }, prepared);
   const report = await readReport(reportPath);
   assert.ok(report, 'fake AppKit vendor did not write its launch receipt');
   launchedPid = report.pid;
+  const ps = await execFile('/bin/ps', ['-p', String(receipt.pid), '-o', 'lstart='], {
+    encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'en_US.UTF-8', TZ: 'UTC' },
+  });
+  const psSeconds = Number(targetStartSeconds(`${ps.stdout.trim()} UTC`));
+  t.diagnostic(JSON.stringify({ launchSeconds: report.launchSeconds, kernelStartSeconds: report.kernelStartSeconds,
+    receiptSeconds: receipt.startSeconds, psSeconds }));
+  assert.equal(receipt.startSeconds, report.kernelStartSeconds);
+  assert.equal(receipt.startSeconds, psSeconds);
   assert.equal(report.pid, receipt.pid, 'LaunchServices bootstrap must exec the vendor at the same PID');
   assert.equal(report.executable, prepared.application.executable);
   assert.equal(receipt.executable, prepared.application.executable);
@@ -219,7 +249,15 @@ func kernelExecutablePath() -> String? {
   assert.equal(report.runningName, 'Codex · Native Fixture');
   assert.equal(report.frameworkLoaded, true);
   assert.deepEqual([report.codexHome, report.sqliteHome, report.desktopData, report.userHome, report.temporary],
-    [home, home, desktopData, userHome, temporary]);
+    [home, home, desktopData, userInfo().homedir, temporary]);
   assert.deepEqual(report.arguments, [`--user-data-dir=${desktopData}`]);
+  assert.equal(opened.main.pid, report.pid);
+  assert.equal(Number(targetStartSeconds(opened.main.startedAt)), report.kernelStartSeconds);
+  await assert.rejects(run(prepared.helperExecutable, ['--quit-pid', String(receipt.pid),
+    '--target-executable', receipt.executable, '--target-start-seconds', String(receipt.startSeconds + 1)]),
+  /exited 1/, 'native quit must reject a different kernel start time');
+  await runtime.focus(opened.main, prepared);
+  const closed = await runtime.close(opened.main, prepared);
+  assert.equal(closed.status, 'stopped');
   await waitForExit(receipt.pid);
 });

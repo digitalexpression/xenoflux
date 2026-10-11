@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { chmod, cp, link, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { basename, join } from 'node:path';
 import { prepareProfileApp, validateProfileApp } from '../src/profile-launcher.js';
 
@@ -340,7 +340,7 @@ test('real Swift bootstrap routes the disposable signed app and execs it in the 
   assert.equal(observed.codex, `${plan.nativeRoot}/codex-home`);
   assert.equal(observed.sqlite, `${plan.nativeRoot}/codex-home`);
   assert.equal(observed.data, `${plan.nativeRoot}/desktop-data`);
-  assert.equal(observed.home, `${plan.nativeRoot}/user-home`);
+  assert.equal(observed.home, userInfo().homedir, 'Desktop must resolve the normal macOS login keychain despite inherited HOME overrides');
   assert.equal(observed.tmp, `${plan.nativeRoot}/tmp`);
   assert.equal(observed.arg, `--user-data-dir=${plan.nativeRoot}/desktop-data`);
   assert.equal(observed.launcherPid, '', 'bootstrap must remove the launcher-attribution environment');

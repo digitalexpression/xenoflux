@@ -19,12 +19,19 @@ xfx desktop recover NAME
 
 `open` prepares a private copy of the verified installed app named `Codex · NAME`,
 with its own bundle identity and the original icon and resources. The bootstrap
-sets the profile's home, SQLite, user-home and UI-data paths, then replaces itself
+sets the profile's Codex home, SQLite, temporary and UI-data paths, then replaces itself
 with Codex in the same PID. There is no persistent companion application.
 Opening a running profile focuses its recorded instance. The profile app can be
 opened through Finder or kept in the Dock; its bootstrap asks Xenoflux to reserve
 the profile before starting Codex. Profile sign-in and settings stay with that
 profile. The installed app remains unchanged.
+
+Desktop retains the logged-in macOS account's normal `HOME` so Security.framework
+can find the login keychain. An isolated Desktop `HOME` caused the native
+"Keychain Not Found" prompt. Xenoflux does not create or reset keychains or change
+their search lists. CLI launches still use an isolated `user-home`. Desktop
+resources discovered through the account home remain account-wide; the explicit
+Codex and UI-data routes provide the profile storage boundary.
 
 Only the bootstrap, copied main executable and outer app are signed locally.
 The main receives the Electron runtime grants for JIT, unsigned executable memory
@@ -63,12 +70,18 @@ parentage, then wait for that same process to become the profile's Codex binary.
 Neither route adopts unrelated or preexisting processes. A private receipt
 binds the process to its requested profile paths. Focus, close, and recovery
 verify the receipt and recorded process identity. The AppKit helper checks the
-executable and launch time before activating or requesting a graceful quit.
+executable and kernel process start time before activating or requesting a graceful quit.
+Native receipts use the same kernel timestamp source as `ps`, and process records
+use explicit UTC timestamps. Process inspection uses an English UTF-8 locale so
+macOS preserves Unicode executable paths. A mismatch reports both identities and
+preserves the reservation.
 Control from inside the target process ancestry is refused.
 
 Close treats exited zombie process rows as stopped and waits for remaining
 recorded processes and profile handles to drain before
-releasing the reservation. Timeouts, reused identities, detached helpers, or
+releasing the reservation. After graceful quit, an unavailable `ps` command label
+with the same PID, UID and start time keeps close waiting; it is never adopted
+or controlled. Timeouts, reused identities, detached helpers, or
 ambiguous launches preserve the record and reservation. If an app is quit
 normally outside Xenoflux, `open NAME` can reconcile its stopped, idle record.
 For an interrupted launch or close, run `desktop recover NAME` after
@@ -82,7 +95,9 @@ Development checks use mocked native operations and disposable homes. On macOS,
 locally signed fixtures verify compilation, nested framework/helper signatures,
 fixed-path routing and same-PID bootstrap execution. An opt-in, windowless AppKit
 fixture also exercises the real LaunchServices path, loads a signed framework,
-checks its macOS application name and identity, and exits automatically:
+checks its macOS application name and identity, compares native/kernel/`ps`
+timestamps across a delayed bootstrap, exercises controller open/focus/close,
+rejects a quit with the wrong start time, and exits automatically:
 
 ```sh
 XFX_NATIVE_PROFILE_OPEN=1 node --test test/native-profile-open.test.js
@@ -119,4 +134,14 @@ while preserving the framework's bytes and OpenAI Team ID. Nesting an entirely
 untouched vendor app was tested as an alternative, but macOS restored the generic
 vendor application name after exec, so it did not meet the profile identity goal.
 These experiments did not launch real Codex or change installed/live profile
-state. Real Codex launch and the full Dock/Cmd+Tab acceptance remain pending.
+state. The user's next RC3 Check test opened a real window, then showed "Keychain
+Not Found" and a controller receipt mismatch. Cancelling the prompt did not reset
+the keychain. A read-only, interaction-disabled default-keychain probe found no
+default under a disposable `HOME`, and found the normal login keychain under the
+account home. This establishes the need for the Desktop account context above.
+
+The full controller fixture reproduced the receipt mismatch: `ps` under the old
+ASCII locale rendered `Codex · NAME` as `Codex M-BM-7 NAME`, so its executable path
+differed from the native receipt. The UTF-8 locale preserves the actual path.
+Real profile sign-in, data isolation and the full Dock/Cmd+Tab acceptance still
+require the native checks above.
