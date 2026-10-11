@@ -326,14 +326,14 @@ test('same-user filtering, timeout evidence, and numeric start conversion are bo
 
 test('idle resource inspection ignores sibling profile handles and rejects target handles', async () => {
   const home = '/fixture/profiles/selected', sibling = '/fixture/profiles/other';
-  let lsofOutput = `p20\ncCodex\nu501\nn${sibling}/config.toml\n`;
+  let lsofOutput = `p20\nf12\ncCodex\nu501\nn${sibling}/config.toml\n`;
   const holder = { pid: 90, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:10:00 2026', executable: DESKTOP_APP.executable };
   const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, holder],
     lstat: async path => ({ isDirectory: () => path === home, isSymbolicLink: () => false }), realpath: async path => path,
     execFile: async (file, args) => { assert.equal(file, '/usr/sbin/lsof'); assert.deepEqual(args.slice(0, 8), ['-nP', '-Fpcun', '-u', '501', '-a', '+D', home]); return { stdout: lsofOutput, stderr: '' }; },
   }));
   assert.deepEqual(await rt.assertResourcesIdle([home]), { idle: true, processes: [] });
-  lsofOutput = `p90\ncCodex\nu501\nn${home}/config.toml\n`;
+  lsofOutput = `p90\nf12\ncCodex\nu501\nn${home}/config.toml\n`;
   await assert.rejects(rt.assertResourcesIdle([home]), { code: 'RESOURCE_BUSY' });
 });
 
@@ -343,11 +343,41 @@ test('resource inspection treats absent paths as idle and incomplete lsof eviden
   const home = '/fixture/home';
   const broken = createDesktopInstanceRuntime(opts({ lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }),
     realpath: async path => path, execFile: async () => { throw Object.assign(new Error(), { code: 1, stdout: '', stderr: 'lsof: permission denied' }); } }));
-  await assert.rejects(broken.assertResourcesIdle([home]), { code: 'RESOURCE_INSPECTION_FAILED' });
+  await assert.rejects(broken.assertResourcesIdle([home]), e => e.code === 'RESOURCE_INSPECTION_FAILED'
+    && /lsof for \/fixture\/home: exit status 1 \(permission denied\)/.test(e.message));
   const unobserved = createDesktopInstanceRuntime(opts({ lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }),
     realpath: async path => path, execFile: async () => ({ stdout: 'p999\ncCodex\nu501\nn/fixture/home/config.toml\n', stderr: '' }),
     processSnapshot: async () => [self] }));
-  await assert.rejects(unobserved.assertResourcesIdle([home]), { code: 'RESOURCE_INSPECTION_FAILED' });
+  await assert.rejects(unobserved.assertResourcesIdle([home]), e => e.code === 'RESOURCE_INSPECTION_FAILED'
+    && /process snapshot for \/fixture\/home: holder PID 999 was absent/.test(e.message));
+});
+
+test('resource inspection diagnostics identify path validation and malformed lsof fields safely', async () => {
+  const home = '/fixture/home';
+  const base = { lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }), realpath: async path => path };
+  const lstatFailure = createDesktopInstanceRuntime({ ...opts(), ...base,
+    lstat: async () => { throw Object.assign(new Error('private detail'), { code: 'EACCES' }); } });
+  await assert.rejects(lstatFailure.assertResourcesIdle([home]), e => e.code === 'RESOURCE_INSPECTION_FAILED'
+    && /lstat for \/fixture\/home: EACCES/.test(e.message) && !e.message.includes('private detail'));
+  const malformed = createDesktopInstanceRuntime({ ...opts(), ...base,
+    execFile: async () => ({ stdout: 'p999x\ncCodex\nu501\nn/fixture/home/file\n', stderr: '' }) });
+  await assert.rejects(malformed.assertResourcesIdle([home]), e => e.code === 'RESOURCE_INSPECTION_FAILED'
+    && /lsof fields for \/fixture\/home: invalid PID field/.test(e.message));
+});
+
+test('resource inspection reports canonicality, realpath, lsof timeout, and warning stages', async () => {
+  const home = '/fixture/home';
+  const lstat = async () => ({ isDirectory: () => false, isSymbolicLink: () => false });
+  const makeRuntime = overrides => createDesktopInstanceRuntime({ ...opts(), lstat,
+    realpath: async path => path, execFile: async () => ({ stdout: '', stderr: '' }), ...overrides });
+  const cases = [
+    [makeRuntime({ realpath: async () => { throw Object.assign(new Error(), { code: 'EIO' }); } }), /realpath for \/fixture\/home: EIO/],
+    [makeRuntime({ realpath: async () => '/fixture/elsewhere' }), /canonicality check for \/fixture\/home: resolved to \/fixture\/elsewhere/],
+    [makeRuntime({ execFile: async () => { throw Object.assign(new Error('private timeout'), { code: 'ETIMEDOUT' }); } }), /lsof for \/fixture\/home: timed out/],
+    [makeRuntime({ execFile: async () => ({ stdout: '', stderr: 'private warning text' }) }), /lsof output for \/fixture\/home: reported warnings/],
+  ];
+  for (const [rt, expected] of cases) await assert.rejects(rt.assertResourcesIdle([home]), e =>
+    e.code === 'RESOURCE_INSPECTION_FAILED' && expected.test(e.message) && !e.message.includes('private'));
 });
 
 test('observe retains tracked app-server identity after the main exits', async () => {

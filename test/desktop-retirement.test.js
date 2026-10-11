@@ -39,12 +39,27 @@ test('legacy desktop controls have no CLI path and do not create a controller', 
     assert.ok(/Invalid desktop command|Unknown option: --no-open|is not supported by desktop/.test(result.stderr), result.stderr);
     await assert.rejects(access(store));
   }
+  const prepare = await run(['--store', store, 'desktop', 'prepare', 'Research']);
+  assert.equal(prepare.code, 1);
+  assert.match(prepare.stderr, /external interactive terminal/);
+  await assert.rejects(access(store));
+  const refreshAlias = await run(['--store', store, '--json', 'desktop', 'refresh', 'Research']);
+  assert.equal(refreshAlias.code, 1);
+  assert.doesNotMatch(refreshAlias.stderr, /Invalid desktop command/);
+  const dryRun = await run(['--store', store, 'desktop', 'prepare', 'Research', '--dry-run']);
+  assert.equal(dryRun.code, 1);
+  assert.doesNotMatch(dryRun.stderr, /Invalid desktop command|not supported by desktop/);
+  const closeFlag = await run(['--store', store, 'desktop', 'refresh', 'Research', '--close-clients']);
+  assert.equal(closeFlag.code, 1);
+  assert.match(closeFlag.stderr, /--close-clients is not supported by desktop/);
 });
 
 test('help advertises only named desktop controls while retaining the CLI picker', async () => {
   const result = await run(['--help']);
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /desktop open NAME/);
+  assert.match(result.stdout, /desktop prepare NAME/);
+  assert.match(result.stdout, /desktop refresh NAME/);
   assert.match(result.stdout, /desktop recover NAME/);
   for (const retired of ['desktop switch', 'desktop pick', 'desktop activate', 'desktop activation-plan', 'desktop add-target',
     'desktop current', 'desktop restore', 'desktop recover --no-open'])

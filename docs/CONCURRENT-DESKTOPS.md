@@ -8,6 +8,9 @@ has one Xenoflux-managed client reservation at a time.
 ## Commands
 
 ```sh
+xfx desktop prepare NAME --dry-run
+xfx desktop prepare NAME
+xfx desktop refresh NAME
 xfx desktop open NAME --dry-run
 xfx desktop open NAME
 xfx desktop list --observe
@@ -17,14 +20,26 @@ xfx desktop recover NAME --dry-run
 xfx desktop recover NAME
 ```
 
-`open` prepares a private copy of the verified installed app named `Codex · NAME`,
-with its own bundle identity and the original icon and resources. The bootstrap
-sets the profile's Codex home, SQLite, temporary and UI-data paths, then replaces itself
-with Codex in the same PID. There is no persistent companion application.
-Opening a running profile focuses its recorded instance. The profile app can be
-opened through Finder or kept in the Dock; its bootstrap asks Xenoflux to reserve
-the profile before starting Codex. Profile sign-in and settings stay with that
-profile. The installed app remains unchanged.
+`open` creates or refreshes the private copy of the verified installed app named
+`Codex · NAME` when its cache is missing or stale, then validates and launches it.
+Preparation copies the app with its own bundle identity and original icon and
+resources; it compiles the small AppKit bootstrap when its source changes, then
+signs the copy. If a safely stopped open left an unfinished journal, the next
+open reconciles it before continuing. Opening a running profile focuses its
+pinned app without building, signing, or refreshing.
+
+The bootstrap sets the profile's Codex home, SQLite, temporary and UI-data paths,
+then replaces itself with Codex in the same PID. There is no persistent companion
+application. The profile app can be opened through Finder or kept in the Dock;
+its bootstrap asks Xenoflux to reserve the profile before starting Codex. Profile
+sign-in and settings stay with that profile. The installed app remains unchanged.
+
+`prepare`, `refresh`, and `recover` remain explicit maintenance and debugging
+commands. `prepare` creates or refreshes the cache and `refresh` is its alias;
+both operate only while that profile's desktop is stopped. `recover` explicitly
+reconciles a stopped instance's verified reservation. All support `--dry-run` to
+show the profile routing or recovery plan without preparing, signing, launching,
+or mutating anything.
 
 Desktop retains the logged-in macOS account's normal `HOME` so Security.framework
 can find the login keychain. An isolated Desktop `HOME` caused the native
@@ -39,16 +54,17 @@ and loading libraries across signing identities. Frameworks and nested helper
 apps retain their original publisher signatures and bytes. The bootstrap has no
 entitlements, and the copied main does not claim OpenAI's identity or app groups.
 Deep signature verification checks the resulting app without re-signing nested
-code. An owned stopped copy made with an earlier signing policy refreshes on the
-next CLI open; Finder requires that refresh before launching it.
+code. An owned stopped copy made with an earlier signing policy is refreshed on
+the next CLI open.
 
-The first launch requires Xcode Command Line Tools for the small AppKit helper.
+Preparing a missing or stale cache requires Xcode Command Line Tools for the small AppKit helper.
 Generated apps and records live under `CONTROLLER/desktop-instances`, outside
 native homes. The copy attempts filesystem cloning where available and otherwise
 copies files; it never hardlinks the installed app. Renaming a profile changes its
-app label after the desktop stops and is next prepared. A later CLI open refreshes
-a stopped copy when the verified installed app or bootstrap changes. If Finder
-requests an outdated copy, open it with `xfx desktop open NAME` to refresh it first.
+app label after the desktop stops and is next prepared. CLI open detects changes
+to the verified installed app, bootstrap, or signing policy and refreshes the
+stopped copy. Finder and Dock launches cannot refresh a stale copy; use CLI open
+to refresh it.
 
 ## Isolation and recovery
 
@@ -96,7 +112,8 @@ locally signed fixtures verify compilation, nested framework/helper signatures,
 fixed-path routing and same-PID bootstrap execution. An opt-in, windowless AppKit
 fixture also exercises the real LaunchServices path, loads a signed framework,
 checks its macOS application name and identity, compares native/kernel/`ps`
-timestamps across a delayed bootstrap, exercises controller open/focus/close,
+timestamps across a delayed bootstrap, exercises automatic controller preparation,
+open, repeated-open focus, stopped-instance reopen and fixture close,
 rejects a quit with the wrong start time, and exits automatically:
 
 ```sh
@@ -145,3 +162,9 @@ ASCII locale rendered `Codex · NAME` as `Codex M-BM-7 NAME`, so its executable 
 differed from the native receipt. The UTF-8 locale preserves the actual path.
 Real profile sign-in, data isolation and the full Dock/Cmd+Tab acceptance still
 require the native checks above.
+
+On 2026-10-11 the user confirmed both RC3 Check and Advanced Check opened through
+CLI `desktop open`, and repeated opens focused the correct existing instance.
+The supplied process observations showed both running concurrently, with repeated
+opens retaining each profile's PID and start time. This confirms concurrent open
+and repeated-open focus; the other native acceptance checks remain separate.

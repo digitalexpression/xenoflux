@@ -23,7 +23,7 @@ import { createInstallation } from '../src/installation.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
 import { readLogSettings } from '../src/log-storage.js';
 import { desktopInstancePlan, openDesktopInstance, focusDesktopInstance, closeDesktopInstance,
-  recoverDesktopInstance, listDesktopInstances } from '../src/desktop-instances.js';
+  recoverDesktopInstance, listDesktopInstances, prepareDesktopInstance } from '../src/desktop-instances.js';
 
 // Preserve JSON values while escaping terminal C1 controls in native metadata.
 const displayJSON = value => JSON.stringify(value, null, 2).replace(/[\x7f-\x9f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
@@ -50,7 +50,9 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   resume NAME TASK_ID [--dry-run]
   history [--profile NAME] [--search TEXT] [--limit COUNT] [--archived]
   pick [--repo DIRECTORY] [--dry-run] [--viewer EXECUTABLE]
-  desktop open NAME [--dry-run]          Open or focus a concurrent profile desktop
+  desktop prepare NAME [--dry-run]       Prepare or refresh a stopped profile app
+  desktop refresh NAME [--dry-run]       Alias for desktop prepare
+  desktop open NAME [--dry-run]          Prepare as needed, then open or focus
   desktop list [--observe] | desktop focus NAME | desktop close NAME
   desktop recover NAME [--dry-run]       Release a stopped named instance's reservation
   install [--background-path PATH] | uninstall
@@ -110,7 +112,7 @@ try {
       '--include': command === 'compare' || (command === 'copy' && params[0] !== 'undo') || (settingUp && params[0] === 'create'),
       '--apply': command === 'copy' || settingUp || recoveringProfile,
       '--dry-run': ['launch', 'resume', 'pick', 'copy'].includes(command) || settingUp
-        || (command === 'desktop' && (params[0] === 'open'
+        || (command === 'desktop' && (['open', 'prepare', 'refresh'].includes(params[0])
           || (params[0] === 'recover' && params.length === 2))),
       '--observe': command === 'desktop' && params[0] === 'list',
       '--close-clients': !options['--dry-run'] && ((command === 'copy' && options['--apply'])
@@ -227,10 +229,18 @@ try {
       }
     } else if (command === 'desktop') {
       const [operation, ...targets] = params;
-      const counts = { recover: [1], open: [1], focus: [1], close: [1], list: [0] };
+      const counts = { recover: [1], prepare: [1], refresh: [1], open: [1], focus: [1], close: [1], list: [0] };
       if (!counts[operation]?.includes(targets.length))
         throw new Error('Invalid desktop command; run xfx --help');
-      if (operation === 'open') result = options['--dry-run']
+      if (operation === 'prepare' || operation === 'refresh') {
+        if (options['--dry-run']) result = await desktopInstancePlan(store, targets[0]);
+        else {
+          if (!process.stdin.isTTY || !process.stdout.isTTY || json)
+            throw new Error('Desktop preparation requires an external interactive terminal; preview with --dry-run first');
+          await clientRuntime().assertExternal();
+          result = await prepareDesktopInstance(store, targets[0]);
+        }
+      } else if (operation === 'open') result = options['--dry-run']
         ? await desktopInstancePlan(store, targets[0]) : await openDesktopInstance(store, targets[0], {
           onBootstrapReady: async reply => {
             // The Finder bootstrap is waiting on this line before exec. Once

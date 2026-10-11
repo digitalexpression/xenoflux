@@ -5,7 +5,8 @@ export async function load(url, context, nextLoad) {
     const source = (await readFile(new URL(url), 'utf8')).replace('export function createDesktopInstanceRuntime(', 'function originalCreateDesktopInstanceRuntime(');
     return { format: 'module', shortCircuit: true, source: `${source}\nexport function createDesktopInstanceRuntime() {
       return { inspectApp: async () => ({appPath:'/fixture/Codex.app',bundleId:'com.openai.codex',executable:'/fixture/Codex.app/Contents/MacOS/Codex'}),
-        snapshot: async () => [], open: async () => { throw new Error('Native launches are forbidden in this fixture'); } };
+        snapshot: async () => [], assertExternal: async () => true, assertResourcesIdle: async () => true,
+        open: async () => { throw new Error('Native launches are forbidden in this fixture'); } };
     }` };
   }
   return nextLoad(url, context);

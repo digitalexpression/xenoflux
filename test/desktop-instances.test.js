@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
@@ -15,7 +15,7 @@ import { removeProfile, unbindNativeHome } from '../src/profile-removal.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
 import { assertNoConcurrentDesktops } from '../src/desktop-instance-guard.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
-import { desktopInstancePlan, openDesktopInstance, focusDesktopInstance, closeDesktopInstance,
+import { desktopInstancePlan, openDesktopInstance, prepareDesktopInstance, focusDesktopInstance, closeDesktopInstance,
   recoverDesktopInstance, listDesktopInstances } from '../src/desktop-instances.js';
 
 const app = { appPath: '/fixture/Codex.app', bundleId: 'com.openai.codex', executable: '/fixture/Codex.app/Contents/MacOS/Codex' };
@@ -72,7 +72,9 @@ async function fixture(t) {
       for (let i = rows.length - 1; i >= 0; i--) if (rows[i].pid === main.pid || rows[i].ppid === main.pid) rows.splice(i, 1);
     },
   };
+  const preparedLaunchers = new Map();
   const prepareLauncher = async (store, plan) => {
+    calls.push({ operation: 'prepare', profileId: plan.profileId });
     const appPath = join(store.directory, 'desktop-instances', 'apps', plan.profileId, `Codex · ${plan.name}.app`);
     const executable = join(appPath, 'Contents', 'MacOS', 'Codex');
     const bootstrapExecutable = join(appPath, 'Contents', 'MacOS', 'XfxProfileLauncher');
@@ -84,12 +86,27 @@ async function fixture(t) {
     await writeFile(executable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
     await writeFile(bootstrapExecutable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
     await writeFile(helperExecutable, 'desktop-instance-test-helper', { mode: 0o700 });
-    return { application: { appPath, bundleId: `com.xenoflux.profile.${plan.profileId.toLowerCase()}`, executable },
+    const prepared = { application: { appPath, bundleId: `com.xenoflux.profile.${plan.profileId.toLowerCase()}`, executable },
       bootstrapExecutable, helperExecutable, helperSha256 };
+    preparedLaunchers.set(plan.profileId, prepared);
+    return prepared;
+  };
+  const loadLauncher = async (_store, plan) => {
+    const prepared = preparedLaunchers.get(plan.profileId);
+    if (!prepared) {
+      const error = new Error('Profile app is not prepared; run xfx desktop prepare PROFILE.');
+      error.code = 'PROFILE_APP_PREPARE_REQUIRED';
+      throw error;
+    }
+    return prepared;
   };
   const ramLogs = { prepareHome: async args => { calls.push({ operation: 'logs', ...args }); } };
-  const options = { runtime, prepareLauncher, validateApp: async () => {}, ramLogs, defaultUserHome,
+  const options = { runtime, prepareLauncher, loadLauncher, validateApp: async () => {}, ramLogs, defaultUserHome,
     lockPath: join(root, 'desktop.lock'), launcherEnvironment: {} };
+  for (const name of names) {
+    const plan = await desktopInstancePlan(store, name, { runtime });
+    await prepareLauncher(store, plan);
+  }
   return { root, store, homes, original, rows, calls, runtime, options, aliases, ramLogs };
 }
 const statePath = (f, id) => join(f.store.directory, 'desktop-instances', `${id}.json`);
@@ -130,6 +147,138 @@ test('reopening focuses one owned instance; same-profile CLI and registry remova
   await assert.rejects(launchHome(f.store, 'A', { ramLogs: f.ramLogs, run: async () => { throw new Error('must not launch'); } }), /in use/);
   await assert.rejects(removeProfile(f.store, 'A', f.options), /unfinished desktop instance/);
   await assert.rejects(unbindNativeHome(f.store, 'A', f.options), /unfinished desktop instance/);
+});
+
+test('explicit desktop preparation refreshes a closed profile and refuses a running target without touching it', async t => {
+  const f = await fixture(t);
+  const profile = (await f.store.read()).profiles.find(item => item.name === 'A');
+  f.calls.length = 0;
+  const prepared = await prepareDesktopInstance(f.store, 'A', f.options);
+  assert.equal(prepared.status, 'prepared');
+  assert.equal(prepared.main, null);
+  assert.equal(f.calls.filter(call => call.operation === 'prepare').length, 1);
+  assert.equal(f.calls.filter(call => call.operation === 'open' || call.operation === 'focus').length, 0);
+  assert.equal((await listDesktopInstances(f.store, { runtime: f.runtime })).instances.length, 0);
+
+  const opened = await openDesktopInstance(f.store, 'A', f.options);
+  const journalBefore = await readFile(statePath(f, profile.id));
+  const rowsBefore = structuredClone(f.rows);
+  f.calls.length = 0;
+  await assert.rejects(prepareDesktopInstance(f.store, 'A', f.options), /running|open|close/i);
+  assert.equal(f.calls.filter(call => call.operation === 'prepare' || call.operation === 'open' || call.operation === 'focus' || call.operation === 'close').length, 0);
+  assert.deepEqual(await readFile(statePath(f, profile.id)), journalBefore);
+  assert.deepEqual(f.rows, rowsBefore);
+  assert.ok(f.rows.some(item => item.pid === opened.main.pid));
+});
+
+for (const code of ['PROFILE_APP_PREPARE_REQUIRED', 'PROFILE_APP_REFRESH_REQUIRED'])
+test(`desktop open handles ${code} once, then reuses and focuses the running app`, async t => {
+  const f = await fixture(t);
+  f.calls.length = 0;
+  const load = f.options.loadLauncher;
+  let stale = true;
+  f.options.loadLauncher = async (...args) => {
+    if (stale) { stale = false; throw Object.assign(new Error(code), { code }); }
+    return load(...args);
+  };
+  const first = await openDesktopInstance(f.store, 'A', f.options);
+  assert.equal(first.status, 'opened');
+  assert.equal(f.calls.filter(call => call.operation === 'prepare').length, 1);
+  // A vendor update while this profile is live must not replace its bundle.
+  f.options.loadLauncher = async () => { throw new Error('running open must not load or refresh the cache'); };
+  f.options.prepareLauncher = async () => { throw new Error('running open must not prepare'); };
+  const again = await openDesktopInstance(f.store, 'A', f.options);
+  assert.equal(again.status, 'focused');
+  assert.deepEqual(again.main, first.main);
+  assert.equal(f.calls.filter(call => call.operation === 'open').length, 1);
+  assert.equal(f.calls.filter(call => call.operation === 'close').length, 0);
+});
+
+test('automatic preparation preserves invalid caches and executing raw apps or Finder bootstraps', async t => {
+  const f = await fixture(t), profile = (await f.store.read()).profiles.find(item => item.name === 'A');
+  f.calls.length = 0;
+  f.options.loadLauncher = async () => { throw new Error('cache integrity failed'); };
+  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /cache integrity failed/);
+  f.options.loadLauncher = async () => {
+    throw Object.assign(new Error('stale cache'), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+  };
+  const plan = await desktopInstancePlan(f.store, 'A', f.options);
+  const prepared = await f.options.prepareLauncher(f.store, plan);
+  f.calls.length = 0;
+  f.rows.push(row(500, prepared.bootstrapExecutable));
+  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /still executing/);
+  f.rows.pop();
+  await assert.rejects(openDesktopInstance(f.store, 'A', { ...f.options,
+    launcherEnvironment: { XFX_DESKTOP_LAUNCHER_PID: '500', XFX_DESKTOP_LAUNCHER_EXECUTABLE: prepared.bootstrapExecutable } }), /from a terminal/);
+  assert.equal(f.calls.filter(call => call.operation === 'prepare' || call.operation === 'open').length, 0);
+  assert.equal(JSON.parse(await readFile(statePath(f, profile.id))).phase, 'closed');
+});
+
+test('open reconciles stopped opening and running journals without manual recovery', async t => {
+  const f = await fixture(t);
+  for (const phase of ['opening', 'running']) {
+    const first = await openDesktopInstance(f.store, 'A', f.options);
+    f.rows.splice(1);
+    const path = statePath(f, first.profileId), state = JSON.parse(await readFile(path));
+    state.phase = phase;
+    if (phase === 'opening') { state.main = null; state.processes = []; }
+    await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+    // A stopped, validated journal may also survive a crash after lock release.
+    await rm(lockPath(f, 'A'), { recursive: true });
+    const again = await openDesktopInstance(f.store, 'A', f.options);
+    assert.equal(again.status, 'opened');
+    assert.notEqual(again.main.pid, first.main.pid);
+  }
+  assert.equal(f.calls.filter(call => call.operation === 'prepare').length, 4, 'initial fixture caches only');
+  assert.equal(f.calls.filter(call => call.operation === 'close').length, 0);
+  assert.deepEqual(f.rows.find(row => row.pid === f.original.pid), f.original);
+});
+
+test('open releases only a dead operation guard belonging to this store and profile', async t => {
+  const f = await fixture(t), profile = (await f.store.read()).profiles.find(item => item.name === 'A');
+  const guard = `${f.options.lockPath}.operation`;
+  const owner = { kind: 'desktop-instance-operation', host: hostname(), pid: 900,
+    runId: randomUUID(), storePath: f.store.directory, profileId: profile.id, journalPath: statePath(f, profile.id) };
+  const writeOwner = async value => {
+    await mkdir(guard, { mode: 0o700 });
+    await writeFile(join(guard, 'owner.json'), JSON.stringify(value), { mode: 0o600 });
+  };
+  await writeOwner(owner);
+  await assert.rejects(openDesktopInstance(f.store, 'A', { ...f.options, isAlive: () => true }), /Another desktop operation/);
+  assert.deepEqual(JSON.parse(await readFile(join(guard, 'owner.json'))), owner);
+  await rm(guard, { recursive: true });
+  const foreign = { ...owner, profileId: randomUUID() };
+  await writeOwner(foreign);
+  await assert.rejects(openDesktopInstance(f.store, 'A', { ...f.options, isAlive: () => false }), /Another desktop operation/);
+  assert.deepEqual(JSON.parse(await readFile(join(guard, 'owner.json'))), foreign);
+  await rm(guard, { recursive: true });
+  await writeOwner(owner);
+  assert.equal((await openDesktopInstance(f.store, 'A', { ...f.options, isAlive: () => false })).status, 'opened');
+  await assert.rejects(access(guard), { code: 'ENOENT' });
+});
+
+test('desktop preparation respects CLI reservations and unfinished journals without replacing either', async t => {
+  const f = await fixture(t);
+  const profile = (await f.store.read()).profiles.find(item => item.name === 'A');
+  const journal = statePath(f, profile.id);
+  const reservation = lockPath(f, 'A');
+  const foreignOwner = { kind: 'cli-profile', runId: 'held-by-cli' };
+  await mkdir(reservation, { mode: 0o700 });
+  await writeFile(join(reservation, 'owner.json'), JSON.stringify(foreignOwner), { mode: 0o600 });
+  f.calls.length = 0;
+  await assert.rejects(prepareDesktopInstance(f.store, 'A', f.options), /in use|unfinished/i);
+  assert.deepEqual(JSON.parse(await readFile(join(reservation, 'owner.json'))), foreignOwner);
+  assert.equal(f.calls.filter(call => call.operation === 'prepare').length, 0);
+  await rm(reservation, { recursive: true });
+
+  const opened = await openDesktopInstance(f.store, 'A', f.options);
+  const journalBefore = await readFile(journal);
+  await rm(reservation, { recursive: true });
+  f.calls.length = 0;
+  await assert.rejects(prepareDesktopInstance(f.store, 'A', f.options), /running or unfinished/i);
+  assert.deepEqual(await readFile(journal), journalBefore);
+  assert.equal(f.calls.filter(call => call.operation === 'prepare').length, 0);
+  assert.ok(f.rows.some(item => item.pid === opened.main.pid));
 });
 
 test('profile deletion and unbinding preserve an interrupted instance even without its run lock', async t => {
@@ -347,14 +496,15 @@ test('resource/preparation failure before launch releases only its own reservati
 
 test('planning and public CLI dry-run/list are read-only; new controls reject blanket shutdown flags', async t => {
   const f = await fixture(t);
+  const before = await readdir(join(f.store.directory, 'desktop-instances'));
   const plan = await desktopInstancePlan(f.store, 'A', f.options);
   assert.equal(plan.home, f.homes.A.home); assert.equal(plan.userHome, join(f.homes.A.root, 'user-home'));
-  await assert.rejects(access(join(f.store.directory, 'desktop-instances')), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(join(f.store.directory, 'desktop-instances')), before);
   const run = args => promisify(execFile)(process.execPath, ['--loader', loader, cli, '--store', f.store.directory, '--json', ...args]);
   const dryRun = JSON.parse((await run(['desktop', 'open', 'A', '--dry-run'])).stdout);
   assert.equal(dryRun.profileId, plan.profileId); assert.equal(dryRun.liveHomeChanged, false);
   assert.deepEqual(JSON.parse((await run(['desktop', 'list', '--observe'])).stdout).instances, []);
   for (const args of [['desktop', 'close', 'A', '--close-clients'], ['desktop', 'recover', 'A', '--close-clients']])
     await assert.rejects(run(args), /not supported/);
-  await assert.rejects(access(join(f.store.directory, 'desktop-instances')), { code: 'ENOENT' });
+  assert.deepEqual(await readdir(join(f.store.directory, 'desktop-instances')), before);
 });

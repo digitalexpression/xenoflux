@@ -6,7 +6,7 @@ import { chmod, cp, link, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm
 import { createHash } from 'node:crypto';
 import { tmpdir, userInfo } from 'node:os';
 import { basename, join } from 'node:path';
-import { prepareProfileApp, validateProfileApp } from '../src/profile-launcher.js';
+import { loadPreparedProfileApp, prepareProfileApp, validateProfileApp } from '../src/profile-launcher.js';
 
 const profileA = 'd083b722-5744-4d5d-9fa2-81ffb8e85a14';
 const profileB = '9d73a112-a533-41c2-b316-10fd2530ac73';
@@ -147,6 +147,37 @@ test('reuses a validated private bundle and native helper for the same profile',
   assert.equal(copies, 1);
 });
 
+test('prepared-app loading is read-only and requires explicit preparation or refresh', async t => {
+  const { store, plan, options } = await fixture(t);
+  let builds = 0, copies = 0, signs = 0;
+  const tracked = { ...options,
+    build: async args => { builds += 1; return options.build(args); },
+    copyApp: async (...args) => { copies += 1; return options.copyApp(...args); },
+    signApp: async (...args) => { signs += 1; return options.signApp(...args); },
+  };
+  await assert.rejects(loadPreparedProfileApp(store, plan, tracked), error => {
+    assert.equal(error.code, 'PROFILE_APP_PREPARE_REQUIRED');
+    assert.match(error.message, /desktop prepare/);
+    return true;
+  });
+  assert.deepEqual({ builds, copies, signs }, { builds: 0, copies: 0, signs: 0 });
+
+  const prepared = await prepareProfileApp(store, plan, tracked);
+  const loaded = await loadPreparedProfileApp(store, plan, tracked);
+  assert.deepEqual(loaded, prepared);
+  assert.deepEqual({ builds, copies, signs }, { builds: 1, copies: 1, signs: 1 });
+
+  const changedArchive = Buffer.from('new vendor archive version');
+  await writeFile(join(plan.app.appPath, 'Contents', 'Resources', 'app.asar'), changedArchive);
+  plan.app.asarSha256 = digest(changedArchive);
+  await assert.rejects(loadPreparedProfileApp(store, plan, tracked), error => {
+    assert.equal(error.code, 'PROFILE_APP_REFRESH_REQUIRED');
+    assert.match(error.message, /desktop refresh/);
+    return true;
+  });
+  assert.deepEqual({ builds, copies, signs }, { builds: 1, copies: 1, signs: 1 }, 'loading must never repair stale cache');
+});
+
 test('refreshes an owned bundle when vendor or helper sources change and refuses in-place refresh on Finder launch', async t => {
   const { root, store, plan, options } = await fixture(t);
   const helperSource = join(root, 'profile-launcher.swift');
@@ -166,9 +197,9 @@ test('refreshes an owned bundle when vendor or helper sources change and refuses
   plan.app.asarSha256 = digest(newAsar);
   await writeFile(helperSource, 'fixture helper source v2');
 
-  await assert.rejects(prepareProfileApp(store, plan, { ...tracked, allowRebuild: false }), error => {
+  await assert.rejects(loadPreparedProfileApp(store, plan, tracked), error => {
     assert.equal(error.code, 'PROFILE_APP_REFRESH_REQUIRED');
-    assert.match(error.message, /xfx desktop open/);
+    assert.match(error.message, /xfx desktop refresh/);
     return true;
   });
   assert.equal(await readFile(oldAsarPath, 'utf8'), 'mock vendor archive', 'refused refresh must preserve the running bundle');
@@ -278,7 +309,7 @@ test('refreshes old-policy owned bundles on CLI open and preserves validation fo
   delete marker.signingPolicy;
   await writeFile(ownerPath, `${JSON.stringify(marker)}\n`, { mode: 0o600 });
   await validateProfileApp(f.store, f.plan, initial.application, options);
-  await assert.rejects(prepareProfileApp(f.store, f.plan, { ...options, allowRebuild: false }), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+  await assert.rejects(loadPreparedProfileApp(f.store, f.plan, options), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
   assert.equal(copies, 1, 'a Finder reopen must not replace an old-policy bundle in place');
   assert.equal(signs, 1);
   const refreshed = await prepareProfileApp(f.store, f.plan, options);

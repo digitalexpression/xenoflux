@@ -45,7 +45,7 @@ xfx profile list
 xfx profile inspect Research
 ```
 
-Profiles keep their own settings, sign-in, history, and desktop data. Xenoflux does not copy credentials or conversations between them. Guided creation prepares a named profile and prints `xfx desktop open NAME` as the next step.
+Profiles keep their own settings, sign-in, history, and desktop data. Xenoflux does not copy credentials or conversations between them. Guided creation prepares the native profile and prints `xfx desktop open NAME` as the next step. Opening creates or refreshes the cached desktop app when it is missing or stale.
 
 To register an existing native profile directory, use `xfx profile register NAME ROOT --codex EXECUTABLE --codex-version VERSION`. Registration creates its profile record after validating the directory. `profile rename`, `profile delete`, and `profile unbind` change registry metadata while preserving native files. Deletion and native unbinding refuse profiles with an active named desktop or unfinished operation.
 
@@ -100,10 +100,18 @@ Closing a profile refuses to target a Codex process that hosts the invoking comm
 An owned app named `Codex · PROFILE` contains a private copy of the verified
 installed Codex app, retaining its icon and resources. A small bootstrap becomes
 Codex in the same process, so a profile needs one Dock and Cmd+Tab entry. The first
-open requires Xcode Command Line Tools and prepares a locally signed copy. The
-installed app remains intact. Native
+`desktop open` creates a locally signed copy when the cache is missing, and
+refreshes it when stale. This requires Xcode Command Line Tools. The installed app
+remains intact. Opening a running profile focuses its pinned app without building,
+signing, or refreshing. Native
 Cmd+Tab, Dock reopening, and profile routing remain acceptance checks pending on
 the target Mac; fixture checks and helper compilation do not establish them.
+
+`xfx desktop prepare NAME` and `xfx desktop refresh NAME` are explicit maintenance
+commands for creating or refreshing a stopped profile app. A safely stopped
+unfinished open is reconciled by the next `desktop open NAME`. Use
+`xfx desktop recover NAME` for explicit journal recovery and diagnostics. A Finder
+or Dock launch cannot refresh a stale copy; use CLI `desktop open NAME` to refresh it.
 
 `xfx desktop recover NAME` releases only a stopped instance's verified reservation;
 it does not quit or reopen an app. See [concurrent desktop operation](docs/CONCURRENT-DESKTOPS.md)

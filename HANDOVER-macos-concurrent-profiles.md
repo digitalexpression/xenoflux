@@ -11,6 +11,51 @@ ordinary long-running Codex session. Local source work and disposable checks are
 authorized; the user tests real profiles afterward. No live profile/app/keychain
 mutation, client closure, installation or publication was performed.
 
+## Single-command cached opens
+
+The latest user request supersedes the explicit preparation workflow: normal
+users run only `desktop open NAME`. Open first focuses a verified running
+instance without loading or refreshing the cache. Otherwise it reconciles a
+validated stopped journal and its own reservation, loads a valid cached app,
+and prepares or refreshes only on `PROFILE_APP_PREPARE_REQUIRED` or
+`PROFILE_APP_REFRESH_REQUIRED`. Ownership, integrity and signature failures
+remain refusals. A dead operation guard is released only for the exact same
+host/store/profile/journal; live and foreign guards stay untouched. Missing
+run-locks can be reconciled only for stopped instances, never live ones.
+
+`desktop prepare NAME`, `desktop refresh NAME`, and `desktop recover NAME` remain
+explicit maintenance/debugging tools. Cached apps are reused on normal opens;
+first opens and stale stopped caches may compile/copy/sign as needed. A Finder
+bootstrap cannot refresh its executing bundle and asks for CLI open instead.
+Preparation also refuses raw processes executing from that profile's app root.
+
+The user reported a repeated RC3 open with `RESOURCE_INSPECTION_FAILED` after
+opening PID 76877. A read-only host check found that recorded process stopped and
+all five profile-resource lsof calls idle (exit 1, empty stdout/stderr). The earlier
+failure was not reproduced; no crash or focus failure is established by that
+observation. Resource inspection now reports the stage/path and bounded reason
+without dumping arbitrary process output or resource contents. Its fail-closed
+semantics remain unchanged. No live profile preparation, recovery, launch,
+signing or closure was performed by this development turn.
+
+Verification: 379 full-suite checks passed with the opt-in native test skipped.
+The separate host-permission native fixture passed automatic cache-miss
+preparation, LaunchServices open, same-PID repeated-open focus, stopped-journal
+reconciliation and cached reopen without another preparation, wrong-start quit
+refusal, and controller close of its own synthetic app. The successful retry
+cleaned up its disposable files. Its kernel/native/ps timestamps agreed.
+`npm run check` and `git diff --check` passed. Independent source review found no
+actionable automatic-open defect. Logs: `/private/tmp/xfx-auto-open-tests.log`
+and `/private/tmp/xfx-auto-open-native.log`.
+
+User acceptance on 2026-10-11: RC3 Check opened as PID 1836 and Advanced Check
+as PID 3106. Repeated opens returned `focused` with the same PID and start time
+for each profile; `desktop list --observe` reported both running with their own
+app paths and descendants. The user confirmed focus reached the correct instance.
+This establishes real concurrent open and repeated-open focus. Full Dock/Cmd+Tab
+labels, sign-in, data isolation and Default preservation still require their
+separate acceptance checks.
+
 ## Current result and causes
 
 The previous signer fix (4d7fc7e) preserved nested vendor code and allowed the
@@ -61,10 +106,10 @@ HOME rejection. Final verification passed:
   gaps; both were repaired with regressions and confirmed in the final review.
 
 Installed/default Codex, real profile apps, journals and keychains were unchanged.
-The actual Default main was read-only observed as PID 57327. RC3's journal remains
-opening with main null; leftover profile helpers/handles may prevent recovery.
-Do not infer stopped/idle from the absent GUI alone. Inspect the journal and
-resource handles before any explicitly authorized cleanup.
+The actual Default main was previously read-only observed as PID 57327. The user
+subsequently reported RC3 running as PID 84299 with its profile-labelled executable.
+These are past observations; inspect current journals and resource handles before
+any explicitly authorized cleanup. Do not infer stopped/idle from an absent GUI.
 
 Real profile sign-in, separate data, account-home discovery, vendor helper group
 state, Dock/Cmd+Tab activation/reopen and Default preservation remain native
@@ -74,10 +119,10 @@ interruption window; this work adds no cache migration/recovery framework.
 
 ## Next action
 
-Use the existing xfx_dev helper against this checkout. Once RC3 Check is quit and
-its resources are idle, recover its interrupted reservation and open it from the
-CLI; changed helper source refreshes a stopped owned app. Keep Default running.
-Test the keychain prompt, profile name, focus/reopen/close, then Advanced Check
-alongside RC3 and Default following `docs/CONCURRENT-DESKTOPS.md`. Do not reset
-keychain defaults. If a receipt mismatch remains, its new diagnostics identify
-the precise field; investigate that evidence before another launch change.
+Use the existing xfx_dev helper against this checkout. Already prepared valid
+apps need only `desktop open NAME`; a running instance is focused. Use `desktop
+prepare NAME` for an absent app and `desktop refresh NAME` for a stale stopped
+app. Recover any interrupted target reservation after its resources are idle.
+Do not close the user's running instances for this work. The remaining native
+acceptance checks are in `docs/CONCURRENT-DESKTOPS.md`; do not reset keychain
+defaults or claim full profile isolation from the synthetic fixture.

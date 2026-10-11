@@ -76,7 +76,7 @@ export async function profileCommand(store, params, options, { json = false, cli
   let preview = operation === 'create' ? await planHomeCreation({ store, name, base, description: options['--description'] })
     : await inspectHomeCreation({ store, name, base });
   preview = { ...preview, settings: { source: options['--from'] ?? null, included: include ?? [] },
-    desktop: `Open this profile separately with xfx desktop open ${shellArgument(name)}.`, nativeSignIn: 'Explicit native login; no credentials or history are copied.' };
+    desktop: `Open this profile with xfx desktop open ${shellArgument(name)}; the app is prepared or refreshed automatically when needed.`, nativeSignIn: 'Explicit native login; no credentials or history are copied.' };
   if (!options['--apply']) {
     if (!advanced) return preview;
     const source = options['--from'] ?? 'Default';
@@ -170,7 +170,8 @@ export async function profileCommand(store, params, options, { json = false, cli
       if (setup.login.state !== 'completed') return { ...setup, status: 'setup-pending' };
     }
     if (controller.signal.aborted) return { ...setup, status: 'cancelled' };
-    return { ...setup, desktop: 'available', nativeAcceptance: 'pending', next: `xfx desktop open ${shellArgument(name)}` };
+    return { ...setup, desktop: 'available', nativeAcceptance: 'pending',
+      next: `xfx desktop open ${shellArgument(name)}` };
   } finally {
     for (const signal of signals) process.off(signal, abort);
     if (input.isTTY && typeof input.setRawMode === 'function') input.setRawMode(false);

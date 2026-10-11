@@ -1,21 +1,25 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { execFile as nodeExecFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
-import { prepareProfileApp } from '../src/profile-launcher.js';
+import { loadPreparedProfileApp, prepareProfileApp, validateProfileApp } from '../src/profile-launcher.js';
 import { DESKTOP_APP } from '../src/desktop-runtime.js';
 import { createDesktopInstanceRuntime, targetStartSeconds } from '../src/desktop-instance-runtime.js';
+import { Store, create } from '../src/profiles.js';
+import { registerHome } from '../src/homes.js';
+import { prepareNativeHome } from '../test-support/native-home-fixture.js';
+import { openDesktopInstance, closeDesktopInstance } from '../src/desktop-instances.js';
 
 const execFile = promisify(nodeExecFile);
 const enabled = process.platform === 'darwin' && process.env.XFX_NATIVE_PROFILE_OPEN === '1';
 
 function run(executable, args, { timeout = 45000 } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(executable, args, { cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', TMPDIR: tmpdir() }, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
@@ -46,39 +50,46 @@ async function waitForExit(pid, timeout = 10000) {
   throw new Error(`Disposable profile app PID ${pid} did not terminate naturally`);
 }
 
-async function readReport(path, timeout = 5000) {
+async function readReport(path, timeout = 5000, differentFromPid) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    try { return JSON.parse(await readFile(path, 'utf8')); }
+    try {
+      const report = JSON.parse(await readFile(path, 'utf8'));
+      if (differentFromPid === undefined || report.pid !== differentFromPid) return report;
+    }
     catch (error) { if (error.code !== 'ENOENT') throw error; await new Promise(resolve => setTimeout(resolve, 50)); }
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
   return null;
 }
 
-test('LaunchServices opens the named profile app, loads its framework and preserves same-PID routing', {
+test('the desktop controller prepares, opens, focuses and reopens a native profile app', {
   skip: !enabled,
   timeout: 90000,
 }, async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-native-profile-open-')));
-  const profileId = randomUUID();
-  let reportPath, launchedPid, launchRequested = false;
+  let profileId;
+  let reportPath, launchRequested = false;
+  const launchedPids = new Set();
   t.after(async () => {
     if (!launchRequested) {
       await rm(root, { recursive: true, force: true });
       return;
     }
-    if (!launchedPid && reportPath) {
+    if (reportPath) {
       const report = await readReport(reportPath, 5000).catch(() => null);
-      if (report && Number.isSafeInteger(report.pid)) launchedPid = report.pid;
+      if (report && Number.isSafeInteger(report.pid)) launchedPids.add(report.pid);
     }
-    if (!launchedPid) {
+    if (!launchedPids.size) {
       t.diagnostic(`Leaving disposable native fixture for inspection because its app exit could not be proven: ${root}`);
       return;
     }
-    try { await waitForExit(launchedPid, 15000); }
-    catch {
-      t.diagnostic(`Leaving disposable native fixture for inspection because PID ${launchedPid} did not exit: ${root}`);
-      return;
+    for (const pid of launchedPids) {
+      try { await waitForExit(pid, 20000); }
+      catch {
+        t.diagnostic(`Leaving disposable native fixture for inspection because PID ${pid} did not exit: ${root}`);
+        return;
+      }
     }
     await rm(root, { recursive: true, force: true });
   });
@@ -141,7 +152,7 @@ let report: [String: Any] = [
 let reportURL = URL(fileURLWithPath: home).appendingPathComponent("native-open-result.json")
 let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
 try data.write(to: reportURL, options: .atomic)
-DispatchQueue.main.asyncAfter(deadline: .now() + 5) { app.terminate(nil) }
+DispatchQueue.main.asyncAfter(deadline: .now() + 15) { app.terminate(nil) }
 app.run()
 
 func kernelExecutablePath() -> String? {
@@ -191,37 +202,33 @@ func kernelExecutablePath() -> String? {
   const appPath = await realpath(sourceApp);
   const app = { appPath, bundleId: DESKTOP_APP.bundleId, executable: vendorExecutable,
     asarSha256: createHash('sha256').update(archive).digest('hex') };
-  const plan = { profileId, name: 'Native Fixture', nativeRoot: join(root, 'profile-native'), app };
-  const store = { directory: await realpath(storeDirectory) };
-  // Exercise the full controller path across a delayed same-PID exec, using
+  const store = new Store(await realpath(storeDirectory));
+  await store.update(data => { profileId = create(data, 'Native Fixture').id; });
+  const native = await prepareNativeHome({ directory: join(root, 'profile-native'), executable: vendorExecutable, codexVersion: '0.153.4' });
+  await registerHome(store, 'Native Fixture', native.root, { executable: vendorExecutable, version: '0.153.4' });
+  // Exercise the native runtime path across a delayed same-PID exec, using
   // kernel and ps timestamps as independent ownership checks.
   const delayedSource = join(root, 'delayed-profile-launcher.swift');
   const source = await readFile(new URL('../src/native/profile-launcher.swift', import.meta.url), 'utf8');
   assert.ok(source.includes('let args = [metadata.vendorExecutable,'));
   await writeFile(delayedSource, source.replace('let args = [metadata.vendorExecutable,',
     'sleep(2)\n    let args = [metadata.vendorExecutable,'), { mode: 0o600 });
-  const prepared = await prepareProfileApp(store, plan, {
+  const launcherOptions = {
     source: delayedSource,
     verifyOriginal: async sourcePath => ({ ...app, appPath: sourcePath }),
-  });
-  const copiedClaims = await entitlements(prepared.application.executable);
-  assert.ok(copiedClaims.includes('com.apple.security.cs.disable-library-validation'),
-    'the locally signed main must be allowed to load the preserved vendor framework');
-  for (const claim of ['SYNTHETICTEAM.com.openai.codex', 'com.apple.developer.team-identifier', 'com.apple.security.application-groups', 'com.apple.security.app-sandbox'])
-    assert.ok(!copiedClaims.includes(claim), `secondary executable retained restricted vendor claim ${claim}`);
-  assert.deepEqual(await readFile(join(prepared.application.appPath, 'Contents', 'Frameworks', 'FakeRuntime.framework', 'FakeRuntime')),
-    originalFrameworkBytes, 'the framework and its embedded signature must remain untouched');
-
-  const home = join(plan.nativeRoot, 'codex-home'), desktopData = join(plan.nativeRoot, 'desktop-data');
-  const userHome = join(plan.nativeRoot, 'user-home'), temporary = join(plan.nativeRoot, 'tmp');
-  for (const path of [home, desktopData, userHome, temporary]) await mkdir(path, { recursive: true, mode: 0o700 });
+  };
+  const home = native.home, desktopData = native.desktopData;
   reportPath = join(home, 'native-open-result.json');
-  launchRequested = true;
   let receipt;
+  let preparations = 0;
+  let prepared;
   const runtime = createDesktopInstanceRuntime({ inspectApp: async () => app,
     execFile: async (path, args, options) => {
+      assert.ok(!(path === '/usr/bin/xcrun' && args.includes('swiftc')), 'opening must not compile the Swift helper');
+      assert.ok(!(path === '/usr/bin/codesign' && args.includes('--sign')), 'opening must not sign the prepared app');
+      if (args[0] === '--open-app') launchRequested = true;
       const result = await execFile(path, args, options);
-      if (path === prepared.helperExecutable && args[0] === '--open-app') receipt = JSON.parse(result.stdout.trim());
+      if (path === prepared?.helperExecutable && args[0] === '--open-app') receipt = JSON.parse(result.stdout.trim());
       if (path === '/bin/ps' && receipt) {
         const row = result.stdout.split('\n').find(line => line.trim().startsWith(`${receipt.pid} `));
         if (row?.includes('(Codex)')) t.diagnostic(`Shutdown ps row: ${row.trim()}`);
@@ -229,10 +236,32 @@ func kernelExecutablePath() -> String? {
       return result;
     },
   });
-  const opened = await runtime.open({ ...plan, home, desktopData, userHome, temporary }, prepared);
+  const prepareLauncher = async (targetStore, plan) => {
+    preparations++;
+    prepared = await prepareProfileApp(targetStore, plan, launcherOptions);
+    return prepared;
+  };
+  const loadLauncher = (targetStore, plan) => loadPreparedProfileApp(targetStore, plan, launcherOptions);
+  const controllerOptions = { runtime, prepareLauncher, loadLauncher,
+    lockPath: join(root, 'desktop.lock'), launcherEnvironment: {},
+    validateApp: (targetStore, plan, application) => validateProfileApp(targetStore, plan, application, launcherOptions),
+    ramLogs: { prepareHome: async () => {} } };
+  const opened = await openDesktopInstance(store, 'Native Fixture', controllerOptions);
+  assert.equal(opened.status, 'opened');
+  assert.equal(preparations, 1, 'the first cache miss must prepare the profile app through the controller');
+  const preparedApp = await loadPreparedProfileApp(store,
+    { profileId, name: 'Native Fixture', nativeRoot: native.root, app }, launcherOptions);
+  const copiedClaims = await entitlements(preparedApp.application.executable);
+  assert.ok(copiedClaims.includes('com.apple.security.cs.disable-library-validation'),
+    'the locally signed main must be allowed to load the preserved vendor framework');
+  for (const claim of ['SYNTHETICTEAM.com.openai.codex', 'com.apple.developer.team-identifier', 'com.apple.security.application-groups', 'com.apple.security.app-sandbox'])
+    assert.ok(!copiedClaims.includes(claim), `secondary executable retained restricted vendor claim ${claim}`);
+  assert.deepEqual(await readFile(join(preparedApp.application.appPath, 'Contents', 'Frameworks', 'FakeRuntime.framework', 'FakeRuntime')),
+    originalFrameworkBytes, 'the framework and its embedded signature must remain untouched');
+
   const report = await readReport(reportPath);
   assert.ok(report, 'fake AppKit vendor did not write its launch receipt');
-  launchedPid = report.pid;
+  launchedPids.add(report.pid);
   const ps = await execFile('/bin/ps', ['-p', String(receipt.pid), '-o', 'lstart='], {
     encoding: 'utf8', env: { PATH: '/usr/bin:/bin', LC_ALL: 'en_US.UTF-8', TZ: 'UTC' },
   });
@@ -242,22 +271,32 @@ func kernelExecutablePath() -> String? {
   assert.equal(receipt.startSeconds, report.kernelStartSeconds);
   assert.equal(receipt.startSeconds, psSeconds);
   assert.equal(report.pid, receipt.pid, 'LaunchServices bootstrap must exec the vendor at the same PID');
-  assert.equal(report.executable, prepared.application.executable);
-  assert.equal(receipt.executable, prepared.application.executable);
-  assert.equal(report.bundleId, prepared.application.bundleId);
-  assert.equal(report.runningBundleId, prepared.application.bundleId);
+  assert.equal(report.executable, preparedApp.application.executable);
+  assert.equal(receipt.executable, preparedApp.application.executable);
+  assert.equal(report.bundleId, preparedApp.application.bundleId);
+  assert.equal(report.runningBundleId, preparedApp.application.bundleId);
   assert.equal(report.runningName, 'Codex · Native Fixture');
   assert.equal(report.frameworkLoaded, true);
   assert.deepEqual([report.codexHome, report.sqliteHome, report.desktopData, report.userHome, report.temporary],
-    [home, home, desktopData, userInfo().homedir, temporary]);
+    [home, home, desktopData, userInfo().homedir, native.temporary]);
   assert.deepEqual(report.arguments, [`--user-data-dir=${desktopData}`]);
   assert.equal(opened.main.pid, report.pid);
   assert.equal(Number(targetStartSeconds(opened.main.startedAt)), report.kernelStartSeconds);
-  await assert.rejects(run(prepared.helperExecutable, ['--quit-pid', String(receipt.pid),
+  const focused = await openDesktopInstance(store, 'Native Fixture', controllerOptions);
+  assert.equal(focused.status, 'focused');
+  assert.equal(focused.main.pid, opened.main.pid, 'a repeated controller open must focus the same PID');
+  assert.equal(preparations, 1, 'a cached repeated open must not prepare or sign again');
+  await waitForExit(report.pid, 20000);
+  const reopened = await openDesktopInstance(store, 'Native Fixture', controllerOptions);
+  assert.equal(reopened.status, 'opened', 'a stopped journal must be reconciled by open itself');
+  assert.notEqual(reopened.main.pid, report.pid);
+  const reopenedReport = await readReport(reportPath, 5000, report.pid);
+  assert.ok(reopenedReport);
+  launchedPids.add(reopenedReport.pid);
+  assert.equal(reopenedReport.pid, reopened.main.pid);
+  assert.equal(preparations, 1, 'the reconciled reopen must reuse the cached app');
+  await assert.rejects(run(preparedApp.helperExecutable, ['--quit-pid', String(receipt.pid),
     '--target-executable', receipt.executable, '--target-start-seconds', String(receipt.startSeconds + 1)]),
   /exited 1/, 'native quit must reject a different kernel start time');
-  await runtime.focus(opened.main, prepared);
-  const closed = await runtime.close(opened.main, prepared);
-  assert.equal(closed.status, 'stopped');
-  await waitForExit(receipt.pid);
+  assert.equal((await closeDesktopInstance(store, 'Native Fixture', controllerOptions)).status, 'closed');
 });

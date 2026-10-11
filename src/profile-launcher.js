@@ -32,6 +32,9 @@ function isWithin(root, path) { const rel = relative(root, path); return rel ===
 async function ensureDirectory(path, { mkdir, lstat, realpath }) {
   try { await mkdir(path, { recursive: false, mode: 0o700 }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
+  return requireDirectory(path, { lstat, realpath });
+}
+async function requireDirectory(path, { lstat, realpath }) {
   const info = await lstat(path);
   if (info.isSymbolicLink() || !info.isDirectory() || info.uid !== currentUid() || !privateMode(info)) fail('LAUNCHER_DIRECTORY_UNSAFE');
   if (await realpath(path) !== path) fail('LAUNCHER_DIRECTORY_UNSAFE');
@@ -70,6 +73,31 @@ async function atomicWrite(path, contents, { writeFile, rename, chmod, lstat }, 
     throw error;
   }
 }
+async function cachedHelper(sourceHash, storeDirectory, { lstat, realpath, readFile }) {
+  const nativeRoot = join(storeDirectory, 'desktop-instances', 'native');
+  await requireDirectory(nativeRoot, { lstat, realpath });
+  const owner = { kind: 'xenoflux-profile-launcher-native-cache', store: storeDirectory };
+  await loadOwnedMarker(join(nativeRoot, ownerName), { lstat, readFile }, owner);
+  const cacheDir = join(nativeRoot, sourceHash), helper = join(cacheDir, 'XfxProfileLauncher');
+  const dirInfo = await lstat(cacheDir);
+  if (dirInfo.isSymbolicLink() || !dirInfo.isDirectory() || dirInfo.uid !== currentUid() || !privateMode(dirInfo)
+      || await realpath(cacheDir) !== cacheDir) fail('LAUNCHER_CACHE_UNSAFE');
+  let marker;
+  try {
+    const markerPath = join(cacheDir, ownerName);
+    await requireOwnedFile(markerPath, { lstat }, 'LAUNCHER_CACHE_UNSAFE');
+    marker = JSON.parse(await readFile(markerPath, 'utf8'));
+  } catch { fail('LAUNCHER_CACHE_UNSAFE'); }
+  if (marker.kind !== owner.kind || marker.store !== storeDirectory || marker.sourceHash !== sourceHash
+      || typeof marker.helperSha256 !== 'string') fail('LAUNCHER_CACHE_UNSAFE');
+  let helperInfo;
+  try { helperInfo = await requireOwnedFile(helper, { lstat }, 'LAUNCHER_CACHE_UNSAFE'); }
+  catch { fail('LAUNCHER_CACHE_UNSAFE'); }
+  if (!(helperInfo.mode & 0o111)) fail('LAUNCHER_CACHE_UNSAFE');
+  const helperHash = createHash('sha256').update(await readFile(helper)).digest('hex');
+  if (helperHash !== marker.helperSha256) fail('LAUNCHER_CACHE_UNSAFE');
+  return { helper, helperSha256: helperHash, sourceHash };
+}
 async function compileHelper(source, sourceHash, storeDirectory, { build, execFile, mkdir, lstat, realpath, readFile, writeFile, rename, rm, chmod }) {
   const nativeRoot = join(storeDirectory, 'desktop-instances', 'native');
   await ensureDirectory(nativeRoot, { mkdir, lstat, realpath });
@@ -77,26 +105,7 @@ async function compileHelper(source, sourceHash, storeDirectory, { build, execFi
   await writeOwner(nativeRoot, owner, { lstat, readFile, writeFile });
   const cacheDir = join(nativeRoot, sourceHash);
   const helper = join(cacheDir, 'XfxProfileLauncher');
-  async function cached() {
-    const dirInfo = await lstat(cacheDir);
-    if (dirInfo.isSymbolicLink() || !dirInfo.isDirectory() || dirInfo.uid !== currentUid() || !privateMode(dirInfo)
-        || await realpath(cacheDir) !== cacheDir) fail('LAUNCHER_CACHE_UNSAFE');
-    let marker;
-    try {
-      const markerPath = join(cacheDir, ownerName);
-      await requireOwnedFile(markerPath, { lstat }, 'LAUNCHER_CACHE_UNSAFE');
-      marker = JSON.parse(await readFile(markerPath, 'utf8'));
-    } catch { fail('LAUNCHER_CACHE_UNSAFE'); }
-    if (marker.kind !== owner.kind || marker.store !== storeDirectory || marker.sourceHash !== sourceHash
-        || typeof marker.helperSha256 !== 'string') fail('LAUNCHER_CACHE_UNSAFE');
-    let helperInfo;
-    try { helperInfo = await requireOwnedFile(helper, { lstat }, 'LAUNCHER_CACHE_UNSAFE'); }
-    catch { fail('LAUNCHER_CACHE_UNSAFE'); }
-    if (!(helperInfo.mode & 0o111)) fail('LAUNCHER_CACHE_UNSAFE');
-    const helperHash = createHash('sha256').update(await readFile(helper)).digest('hex');
-    if (helperHash !== marker.helperSha256) fail('LAUNCHER_CACHE_UNSAFE');
-    return { helper, helperSha256: helperHash, sourceHash };
-  }
+  const cached = () => cachedHelper(sourceHash, storeDirectory, { lstat, realpath, readFile });
   try { return await cached(); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   const buildLock = join(nativeRoot, `.${sourceHash}.build-lock`);
@@ -223,9 +232,19 @@ async function loadOwnedMarker(path, { lstat, readFile }, expected) {
 function applicationFor(appPath, bundleId, executable) { return { appPath, bundleId, executable }; }
 
 /** Prepare a signed, profile-labelled copy of the verified vendor app. */
-export async function prepareProfileApp(store, plan, {
+export function prepareProfileApp(store, plan, options = {}) {
+  return profileApp(store, plan, true, options);
+}
+/** Load a current prepared app using reads and signature verification only. */
+export function loadPreparedProfileApp(store, plan, options = {}) {
+  return profileApp(store, plan, false, options);
+}
+function preparationRequired(plan, refresh) {
+  const code = refresh ? 'PROFILE_APP_REFRESH_REQUIRED' : 'PROFILE_APP_PREPARE_REQUIRED';
+  return Object.assign(new Error(`${code}: Run xfx desktop ${refresh ? 'refresh' : 'prepare'} ${JSON.stringify(plan.name)} before opening this profile.`), { code });
+}
+async function profileApp(store, plan, allowRebuild, {
   build, nodeExecutable = process.execPath, entryPoint = fileURLToPath(new URL('../bin/xfx.js', import.meta.url)),
-  allowRebuild = true,
   source = sourceDefault, execFile = execFileDefault,
   verifyOriginal: verifyOriginalFn = async (appPath, expected) => inspectDesktopApp({ appPath, expected, execFile, readFile, realpath }),
   copyApp = (from, to) => nodeCp(from, to, { recursive: true, verbatimSymlinks: true, mode: fsConstants.COPYFILE_FICLONE }),
@@ -235,7 +254,6 @@ export async function prepareProfileApp(store, plan, {
   readlink = nodeReadlink, writeFile = nodeWriteFile, rename = nodeRename, rm = nodeRm, chmod = nodeChmod,
 } = {}) {
   validateInput(store, plan, nodeExecutable, entryPoint, source);
-  if (typeof allowRebuild !== 'boolean') fail('INVALID_LAUNCHER_PLAN');
   const canonicalStore = await realpath(store.directory);
   if (canonicalStore !== store.directory) fail('INVALID_LAUNCHER_STORE');
   const canonicalNode = await realpath(nodeExecutable), canonicalEntry = await realpath(entryPoint);
@@ -250,21 +268,27 @@ export async function prepareProfileApp(store, plan, {
   const copiedAsarSha256 = await hashFile(join(sourceAppPath, 'Contents', 'Resources', 'app.asar'), { readFile, lstat });
   if (copiedAsarSha256 !== plan.app.asarSha256) fail('PROFILE_APP_SOURCE_CHANGED');
   const instancesRoot = join(store.directory, 'desktop-instances');
-  await ensureDirectory(instancesRoot, { mkdir, lstat, realpath });
   const sourcePath = await realpath(source);
   const sourceHash = createHash('sha256').update(await readFile(sourcePath)).digest('hex');
-  const helper = await compileHelper(sourcePath, sourceHash, store.directory, { build, execFile, mkdir, lstat, realpath, readFile, writeFile, rename, rm, chmod });
   const appsRoot = join(instancesRoot, 'apps');
-  await ensureDirectory(appsRoot, { mkdir, lstat, realpath });
   const profileDir = join(appsRoot, plan.profileId);
-  try { await mkdir(profileDir, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
-  await ensureDirectory(profileDir, { mkdir, lstat, realpath });
   const appPath = appPathFor(appsRoot, plan.profileId, plan.name);
   const ownerPath = join(profileDir, markerName);
   const tempApp = join(profileDir, `.profile-app-${randomUUID()}.app`);
   const bundleId = `com.xenoflux.profile.${plan.profileId.toLowerCase()}`;
   const expectedBase = { kind: 'xenoflux-profile-app', store: store.directory, profileId: plan.profileId, nativeRoot: plan.nativeRoot, appPath };
   const existingMarker = await lstat(ownerPath).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!allowRebuild && !existingMarker) throw preparationRequired(plan, false);
+  for (const path of [instancesRoot, appsRoot, profileDir]) {
+    if (allowRebuild) await ensureDirectory(path, { mkdir, lstat, realpath });
+    else await requireDirectory(path, { lstat, realpath });
+  }
+  let helper;
+  if (allowRebuild) helper = await compileHelper(sourcePath, sourceHash, store.directory, { build, execFile, mkdir, lstat, realpath, readFile, writeFile, rename, rm, chmod });
+  else {
+    try { helper = await cachedHelper(sourceHash, store.directory, { lstat, realpath, readFile }); }
+    catch (error) { if (error.code === 'ENOENT') throw preparationRequired(plan, true); throw error; }
+  }
   let previousAppPath = null;
   if (existingMarker) {
     const existing = await loadOwnedMarker(ownerPath, { lstat, readFile }, {
@@ -282,11 +306,11 @@ export async function prepareProfileApp(store, plan, {
       || existing.sourceBundleId !== plan.app.bundleId || existing.sourceAsarSha256 !== copiedAsarSha256
       || existing.sourceExecutableSha256 !== sourceExecutableSha256
       || existing.helperSourceSha256 !== helper.sourceHash || existing.helperSha256 !== helper.helperSha256
-      || existing.signingPolicy !== signingPolicy;
+      || existing.signingPolicy !== signingPolicy || existing.node !== canonicalNode || existing.entry !== canonicalEntry;
     if (!needsRefresh) {
       return { ...validation, helperExecutable: helper.helper, helperSha256: helper.helperSha256 };
     }
-    if (!allowRebuild) throw Object.assign(new Error(`Profile app needs refresh; open it using xfx desktop open ${JSON.stringify(plan.name)}`), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+    if (!allowRebuild) throw preparationRequired(plan, true);
     previousAppPath = existing.appPath;
   }
   const entries = await readdir(profileDir);

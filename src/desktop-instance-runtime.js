@@ -11,6 +11,24 @@ import { DESKTOP_APP, inspectDesktopApp, sameDesktopApp } from './desktop-runtim
 const execFileDefault = promisify(nodeExecFile);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const fail = (code, remainingProcesses = []) => Object.assign(new Error(code), { code, remainingProcesses });
+function resourceInspectionFailure(stage, path, reason) {
+  const error = fail('RESOURCE_INSPECTION_FAILED');
+  // Keep diagnostics useful without copying arbitrary child-process output or
+  // resource contents into logs/UI errors.
+  error.message = `RESOURCE_INSPECTION_FAILED: ${stage} for ${path}: ${reason}`;
+  return error;
+}
+function safeResourceErrorReason(error) {
+  if (error?.code === 'ETIMEDOUT' || error?.timedOut) return 'timed out';
+  if (error?.signal) return `terminated by ${String(error.signal).replace(/[^A-Z0-9_-]/gi, '').slice(0, 24) || 'signal'}`;
+  if (Number.isInteger(error?.code)) {
+    const stderr = typeof error.stderr === 'string' ? error.stderr.toLowerCase() : '';
+    if (/permission denied|operation not permitted/.test(stderr)) return `exit status ${error.code} (permission denied)`;
+    return `exit status ${error.code}`;
+  }
+  if (typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(error.code)) return error.code;
+  return 'operation failed';
+}
 const absoluteCanonical = value => typeof value === 'string' && value.startsWith('/') && resolve(value) === value && !/[\x00-\x1f\x7f]/.test(value);
 function identityChanged(previous, current) {
   const fields = current
@@ -291,10 +309,11 @@ export function createDesktopInstanceRuntime({
     for (const path of new Set(paths)) {
       let stat;
       try { stat = await lstat(path); }
-      catch (e) { if (e.code === 'ENOENT') continue; throw fail('RESOURCE_INSPECTION_FAILED'); }
+      catch (e) { if (e.code === 'ENOENT') continue; throw resourceInspectionFailure('lstat', path, safeResourceErrorReason(e)); }
       let canonical;
-      try { canonical = await realpath(path); } catch { throw fail('RESOURCE_INSPECTION_FAILED'); }
-      if (canonical !== path || stat.isSymbolicLink?.()) throw fail('RESOURCE_INSPECTION_FAILED');
+      try { canonical = await realpath(path); } catch (e) { throw resourceInspectionFailure('realpath', path, safeResourceErrorReason(e)); }
+      if (canonical !== path) throw resourceInspectionFailure('canonicality check', path, `resolved to ${canonical}`);
+      if (stat.isSymbolicLink?.()) throw resourceInspectionFailure('lstat', path, 'path is a symbolic link');
       present.push({ path, directory: stat.isDirectory?.() === true });
     }
     const holders = new Set();
@@ -306,29 +325,37 @@ export function createDesktopInstanceRuntime({
           maxBuffer: 4 * 1024 * 1024, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' } });
       } catch (e) {
         if (e.code === 1 && e.stdout === '' && e.stderr === '') continue;
-        throw fail('RESOURCE_INSPECTION_FAILED');
+        throw resourceInspectionFailure('lsof', item.path, safeResourceErrorReason(e));
       }
-      if (typeof result.stdout !== 'string' || result.stderr) throw fail('RESOURCE_INSPECTION_FAILED');
+      if (!result || typeof result.stdout !== 'string') throw resourceInspectionFailure('lsof output', item.path, 'stdout was not text');
+      if (result.stderr) {
+        const reason = /permission denied|operation not permitted/i.test(result.stderr) ? 'reported permission denied' : 'reported warnings';
+        throw resourceInspectionFailure('lsof output', item.path, reason);
+      }
       let currentPidSeen, sawCommand = false, sawUid = false, sawName = false;
       const finishProcess = () => {
-        if (currentPidSeen !== undefined && (!sawCommand || !sawUid || !sawName)) throw fail('RESOURCE_INSPECTION_FAILED');
+        if (currentPidSeen !== undefined && (!sawCommand || !sawUid || !sawName)) {
+          const missing = [['command', sawCommand], ['uid', sawUid], ['name', sawName]].filter(([, seen]) => !seen).map(([name]) => name);
+          throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} missing ${missing.join(', ')}`);
+        }
       };
       for (const line of result.stdout.split('\n')) {
         if (!line) continue;
         const field = line[0], value = line.slice(1);
         if (field === 'p') {
           finishProcess();
-          if (!/^\d+$/.test(value)) throw fail('RESOURCE_INSPECTION_FAILED');
+          if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)
+            throw resourceInspectionFailure('lsof fields', item.path, 'invalid PID field');
           currentPidSeen = Number(value);
           sawCommand = sawUid = sawName = false;
         } else if (field === 'c' && currentPidSeen !== undefined) {
-          if (!value) throw fail('RESOURCE_INSPECTION_FAILED');
+          if (!value) throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} has an empty command field`);
           sawCommand = true;
         } else if (field === 'u' && currentPidSeen !== undefined) {
-          if (value !== String(uid)) throw fail('RESOURCE_INSPECTION_FAILED');
+          if (value !== String(uid)) throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} has an unexpected UID field`);
           sawUid = true;
         } else if (field === 'n' && currentPidSeen !== undefined) {
-          if (!value) throw fail('RESOURCE_INSPECTION_FAILED');
+          if (!value) throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} has an empty name field`);
           sawName = true;
           let observed = value;
           try { observed = await realpath(value); } catch { /* compare the reported absolute path below */ }
@@ -342,7 +369,8 @@ export function createDesktopInstanceRuntime({
     const rows = await snapshot();
     const byPid = new Map(rows.map(row => [row.pid, row]));
     const processes = [...holders].map(pid => byPid.get(pid));
-    if (processes.some(row => !row)) throw fail('RESOURCE_INSPECTION_FAILED');
+    const missingPid = [...holders].find(pid => !byPid.has(pid));
+    if (missingPid !== undefined) throw resourceInspectionFailure('process snapshot', present.map(item => item.path).join(', '), `holder PID ${missingPid} was absent`);
     throw fail('RESOURCE_BUSY', processes);
   }
   async function control(flag, main, helperExecutable) {

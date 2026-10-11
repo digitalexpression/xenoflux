@@ -8,7 +8,7 @@ import { resolveHome } from './homes.js';
 import { find } from './profiles.js';
 import { DESKTOP_APP } from './desktop-runtime.js';
 import { createDesktopInstanceRuntime, processIdentity, targetStartSeconds } from './desktop-instance-runtime.js';
-import { prepareProfileApp, validateProfileApp } from './profile-launcher.js';
+import { prepareProfileApp, loadPreparedProfileApp, validateProfileApp } from './profile-launcher.js';
 import { reserveInstanceControl, releaseInstanceControl } from './desktop-instance-guard.js';
 import { createLogStorage } from './log-storage.js';
 import { ramLogTarget } from './ram-logs.js';
@@ -195,19 +195,71 @@ async function launcherCaller(runtime, launcherPaths, env) {
   return row;
 }
 
-export async function openDesktopInstance(store, name, {
-  runtime = createDesktopInstanceRuntime(), prepareLauncher = prepareProfileApp, validateApp = validateProfileApp, ramLogs,
-  launcherEnvironment = process.env, onBootstrapReady, ...options
+/** Explicitly create or refresh a cached app, without launching or closing it. */
+export async function prepareDesktopInstance(store, name, {
+  runtime = createDesktopInstanceRuntime(), prepareLauncher = prepareProfileApp, ...options
 } = {}) {
   const id = find(await store.read(), name).id;
   return withOperation(store, id, options, async () => {
+    const previous = await readState(store, id);
+    if (previous && previous.phase !== 'closed')
+      throw new Error('Profile has a running or unfinished desktop instance; prepare or refresh only after it stops and is closed or recovered');
+    const plan = await desktopInstancePlan(store, id, { runtime });
+    const reservation = join(plan.nativeRoot, '.run-lock');
+    if (await exists(reservation)) throw new Error('Profile is in use or has an unfinished operation; preserve its reservation');
+    // A raw Finder/CLI launch can bypass the controller journal. Never replace
+    // any app in this profile's cache while its bootstrap, main or helpers run.
+    const appDirectory = join(paths(store, id).root, 'apps', id);
+    if ((await runtime.snapshot()).some(row => row.executable.startsWith(`${appDirectory}/`)))
+      throw new Error('Profile app processes are still running; prepare or refresh only after they stop');
+    await runtime.assertResourcesIdle(resources(plan));
+    await privateDirectory(store.directory); await privateDirectory(paths(store, id).root, true);
+    if (previous) await releaseInstanceControl(previous.owner, options);
+    const runId = randomUUID();
+    const owner = { kind: 'desktop-instance', host: hostname(), pid: process.pid, runId, storePath: store.directory,
+      profileId: id, journalPath: paths(store, id).journal };
+    const state = { schemaVersion: 1, kind: 'desktop-instance', profileId: id, runId, owner, plan, phase: 'preparing',
+      main: null, processes: [], baselineMains: [], launcher: null, launcherPaths: null };
+    await save(store, state);
+    let reserved = false;
+    try {
+      await acquire(reservation, owner, true); reserved = true;
+      await reserveInstanceControl(owner, options);
+      await assertBinding(store, state);
+      await runtime.assertResourcesIdle(resources(plan));
+      if ((await runtime.snapshot()).some(row => row.executable.startsWith(`${appDirectory}/`)))
+        throw new Error('Profile app processes are still running; preserving the prepared app');
+      state.launcherPaths = await prepareLauncher(store, plan);
+      validateLauncherPaths(state.launcherPaths, store, id);
+      await save(store, state, 'closed');
+      return result(state, 'prepared');
+    } catch (error) {
+      state.error = error.code ?? 'DESKTOP_PREPARE_FAILED';
+      await save(store, state, 'closed');
+      throw error;
+    } finally {
+      if (reserved && await ownedReservation(state)) await release(reservation, owner);
+      await releaseInstanceControl(owner, options);
+    }
+  });
+}
+
+export async function openDesktopInstance(store, name, {
+  runtime = createDesktopInstanceRuntime(), loadLauncher = loadPreparedProfileApp, prepareLauncher = prepareProfileApp,
+  validateApp = validateProfileApp, ramLogs,
+  launcherEnvironment = process.env, onBootstrapReady, ...options
+} = {}) {
+  const id = find(await store.read(), name).id;
+  return withOperation(store, id, { ...options, recovery: true }, async () => {
     let state = await readState(store, id);
     if (state?.phase === 'closed') await releaseInstanceControl(state.owner, options);
     if (state && state.phase !== 'closed') {
       await assertBinding(store, state);
-      if (!await ownedReservation(state)) throw new Error('Desktop instance lost its reservation; preserve it for recovery');
+      const reserved = await ownedReservation(state);
       await reserveInstanceControl(state.owner, options);
       const observed = await observation(state, runtime);
+      if (observed.status !== 'stopped' && !reserved)
+        throw new Error('Desktop instance lost its reservation; preserve it for recovery');
       if (['opening', 'running'].includes(state.phase) && state.main && state.launcherPaths && observed.status === 'running' && !observed.orphaned) {
         if (!state.launcherPaths.application) throw new Error('Close or recover the previous desktop test before opening the named app');
         await assertLaunchReceipt(store, state);
@@ -241,9 +293,20 @@ export async function openDesktopInstance(store, name, {
       await assertBinding(store, state);
       await runtime.assertResourcesIdle(resources(plan));
       await privateDirectory(plan.desktopData, true);
-      state.launcherPaths = await prepareLauncher(store, plan, {
-        allowRebuild: launcherEnvironment.XFX_DESKTOP_LAUNCHER_PID === undefined,
-      });
+      try { state.launcherPaths = await loadLauncher(store, plan); }
+      catch (error) {
+        if (!['PROFILE_APP_PREPARE_REQUIRED', 'PROFILE_APP_REFRESH_REQUIRED'].includes(error.code)) throw error;
+        // A Finder bootstrap is executing this bundle. Refresh only from the
+        // CLI after the old app has stopped, never replace an executing copy.
+        if (launcherEnvironment.XFX_DESKTOP_LAUNCHER_PID !== undefined
+          || launcherEnvironment.XFX_DESKTOP_LAUNCHER_EXECUTABLE !== undefined)
+          throw new Error(`Profile app needs preparation; run xfx desktop open ${JSON.stringify(plan.name)} from a terminal.`);
+        const appRoot = `${join(paths(store, id).root, 'apps', id)}/`;
+        if ((await runtime.snapshot()).some(row => row.executable.startsWith(appRoot)))
+          throw new Error('Profile app is still executing; preserving its cached app and reservation');
+        await runtime.assertResourcesIdle(resources(plan));
+        state.launcherPaths = await prepareLauncher(store, plan);
+      }
       validateLauncherPaths(state.launcherPaths, store, id);
       await pinnedApplication(store, state, validateApp);
       const bootstrap = await launcherCaller(runtime, state.launcherPaths, launcherEnvironment);

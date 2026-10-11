@@ -47,6 +47,7 @@ test('read-only profile preview leaves registry, profile base, and runtime untou
   const f = await fixture(t), io = terminal([]);
   const result = await profileCommand(f.store, ['create', 'alpha'], { '--base': f.base }, { input: io.input, output: io.output, clientRuntime: f.clientRuntime, defaultUserHome: f.defaultUserHome });
   assert.equal(result.status, 'preview'); assert.equal((await f.store.read()).profiles.length, 0);
+  assert.match(result.desktop, /desktop open 'alpha'.*prepared or refreshed automatically/);
   await assert.rejects(stat(f.base), { code: 'ENOENT' }); assert.deepEqual(f.calls, []);
 });
 
