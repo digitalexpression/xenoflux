@@ -206,15 +206,8 @@ func kernelExecutablePath() -> String? {
   await store.update(data => { profileId = create(data, 'Native Fixture').id; });
   const native = await prepareNativeHome({ directory: join(root, 'profile-native'), executable: vendorExecutable, codexVersion: '0.153.4' });
   await registerHome(store, 'Native Fixture', native.root, { executable: vendorExecutable, version: '0.153.4' });
-  // Exercise the native runtime path across a delayed same-PID exec, using
-  // kernel and ps timestamps as independent ownership checks.
-  const delayedSource = join(root, 'delayed-profile-launcher.swift');
-  const source = await readFile(new URL('../src/native/profile-launcher.swift', import.meta.url), 'utf8');
-  assert.ok(source.includes('let args = [metadata.vendorExecutable,'));
-  await writeFile(delayedSource, source.replace('let args = [metadata.vendorExecutable,',
-    'sleep(2)\n    let args = [metadata.vendorExecutable,'), { mode: 0o600 });
+  // Exercise the shipped universal launcher without compiling it locally.
   const launcherOptions = {
-    source: delayedSource,
     verifyOriginal: async sourcePath => ({ ...app, appPath: sourcePath }),
   };
   const home = native.home, desktopData = native.desktopData;

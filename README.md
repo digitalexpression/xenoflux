@@ -101,7 +101,9 @@ An owned app named `Codex · PROFILE` contains a private copy of the verified
 installed Codex app, retaining its icon and resources. A small bootstrap becomes
 Codex in the same process, so a profile needs one Dock and Cmd+Tab entry. The first
 `desktop open` creates a locally signed copy when the cache is missing, and
-refreshes it when stale. This requires Xcode Command Line Tools. The installed app
+refreshes it when stale. The package includes a universal launcher for Apple Silicon
+and Intel Macs running macOS 13 or later; users need no Swift compiler or Xcode
+Command Line Tools. macOS signs customized copies with its built-in `codesign`. The installed app
 remains intact. Opening a running profile focuses its pinned app without building,
 signing, or refreshing. Native
 Cmd+Tab, Dock reopening, and profile routing remain acceptance checks pending on

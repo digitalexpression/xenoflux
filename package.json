@@ -24,6 +24,8 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "check": "node scripts/check.mjs",
+    "build:native": "node scripts/build-profile-launcher.mjs",
+    "check:native": "node scripts/build-profile-launcher.mjs --check",
     "local-release": "node scripts/local-release.mjs"
   },
   "dependencies": {

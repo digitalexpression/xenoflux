@@ -18,11 +18,18 @@ The package is macOS-only. For an approved publication, explicitly pass `--tag p
 
 ## Four-file bundle
 
+The package includes the universal native launcher; target Macs need no Swift
+compiler. When `src/native/profile-launcher.swift` changes, maintainers run
+`npm run build:native` on macOS with Xcode Command Line Tools and commit the
+updated `src/native/XfxProfileLauncher` and `profile-launcher-prebuilt.json`.
+Installation and packing never compile it.
+
 Create a release from a clean tracked source tree:
 
 ```sh
 npm ci
 npm run check
+npm run check:native
 npm test
 npm run local-release -- --output /absolute/new/release-directory --smoke
 ```

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { inspectDesktopApp, DESKTOP_APP } from './desktop-runtime.js';
 
 const execFileDefault = promisify(nodeExecFile);
+const prebuiltDirectoryDefault = fileURLToPath(new URL('./native/', import.meta.url));
 const sourceDefault = fileURLToPath(new URL('./native/profile-launcher.swift', import.meta.url));
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const safeText = value => typeof value === 'string' && value.length > 0 && !/[\x00-\x1f\x7f]/.test(value);
@@ -73,12 +74,37 @@ async function atomicWrite(path, contents, { writeFile, rename, chmod, lstat }, 
     throw error;
   }
 }
-async function cachedHelper(sourceHash, storeDirectory, { lstat, realpath, readFile }) {
+async function packagedHelper(directory, sourceHash, { lstat, readFile }) {
+  try {
+    const binary = join(directory, 'XfxProfileLauncher');
+    const manifest = join(directory, 'profile-launcher-prebuilt.json');
+    for (const path of [binary, manifest]) {
+      const info = await lstat(path);
+      // Installed package files may belong to an administrator; private cache
+      // ownership rules apply only after copying them into the controller store.
+      if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o022)
+          || (path === binary && !(info.mode & 0o111))) fail('PREBUILT_LAUNCHER_INVALID');
+    }
+    const metadata = JSON.parse(await readFile(manifest, 'utf8'));
+    if (!metadata || typeof metadata !== 'object' || metadata.schemaVersion !== 1 || metadata.minimumMacOS !== '13.0'
+        || JSON.stringify(metadata.architectures) !== JSON.stringify(['arm64', 'x86_64'])
+        || !/^[a-f0-9]{64}$/.test(metadata.helperSha256 ?? '')) fail('PREBUILT_LAUNCHER_INVALID');
+    if (metadata.sourceSha256 !== sourceHash) fail('PREBUILT_LAUNCHER_STALE');
+    const bytes = await readFile(binary);
+    if (createHash('sha256').update(bytes).digest('hex') !== metadata.helperSha256) fail('PREBUILT_LAUNCHER_INVALID');
+    return { bytes, helperSha256: metadata.helperSha256 };
+  } catch (error) {
+    if (error.code === 'ENOENT') fail('PREBUILT_LAUNCHER_MISSING');
+    if (error instanceof SyntaxError) fail('PREBUILT_LAUNCHER_INVALID');
+    throw error;
+  }
+}
+async function cachedHelper(sourceHash, storeDirectory, { lstat, realpath, readFile }, cacheKey = sourceHash) {
   const nativeRoot = join(storeDirectory, 'desktop-instances', 'native');
   await requireDirectory(nativeRoot, { lstat, realpath });
   const owner = { kind: 'xenoflux-profile-launcher-native-cache', store: storeDirectory };
   await loadOwnedMarker(join(nativeRoot, ownerName), { lstat, readFile }, owner);
-  const cacheDir = join(nativeRoot, sourceHash), helper = join(cacheDir, 'XfxProfileLauncher');
+  const cacheDir = join(nativeRoot, cacheKey), helper = join(cacheDir, 'XfxProfileLauncher');
   const dirInfo = await lstat(cacheDir);
   if (dirInfo.isSymbolicLink() || !dirInfo.isDirectory() || dirInfo.uid !== currentUid() || !privateMode(dirInfo)
       || await realpath(cacheDir) !== cacheDir) fail('LAUNCHER_CACHE_UNSAFE');
@@ -98,37 +124,30 @@ async function cachedHelper(sourceHash, storeDirectory, { lstat, realpath, readF
   if (helperHash !== marker.helperSha256) fail('LAUNCHER_CACHE_UNSAFE');
   return { helper, helperSha256: helperHash, sourceHash };
 }
-async function compileHelper(source, sourceHash, storeDirectory, { build, execFile, mkdir, lstat, realpath, readFile, writeFile, rename, rm, chmod }) {
+async function prepareHelper(source, sourceHash, storeDirectory, packaged, { build, mkdir, lstat, realpath, readFile, writeFile, rename, rm, chmod }) {
   const nativeRoot = join(storeDirectory, 'desktop-instances', 'native');
   await ensureDirectory(nativeRoot, { mkdir, lstat, realpath });
   const owner = { kind: 'xenoflux-profile-launcher-native-cache', store: storeDirectory };
   await writeOwner(nativeRoot, owner, { lstat, readFile, writeFile });
-  const cacheDir = join(nativeRoot, sourceHash);
+  const cacheKey = packaged?.helperSha256 ?? sourceHash;
+  const cacheDir = join(nativeRoot, cacheKey);
   const helper = join(cacheDir, 'XfxProfileLauncher');
-  const cached = () => cachedHelper(sourceHash, storeDirectory, { lstat, realpath, readFile });
+  const cached = () => cachedHelper(sourceHash, storeDirectory, { lstat, realpath, readFile }, cacheKey);
   try { return await cached(); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const buildLock = join(nativeRoot, `.${sourceHash}.build-lock`);
+  const buildLock = join(nativeRoot, `.${cacheKey}.build-lock`);
   try { await mkdir(buildLock, { mode: 0o700 }); }
   catch (error) { if (error.code === 'EEXIST') fail('LAUNCHER_BUILD_BUSY'); throw error; }
   try {
     await ensureDirectory(buildLock, { mkdir, lstat, realpath });
     try { return await cached(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const temp = join(nativeRoot, `.build-${sourceHash}-${randomUUID()}`);
+    const temp = join(nativeRoot, `.build-${cacheKey}-${randomUUID()}`);
     await mkdir(temp, { mode: 0o700 });
     try {
       await ensureDirectory(temp, { mkdir, lstat, realpath });
       const temporaryHelper = join(temp, 'XfxProfileLauncher');
       if (build) await build({ source, output: temporaryHelper, sourceHash });
-      else {
-        if (process.platform !== 'darwin') fail('SWIFT_COMPILER_UNAVAILABLE');
-        await mkdir(join(temp, 'ModuleCache'), { mode: 0o700 });
-        await execFile('/usr/bin/xcrun', ['swiftc', '-O', '-module-cache-path', join(temp, 'ModuleCache'), source, '-framework', 'AppKit', '-o', temporaryHelper], {
-          cwd: '/', encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 120000,
-          env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: process.env.HOME ?? '/' },
-        });
-      }
-      await rm(join(temp, 'ModuleCache'), { recursive: true, force: true });
+      else await writeFile(temporaryHelper, packaged.bytes, { flag: 'wx', mode: 0o700 });
       await chmod(temporaryHelper, 0o700);
       const built = await requireOwnedFile(temporaryHelper, { lstat }, 'LAUNCHER_BUILD_INVALID');
       if (!(built.mode & 0o111)) fail('LAUNCHER_BUILD_INVALID');
@@ -144,7 +163,6 @@ async function compileHelper(source, sourceHash, storeDirectory, { build, execFi
       return { helper, helperSha256, sourceHash };
     } catch (error) {
       await rm(temp, { recursive: true, force: true }).catch(() => {});
-      if (error.code === 'ENOENT' && !build) fail('SWIFT_COMPILER_UNAVAILABLE');
       throw error;
     }
   } finally { await nodeRmdir(buildLock).catch(() => {}); }
@@ -245,7 +263,7 @@ function preparationRequired(plan, refresh) {
 }
 async function profileApp(store, plan, allowRebuild, {
   build, nodeExecutable = process.execPath, entryPoint = fileURLToPath(new URL('../bin/xfx.js', import.meta.url)),
-  source = sourceDefault, execFile = execFileDefault,
+  source = sourceDefault, prebuiltDirectory = prebuiltDirectoryDefault, execFile = execFileDefault,
   verifyOriginal: verifyOriginalFn = async (appPath, expected) => inspectDesktopApp({ appPath, expected, execFile, readFile, realpath }),
   copyApp = (from, to) => nodeCp(from, to, { recursive: true, verbatimSymlinks: true, mode: fsConstants.COPYFILE_FICLONE }),
   updatePlist = (path, operations) => updatePlistDefault(path, operations, execFile, writeFile, rm),
@@ -270,6 +288,7 @@ async function profileApp(store, plan, allowRebuild, {
   const instancesRoot = join(store.directory, 'desktop-instances');
   const sourcePath = await realpath(source);
   const sourceHash = createHash('sha256').update(await readFile(sourcePath)).digest('hex');
+  const packaged = build ? null : await packagedHelper(prebuiltDirectory, sourceHash, { lstat, readFile });
   const appsRoot = join(instancesRoot, 'apps');
   const profileDir = join(appsRoot, plan.profileId);
   const appPath = appPathFor(appsRoot, plan.profileId, plan.name);
@@ -284,11 +303,12 @@ async function profileApp(store, plan, allowRebuild, {
     else await requireDirectory(path, { lstat, realpath });
   }
   let helper;
-  if (allowRebuild) helper = await compileHelper(sourcePath, sourceHash, store.directory, { build, execFile, mkdir, lstat, realpath, readFile, writeFile, rename, rm, chmod });
+  if (allowRebuild) helper = await prepareHelper(sourcePath, sourceHash, store.directory, packaged, { build, mkdir, lstat, realpath, readFile, writeFile, rename, rm, chmod });
   else {
-    try { helper = await cachedHelper(sourceHash, store.directory, { lstat, realpath, readFile }); }
+    try { helper = await cachedHelper(sourceHash, store.directory, { lstat, realpath, readFile }, packaged?.helperSha256 ?? sourceHash); }
     catch (error) { if (error.code === 'ENOENT') throw preparationRequired(plan, true); throw error; }
   }
+  if (packaged && helper.helperSha256 !== packaged.helperSha256) fail('LAUNCHER_CACHE_UNSAFE');
   let previousAppPath = null;
   if (existingMarker) {
     const existing = await loadOwnedMarker(ownerPath, { lstat, readFile }, {

@@ -170,9 +170,6 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
         if (command === '/usr/bin/plutil') return { stdout: await readFile(args.at(-1), 'utf8') };
         if (command === '/usr/bin/codesign') return { stdout: '' };
         throw new Error(`unexpected profile-app command: ${command}`);
-      }, build: async ({ output }) => {
-        // Package verification must never execute a native client or its helper.
-        await writeFile(output, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
       } });
     if (profileApp.application.bundleId !== `com.xenoflux.profile.${desktopPlan.profileId.toLowerCase()}`
       || !(await readFile(join(profileApp.application.appPath, 'Contents', 'Info.plist'), 'utf8')).includes('Codex · smoke'))

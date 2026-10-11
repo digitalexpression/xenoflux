@@ -23,8 +23,7 @@ xfx desktop recover NAME
 `open` creates or refreshes the private copy of the verified installed app named
 `Codex · NAME` when its cache is missing or stale, then validates and launches it.
 Preparation copies the app with its own bundle identity and original icon and
-resources; it compiles the small AppKit bootstrap when its source changes, then
-signs the copy. If a safely stopped open left an unfinished journal, the next
+resources; it copies the packaged universal AppKit bootstrap, then signs the copy. If a safely stopped open left an unfinished journal, the next
 open reconciles it before continuing. Opening a running profile focuses its
 pinned app without building, signing, or refreshing.
 
@@ -57,7 +56,19 @@ Deep signature verification checks the resulting app without re-signing nested
 code. An owned stopped copy made with an earlier signing policy is refreshed on
 the next CLI open.
 
-Preparing a missing or stale cache requires Xcode Command Line Tools for the small AppKit helper.
+Users do not need Swift or Xcode Command Line Tools. The package ships a prebuilt
+launcher for arm64 and x86_64 Macs (macOS 13 or later). Preparation verifies its
+source and binary hashes and copies it into a private cache keyed by binary hash;
+it never falls back to local compilation. Older helper entries remain available
+for running instances. macOS's built-in `codesign` still signs customized profile
+apps when their cache is missing or stale.
+
+When the Swift source changes, package maintainers run `npm run build:native` on
+a Mac with Xcode Command Line Tools, then `npm run check:native`. Commit the
+universal binary and its manifest with the source. There are no compilation hooks
+on install or pack. The check validates source and binary hashes, architectures,
+and signature. A missing, stale, or damaged shipped helper requires a corrected
+xfx package rather than a compiler on the user's Mac.
 Generated apps and records live under `CONTROLLER/desktop-instances`, outside
 native homes. The copy attempts filesystem cloning where available and otherwise
 copies files; it never hardlinks the installed app. Renaming a profile changes its
@@ -112,7 +123,7 @@ locally signed fixtures verify compilation, nested framework/helper signatures,
 fixed-path routing and same-PID bootstrap execution. An opt-in, windowless AppKit
 fixture also exercises the real LaunchServices path, loads a signed framework,
 checks its macOS application name and identity, compares native/kernel/`ps`
-timestamps across a delayed bootstrap, exercises automatic controller preparation,
+timestamps across the shipped prebuilt bootstrap, exercises automatic controller preparation,
 open, repeated-open focus, stopped-instance reopen and fixture close,
 rejects a quit with the wrong start time, and exits automatically:
 

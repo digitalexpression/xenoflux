@@ -60,6 +60,61 @@ async function fixture(t, profileId = profileA, name = 'Blue & <QA>') {
   return { root, store: { directory: await realpath(storeDirectory) }, plan, sourceApp: appPath, options };
 }
 
+test('preparation copies the packaged universal helper and reuses it without a compiler or app rewrite', async t => {
+  const { store, plan, options } = await fixture(t);
+  let copies = 0, signs = 0;
+  const defaults = { ...options, build: undefined,
+    copyApp: async (...args) => { copies++; return options.copyApp(...args); },
+    signApp: async () => { signs++; },
+  };
+  const prepared = await prepareProfileApp(store, plan, defaults);
+  const shipped = await readFile(new URL('../src/native/XfxProfileLauncher', import.meta.url));
+  assert.deepEqual(await readFile(prepared.helperExecutable), shipped);
+  assert.equal(basename(join(prepared.helperExecutable, '..')), digest(shipped));
+  assert.equal((await lstat(prepared.helperExecutable)).mode & 0o777, 0o700);
+  assert.deepEqual(await loadPreparedProfileApp(store, plan, defaults), prepared);
+  assert.deepEqual(await prepareProfileApp(store, plan, defaults), prepared);
+  assert.deepEqual({ copies, signs }, { copies: 1, signs: 1 });
+});
+
+test('a packaged helper gets a new cache entry without overwriting the legacy helper', async t => {
+  const { store, plan, options } = await fixture(t);
+  const legacy = await prepareProfileApp(store, plan, options);
+  const legacyBytes = await readFile(legacy.helperExecutable);
+  const defaults = { ...options, build: undefined };
+  await assert.rejects(loadPreparedProfileApp(store, plan, defaults), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+  // Read-only validation of a pinned app remains independent of current helper packaging.
+  await validateProfileApp(store, plan, legacy.application, defaults);
+  const prepared = await prepareProfileApp(store, plan, defaults);
+  assert.notEqual(prepared.helperExecutable, legacy.helperExecutable);
+  assert.deepEqual(await readFile(legacy.helperExecutable), legacyBytes);
+  assert.deepEqual(await loadPreparedProfileApp(store, plan, defaults), prepared);
+});
+
+for (const failure of ['missing', 'corrupt', 'stale', 'symlink']) {
+  test(`packaged helper ${failure} fails before caching and never invokes a compiler`, async t => {
+    const { root, store, plan, options } = await fixture(t);
+    const prebuiltDirectory = join(root, 'package-native');
+    await cp(new URL('../src/native/', import.meta.url), prebuiltDirectory, { recursive: true });
+    const helper = join(prebuiltDirectory, 'XfxProfileLauncher');
+    const metadataPath = join(prebuiltDirectory, 'profile-launcher-prebuilt.json');
+    if (failure === 'missing') await unlink(helper);
+    if (failure === 'corrupt') await writeFile(helper, 'corrupt package binary');
+    if (failure === 'stale') {
+      const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+      metadata.sourceSha256 = '0'.repeat(64);
+      await writeFile(metadataPath, JSON.stringify(metadata));
+    }
+    if (failure === 'symlink') {
+      await unlink(helper);
+      await symlink(new URL('../src/native/XfxProfileLauncher', import.meta.url).pathname, helper);
+    }
+    const code = failure === 'missing' ? 'PREBUILT_LAUNCHER_MISSING' : failure === 'stale' ? 'PREBUILT_LAUNCHER_STALE' : 'PREBUILT_LAUNCHER_INVALID';
+    await assert.rejects(prepareProfileApp(store, plan, { ...options, build: undefined, prebuiltDirectory }), { code });
+    await assert.rejects(lstat(join(store.directory, 'desktop-instances')), { code: 'ENOENT' });
+  });
+}
+
 test('clones a verified vendor bundle into a labelled private app while preserving resources and icon files', async t => {
   const { store, plan, options, sourceApp } = await fixture(t);
   const icon = join(sourceApp, 'Contents', 'Resources', 'AppIcon.icns');
@@ -319,7 +374,7 @@ test('refreshes old-policy owned bundles on CLI open and preserves validation fo
   assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).signingPolicy, 'main-host-disable-library-validation-v1');
 });
 
-test('real Swift bootstrap routes the disposable signed app and execs it in the same pid', {
+test('shipped prebuilt bootstrap routes the disposable signed app and execs it in the same pid', {
   skip: process.platform !== 'darwin' && 'requires macOS AppKit and codesign',
 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'xfx-native-bootstrap-'));

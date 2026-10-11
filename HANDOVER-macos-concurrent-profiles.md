@@ -11,6 +11,31 @@ ordinary long-running Codex session. Local source work and disposable checks are
 authorized; the user tests real profiles afterward. No live profile/app/keychain
 mutation, client closure, installation or publication was performed.
 
+## Prebuilt launcher package
+
+The package now ships `src/native/XfxProfileLauncher`, a signed universal Mach-O
+for arm64 and x86_64 targeting macOS 13, with a source/binary hash manifest.
+Runtime preparation verifies the packaged bytes and copies them; it never calls
+Swift or falls back to a compiler. Maintainers explicitly run `npm run build:native`
+after Swift changes and `npm run check:native` before packaging. Install/pack hooks
+do not compile anything. Customized profile apps still use macOS codesign on a
+cache miss or refresh; valid cached apps are reused.
+
+Private helper entries use binary hashes so a new package cannot overwrite a
+legacy or running instance's pinned helper. The live open/focus path is unchanged
+and bypasses current-package loading. No real profile/app, journal, keychain,
+installation or running instance was modified during this work.
+
+Verification: 385 full-suite tests passed, with the opt-in native fixture skipped;
+the separate native fixture passed open, repeat-open focus, stopped reopen and
+close using the shipped launcher. Six tests also passed from an offline packed
+and detached package, confirming packaged bytes/mode, compiler-free preparation,
+cache reuse, legacy helper preservation and invalid-package refusal. Syntax,
+manifest/architecture/signature/entitlement checks and diff checks passed. Native
+execution was verified on Apple Silicon; the Intel slice was cross-built and
+inspected, not executed on Intel hardware. Release generation requires these
+package inputs to be tracked and the source tree clean.
+
 ## Single-command cached opens
 
 The latest user request supersedes the explicit preparation workflow: normal
@@ -25,7 +50,7 @@ run-locks can be reconciled only for stopped instances, never live ones.
 
 `desktop prepare NAME`, `desktop refresh NAME`, and `desktop recover NAME` remain
 explicit maintenance/debugging tools. Cached apps are reused on normal opens;
-first opens and stale stopped caches may compile/copy/sign as needed. A Finder
+first opens and stale stopped caches copy the prebuilt helper and sign as needed. A Finder
 bootstrap cannot refresh its executing bundle and asks for CLI open instead.
 Preparation also refuses raw processes executing from that profile's app root.
 
