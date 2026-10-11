@@ -54,7 +54,7 @@ async function readReport(path, timeout = 5000) {
   return null;
 }
 
-test('LaunchServices opens the copied profile app and same-PID exec preserves profile routing', {
+test('LaunchServices opens the named profile app, loads its framework and preserves same-PID routing', {
   skip: !enabled,
   timeout: 90000,
 }, async t => {
@@ -87,6 +87,22 @@ test('LaunchServices opens the copied profile app and same-PID exec preserves pr
   await mkdir(macOS, { recursive: true, mode: 0o700 });
   await mkdir(resources, { recursive: true, mode: 0o700 });
 
+  // A hardened, ad-hoc host cannot load even an ad-hoc framework without the
+  // library-validation runtime grant. The old AppKit-only fixture missed this.
+  const framework = join(contents, 'Frameworks', 'FakeRuntime.framework');
+  const frameworkExecutable = join(framework, 'FakeRuntime');
+  const frameworkSource = join(root, 'FakeRuntime.c');
+  await mkdir(framework, { recursive: true, mode: 0o700 });
+  await writeFile(frameworkSource, 'int xfx_runtime_probe(void) { return 42; }\n', { mode: 0o600 });
+  await run('/usr/bin/clang', ['-dynamiclib', frameworkSource, '-o', frameworkExecutable]);
+  await writeFile(join(framework, 'Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>com.synthetic.xfx.runtime</string>
+<key>CFBundleExecutable</key><string>FakeRuntime</string>
+<key>CFBundlePackageType</key><string>FMWK</string>
+</dict></plist>`, { mode: 0o600 });
+  await run('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', framework]);
+  const originalFrameworkBytes = await readFile(frameworkExecutable);
+
   const vendorSource = join(root, 'FakeCodex.swift');
   const vendorExecutable = join(macOS, 'Codex');
   await writeFile(vendorSource, `import AppKit
@@ -94,13 +110,21 @@ import Foundation
 import Darwin
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+app.setActivationPolicy(.regular)
+let frameworkURL = Bundle.main.privateFrameworksURL!.appendingPathComponent("FakeRuntime.framework/FakeRuntime")
+guard let framework = dlopen(frameworkURL.path, RTLD_LAZY | RTLD_LOCAL) else {
+    fatalError("Framework failed to load: \\(String(cString: dlerror()))")
+}
+defer { dlclose(framework) }
 let environment = ProcessInfo.processInfo.environment
 let home = environment["CODEX_HOME"]!
 let arguments = Array(CommandLine.arguments.dropFirst())
 let report: [String: Any] = [
     "pid": getpid(),
     "bundleId": Bundle.main.bundleIdentifier ?? "",
+    "runningBundleId": NSRunningApplication.current.bundleIdentifier ?? "",
+    "runningName": NSRunningApplication.current.localizedName ?? "",
+    "frameworkLoaded": true,
     "executable": kernelExecutablePath() ?? "",
     "codexHome": home,
     "sqliteHome": environment["CODEX_SQLITE_HOME"] ?? "",
@@ -139,7 +163,7 @@ func kernelExecutablePath() -> String? {
 <key>CFBundleIdentifier</key><string>com.openai.codex</string>
 <key>CFBundleExecutable</key><string>Codex</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>LSUIElement</key><true/>
+<key>LSUIElement</key><false/>
 </dict></plist>
 `, { mode: 0o600 });
   const archive = Buffer.from('synthetic disposable vendor archive');
@@ -168,8 +192,12 @@ func kernelExecutablePath() -> String? {
     verifyOriginal: async sourcePath => ({ ...app, appPath: sourcePath }),
   });
   const copiedClaims = await entitlements(prepared.application.executable);
+  assert.ok(copiedClaims.includes('com.apple.security.cs.disable-library-validation'),
+    'the locally signed main must be allowed to load the preserved vendor framework');
   for (const claim of ['SYNTHETICTEAM.com.openai.codex', 'com.apple.developer.team-identifier', 'com.apple.security.application-groups', 'com.apple.security.app-sandbox'])
     assert.ok(!copiedClaims.includes(claim), `secondary executable retained restricted vendor claim ${claim}`);
+  assert.deepEqual(await readFile(join(prepared.application.appPath, 'Contents', 'Frameworks', 'FakeRuntime.framework', 'FakeRuntime')),
+    originalFrameworkBytes, 'the framework and its embedded signature must remain untouched');
 
   const home = join(plan.nativeRoot, 'codex-home'), desktopData = join(plan.nativeRoot, 'desktop-data');
   const userHome = join(plan.nativeRoot, 'user-home'), temporary = join(plan.nativeRoot, 'tmp');
@@ -187,6 +215,9 @@ func kernelExecutablePath() -> String? {
   assert.equal(report.executable, prepared.application.executable);
   assert.equal(receipt.executable, prepared.application.executable);
   assert.equal(report.bundleId, prepared.application.bundleId);
+  assert.equal(report.runningBundleId, prepared.application.bundleId);
+  assert.equal(report.runningName, 'Codex · Native Fixture');
+  assert.equal(report.frameworkLoaded, true);
   assert.deepEqual([report.codexHome, report.sqliteHome, report.desktopData, report.userHome, report.temporary],
     [home, home, desktopData, userHome, temporary]);
   assert.deepEqual(report.arguments, [`--user-data-dir=${desktopData}`]);

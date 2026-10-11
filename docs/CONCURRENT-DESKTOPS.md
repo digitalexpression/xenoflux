@@ -26,6 +26,15 @@ opened through Finder or kept in the Dock; its bootstrap asks Xenoflux to reserv
 the profile before starting Codex. Profile sign-in and settings stay with that
 profile. The installed app remains unchanged.
 
+Only the bootstrap, copied main executable and outer app are signed locally.
+The main receives the Electron runtime grants for JIT, unsigned executable memory
+and loading libraries across signing identities. Frameworks and nested helper
+apps retain their original publisher signatures and bytes. The bootstrap has no
+entitlements, and the copied main does not claim OpenAI's identity or app groups.
+Deep signature verification checks the resulting app without re-signing nested
+code. An owned stopped copy made with an earlier signing policy refreshes on the
+next CLI open; Finder requires that refresh before launching it.
+
 The first launch requires Xcode Command Line Tools for the small AppKit helper.
 Generated apps and records live under `CONTROLLER/desktop-instances`, outside
 native homes. The copy attempts filesystem cloning where available and otherwise
@@ -43,6 +52,11 @@ concurrently. A short operation lock serializes changes to Xenoflux desktop
 state. Raw Codex processes can bypass Xenoflux reservations, so open and cleanup
 also inspect the selected profile's resource handles.
 
+Preserved vendor helper signatures also retain their application-group
+entitlements. Separate filesystem routes do not establish that helpers avoid
+shared macOS group state; verify that boundary alongside Default preservation
+during real native acceptance.
+
 The CLI native launch uses the application instance returned by macOS for that
 request. Finder launches verify their bootstrap's exact PID and controller
 parentage, then wait for that same process to become the profile's Codex binary.
@@ -57,7 +71,7 @@ recorded processes and profile handles to drain before
 releasing the reservation. Timeouts, reused identities, detached helpers, or
 ambiguous launches preserve the record and reservation. If an app is quit
 normally outside Xenoflux, `open NAME` can reconcile its stopped, idle record.
-For an interrupted named-instance operation, run `desktop recover NAME` after
+For an interrupted launch or close, run `desktop recover NAME` after
 the instance stops. Recovery validates its binding, journal and reservation
 owner, checks remaining processes and open handles, and releases only its own
 reservation. It does not close or launch apps.
@@ -67,7 +81,8 @@ reservation. It does not close or launch apps.
 Development checks use mocked native operations and disposable homes. On macOS,
 locally signed fixtures verify compilation, nested framework/helper signatures,
 fixed-path routing and same-PID bootstrap execution. An opt-in, windowless AppKit
-fixture also exercises the real LaunchServices path and exits automatically:
+fixture also exercises the real LaunchServices path, loads a signed framework,
+checks its macOS application name and identity, and exits automatically:
 
 ```sh
 XFX_NATIVE_PROFILE_OPEN=1 node --test test/native-profile-open.test.js
@@ -91,26 +106,17 @@ settings and fresh chats. Verify:
 Record the exact desktop/backend versions and observed outcomes before claiming
 native concurrency support. Retest native launch and activation after app updates.
 
-The first native test on 2026-10-09 verified separate profile windows could be
-selected through Cmd+Tab. It also exposed generic `ChatGPT` names, duplicate
-launcher entries and `PROCESS_IDENTITY_CHANGED` during close. The replacement
-app design and close fixes require a new native test.
+The user's native opens on 2026-10-11 failed after the bootstrap started Codex.
+Crash reports and kernel logs showed library validation rejecting the re-signed
+Codex Framework. The earlier deep signer removed its publisher identity, while
+the locally signed main lacked the grant needed to load it. Static signature
+checks and an AppKit-only fixture had missed this runtime failure.
 
-A follow-up test exposed a second verification bug: the copy builder checked the
-discovered `ChatGPT.app` against the fixed `Codex.app` path and rejected its identity.
-The builder now verifies the discovered path and executable while retaining the
-publisher signature requirement.
-
-The next native attempt reached app preparation but macOS refused to spawn the
-bootstrap: AMFI reported restricted vendor entitlements on an ad-hoc signed app.
-Profile copies now remove those vendor identity/group claims. The bootstrap has
-no entitlements; copied executables retain only source-present Electron runtime
-grants for JIT, unsigned executable memory and library validation. The signing
-pass reseals nested frameworks after restoring those grants. Unexpected or
-unreadable entitlement metadata stops preparation. Native launch failures now
-include the macOS error or timeout diagnostics.
-
-Current publisher verification of `/Applications/ChatGPT.app` passes, and a
-disposable copy of that real app passed preparation and deep signature validation.
-The corrected LaunchServices fixture also passed. The installed app and live
-profile state were unchanged; real Codex was not launched by these checks.
+A disposable headless experiment reproduced that exact rejection with the real
+Codex framework, then loaded it successfully with the library-validation grant.
+Signing only the copied main and bootstrap also passed deep strict verification
+while preserving the framework's bytes and OpenAI Team ID. Nesting an entirely
+untouched vendor app was tested as an alternative, but macOS restored the generic
+vendor application name after exec, so it did not meet the profile identity goal.
+These experiments did not launch real Codex or change installed/live profile
+state. Real Codex launch and the full Dock/Cmd+Tab acceptance remain pending.

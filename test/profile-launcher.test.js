@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { chmod, cp, link, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -10,6 +11,11 @@ import { prepareProfileApp, validateProfileApp } from '../src/profile-launcher.j
 const profileA = 'd083b722-5744-4d5d-9fa2-81ffb8e85a14';
 const profileB = '9d73a112-a533-41c2-b316-10fd2530ac73';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+function signatureDetails(path) {
+  const result = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', path], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return `${result.stdout}${result.stderr}`.split('\n').filter(line => /^(Identifier|CodeDirectory|CDHash|TeamIdentifier|Runtime Version)=/.test(line)).join('\n');
+}
 
 async function fixture(t, profileId = profileA, name = 'Blue & <QA>') {
   const root = await mkdtemp(join(tmpdir(), 'xfx-profile-app-'));
@@ -259,25 +265,27 @@ test('refuses a source app that no longer matches its inspection identity', asyn
   await assert.rejects(prepareProfileApp(store, plan, { ...options, verifyOriginal: async () => ({ ...plan.app, asarSha256: '0'.repeat(64) }) }), { code: 'PROFILE_APP_SOURCE_CHANGED' });
 });
 
-test('fails closed when signed executable entitlement metadata is malformed or unavailable', async t => {
-  for (const mode of ['malformed', 'unclosed', 'array', 'missing-blob', 'unavailable']) {
-    const f = await fixture(t);
-    const { signApp: _mockSigner, ...options } = f.options;
-    options.execFile = async (command, args, settings) => {
-      if (command === '/usr/bin/codesign' && args[0] === '--display' && args.includes('--entitlements')
-          && args.at(-1).endsWith('/Contents/MacOS/Codex')) {
-        if (mode === 'malformed') return { stdout: '<plist><dict><broken></dict></plist>' };
-        if (mode === 'unclosed') return { stdout: '<plist><dict><key>com.apple.security.cs.allow-jit</key><true/>' };
-        if (mode === 'array') return { stdout: '<plist><array><string>unexpected</string></array></plist>' };
-        if (mode === 'missing-blob') return { stdout: 'unexpected successful output', stderr: '' };
-        throw Object.assign(new Error('codesign metadata lookup failed'), { stderr: 'signature metadata unavailable' });
-      }
-      return f.options.execFile(command, args, settings);
-    };
-    await assert.rejects(prepareProfileApp(f.store, f.plan, options), {
-      code: mode === 'unavailable' ? 'PROFILE_ENTITLEMENTS_UNAVAILABLE' : 'PROFILE_ENTITLEMENTS_INVALID',
-    });
-  }
+test('refreshes old-policy owned bundles on CLI open and preserves validation for recovery', async t => {
+  const f = await fixture(t);
+  let copies = 0, signs = 0;
+  const options = { ...f.options,
+    copyApp: async (...args) => { copies += 1; return f.options.copyApp(...args); },
+    signApp: async (...args) => { signs += 1; return f.options.signApp(...args); },
+  };
+  const initial = await prepareProfileApp(f.store, f.plan, options);
+  const ownerPath = join(f.store.directory, 'desktop-instances', 'apps', profileA, '.xfx-profile-app-owner.json');
+  const marker = JSON.parse(await readFile(ownerPath, 'utf8'));
+  delete marker.signingPolicy;
+  await writeFile(ownerPath, `${JSON.stringify(marker)}\n`, { mode: 0o600 });
+  await validateProfileApp(f.store, f.plan, initial.application, options);
+  await assert.rejects(prepareProfileApp(f.store, f.plan, { ...options, allowRebuild: false }), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+  assert.equal(copies, 1, 'a Finder reopen must not replace an old-policy bundle in place');
+  assert.equal(signs, 1);
+  const refreshed = await prepareProfileApp(f.store, f.plan, options);
+  assert.equal(refreshed.application.appPath, initial.application.appPath);
+  assert.equal(copies, 2);
+  assert.equal(signs, 2);
+  assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).signingPolicy, 'main-host-disable-library-validation-v1');
 });
 
 test('real Swift bootstrap routes the disposable signed app and execs it in the same pid', {
@@ -341,8 +349,8 @@ test('real Swift bootstrap routes the disposable signed app and execs it in the 
   assert.deepEqual(reused, prepared, 'a validated bundle must be reused without another copy or signature replacement');
   await validateProfileApp(store, plan, reused.application);
 
-  // A second disposable source carries Electron-specific grants. Deep signing
-  // must retain them on the vendor executable while keeping them off the shim.
+  // A second disposable source proves only its main host is re-signed; nested
+  // publisher code retains its original bytes and signature identity.
   const secondID = profileB;
   const secondSourceApp = join(root, 'fixture-vendor-with-entitlements', 'FakeCodex.app');
   const secondContents = join(secondSourceApp, 'Contents');
@@ -377,6 +385,9 @@ test('real Swift bootstrap routes the disposable signed app and execs it in the 
   await writeFile(entitlementsPath, `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>com.apple.application-identifier</key><string>2DC432GLL2.com.openai.codex</string><key>com.apple.developer.team-identifier</key><string>2DC432GLL2</string><key>com.apple.security.application-groups</key><array><string>group.com.openai.codex</string></array><key>keychain-access-groups</key><array><string>2DC432GLL2.com.openai.codex</string></array><key>com.apple.security.device.camera</key><true/><key>com.apple.security.cs.allow-jit</key><true/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/><key>com.apple.security.cs.disable-library-validation</key><true/><key>com.apple.security.get-task-allow</key><true/><key>com.example.unrelated</key><true/></dict></plist>`);
   execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--options', 'runtime', '--entitlements', entitlementsPath, '--timestamp=none', secondSourceApp]);
   execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', secondSourceApp]);
+  const nestedSourceStates = [nestedHelperExecutable, nestedFrameworkExecutable].map(path => ({
+    relative: path.slice(secondSourceApp.length), sha256: digest(readFileSync(path)), signature: signatureDetails(path),
+  }));
   const secondAppPath = await realpath(secondSourceApp), secondExecutablePath = await realpath(secondExecutable);
   const secondApp = { appPath: secondAppPath, bundleId: 'com.openai.codex', executable: secondExecutablePath, asarSha256: digest(asar) };
   const secondPlan = { profileId: secondID, name: 'Entitlement Probe', nativeRoot: join(root, 'native', secondID), app: secondApp };
@@ -390,14 +401,17 @@ test('real Swift bootstrap routes the disposable signed app and execs it in the 
   const nestedHelperEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', nestedClonedHelper], { encoding: 'utf8' });
   const nestedClonedFramework = join(secondPrepared.application.appPath, 'Contents', 'Frameworks', 'FakeRuntime.framework', 'FakeRuntime');
   const nestedFrameworkEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', nestedClonedFramework], { encoding: 'utf8' });
-  assert.doesNotMatch(secondBootstrapEntitlements, /<key>/, 'deep signing must not reattach vendor grants to the bootstrap');
-  assert.match(secondVendorEntitlements, /com\.apple\.security\.cs\.allow-jit/, 'vendor runtime grants should remain on the Electron executable');
-  assert.match(secondVendorEntitlements, /com\.apple\.security\.cs\.disable-library-validation/);
-  for (const [label, output] of [['vendor', secondVendorEntitlements], ['nested helper', nestedHelperEntitlements], ['nested framework', nestedFrameworkEntitlements]]) {
-    assert.match(output, /com\.apple\.security\.cs\.allow-jit/, `${label} should retain its Electron JIT grant`);
-    for (const restricted of ['application-identifier', 'developer-team-identifier', 'application-groups', 'keychain-access-groups',
-      'security.device.camera', 'security.get-task-allow', 'com.example.unrelated'])
-      assert.doesNotMatch(output, new RegExp(restricted.replaceAll('.', '\\.'), 'i'), `${label} must not retain ${restricted}`);
+  assert.doesNotMatch(secondBootstrapEntitlements, /<key>/, 'bootstrap must remain entitlement-free');
+  for (const runtime of ['allow-jit', 'allow-unsigned-executable-memory', 'disable-library-validation'])
+    assert.match(secondVendorEntitlements, new RegExp(`com\\.apple\\.security\\.cs\\.${runtime}`), `main host should claim ${runtime}`);
+  for (const restricted of ['application-identifier', 'developer.team-identifier', 'application-groups', 'keychain-access-groups',
+    'security.device.camera', 'security.get-task-allow', 'com.example.unrelated'])
+    assert.doesNotMatch(secondVendorEntitlements, new RegExp(restricted.replaceAll('.', '\\.'), 'i'), `main host must not claim ${restricted}`);
+  for (const [path, output] of [[nestedClonedHelper, nestedHelperEntitlements], [nestedClonedFramework, nestedFrameworkEntitlements]]) {
+    const sourceState = nestedSourceStates.find(item => path.endsWith(item.relative));
+    assert.ok(sourceState);
+    assert.equal(digest(readFileSync(path)), sourceState.sha256, `${path} bytes and embedded signature must be unchanged`);
+    assert.equal(signatureDetails(path), sourceState.signature, `${path} signer identity must be unchanged`);
+    assert.match(output, /com\.apple\.security\.cs\.allow-jit/, 'nested vendor code retains its original signature grants');
   }
-  assert.match(nestedHelperEntitlements, /com\.apple\.security\.cs\.allow-unsigned-executable-memory/);
 });

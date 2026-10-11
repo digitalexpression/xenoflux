@@ -16,6 +16,7 @@ const safeText = value => typeof value === 'string' && value.length > 0 && !/[\x
 const absoluteCanonical = value => safeText(value) && value.startsWith('/') && resolve(value) === value;
 const ownerName = '.xfx-owned.json';
 const markerName = '.xfx-profile-app-owner.json';
+const signingPolicy = 'main-host-disable-library-validation-v1';
 const currentUid = () => typeof process.getuid === 'function' ? process.getuid() : -1;
 const privateMode = value => (value.mode & 0o077) === 0;
 const privateRegular = value => value.isFile() && value.nlink === 1 && value.uid === currentUid() && privateMode(value);
@@ -174,85 +175,17 @@ async function updatePlistDefault(path, { set, remove }, execFile, writeFile, rm
 async function verifySignature(path, execFile) {
   await execFile('/usr/bin/codesign', ['--verify', '--deep', '--strict', path], { encoding: 'utf8', timeout: 30000 });
 }
-const electronRuntimeEntitlements = new Set([
-  'com.apple.security.cs.allow-jit',
-  'com.apple.security.cs.allow-unsigned-executable-memory',
-  'com.apple.security.cs.disable-library-validation',
-]);
-async function plistEntitlementsFromText(text, tempRoot, { writeFile, rm, execFile }) {
-  const start = text.indexOf('<plist');
-  const end = text.indexOf('</plist>', start);
-  if (start < 0) return {};
-  if (end < 0) fail('PROFILE_ENTITLEMENTS_INVALID');
-  const file = join(tempRoot, `.xfx-entitlements-${randomUUID()}.plist`);
-  try {
-    await writeFile(file, text.slice(start, end + '</plist>'.length), { flag: 'wx', mode: 0o600 });
-    const { stdout } = await execFile('/usr/bin/plutil', ['-convert', 'json', '-o', '-', file], { encoding: 'utf8', timeout: 30000 });
-    const parsed = JSON.parse(stdout);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail('PROFILE_ENTITLEMENTS_INVALID');
-    return parsed;
-  } catch { fail('PROFILE_ENTITLEMENTS_INVALID'); }
-  finally { await rm(file, { force: true }); }
-}
-async function signedEntitlements(path, tempRoot, io) {
-  let result;
-  try {
-    result = await io.execFile('/usr/bin/codesign', ['--display', '--entitlements', ':-', path], {
-      encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 30000,
-    });
-  } catch (error) {
-    const diagnostics = `${error.stderr ?? ''} ${error.message ?? ''}`;
-    if (/code object is not signed at all/i.test(diagnostics)) return {};
-    fail('PROFILE_ENTITLEMENTS_UNAVAILABLE');
-  }
-  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-  if (!output.includes('<plist')) {
-    const diagnostic = `${result.stderr ?? ''}`;
-    if (diagnostic.includes(`Executable=${path}`) && /warning: Specifying ':' in the path is deprecated/.test(diagnostic)) return {};
-    fail('PROFILE_ENTITLEMENTS_INVALID');
-  }
-  return await plistEntitlementsFromText(output, tempRoot, io);
-}
-function runtimeEntitlements(entitlements) {
-  return Object.fromEntries([...electronRuntimeEntitlements]
-    .filter(key => entitlements[key] === true).map(key => [key, true]));
-}
-async function collectCodeEntitlements(root, io) {
-  const found = [];
-  async function visit(dir) {
-    for (const entry of await nodeReaddir(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) await visit(path);
-      else if (entry.isFile()) {
-        const info = await io.lstat(path);
-        if (!(info.mode & 0o111)) continue;
-        const entitlements = runtimeEntitlements(await signedEntitlements(path, root, io));
-        if (Object.keys(entitlements).length) found.push({ path, entitlements });
-      }
-    }
-  }
-  await visit(join(root, 'Contents'));
-  return found;
-}
-async function signDefault(path, bootstrapExecutable, execFile, writeFile, rm) {
-  const io = { execFile, writeFile, rm };
+async function signDefault(path, vendorExecutable, bootstrapExecutable, execFile, writeFile, rm) {
   // This small Swift process uses AppKit only to request LaunchServices; it must
   // not inherit the vendor app's restricted entitlements or application groups.
   await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', bootstrapExecutable], { encoding: 'utf8', timeout: 30000 });
-  // Keep only Electron's runtime grants on each executable that had them in
-  // the source. Vendor identity, groups, device, and unknown grants are dropped.
-  const saved = await collectCodeEntitlements(path, { ...io, lstat: nodeLstat });
-  await execFile('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--preserve-metadata=flags,runtime', path], { encoding: 'utf8', timeout: 120000 });
-  for (const item of saved) {
-    const plist = join(path, `.xfx-runtime-${randomUUID()}.plist`);
-    try {
-      const body = Object.entries(item.entitlements).map(([key]) => `<key>${key}</key><true/>`).join('');
-      await writeFile(plist, `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict>${body}</dict></plist>`, { flag: 'wx', mode: 0o600 });
-      await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--entitlements', plist, item.path], { encoding: 'utf8', timeout: 30000 });
-    } finally { await rm(plist, { force: true }); }
-  }
-  // Re-seal nested containers after restoring their filtered executable grants.
-  await execFile('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--preserve-metadata=entitlements,flags,runtime', path], { encoding: 'utf8', timeout: 120000 });
+  const entitlements = join(path, `.xfx-main-entitlements-${randomUUID()}.plist`);
+  try {
+    await writeFile(entitlements, `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/><key>com.apple.security.cs.disable-library-validation</key><true/></dict></plist>`, { flag: 'wx', mode: 0o600 });
+    await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', '--entitlements', entitlements, vendorExecutable], { encoding: 'utf8', timeout: 30000 });
+  } finally { await rm(entitlements, { force: true }); }
+  // Sign only the changed outer bundle. Nested vendor signatures remain intact.
+  await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', path], { encoding: 'utf8', timeout: 120000 });
   await verifySignature(path, execFile);
   const bootstrapEntitlements = await execFile('/usr/bin/codesign', ['--display', '--entitlements', ':-', bootstrapExecutable], {
     encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 30000,
@@ -272,7 +205,7 @@ async function verifyOriginal(sourceAppPath, app, verifyOriginalFn) {
       || verified.executable !== app.executable || verified.asarSha256 !== app.asarSha256) fail('PROFILE_APP_SOURCE_CHANGED');
 }
 async function markerFor(storeDirectory, plan, appPath, helperSha256, helperSourceSha256, hashes) {
-  return { kind: 'xenoflux-profile-app', store: storeDirectory, profileId: plan.profileId, nativeRoot: plan.nativeRoot,
+  return { kind: 'xenoflux-profile-app', signingPolicy, store: storeDirectory, profileId: plan.profileId, nativeRoot: plan.nativeRoot,
     appPath, bundleId: `com.xenoflux.profile.${plan.profileId.toLowerCase()}`, sourceAppPath: plan.app.appPath,
     sourceBundleId: plan.app.bundleId, sourceAsarSha256: plan.app.asarSha256,
     node: hashes.node, entry: hashes.entry,
@@ -297,7 +230,7 @@ export async function prepareProfileApp(store, plan, {
   verifyOriginal: verifyOriginalFn = async (appPath, expected) => inspectDesktopApp({ appPath, expected, execFile, readFile, realpath }),
   copyApp = (from, to) => nodeCp(from, to, { recursive: true, verbatimSymlinks: true, mode: fsConstants.COPYFILE_FICLONE }),
   updatePlist = (path, operations) => updatePlistDefault(path, operations, execFile, writeFile, rm),
-  signApp = (path, sourcePath, context) => signDefault(path, context.bootstrapExecutable, execFile, writeFile, rm),
+  signApp = (path, sourcePath, context) => signDefault(path, context.vendorExecutable, context.bootstrapExecutable, execFile, writeFile, rm),
   mkdir = nodeMkdir, lstat = nodeLstat, realpath = nodeRealpath, readFile = nodeReadFile, readdir = nodeReaddir,
   readlink = nodeReadlink, writeFile = nodeWriteFile, rename = nodeRename, rm = nodeRm, chmod = nodeChmod,
 } = {}) {
@@ -348,7 +281,8 @@ export async function prepareProfileApp(store, plan, {
     const needsRefresh = existing.appPath !== appPath || existing.sourceAppPath !== sourceAppPath
       || existing.sourceBundleId !== plan.app.bundleId || existing.sourceAsarSha256 !== copiedAsarSha256
       || existing.sourceExecutableSha256 !== sourceExecutableSha256
-      || existing.helperSourceSha256 !== helper.sourceHash || existing.helperSha256 !== helper.helperSha256;
+      || existing.helperSourceSha256 !== helper.sourceHash || existing.helperSha256 !== helper.helperSha256
+      || existing.signingPolicy !== signingPolicy;
     if (!needsRefresh) {
       return { ...validation, helperExecutable: helper.helper, helperSha256: helper.helperSha256 };
     }
@@ -380,7 +314,7 @@ export async function prepareProfileApp(store, plan, {
     if (await hashFile(join(tempContents, 'Resources', 'app.asar'), { readFile, lstat }) !== copiedAsarSha256) fail('PROFILE_APP_SOURCE_CHANGED');
     if (await hashFile(vendorExecutable, { readFile, lstat }) !== sourceExecutableSha256) fail('PROFILE_APP_SOURCE_CHANGED');
     await chmod(tempApp, 0o700);
-    await signApp(tempApp, sourceAppPath, { sourceExecutable: plan.app.executable, bootstrapExecutable });
+    await signApp(tempApp, sourceAppPath, { sourceExecutable: plan.app.executable, vendorExecutable, bootstrapExecutable });
     await verifySignature(tempApp, execFile);
     await scanLinks(tempApp, tempApp, { lstat, readdir, readlink, realpath });
     const bootstrapSha256 = await hashFile(bootstrapExecutable, { readFile, lstat }, 'PROFILE_APP_UNSAFE', true);
