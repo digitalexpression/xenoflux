@@ -46,25 +46,20 @@ limits above must accompany the release review.
 Preparation checks passed: `npm run check`, `npm run check:native`, 385 tests
 (one opt-in native skip), and the detached offline four-file release smoke.
 PR #4 targets main: https://github.com/digitalexpression/xenoflux/pull/4.
-The macOS CI jobs for Node 22.13.0 and 24 passed at commit 7b55ca2.
+The macOS CI jobs for Node 22.13.0 and 24 passed at commit 92b3984.
 
-Independent review found two conditional upgrade blockers; a built candidate is
-not publication approval:
+Release scope confirmed by the user on 2026-10-12: 1.0.0 is the first stable
+release. Migration from older preview installations is unsupported and is not a
+release requirement. The review findings about removed paired restore/resume
+paths and v1/v2 copy-journal recovery are therefore out of scope, not blockers.
+Do not reintroduce legacy compatibility or inspect/mutate live installations to
+implement a migration. Current v3 journal validation and cached running-instance
+preservation remain in place.
 
-- Published preview versions supported paired aliases and `desktop restore` /
-  `desktop recover --no-open`. This branch removes that restoration path and
-  alias-aware history/resume handling. Existing activated or unfinished paired
-  installations need an explicit upgrade/recovery policy before stable release.
-  No live installation was inspected, so whether this host is affected is unknown.
-- The settings-copy reader now requires v3 journals; origin/main accepted v1/v2
-  as well. An existing applied or interrupted older copy would lose undo/recovery.
-  Requiring v3 is documented, but upgrading existing records is not resolved.
-
-Do not publish 1.0.0 until these boundaries are resolved or an explicit supported
-upgrade policy is reviewed. Do not infer clean legacy state from the successful
-RC3/Advanced startup test. The reviewed candidate is prepared under
-`release-artifacts/1.0.0-2026-10-12-reviewed`; its manifest pins the exact committed
-source revision. Release artifacts are ignored local outputs, not PR contents.
+The candidate for this scope is prepared under
+`release-artifacts/1.0.0-2026-10-12-first-stable`; its manifest pins the exact
+committed source revision. Release artifacts are ignored local outputs, not PR
+contents. Merge, tagging and publication remain separate from this preparation.
 
 ## Prebuilt launcher package
 

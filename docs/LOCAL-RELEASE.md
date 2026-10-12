@@ -2,6 +2,11 @@
 
 Xenoflux provides a macOS release bundle and an npm-compatible package. It does not install or bundle Node.js. The target machine needs a user-managed Node.js 22.x executable from 22.13.0 onward, or Node.js 23.4.0 or later, on `PATH`. Node.js 23.0–23.3 is unsupported.
 
+
+Version 1.0.0 is the first stable release. Migration from earlier preview
+installations is outside the supported release scope; legacy paired-profile
+restoration and v1/v2 settings-copy journals are not supported.
+
 ## npm setup
 
 After a release is published, obtain and run its installer in an external terminal:
