@@ -7,8 +7,7 @@ A Codex profile manager for macOS.
 Run in an external terminal:
 
 ```sh
-npm exec --yes --package=xenoflux@latest -- xfx install --close-clients
-export PATH="$HOME/.local/bin:$PATH"
+npm install -g xenoflux
 ```
 
 ## Create a profile
@@ -20,13 +19,14 @@ xfx profile create Research --apply --close-clients
 xfx desktop open Research
 ```
 
-Setup guides sign-in. Installation and setup may ask to close Codex clients;
-repeated `desktop open` focuses the running profile. To preview setup first,
+Profile setup guides sign-in and may ask to close Codex clients; npm installation
+does not. Repeated `desktop open` focuses the running profile. To preview setup first,
 run `xfx profile create Research` without `--apply`.
 
-You need supported Node.js and a Codex CLI executable; desktop profiles also need
-Codex desktop. See [Installation](docs/user/INSTALLATION.md) for requirements,
-offline setup and updates, and [Profiles](docs/user/PROFILES.md) to continue an
+npm's global bin directory must already be on `PATH`. You need supported Node.js
+and a Codex CLI executable; desktop profiles also need Codex desktop. See
+[Installation](docs/user/INSTALLATION.md) for requirements,
+managed/offline setup and updates, and [Profiles](docs/user/PROFILES.md) to continue an
 interrupted sign-in. Use `xfx --help` for all commands.
 
 ## Documentation

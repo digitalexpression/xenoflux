@@ -4,7 +4,8 @@ Audience: users and operators. See [Installation](INSTALLATION.md) for setup.
 
 Xenoflux can route diagnostic logs to a macOS RAM volume. The logs are disposable at reboot. Native settings, credentials, conversations, histories, and state databases stay on disk.
 
-The installer uses the invoking terminal's `PATH` for a new RAM-log service. Install/enable reuse a working saved path and retry the current terminal's path if the saved Node installation is unavailable or unsupported. `--background-path PATH` takes precedence and is checked without fallback. If discovery cannot resolve a supported Node version, Xenoflux installs with RAM logs disabled and uses disk logs. Retry from an external terminal where Node is available:
+Global npm installation does not enable RAM logs. The managed installer uses the
+invoking terminal's `PATH` for a new RAM-log service. Install/enable reuse a working saved path and retry the current terminal's path if the saved Node installation is unavailable or unsupported. `--background-path PATH` takes precedence and is checked without fallback. If discovery cannot resolve a supported Node version, Xenoflux installs with RAM logs disabled and uses disk logs. Retry from an external terminal where Node is available:
 
 ```sh
 xfx ramlogs status

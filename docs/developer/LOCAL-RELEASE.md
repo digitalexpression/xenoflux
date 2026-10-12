@@ -33,6 +33,66 @@ and installation lifecycle. It does not sign in, start or quit real Codex, mount
 RAM storage, or use a real native home. The manifest records the exact source commit,
 artifact hashes and smoke result. Package scripts are ignored during packing.
 
+## Test global npm installation in isolation
+
+Use a temporary [npm prefix and configuration](https://docs.npmjs.com/cli/v11/using-npm/config/),
+HOME, cache and explicit controller.
+The PATH below applies only to disposable child commands; it simulates npm's global
+bin being available without changing the current shell or startup files. An
+explicit `--store` is important because Xenoflux also uses the macOS account home
+in some paths; changing HOME alone is not a complete isolation boundary.
+
+Run this in a shell with supported Node.js and npm available. It installs the
+published 1.0.0 package, checks the npm-created CLI link and empty isolated profile
+list, then uninstalls and removes the temporary files:
+
+```sh
+(
+  set -eu
+  xfx_test_root=$(mktemp -d "${TMPDIR:-/tmp}/xfx-global-test.XXXXXX")
+  trap 'rm -rf "$xfx_test_root"' EXIT
+  mkdir -p "$xfx_test_root/home"
+  : > "$xfx_test_root/npmrc"
+  : > "$xfx_test_root/global-npmrc"
+  xfx_node_bin=$(dirname "$(command -v node)")
+  xfx_npm_bin=$(dirname "$(command -v npm)")
+
+  xfx_test() {
+    env -i \
+      HOME="$xfx_test_root/home" \
+      PATH="$xfx_test_root/prefix/bin:$xfx_node_bin:$xfx_npm_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+      XFX_HOME="$xfx_test_root/controller" \
+      npm_config_cache="$xfx_test_root/cache" \
+      npm_config_userconfig="$xfx_test_root/npmrc" \
+      npm_config_globalconfig="$xfx_test_root/global-npmrc" \
+      "$@"
+  }
+
+  xfx_test npm install -g xenoflux@1.0.0 \
+    --prefix "$xfx_test_root/prefix" --registry https://registry.npmjs.org \
+    --ignore-scripts --no-audit --no-fund
+
+  test "$(xfx_test /bin/sh -c 'command -v xfx')" = "$xfx_test_root/prefix/bin/xfx"
+  xfx_test xfx --help
+  test "$(xfx_test xfx --store "$xfx_test_root/controller" --json profile list)" = '[]'
+  test ! -e "$xfx_test_root/home/.xfx/app"
+  test ! -e "$xfx_test_root/home/.local/bin/xfx"
+
+  xfx_test npm uninstall -g xenoflux --prefix "$xfx_test_root/prefix" \
+    --registry https://registry.npmjs.org --ignore-scripts --no-audit --no-fund
+  test ! -e "$xfx_test_root/prefix/bin/xfx"
+  printf 'Isolated global install, CLI lookup and uninstall passed.\n'
+)
+
+```
+
+`--ignore-scripts` keeps dependency lifecycle hooks out of this smoke check. These
+commands do not call `xfx install`, create/sign in to profiles, launch or close
+Codex, configure RAM logs, or modify the real npm prefix/configuration. The check
+proves package installation and CLI availability, not native profile runtime.
+For an unpublished candidate, pack the checkout and substitute its absolute
+tarball path for `xenoflux@1.0.0`; native verification remains separate.
+
 ## Publish approved artifacts
 
 Verify CI on the intended PR head before merging. Build the final bundle from the
