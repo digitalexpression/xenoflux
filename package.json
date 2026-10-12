@@ -11,12 +11,7 @@
     "src",
     "LICENSE",
     "README.md",
-    "docs/LOCAL-RELEASE.md",
-    "docs/RAM-LOGS.md",
-    "docs/PROFILE-RECOVERY.md",
-    "docs/ADVANCED-COPY.md",
-    "docs/PROFILE-COPY-POLICY.md",
-    "docs/CONCURRENT-DESKTOPS.md"
+    "docs"
   ],
   "engines": {
     "node": ">=22.13.0 <23 || >=23.4.0"

@@ -1,5 +1,7 @@
 # Recover an interrupted profile run
 
+Audience: users. For desktop-instance recovery, see [Desktop profiles](DESKTOP.md).
+
 After a hard interruption, Xenoflux retains the native home's `.run-lock` so a
 second login, launch, or resume cannot race a child process that may still be
 writing. Inspect the candidate first:

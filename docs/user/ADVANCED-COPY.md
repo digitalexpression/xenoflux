@@ -1,9 +1,7 @@
 # Inspect and selectively copy profile contents
 
-This guide describes this checkout's
-[profile creation and copy policy](PROFILE-COPY-POLICY.md). Published rc.6 differs:
-it overlays skill packages and its category-copy mode can remove destination-only
-settings. The updated behavior below requires this implementation's candidate.
+Audience: users. This guide describes inspection, selective copying and undo in
+Xenoflux 1.0.0. For profile setup, see [Profiles](PROFILES.md).
 
 Use `xfx profile inspect Default` or `xfx profile inspect Research --json` to inspect a profile. The inventory reports discovered contents and their origin. It does not prove that Codex loaded every item into a particular task.
 
@@ -40,9 +38,9 @@ untouched. Undo restores the package's prior files and supported directory shape
 and modes. Unsafe contents and unsupported file/directory transitions are refused
 before mutation. Xenoflux never falls back to a partial package overlay.
 
-`--include config,instructions,agents` now selects supported source items under the
-same preservation policy. It no longer removes destination-only keys, instructions
-or agents merely because the source lacks them. Use `--advanced` for individual
+`--include config,instructions,agents` selects supported source items under the
+same preservation policy. It preserves destination-only keys, instructions and agents when the source
+lacks them. Use `--advanced` for individual
 selection and optional setup guidance. These options cannot be combined.
 
 Identical selections return unchanged without preparing clients or creating a copy
@@ -103,6 +101,5 @@ New-profile setup consists of separate preparation, copy, sign-in and desktop in
 
 Before applying or undoing, ensure Codex clients that can access the affected homes are quiescent. The `--close-clients` option permits the existing graceful shutdown workflow; standalone terminal sessions must be closed manually when requested. Inspection and preview never close applications.
 
-Native skill execution and automatic rule enforcement require separate acceptance
-for the client/interface used. Fixture checks and native discovery alone are not
-proof of those behaviors.
+After copying, check the skill or rule in a fresh Codex task through the interface
+you intend to use. Discovery alone does not establish that it executes or applies.

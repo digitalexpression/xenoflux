@@ -220,5 +220,5 @@ apps need only `desktop open NAME`; a running instance is focused. Use `desktop
 prepare NAME` for an absent app and `desktop refresh NAME` for a stale stopped
 app. Recover any interrupted target reservation after its resources are idle.
 Do not close the user's running instances for this work. The remaining native
-acceptance checks are in `docs/CONCURRENT-DESKTOPS.md`; do not reset keychain
+acceptance checks are in `docs/developer/DESKTOP-IMPLEMENTATION.md`; do not reset keychain
 defaults or claim full profile isolation from the synthetic fixture.

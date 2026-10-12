@@ -1,9 +1,9 @@
 # Profile creation and copy policy
 
 Accepted: 2026-10-02. Scope: profile creation, comparison, copy, and their user flows.
-This is the development and review contract. The local implementation follows it;
-the published `0.3.0-rc.6` release predates these changes. See
-[current copy behavior](ADVANCED-COPY.md) and the evidence boundary below.
+Audience: developers and reviewers. This is the development and review contract
+for the released 1.0.0 behavior. See the [user copy guide](../user/ADVANCED-COPY.md)
+for commands and the evidence boundary below for historical verification.
 
 ## Purpose
 
@@ -120,18 +120,18 @@ profile relationships, a synchronization baseline, or a generic migration framew
 ## Implementation and evidence boundary
 
 Baseline: Xenoflux `0.3.0-rc.6`, commit `96a90204`, inspected 2026-10-02.
-The `codex/profile-copy-policy` implementation changes that baseline as follows:
+The implementation released in 1.0.0 changes that historical baseline as follows:
 
-- [Selected skill copy](../src/advanced-copy.js) replaces supported packages exactly,
+- [Selected skill copy](../../src/advanced-copy.js) replaces supported packages exactly,
   including removals and supported directory modes. Its v3 journal supports undo and
   interruption recovery; all copy journal reads require v3. File/directory
   type transitions, unsafe contents and directories without owner read/write/execute
   permissions are refused before mutation.
-- [Category copy](../src/native-copy.js) selects items through the same planner and
+- [Category copy](../../src/native-copy.js) selects items through the same planner and
   preserves source-absent destination settings, instructions and agents. An identical
   or empty selection does not prepare clients or create a transaction.
-- [Copy selection](../src/advanced-command.js) uses bounded settings/standalone
-  inventory and separate [manual setup guidance](../src/setup-guidance.js). It does
+- [Copy selection](../../src/advanced-command.js) uses bounded settings/standalone
+  inventory and separate [manual setup guidance](../../src/setup-guidance.js). It does
   not scan conversations, memory, project contents or plugin caches. Full diagnostic
   inspection retains its broader scope. Local plugin manifest versions describe the
   source package only; installed versions and runtime availability remain unknown.
@@ -151,5 +151,7 @@ The `codex/profile-copy-policy` implementation changes that baseline as follows:
   native profile loading in those contexts, not arbitrary project precedence or
   another interactive copy test. Existing profile data and sign-in were preserved.
 
-Record candidate-specific check results in the local handover. Do not present this
-unpublished implementation or fixture evidence as released native acceptance.
+Record candidate-specific check results in the
+[concurrent profile handover](HANDOVER-macos-concurrent-profiles.md). Do not present
+historical candidates or fixture evidence as complete native acceptance for a
+released client version.

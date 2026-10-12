@@ -1,44 +1,18 @@
-# Concurrent Codex profiles
+# Desktop implementation and verification
 
-Development implementation; native acceptance is pending. The built-in
-`Default` profile uses Codex's normal paths, including `~/.codex`. Named
-profiles use separate native homes under `~/.xfx/profiles` by default. A profile
-has one Xenoflux-managed client reservation at a time.
+Audience: developers and reviewers. For normal commands and recovery, see the
+[user desktop guide](../user/DESKTOP.md).
 
-## Commands
+## Profile apps and the packaged launcher
 
-```sh
-xfx desktop prepare NAME --dry-run
-xfx desktop prepare NAME
-xfx desktop refresh NAME
-xfx desktop open NAME --dry-run
-xfx desktop open NAME
-xfx desktop list --observe
-xfx desktop focus NAME
-xfx desktop close NAME
-xfx desktop recover NAME --dry-run
-xfx desktop recover NAME
-```
-
-`open` creates or refreshes the private copy of the verified installed app named
-`Codex · NAME` when its cache is missing or stale, then validates and launches it.
-Preparation copies the app with its own bundle identity and original icon and
-resources; it copies the packaged universal AppKit bootstrap, then signs the copy. If a safely stopped open left an unfinished journal, the next
-open reconciles it before continuing. Opening a running profile focuses its
-pinned app without building, signing, or refreshing.
-
-The bootstrap sets the profile's Codex home, SQLite, temporary and UI-data paths,
-then replaces itself with Codex in the same PID. There is no persistent companion
-application. The profile app can be opened through Finder or kept in the Dock;
-its bootstrap asks Xenoflux to reserve the profile before starting Codex. Profile
-sign-in and settings stay with that profile. The installed app remains unchanged.
-
-`prepare`, `refresh`, and `recover` remain explicit maintenance and debugging
-commands. `prepare` creates or refreshes the cache and `refresh` is its alias;
-both operate only while that profile's desktop is stopped. `recover` explicitly
-reconciles a stopped instance's verified reservation. All support `--dry-run` to
-show the profile routing or recovery plan without preparing, signing, launching,
-or mutating anything.
+Each private `Codex · NAME.app` contains the verified vendor app's resources,
+a profile bundle identity and the packaged AppKit bootstrap. The bootstrap sets
+fixed profile paths, then execs the vendor binary without changing its PID.
+Generated apps and records live under `CONTROLLER/desktop-instances`; the copy
+uses filesystem cloning when available and never hardlinks the installed app.
+Current cache misses or stopped stale caches are prepared by CLI `desktop open`;
+running opens use their pinned app and helper before current-package loading.
+Finder/Dock launches reserve their profile but cannot refresh the executing app.
 
 Desktop retains the logged-in macOS account's normal `HOME` so Security.framework
 can find the login keychain. An isolated Desktop `HOME` caused the native
@@ -69,22 +43,13 @@ universal binary and its manifest with the source. There are no compilation hook
 on install or pack. The check validates source and binary hashes, architectures,
 and signature. A missing, stale, or damaged shipped helper requires a corrected
 xfx package rather than a compiler on the user's Mac.
-Generated apps and records live under `CONTROLLER/desktop-instances`, outside
-native homes. The copy attempts filesystem cloning where available and otherwise
-copies files; it never hardlinks the installed app. Renaming a profile changes its
-app label after the desktop stops and is next prepared. CLI open detects changes
+Renaming a profile changes its app label after the desktop stops and is next
+prepared. CLI open detects changes
 to the verified installed app, bootstrap, or signing policy and refreshes the
 stopped copy. Finder and Dock launches cannot refresh a stale copy; use CLI open
 to refresh it.
 
-## Isolation and recovery
-
-The Default profile paths remain fixed. Named desktop operations do not change
-them or close other clients. A profile's `.run-lock` prevents its managed CLI
-and desktop from running at the same time. Different profile homes can run
-concurrently. A short operation lock serializes changes to Xenoflux desktop
-state. Raw Codex processes can bypass Xenoflux reservations, so open and cleanup
-also inspect the selected profile's resource handles.
+## Process identity and isolation boundaries
 
 Preserved vendor helper signatures also retain their application-group
 entitlements. Separate filesystem routes do not establish that helpers avoid
@@ -116,10 +81,10 @@ the instance stops. Recovery validates its binding, journal and reservation
 owner, checks remaining processes and open handles, and releases only its own
 reservation. It does not close or launch apps.
 
-## Deferred native acceptance
+## Verification and native acceptance
 
 Development checks use mocked native operations and disposable homes. On macOS,
-locally signed fixtures verify compilation, nested framework/helper signatures,
+locally signed fixtures verify packaged bootstrap execution, nested framework/helper signatures,
 fixed-path routing and same-PID bootstrap execution. An opt-in, windowless AppKit
 fixture also exercises the real LaunchServices path, loads a signed framework,
 checks its macOS application name and identity, compares native/kernel/`ps`
@@ -149,33 +114,20 @@ settings and fresh chats. Verify:
 Record the exact desktop/backend versions and observed outcomes before claiming
 native concurrency support. Retest native launch and activation after app updates.
 
-The user's native opens on 2026-10-11 failed after the bootstrap started Codex.
-Crash reports and kernel logs showed library validation rejecting the re-signed
-Codex Framework. The earlier deep signer removed its publisher identity, while
-the locally signed main lacked the grant needed to load it. Static signature
-checks and an AppKit-only fixture had missed this runtime failure.
+## Known native failure modes
 
-A disposable headless experiment reproduced that exact rejection with the real
-Codex framework, then loaded it successfully with the library-validation grant.
-Signing only the copied main and bootstrap also passed deep strict verification
-while preserving the framework's bytes and OpenAI Team ID. Nesting an entirely
-untouched vendor app was tested as an alternative, but macOS restored the generic
-vendor application name after exec, so it did not meet the profile identity goal.
-These experiments did not launch real Codex or change installed/live profile
-state. The user's next RC3 Check test opened a real window, then showed "Keychain
-Not Found" and a controller receipt mismatch. Cancelling the prompt did not reset
-the keychain. A read-only, interaction-disabled default-keychain probe found no
-default under a disposable `HOME`, and found the normal login keychain under the
-account home. This establishes the need for the Desktop account context above.
+- Re-signing nested vendor frameworks broke library validation. Preserve their
+  publisher signatures and give only the copied main the required Electron grants;
+  static signature checks alone did not reveal that runtime failure.
+- An isolated Desktop HOME caused "Keychain Not Found". Desktop resolves the
+  logged-in account HOME; CLI keeps its isolated user-home.
+- ASCII process output mangled Unicode app paths and caused receipt mismatches.
+  Observe processes with UTF-8 output and compare kernel-derived start times.
 
-The full controller fixture reproduced the receipt mismatch: `ps` under the old
-ASCII locale rendered `Codex · NAME` as `Codex M-BM-7 NAME`, so its executable path
-differed from the native receipt. The UTF-8 locale preserves the actual path.
-Real profile sign-in, data isolation and the full Dock/Cmd+Tab acceptance still
-require the native checks above.
-
-On 2026-10-11 the user confirmed both RC3 Check and Advanced Check opened through
-CLI `desktop open`, and repeated opens focused the correct existing instance.
-The supplied process observations showed both running concurrently, with repeated
-opens retaining each profile's PID and start time. This confirms concurrent open
-and repeated-open focus; the other native acceptance checks remain separate.
+The user confirmed concurrent open and correct repeat-open focus on 2026-10-11.
+The 2026-10-12 follow-up verified the packaged launcher, opened RC3 Check (PID
+66357) and Advanced Check (PID 67811), and repeated each open with unchanged PID
+and start time. Final observations reported both running. Exact results, dated
+investigations and the 1.0.0 publication record live in the
+[concurrent profile handover](HANDOVER-macos-concurrent-profiles.md). This evidence does not establish current
+process state or the remaining native acceptance checks above.
