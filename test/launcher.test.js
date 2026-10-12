@@ -2,12 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, writeFile, readFile, lstat, access, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { userInfo } from 'node:os';
-import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { DatabaseSync } from 'node:sqlite';
 import { Store, create, renameProfile, bind } from '../src/profiles.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome, listHomes } from '../src/homes.js';
@@ -36,29 +33,6 @@ async function fixture(t) {
 const launch = (f, name, options = {}) => launchHome(f.store, name, { ramLogs: f.ramLogs, ...options });
 
 const taskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-
-async function writePairedActivation(store, natives) {
-  const data = await store.read(), defaultUserHome = userInfo().homedir;
-  const profiles = data.profiles.map((profile, index) => {
-    const native = natives[index], activationTarget = `profile:${profile.id}`;
-    return { profileId: profile.id, name: profile.name, native: profile.native, activationTarget,
-      environmentId: profile.native.environmentId, home: native.home, cwd: native.cwd, desktopData: native.desktopData };
-  });
-  const aliases = [join(defaultUserHome, '.codex'), join(defaultUserHome, 'Library', 'Application Support', 'Codex')];
-  const components = ['codex-home', 'desktop-data'].map((name, index) => ({ name, alias: aliases[index],
-    original: `${aliases[index]}.xenoflux-original`, originalFact: { path: aliases[index] },
-    targets: Object.fromEntries(profiles.map(profile => [profile.activationTarget, index === 0 ? profile.home : profile.desktopData])) }));
-  const facts = [...new Set(components.flatMap(component => [dirname(component.alias), ...Object.values(component.targets),
-    ...Object.values(component.targets).map(dirname)]))].sort().map(path => ({ path }));
-  const cliByProfile = Object.fromEntries(profiles.map(profile => [profile.profileId,
-    { executable: profile.native.executable, identity: profile.native.executableIdentity, version: profile.native.version }]));
-  const body = { schemaVersion: 1, kind: 'paired-native-home-plan', id: randomUUID(), storePath: store.directory, defaultUserHome,
-    app: {}, cliByProfile, profiles, components, facts,
-    originalRouting: {}, resourcePaths: [], resourcePolicy: '', steps: [], liveHomeChanged: false };
-  await mkdir(join(store.directory, 'activation'), { recursive: true, mode: 0o700 });
-  await writeFile(join(store.directory, 'activation', 'manifest.json'), `${JSON.stringify({ ...body,
-    approvalId: createHash('sha256').update(JSON.stringify(body)).digest('hex') })}\n`, { mode: 0o600 });
-}
 
 async function task(environment, cwd = environment.cwd, rollout) {
   const path = rollout ?? join(environment.home, `rollout-test-${taskId}.jsonl`);
@@ -99,136 +73,23 @@ test('resume selects the exact source home even when both homes contain the same
   assert.equal(JSON.parse(stdout).home, f.a.home);
 });
 
-test('resume translates a trusted recorded .codex transcript into the originating home and preserves workspace boundaries', async t => {
-  const f = await fixture(t), repo = join(f.root, 'work'); await mkdir(repo);
-  const source = f.a;
-  const transcript = join(source.home, 'sessions', 'rollout.jsonl');
-  await mkdir(dirname(transcript), { recursive: true, mode: 0o700 });
-  await task(source, repo, transcript);
-  await writePairedActivation(f.store, [f.a, f.b]);
-  const recorded = join(userInfo().homedir, '.codex', 'sessions', 'rollout.jsonl');
-  await promisify(execFile)('/usr/bin/sqlite3', [join(source.home, 'state_5.sqlite'),
-    `UPDATE threads SET rollout_path='${recorded.replaceAll("'", "''")}';`]);
-  await f.store.update(async data => { await bind(data, 'A', repo); await bind(data, 'A', source.cwd); });
-
-  const plan = await launchPlan(f.store, 'A', undefined, { resumeId: taskId });
-  assert.equal(plan.home, source.home); assert.equal(plan.cwd, repo);
-  assert.deepEqual(plan.args.slice(0, 2), ['resume', taskId]);
-  const { stdout } = await promisify(execFile)(process.execPath,
-    [cli, '--store', f.store.directory, 'resume', 'A', taskId, '--dry-run', '--json']);
-  assert.deepEqual({ home: JSON.parse(stdout).home, cwd: JSON.parse(stdout).cwd }, { home: source.home, cwd: repo });
-  assert.deepEqual(plan.resumeIndexRepair, { from: recorded, to: transcript, createdAt: 1, updatedAt: 2 });
-  assert.equal(indexRows(source)[0].rollout_path, recorded, 'planning and CLI dry-run do not write the index');
-  await assert.rejects(launchPlan(f.store, 'A', undefined, { resumeId: taskId, repository: f.a.cwd }), /Selected repository differs/);
-  await assert.rejects(launchPlan(f.store, 'B', undefined, { resumeId: taskId }), /unavailable/);
-});
-
-function indexRows(environment, update) {
-  const db = new DatabaseSync(join(environment.home, 'state_5.sqlite'), { readOnly: !update });
-  try {
-    update?.(db);
-    return db.prepare('SELECT * FROM threads ORDER BY id').all().map(row => ({ ...row }));
-  } finally { db.close(); }
-}
-
-async function aliasedTask(t) {
-  const f = await fixture(t), source = f.a;
-  const transcript = join(source.home, 'sessions', 'rollout.jsonl');
-  await mkdir(dirname(transcript), { recursive: true, mode: 0o700 });
-  await task(source, source.cwd, transcript);
-  await writeFile(transcript, JSON.stringify({ type: 'session_meta', payload: { id: taskId, cwd: source.cwd } }) + '\n');
-  await writePairedActivation(f.store, [f.a, f.b]);
-  const recorded = join(userInfo().homedir, '.codex', 'sessions', 'rollout.jsonl');
-  indexRows(source, db => db.prepare('UPDATE threads SET rollout_path = ? WHERE id = ?').run(recorded, taskId));
-  return { ...f, source, transcript, recorded };
-}
-
-test('actual resume normalizes only the selected source row before native ID lookup and leaves a durable journal', async t => {
-  const f = await aliasedTask(t), other = f.b;
-  await task(other);
-  indexRows(f.source, db => db.exec("INSERT INTO threads SELECT 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', cwd, title, created_at, updated_at, archived, rollout_path FROM threads"));
-  const before = indexRows(f.source), otherBefore = indexRows(other), content = await readFile(f.transcript);
-  for (const exitCode of [1, 0]) {
-    const result = await launch(f, 'A', { resumeId: taskId, probe: async () => '0.153.4', run: async opts => {
-      // Model the native downstream lookup: resolve the ID again from SQLite.
-      const row = indexRows(f.source).find(row => row.id === opts.args[1]);
-      assert.equal(row.rollout_path, f.transcript);
-      assert.equal(JSON.parse((await readFile(row.rollout_path, 'utf8')).trim()).payload.id, taskId);
-      await opts.onSpawn(123); return { exitCode, signal: null, shutdown };
-    } });
-    assert.equal(result.status, exitCode === 0 ? 'exited' : 'failed');
-    if (exitCode === 1) assert.equal(JSON.parse(await readFile(result.reportPath, 'utf8')).resumeIndexRepair.status, 'applied');
-    else assert.equal(result.resumeIndexRepair, undefined, 'retry is already canonical');
-    assert.deepEqual(indexRows(f.source), before.map(row => row.id === taskId ? { ...row, rollout_path: f.transcript } : row));
-    assert.deepEqual(indexRows(other), otherBefore);
-    assert.deepEqual(await readFile(f.transcript), content);
-  }
-});
-
-test('resume leaves alias metadata untouched if preflight fails or launch is cancelled', async t => {
-  const f = await aliasedTask(t), before = indexRows(f.source);
-  const controller = new AbortController();
-  for (const options of [
-    { ramLogs: { prepareHome: async () => { throw Object.assign(new Error('unavailable'), { code: 'RAM_LOGS_UNAVAILABLE' }); } } },
-    { signal: controller.signal, onStart: async () => controller.abort() },
-  ]) {
-    const result = await launch(f, 'A', { resumeId: taskId, probe: async () => '0.153.4', ...options,
-      run: async () => assert.fail('must not spawn') });
-    assert.equal(result.status, 'incomplete');
-    assert.deepEqual(indexRows(f.source), before);
-  }
-});
-
-test('resume supports native timestamp triggers without changing their maintained fields', async t => {
-  const f = await aliasedTask(t);
-  indexRows(f.source, db => db.exec(`
-    ALTER TABLE threads ADD COLUMN created_at_ms INTEGER;
-    ALTER TABLE threads ADD COLUMN updated_at_ms INTEGER;
-    UPDATE threads SET created_at_ms = created_at * 1000, updated_at_ms = updated_at * 1000;
-    CREATE TRIGGER threads_created_at_ms_after_insert AFTER INSERT ON threads WHEN NEW.created_at_ms IS NULL
-    BEGIN UPDATE threads SET created_at_ms = NEW.created_at * 1000 WHERE id = NEW.id; END;
-    CREATE TRIGGER threads_updated_at_ms_after_update AFTER UPDATE OF updated_at ON threads
-    WHEN NEW.updated_at != OLD.updated_at AND NEW.updated_at_ms IS OLD.updated_at_ms
-    BEGIN UPDATE threads SET updated_at_ms = NEW.updated_at * 1000 WHERE id = NEW.id; END;
-  `));
-  const before = indexRows(f.source);
-  const result = await launch(f, 'A', { resumeId: taskId, probe: async () => '0.153.4', run: async () => ({ exitCode: 0, signal: null, shutdown }) });
-  assert.equal(result.status, 'exited');
-  assert.deepEqual(indexRows(f.source), before.map(row => ({ ...row, rollout_path: f.transcript })));
-});
-
-test('resume refuses changed task metadata, mismatched transcript identity, redirected paths and update hooks', async t => {
-  for (const variant of ['cwd', 'archived', 'updated_at', 'rollout_path', 'identity', 'transcript-cwd', 'symlink', 'trigger']) {
-    await t.test(variant, async t => {
-      const f = await aliasedTask(t); let expected;
-      const result = await launch(f, 'A', { resumeId: taskId, probe: async () => '0.153.4', onStart: async () => {
-        if (variant === 'identity' || variant === 'transcript-cwd') await writeFile(f.transcript, JSON.stringify({ type: 'session_meta', payload: {
-          id: variant === 'identity' ? 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' : taskId,
-          cwd: variant === 'transcript-cwd' ? f.root : f.source.cwd } }) + '\n');
-        else if (variant === 'symlink') { await rm(f.transcript); await symlink(join(f.root, 'unrelated'), f.transcript); }
-        else indexRows(f.source, db => {
-          if (variant === 'trigger') db.exec('CREATE TRIGGER forbidden AFTER UPDATE ON threads BEGIN DELETE FROM threads; END');
-          else db.prepare(`UPDATE threads SET ${variant} = ?`).run({ cwd: f.root, archived: 1, updated_at: 3, rollout_path: '/untrusted/rollout.jsonl' }[variant]);
-        });
-        expected = indexRows(f.source);
-      }, run: async () => assert.fail('must not spawn') });
-      assert.equal(result.status, 'incomplete'); assert.equal(result.error, 'RESUME_INDEX_CHANGED');
-      assert.deepEqual(indexRows(f.source), expected, 'failed repair preserves current metadata');
-      await assert.rejects(access(join(f.a.root, '.run-lock')), { code: 'ENOENT' });
-    });
-  }
-});
-
-test('resume rejects an unknown source, unbound workspace, or redirected transcript before launch', async t => {
-  const f = await fixture(t), repo = join(f.root,'work'); await mkdir(repo);
-  await task(f.a, repo);
-  await assert.rejects(launchPlan(f.store,'B',undefined,{resumeId:taskId}),/unavailable/);
-  await assert.rejects(launchPlan(f.store,'A',undefined,{resumeId:taskId}),/Bind the task repository/);
-  await f.store.update(data=>bind(data,'A',repo));
-  assert.equal((await launchPlan(f.store,'A',undefined,{resumeId:taskId})).cwd,repo);
-  await task(f.b, f.b.cwd, join(f.root,'outside.jsonl'));
-  await assert.rejects(launchPlan(f.store,'B',undefined,{resumeId:taskId}),/transcript is unavailable/);
-  await assert.rejects(access(join(f.a.root, 'launches')),{code:'ENOENT'});
+test('resume refuses transcript paths outside the selected home without translating matching relative paths', async t => {
+  const f = await fixture(t);
+  const relativeTranscript = join('sessions', 'rollout.jsonl');
+  const inHome = join(f.a.home, relativeTranscript);
+  const external = join(f.root, 'legacy-default-home', relativeTranscript);
+  await mkdir(dirname(inHome), { recursive: true, mode: 0o700 });
+  await mkdir(dirname(external), { recursive: true, mode: 0o700 });
+  await writeFile(inHome, 'bound home transcript\n', { mode: 0o600 });
+  await writeFile(external, 'outside transcript\n', { mode: 0o600 });
+  await task(f.a, f.a.cwd, inHome);
+  const db = join(f.a.home, 'state_5.sqlite');
+  await promisify(execFile)('/usr/bin/sqlite3', [db,
+    `UPDATE threads SET rollout_path='${external.replaceAll("'", "''")}';`]);
+  await assert.rejects(launchPlan(f.store, 'A', undefined, { resumeId: taskId }), /transcript is unavailable/);
+  const recorded = (await promisify(execFile)('/usr/bin/sqlite3', ['-readonly', db, 'SELECT rollout_path FROM threads;'])).stdout.trim();
+  assert.equal(recorded, external);
+  await assert.rejects(access(join(f.a.root, 'launches')), { code: 'ENOENT' });
 });
 
 test('history CLI reads combined fixture metadata without creating a launch record or changing the store', async t => {

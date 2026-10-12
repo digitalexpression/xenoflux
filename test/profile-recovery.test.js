@@ -101,10 +101,10 @@ test('writer-quiescence failure preserves lock and login marker', async t => {
   assert.equal(JSON.parse(await readFile(join(f.made.root, '.xfx-home-setup.json'), 'utf8')).phase, 'login-running');
 });
 
-test('desktop reservation blocks profile recovery without touching either record', async t => {
+test('profile operation reservation blocks stale run recovery without touching either record', async t => {
   const f = await fixture(t); await interruptedLogin(f);
-  await mkdir(f.lockPath, { mode: 0o700 });
-  await assert.rejects(recoverProfileRun(f.store, 'Research', opts(f, { apply: true })), /Desktop selection is reserved/);
+  await mkdir(`${f.lockPath}.operation`, { mode: 0o700 });
+  await assert.rejects(recoverProfileRun(f.store, 'Research', opts(f, { apply: true })), /locked/);
   await access(join(f.made.root, '.run-lock'));
   assert.equal(JSON.parse(await readFile(join(f.made.root, '.xfx-home-setup.json'), 'utf8')).phase, 'login-running');
 });

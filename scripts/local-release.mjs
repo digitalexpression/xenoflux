@@ -1,16 +1,15 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createPairedPathFixture } from '../test-support/paired-path-fixture.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const usage = `Usage: npm run local-release -- --output DIRECTORY [--smoke] [--helpers DIRECTORY]
+const usage = `Usage: npm run local-release -- --output DIRECTORY [--smoke]
 
 Builds the current Xenoflux package locally, writes a SHA-256 manifest beside it,
 and optionally verifies a detached offline installation using the checked-out
@@ -18,7 +17,6 @@ smol-toml dependency. It never installs xfx globally or changes profile stores.
 
   --output DIRECTORY  New directory for the tarball and manifest.
   --smoke             Verify a detached offline install and disposable fixture lifecycle.
-  --helpers DIRECTORY New directory for external-terminal helper templates.
 `;
 
 function argument(value, name) {
@@ -32,29 +30,10 @@ export function parseArguments(argv) {
     const value = argv[index];
     if (value === '--help' || value === '-h') options.help = true;
     else if (value === '--smoke') options.smoke = true;
-    else if (value === '--output' || value === '--helpers') options[value.slice(2)] = argument(argv[++index], value);
+    else if (value === '--output') options.output = argument(argv[++index], value);
     else throw new Error(`Unknown option: ${value}`);
   }
   return options;
-}
-
-export function helperTemplates() {
-  const preamble = `#!/bin/sh
-set -eu
-
-if [ "$#" -ne 1 ]; then
-  printf '%s\\n' "Usage: $0 STORE_DIRECTORY" >&2
-  exit 64
-fi
-
-`;
-  const executable = 'xfx_executable=${XFX_EXECUTABLE:-xfx}\n';
-  return {
-    'xfx-desktop-switch.command': `${preamble}${executable}exec "$xfx_executable" --store "$1" desktop pick
-`,
-    'xfx-desktop-recover.command': `${preamble}${executable}exec "$xfx_executable" --store "$1" desktop recover --no-open
-`,
-  };
 }
 
 export function manifestFor({ packageName, version, tarball, sha256, dependencies, sourceRevision, smoke }) {
@@ -117,16 +96,6 @@ async function pack(directory, destination, cache) {
   return entries[0];
 }
 
-async function writeHelpers(directory) {
-  const target = await newDirectory(resolve(directory), 'Helper directory');
-  for (const [name, contents] of Object.entries(helperTemplates())) {
-    const path = join(target, name);
-    await writeFile(path, contents, { mode: 0o700 });
-    await chmod(path, 0o700);
-  }
-  return target;
-}
-
 async function writeInstaller(directory) {
   const installer = join(directory, 'install.mjs');
   await writeFile(installer, await readFile(join(root, 'scripts', 'install-template.mjs')), { mode: 0o700 });
@@ -167,8 +136,44 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
     })).stdout);
     if (comparison.state !== 'native-settings-comparison' || comparison.summary.changed !== 0)
       throw new Error('Installed xfx did not complete its detached read-only native settings comparison');
-    // Exercise the shipped copy engine against disposable native homes only.
+    // Exercise shipped desktop preparation and copy against disposable homes.
     const { Store } = await import(pathToFileURL(join(installedRoot, 'src', 'profiles.js')).href);
+    const { desktopInstancePlan } = await import(pathToFileURL(join(installedRoot, 'src', 'desktop-instances.js')).href);
+    const { prepareProfileApp } = await import(pathToFileURL(join(installedRoot, 'src', 'profile-launcher.js')).href);
+    const instanceList = JSON.parse((await run(installed, ['--json', '--store', store, 'desktop', 'list'])).stdout);
+    if (instanceList.instances.length || instanceList.observation !== 'last-recorded')
+      throw new Error('Installed xfx did not read its empty desktop instance inventory');
+    const vendorApp = join(temporary, 'Codex.app'), vendorContents = join(vendorApp, 'Contents');
+    const vendorExecutable = join(vendorContents, 'MacOS', 'Codex');
+    const vendorAsar = join(vendorContents, 'Resources', 'app.asar');
+    await mkdir(join(vendorContents, 'MacOS'), { recursive: true, mode: 0o700 });
+    await mkdir(join(vendorContents, 'Resources'), { recursive: true, mode: 0o700 });
+    await writeFile(vendorExecutable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
+    await writeFile(vendorAsar, 'detached vendor archive fixture', { mode: 0o600 });
+    await writeFile(join(vendorContents, 'Info.plist'), JSON.stringify({ CFBundleName: 'Codex',
+      CFBundleDisplayName: 'Codex', CFBundleIdentifier: 'com.openai.codex', CFBundleExecutable: 'Codex',
+      CFBundlePackageType: 'APPL' }), { mode: 0o600 });
+    const vendor = { appPath: await realpath(vendorApp), bundleId: 'com.openai.codex', executable: vendorExecutable,
+      asarSha256: createHash('sha256').update(await readFile(vendorAsar)).digest('hex') };
+    const desktopPlan = await desktopInstancePlan(new Store(store), 'smoke', { runtime: { inspectApp: async () => vendor } });
+    if (desktopPlan.userHome !== join(native.root, 'user-home') || desktopPlan.home !== native.home)
+      throw new Error('Installed desktop plan did not retain its profile routing');
+    const profileApp = await prepareProfileApp(new Store(store), desktopPlan, { nodeExecutable: process.execPath,
+      entryPoint: join(installedRoot, 'bin', 'xfx.js'), verifyOriginal: async sourcePath => ({ ...vendor, appPath: sourcePath }),
+      copyApp: (sourcePath, destination) => cp(sourcePath, destination, { recursive: true, verbatimSymlinks: true }),
+      updatePlist: async (path, { set, remove }) => {
+        const plist = JSON.parse(await readFile(path, 'utf8'));
+        for (const key of remove) delete plist[key];
+        Object.assign(plist, set);
+        await writeFile(path, JSON.stringify(plist), { mode: 0o600 });
+      }, signApp: async () => {}, execFile: async (command, args) => {
+        if (command === '/usr/bin/plutil') return { stdout: await readFile(args.at(-1), 'utf8') };
+        if (command === '/usr/bin/codesign') return { stdout: '' };
+        throw new Error(`unexpected profile-app command: ${command}`);
+      } });
+    if (profileApp.application.bundleId !== `com.xenoflux.profile.${desktopPlan.profileId.toLowerCase()}`
+      || !(await readFile(join(profileApp.application.appPath, 'Contents', 'Info.plist'), 'utf8')).includes('Codex · smoke'))
+      throw new Error('Installed xfx did not prepare its profile-specific application bundle');
     const { inspectProfile } = await import(pathToFileURL(join(installedRoot, 'src', 'profile-inventory.js')).href);
     const { planCopy, applyCopy, planUndo, undoCopy } = await import(pathToFileURL(join(installedRoot, 'src', 'native-copy.js')).href);
     const sourceSkill = join(readonlyHome, '.codex', 'skills', 'smoke-skill');
@@ -207,26 +212,6 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
       !(await stat(join(targetSkill, 'obsolete-empty'))).isDirectory() ||
       await exists(join(targetSkill, 'marker.txt')))
       throw new Error('Installed xfx did not restore its exact pre-copy package/config state');
-    const fixture = join(temporary, 'paired fixture');
-    const { PairedPathTransaction } = await import(pathToFileURL(join(installedRoot, 'src', 'paired-path-transaction.js')).href);
-    const lab = createPairedPathFixture(fixture, PairedPathTransaction);
-    const initial = await lab.init();
-    const original = await Promise.all(initial.components.map(async component => {
-      const info = await stat(component.alias);
-      return { device: info.dev, inode: info.ino };
-    }));
-    const switched = await lab.switchTo('A');
-    if (switched.selected !== 'A') throw new Error('Installed xfx did not switch its paired fixture');
-    const recovered = await lab.recover();
-    if (recovered.selected !== 'A' || recovered.recovered !== false) throw new Error('Installed xfx did not preserve a committed paired selection during recovery');
-    const restored = await lab.restore();
-    if (restored.selected !== 'Default') throw new Error('Installed xfx did not restore its paired fixture');
-    const restoredIds = await Promise.all(restored.components.map(async component => {
-      const info = await stat(component.alias);
-      return { device: info.dev, inode: info.ino };
-    }));
-    if (JSON.stringify(original) !== JSON.stringify(restoredIds))
-      throw new Error('Installed xfx did not preserve paired fixture identities');
     const { createInstallation } = await import(pathToFileURL(join(installedRoot, 'src', 'installation.js')).href);
     const userHome = join(temporary, 'installation user');
     const controller = join(userHome, '.xfx', 'controller');
@@ -290,8 +275,7 @@ export async function main(argv = process.argv.slice(2)) {
       sourceRevision, smoke });
     const manifestPath = join(output, 'manifest.json');
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 });
-    const helpers = options.helpers ? await writeHelpers(options.helpers) : null;
-    process.stdout.write(JSON.stringify({ status: 'built', output, tarball, manifest: manifestPath, installer, helpers, smoke }, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ status: 'built', output, tarball, manifest: manifestPath, installer, smoke }, null, 2) + '\n');
   } finally { await rm(cache, { force: true, recursive: true }); }
 }
 

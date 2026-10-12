@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "sourceSha256": "be47340b3fd51af738113551c335a2cf6edf5eb3c93aaccde42e9ae2ecab3e0e",
+  "helperSha256": "7010f271b62ce59579076fd34241d8b6794b2980007621f031cd2553fa2d8548",
+  "architectures": [
+    "arm64",
+    "x86_64"
+  ],
+  "minimumMacOS": "13.0"
+}

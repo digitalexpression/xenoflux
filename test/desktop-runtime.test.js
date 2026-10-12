@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createDesktopRuntime, DESKTOP_APP, DesktopRuntimeError, inspectDesktopApp, sameDesktopApp } from '../src/desktop-runtime.js';
+import { randomUUID } from 'node:crypto';
+import { createDesktopRuntime as createRuntime, DESKTOP_APP, DesktopRuntimeError, inspectDesktopApp, sameDesktopApp } from '../src/desktop-runtime.js';
+
+const createDesktopRuntime = options => createRuntime({
+  concurrentLockPath: join(tmpdir(), `xfx-desktop-runtime-test-${randomUUID()}.lock`),
+  ...options,
+});
 
 const fixtureApp = { ...DESKTOP_APP, version: '26.908.70816', build: '9275',
   crashReporter: `${DESKTOP_APP.appPath}/Contents/Frameworks/Codex Framework.framework/Versions/152.0.7977.83/Helpers/browser_crashpad_handler` };
@@ -268,25 +274,6 @@ test('stop permits a crash reporter to become an orphan but reports unknown surv
   }
 });
 
-test('open and restore accept retained crash reporters without signaling them', async () => {
-  for (const operation of ['open', 'restore']) {
-    const calls = [];
-    let opened = false;
-    const runtime = createDesktopRuntime({ ...appOptions,
-      userInfo: () => ({ uid: 501, homedir: '/Users/fixture' }),
-      processSnapshot: async () => [self, crashpad, ...(opened ? [main] : [])],
-      execFile: async (path, args) => {
-        if (path === '/usr/bin/open') { opened = true; calls.push(args); return { stdout: '' }; }
-        return fixedApp(path, args);
-      } });
-    await runtime.inspectApp();
-    const plan = { home: '/fixture/home', desktopData: '/fixture/data', env: { HOME: '/fixture/user-home', TMPDIR: '/fixture/tmp' } };
-    assert.deepEqual(await runtime[operation](plan), [main]);
-    assert.equal(calls.length, 1);
-    assert.deepEqual(runtime.retainedCrashpad(), [crashpad]);
-  }
-});
-
 test('snapshot includes the exact app tree and keeps an orphaned tracked child visible', async () => {
   let rows = [self, main, child];
   const runtime = createDesktopRuntime({ processSnapshot: async () => rows, currentPid: 999 });
@@ -314,6 +301,19 @@ test('parses executable paths with spaces and ignores unrelated non-path ps comm
 test('refuses control when running inside the desktop process ancestry', async () => {
   const runtime = createDesktopRuntime({ processSnapshot: async () => [{ ...main, pid: 20, ppid: 1 }, { ...self, pid: 21, ppid: 20 }], currentPid: 21 });
   await assert.rejects(runtime.assertExternal(), { code: 'SELF_HOSTED' });
+});
+
+test('maintenance quit refuses multiple desktop mains before sending an Apple event', async () => {
+  let quitCalls = 0;
+  const runtime = createDesktopRuntime({ ...appOptions,
+    processSnapshot: async () => [self, main, { ...main, pid: 110 }],
+    execFile: async (path, args) => {
+      if (path === '/usr/bin/osascript') { quitCalls++; throw new Error('must not quit either instance'); }
+      return fixedApp(path, args);
+    },
+  });
+  await assert.rejects(runtime.stop(), { code: 'DESKTOP_RUNNING' });
+  assert.equal(quitCalls, 0);
 });
 
 test('stop uses a graceful fixed Apple event, waits for every descendant, and rejects PID reuse', async () => {
@@ -357,39 +357,6 @@ test('a pending native quit confirmation gets a human-sized timeout and a quit-s
   }
 });
 
-test('stop refuses an orphan-only recovered tree and persisted identities retain that orphan', async () => {
-  const calls = [];
-  const runtime = createDesktopRuntime({ processSnapshot: async () => [self, { ...child, ppid: 1 }], currentPid: 999, execFile: async (...args) => { calls.push(args); return { stdout: '' }; } });
-  runtime.seedTracked([child]);
-  assert.deepEqual((await runtime.snapshot()).map(row => row.pid), [101]);
-  await assert.rejects(runtime.stop(), { code: 'DESKTOP_RUNNING' });
-  assert.equal(calls.length, 0);
-  assert.throws(() => runtime.seedTracked([{ ...child, executable: '' }]), { code: 'PROCESS_OBSERVATION_INVALID' });
-});
-
-test('open supplies only fixed desktop overrides and requires one main process', async () => {
-  const calls = []; let count = 0;
-  const runtime = createDesktopRuntime({
-    processSnapshot: async () => count++ < 2 ? [self] : [self, main, child], currentPid: 999,
-    now: () => count, sleep: async () => {}, execFile: async (path, args, options) => { calls.push({ path, args, options }); return { stdout: '' }; },
-  });
-  const entries = await runtime.open({ home: '/fixture/home', desktopData: '/fixture/electron', env: { HOME: '/fixture/user-home', TMPDIR: '/fixture/tmp' } });
-  assert.equal(entries[0].pid, 100);
-  assert.deepEqual(calls[0].args, ['-n', '--env', 'CODEX_HOME=/fixture/home', '--env', 'CODEX_ELECTRON_USER_DATA_PATH=/fixture/electron', '--env', 'CODEX_SQLITE_HOME=/fixture/home', '--env', 'HOME=/fixture/user-home', '--env', 'TMPDIR=/fixture/tmp', DESKTOP_APP.appPath, '--args', '--user-data-dir=/fixture/electron']);
-  assert.deepEqual(calls[0].options.env, { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
-});
-
-test('restore uses the OS account home and never accepts a running desktop', async () => {
-  const calls = [];
-  let count = 0;
-  const runtime = createDesktopRuntime({ processSnapshot: async () => count++ < 2 ? [self] : [self, main], currentPid: 999, userInfo: () => ({ homedir: '/Users/real-user' }), execFile: async (path, args, options) => { calls.push({ path, args, options }); return { stdout: '' }; }, sleep: async () => {}, now: () => count });
-  assert.equal((await runtime.restore())[0].pid, 100);
-  assert.deepEqual(calls[0].args, [DESKTOP_APP.appPath]);
-  assert.equal(calls[0].options.env.HOME, '/Users/real-user');
-  const busy = createDesktopRuntime({ processSnapshot: async () => [self, main], currentPid: 999 });
-  await assert.rejects(busy.restore(), { code: 'DESKTOP_RUNNING' });
-});
-
 test('writer preflight blocks active desktop and same-user standalone CLI processes', async () => {
   const cli = '/fixture/bin/codex';
   const cliProcess = { ...self, pid: 555, executable: cli };
@@ -402,29 +369,6 @@ test('writer preflight blocks active desktop and same-user standalone CLI proces
       return true;
     });
   }
-});
-
-test('pre-quit check permits desktop-owned Codex but blocks external IDE and terminal clients', async () => {
-  const owned = { ...child, executable: '/Applications/Codex.app/Contents/Resources/codex' };
-  const ide = { ...self, pid: 555, executable: '/Users/fixture/.vscode/extensions/openai.chatgpt/bin/codex' };
-  const terminal = { ...self, pid: 556, executable: '/fixture/bin/codex-cli' };
-  let rows = [self, main, owned, { ...ide, pid: 557, uid: 502 }];
-  const runtime = createDesktopRuntime({ processSnapshot: async () => rows, currentPid: self.pid, userInfo: () => ({ uid: self.uid }),
-    execFile: async () => assert.fail('pre-quit check must not launch commands or inspect open resources') });
-  assert.deepEqual(await runtime.assertNoOtherClients(), { otherClients: [] });
-  rows = [...rows, ide, terminal];
-  await assert.rejects(runtime.assertNoOtherClients(), error => {
-    assert.equal(error.code, 'CLI_RUNNING'); assert.deepEqual(error.remainingProcesses, [ide, terminal]);
-    assert.match(error.message, /VS Code/); return true;
-  });
-  rows = [self, { ...owned, ppid: 1 }];
-  await assert.rejects(runtime.assertIdle(), { code: 'DESKTOP_RUNNING' });
-});
-
-test('pre-quit check rejects invalid executable inputs before inspecting processes', async () => {
-  const runtime = createDesktopRuntime({ processSnapshot: async () => assert.fail('invalid input must not inspect processes') });
-  for (const input of [null, [], { cliExecutables: 'path' }, { cliExecutables: ['relative'] }])
-    await assert.rejects(runtime.assertNoOtherClients(input), { code: 'INVALID_OPTIONS' });
 });
 
 test('writer preflight ignores foreign CLI users and avoids lsof with no resource paths', async () => {

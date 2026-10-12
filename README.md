@@ -2,17 +2,17 @@
 
 Xenoflux (`xfx`) is a Codex profile manager for macOS. It keeps named profiles separate, provides guided setup and sign-in, compares selected native settings, copies those settings with an undo record, and can route diagnostic logs to RAM while preserving the native home on disk.
 
-It is a macOS preview and does not bundle Node.js. Use a user-managed Node.js 22.x installation from 22.13.0 onward, or Node.js 23.4.0 or later, available on `PATH`. Node.js 23.0–23.3 is unsupported because its SQLite API still requires an experimental flag.
+It runs on macOS and does not bundle Node.js. Use a user-managed Node.js 22.x installation from 22.13.0 onward, or Node.js 23.4.0 or later, available on `PATH`. Node.js 23.0–23.3 is unsupported because its SQLite API still requires an experimental flag.
 
 ## Install
 
-For a published npm preview, run this from an external terminal:
+For a published npm release, run this from an external terminal:
 
 ```sh
-npm exec --yes --package=xenoflux@preview -- xfx install --close-clients
+npm exec --yes --package=xenoflux@latest -- xfx install --close-clients
 ```
 
-This uses npm to obtain the installer, then creates the managed application and launcher described below. It does not require a global npm installation. Add `~/.local/bin` to `PATH`. Use the same command to update to a newer published preview; `xfx install` reinstalls the currently installed version.
+This uses npm to obtain the installer, then creates the managed application and launcher described below. It does not require a global npm installation. Add `~/.local/bin` to `PATH`. Use the same command to update to a newer published release; `xfx install` reinstalls the currently installed version.
 
 Alternatively, build the four-file release bundle from a clean checkout with its dependencies installed:
 
@@ -29,7 +29,7 @@ The release consists of four files: `xenoflux-VERSION.tgz`, `smol-toml-VERSION.t
 node install.mjs --close-clients
 ```
 
-Xenoflux installs its application files under `~/.xfx/app`, its controller under `~/.xfx/controller`, native profiles under `~/.xfx/profiles`, RAM-log settings under `~/.xfx/ramlogs`, and the `xfx` launcher at `~/.local/bin/xfx`. Add `~/.local/bin` to `PATH` if it is not already present.
+Xenoflux installs its application files under `~/.xfx/app`, its controller under `~/.xfx/controller`, named native profiles under `~/.xfx/profiles` by default, RAM-log settings under `~/.xfx/ramlogs`, and the `xfx` launcher at `~/.local/bin/xfx`. Add `~/.local/bin` to `PATH` if it is not already present.
 
 `xfx install --close-clients` reinstalls from an installed bundle. Use `--background-path PATH` to configure the service’s colon-separated executable search directories. `xfx uninstall --close-clients` removes Xenoflux-managed installation files after a graceful client shutdown. These commands, desktop control, and any setting copy that applies changes require an external interactive terminal.
 
@@ -45,13 +45,13 @@ xfx profile list
 xfx profile inspect Research
 ```
 
-Profiles keep their own settings, sign-in, history, and desktop data. Xenoflux does not copy credentials or conversations between them. Guided creation prepares desktop integration and shows the reviewed command to finish it.
+Profiles keep their own settings, sign-in, history, and desktop data. Xenoflux does not copy credentials or conversations between them. Guided creation prepares the native profile and prints `xfx desktop open NAME` as the next step. Opening creates or refreshes the cached desktop app when it is missing or stale.
 
-To register an existing native profile directory, use `xfx profile register NAME ROOT --codex EXECUTABLE --codex-version VERSION`. Registration creates its profile record after validating the directory. `profile rename`, `profile delete`, and `profile unbind` change registry metadata while preserving native files. Deletion and native unbinding refuse profiles referenced by activation or unfinished operations so restoration remains possible.
+To register an existing native profile directory, use `xfx profile register NAME ROOT --codex EXECUTABLE --codex-version VERSION`. Registration creates its profile record after validating the directory. `profile rename`, `profile delete`, and `profile unbind` change registry metadata while preserving native files. Deletion and native unbinding refuse profiles with an active named desktop or unfinished operation.
 
 For a forcibly interrupted sign-in or CLI run, follow [profile recovery](docs/PROFILE-RECOVERY.md).
 
-Compare the supported native-setting selections before making a copy. `Default` is the built-in profile at Codex’s normal directories. It is a settings source and the desktop restoration destination; named profiles are stored separately.
+Compare the supported native-setting selections before making a copy. `Default` is the built-in profile at Codex’s normal directories and a settings source; named profiles are stored separately.
 
 ```sh
 xfx compare Default Research --include config,instructions,agents
@@ -75,22 +75,49 @@ instruction files, individual agents, standalone skills and rules. All copy entr
 points preserve unselected destination items. Selected skill replacement is exact,
 including previewed package-local deletions and undo. Plugins, hooks and MCP receive
 optional native/manual setup guidance only. See [Advanced copying](docs/ADVANCED-COPY.md)
-for controls, compatibility changes, discovery limits and recovery.
+for controls, discovery limits and recovery.
 
-The preview is read-only. A copy or undo records its backup and refuses to overwrite an intervening native change. Restore the desktop to `Default` before applying a copy. The category-based copy surface excludes skills, plugins, MCP configuration, credentials, histories, and repository files. Advanced mode adds standalone skills and rules; it does not copy native history or integrations.
+The preview is read-only. A copy or undo records its backup and refuses to overwrite an intervening native change. The category-based copy surface excludes skills, plugins, MCP configuration, credentials, histories, and repository files. Advanced mode adds standalone skills and rules; it does not copy native history or integrations.
 
-## Desktop selection and recovery
+## Desktop profiles
 
-Use an external terminal for desktop operations because Xenoflux may offer to quit supported clients gracefully. It never force-kills arbitrary processes; standalone terminal Codex sessions must be closed manually.
+The `Default` profile uses Codex's standard paths, including `~/.codex`. Named profiles use isolated homes under `~/.xfx/profiles` by default. Use an external terminal for desktop controls; Xenoflux never force-kills arbitrary processes.
 
 ```sh
-xfx desktop pick
-xfx desktop current --observe
-xfx desktop restore --close-clients
-xfx desktop recover --no-open
+xfx desktop open Research
+xfx desktop list --observe
+xfx desktop focus Research
+xfx desktop close Research
+xfx desktop recover Research
 ```
 
-Paired selection changes the Codex home and desktop-data path together. If an interruption leaves a pending operation, recovery keeps its journal and reservation until both paths agree. `desktop recover --no-open` requires all clients to be stopped already and does not reopen Codex.
+Each managed instance keeps fixed profile storage paths and an exclusive reservation.
+Opening a running profile focuses it. Other profiles can run concurrently in the CLI
+or desktop; the same profile cannot run in both at once. Named desktop commands do not
+change the Default profile paths or close other clients.
+Closing a profile refuses to target a Codex process that hosts the invoking command.
+
+An owned app named `Codex · PROFILE` contains a private copy of the verified
+installed Codex app, retaining its icon and resources. A small bootstrap becomes
+Codex in the same process, so a profile needs one Dock and Cmd+Tab entry. The first
+`desktop open` creates a locally signed copy when the cache is missing, and
+refreshes it when stale. The package includes a universal launcher for Apple Silicon
+and Intel Macs running macOS 13 or later; users need no Swift compiler or Xcode
+Command Line Tools. macOS signs customized copies with its built-in `codesign`. The installed app
+remains intact. Opening a running profile focuses its pinned app without building,
+signing, or refreshing. Native
+Cmd+Tab, Dock reopening, and profile routing remain acceptance checks pending on
+the target Mac; fixture checks and helper compilation do not establish them.
+
+`xfx desktop prepare NAME` and `xfx desktop refresh NAME` are explicit maintenance
+commands for creating or refreshing a stopped profile app. A safely stopped
+unfinished open is reconciled by the next `desktop open NAME`. Use
+`xfx desktop recover NAME` for explicit journal recovery and diagnostics. A Finder
+or Dock launch cannot refresh a stale copy; use CLI `desktop open NAME` to refresh it.
+
+`xfx desktop recover NAME` releases only a stopped instance's verified reservation;
+it does not quit or reopen an app. See [concurrent desktop operation](docs/CONCURRENT-DESKTOPS.md)
+for the test boundary and recovery details.
 
 ## RAM logs
 

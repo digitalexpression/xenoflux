@@ -1,0 +1,503 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { chmod, cp, link, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { tmpdir, userInfo } from 'node:os';
+import { basename, join } from 'node:path';
+import { loadPreparedProfileApp, prepareProfileApp, validateProfileApp } from '../src/profile-launcher.js';
+
+const profileA = 'd083b722-5744-4d5d-9fa2-81ffb8e85a14';
+const profileB = '9d73a112-a533-41c2-b316-10fd2530ac73';
+const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+function signatureDetails(path) {
+  const result = spawnSync('/usr/bin/codesign', ['--display', '--verbose=4', path], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return `${result.stdout}${result.stderr}`.split('\n').filter(line => /^(Identifier|CodeDirectory|CDHash|TeamIdentifier|Runtime Version)=/.test(line)).join('\n');
+}
+
+async function fixture(t, profileId = profileA, name = 'Blue & <QA>') {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-profile-app-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const storeDirectory = join(root, 'store');
+  await mkdir(storeDirectory, { mode: 0o700 });
+  const sourceApp = join(root, 'vendor', 'Codex.app');
+  const contents = join(sourceApp, 'Contents');
+  await mkdir(join(contents, 'MacOS'), { recursive: true, mode: 0o700 });
+  await mkdir(join(contents, 'Resources'), { recursive: true, mode: 0o700 });
+  const executable = join(contents, 'MacOS', 'Codex');
+  const executableBytes = Buffer.from('#!/bin/sh\nexit 0\n');
+  const asarBytes = Buffer.from('mock vendor archive');
+  await writeFile(executable, executableBytes, { mode: 0o700 });
+  await writeFile(join(contents, 'Resources', 'app.asar'), asarBytes, { mode: 0o600 });
+  await writeFile(join(contents, 'Info.plist'), JSON.stringify({
+    CFBundleName: 'Codex', CFBundleDisplayName: 'Codex', CFBundleIdentifier: 'com.openai.codex',
+    CFBundleExecutable: 'Codex', CFBundlePackageType: 'APPL', CFBundleURLTypes: [{ CFBundleURLSchemes: ['codex'] }],
+    CFBundleDocumentTypes: [{ CFBundleTypeName: 'Codex document' }], SUFeedURL: 'https://vendor.invalid/feed.xml',
+  }), { mode: 0o600 });
+  const appPath = await realpath(sourceApp);
+  const app = { appPath, bundleId: 'com.openai.codex', executable, asarSha256: digest(asarBytes) };
+  const plan = { profileId, name, nativeRoot: join(storeDirectory, 'profiles', profileId, 'native'), app };
+  const options = {
+    build: async ({ output }) => writeFile(output, '#!/bin/sh\nexit 0\n', { mode: 0o700 }),
+    nodeExecutable: '/usr/bin/true', entryPoint: '/usr/bin/true',
+    verifyOriginal: async sourcePath => ({ ...app, appPath: sourcePath }),
+    copyApp: (sourcePath, destination) => cp(sourcePath, destination, { recursive: true, verbatimSymlinks: true }),
+    updatePlist: async (path, { set, remove }) => {
+      const plist = JSON.parse(await readFile(path, 'utf8'));
+      for (const key of remove) delete plist[key];
+      Object.assign(plist, set);
+      await writeFile(path, JSON.stringify(plist), { mode: 0o600 });
+    },
+    signApp: async () => {},
+    execFile: async (command, args) => {
+      if (command === '/usr/bin/plutil') return { stdout: await readFile(args.at(-1), 'utf8') };
+      if (command === '/usr/bin/codesign') return { stdout: '' };
+      throw new Error(`unexpected command ${command}`);
+    },
+  };
+  return { root, store: { directory: await realpath(storeDirectory) }, plan, sourceApp: appPath, options };
+}
+
+test('preparation copies the packaged universal helper and reuses it without a compiler or app rewrite', async t => {
+  const { store, plan, options } = await fixture(t);
+  let copies = 0, signs = 0;
+  const defaults = { ...options, build: undefined,
+    copyApp: async (...args) => { copies++; return options.copyApp(...args); },
+    signApp: async () => { signs++; },
+  };
+  const prepared = await prepareProfileApp(store, plan, defaults);
+  const shipped = await readFile(new URL('../src/native/XfxProfileLauncher', import.meta.url));
+  assert.deepEqual(await readFile(prepared.helperExecutable), shipped);
+  assert.equal(basename(join(prepared.helperExecutable, '..')), digest(shipped));
+  assert.equal((await lstat(prepared.helperExecutable)).mode & 0o777, 0o700);
+  assert.deepEqual(await loadPreparedProfileApp(store, plan, defaults), prepared);
+  assert.deepEqual(await prepareProfileApp(store, plan, defaults), prepared);
+  assert.deepEqual({ copies, signs }, { copies: 1, signs: 1 });
+});
+
+test('a packaged helper gets a new cache entry without overwriting the legacy helper', async t => {
+  const { store, plan, options } = await fixture(t);
+  const legacy = await prepareProfileApp(store, plan, options);
+  const legacyBytes = await readFile(legacy.helperExecutable);
+  const defaults = { ...options, build: undefined };
+  await assert.rejects(loadPreparedProfileApp(store, plan, defaults), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+  // Read-only validation of a pinned app remains independent of current helper packaging.
+  await validateProfileApp(store, plan, legacy.application, defaults);
+  const prepared = await prepareProfileApp(store, plan, defaults);
+  assert.notEqual(prepared.helperExecutable, legacy.helperExecutable);
+  assert.deepEqual(await readFile(legacy.helperExecutable), legacyBytes);
+  assert.deepEqual(await loadPreparedProfileApp(store, plan, defaults), prepared);
+});
+
+for (const failure of ['missing', 'corrupt', 'stale', 'symlink']) {
+  test(`packaged helper ${failure} fails before caching and never invokes a compiler`, async t => {
+    const { root, store, plan, options } = await fixture(t);
+    const prebuiltDirectory = join(root, 'package-native');
+    await cp(new URL('../src/native/', import.meta.url), prebuiltDirectory, { recursive: true });
+    const helper = join(prebuiltDirectory, 'XfxProfileLauncher');
+    const metadataPath = join(prebuiltDirectory, 'profile-launcher-prebuilt.json');
+    if (failure === 'missing') await unlink(helper);
+    if (failure === 'corrupt') await writeFile(helper, 'corrupt package binary');
+    if (failure === 'stale') {
+      const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+      metadata.sourceSha256 = '0'.repeat(64);
+      await writeFile(metadataPath, JSON.stringify(metadata));
+    }
+    if (failure === 'symlink') {
+      await unlink(helper);
+      await symlink(new URL('../src/native/XfxProfileLauncher', import.meta.url).pathname, helper);
+    }
+    const code = failure === 'missing' ? 'PREBUILT_LAUNCHER_MISSING' : failure === 'stale' ? 'PREBUILT_LAUNCHER_STALE' : 'PREBUILT_LAUNCHER_INVALID';
+    await assert.rejects(prepareProfileApp(store, plan, { ...options, build: undefined, prebuiltDirectory }), { code });
+    await assert.rejects(lstat(join(store.directory, 'desktop-instances')), { code: 'ENOENT' });
+  });
+}
+
+test('clones a verified vendor bundle into a labelled private app while preserving resources and icon files', async t => {
+  const { store, plan, options, sourceApp } = await fixture(t);
+  const icon = join(sourceApp, 'Contents', 'Resources', 'AppIcon.icns');
+  await writeFile(icon, 'icon fixture', { mode: 0o600 });
+  plan.app.asarSha256 = digest(await readFile(join(sourceApp, 'Contents', 'Resources', 'app.asar')));
+  const prepared = await prepareProfileApp(store, plan, options);
+  const expectedBundleId = `com.xenoflux.profile.${profileA}`;
+  assert.equal(prepared.application.bundleId, expectedBundleId);
+  assert.equal(basename(prepared.application.appPath), 'Codex · Blue & <QA>.app');
+  assert.equal(prepared.application.executable, join(prepared.application.appPath, 'Contents', 'MacOS', 'Codex'));
+  assert.equal(prepared.bootstrapExecutable, join(prepared.application.appPath, 'Contents', 'MacOS', 'XfxProfileLauncher'));
+  assert.equal(await readFile(prepared.application.executable, 'utf8'), '#!/bin/sh\nexit 0\n');
+  assert.equal(await readFile(icon, 'utf8'), 'icon fixture');
+  assert.equal(await readFile(join(prepared.application.appPath, 'Contents', 'Resources', 'AppIcon.icns'), 'utf8'), 'icon fixture');
+  const info = JSON.parse(await readFile(join(prepared.application.appPath, 'Contents', 'Info.plist'), 'utf8'));
+  assert.equal(info.CFBundleIdentifier, expectedBundleId);
+  assert.equal(info.CFBundleExecutable, 'XfxProfileLauncher');
+  assert.equal(info.CFBundleName, 'Codex · Blue & <QA>');
+  assert.equal(info.CFBundleDisplayName, info.CFBundleName);
+  assert.equal(info.XfxStore, store.directory);
+  assert.equal(info.XfxProfileId, profileA);
+  assert.equal(info.XfxNativeRoot, plan.nativeRoot);
+  assert.equal(info.XfxVendorExecutable, 'Codex');
+  assert.equal(info.CFBundleURLTypes, undefined);
+  assert.equal(info.CFBundleDocumentTypes, undefined);
+  assert.equal(info.SUFeedURL, undefined);
+  const validated = await validateProfileApp(store, plan, prepared.application, options);
+  assert.deepEqual(validated.application, prepared.application);
+  assert.equal(validated.bootstrapExecutable, prepared.bootstrapExecutable);
+  assert.equal(validated.helperSha256, prepared.helperSha256);
+});
+
+test('the default source verifier uses the discovered bundle path and executable', async t => {
+  const f = await fixture(t);
+  f.plan.app.executable = join(f.sourceApp, 'Contents', 'MacOS', 'Codex');
+  const reporter = join(f.sourceApp, 'Contents', 'Frameworks', 'Codex Framework.framework', 'Versions', '155.0.8059.27', 'Helpers', 'browser_crashpad_handler');
+  await mkdir(join(reporter, '..'), { recursive: true, mode: 0o700 });
+  await writeFile(reporter, 'fixture crash reporter', { mode: 0o700 });
+  await symlink('Versions/155.0.8059.27/Helpers', join(f.sourceApp, 'Contents', 'Frameworks', 'Codex Framework.framework', 'Helpers'));
+  const infoPath = join(f.sourceApp, 'Contents', 'Info.plist');
+  const info = JSON.parse(await readFile(infoPath, 'utf8'));
+  Object.assign(info, { CFBundleShortVersionString: '26.1002.52244', CFBundleVersion: '13536' });
+  await writeFile(infoPath, JSON.stringify(info), { mode: 0o600 });
+  const { verifyOriginal: _override, ...options } = f.options;
+  const commands = [];
+  options.execFile = async (command, args, settings) => {
+    commands.push({ command, args, settings });
+    return f.options.execFile(command, args, settings);
+  };
+  const prepared = await prepareProfileApp(f.store, f.plan, options);
+  assert.equal(prepared.application.executable.endsWith('/Contents/MacOS/Codex'), true);
+  const sourceSignature = commands.find(call => call.command === '/usr/bin/codesign' && call.args.at(-1) === f.sourceApp);
+  assert.ok(sourceSignature, 'the discovered source still requires publisher signature verification');
+  assert.match(sourceSignature.args.find(arg => arg.startsWith('-R=')), /com\.openai\.codex/);
+
+  info.CFBundleIdentifier = 'other.publisher';
+  await writeFile(infoPath, JSON.stringify(info), { mode: 0o600 });
+  await assert.rejects(prepareProfileApp(f.store, f.plan, options), { code: 'APP_IDENTITY_MISMATCH' });
+  info.CFBundleIdentifier = f.plan.app.bundleId;
+  await writeFile(infoPath, JSON.stringify(info), { mode: 0o600 });
+  options.execFile = async (command, args, settings) => {
+    if (command === '/usr/bin/codesign' && args.at(-1) === f.sourceApp) throw new Error('invalid source signature');
+    return f.options.execFile(command, args, settings);
+  };
+  await assert.rejects(prepareProfileApp(f.store, f.plan, options), { code: 'APP_SIGNATURE_INVALID' });
+});
+
+test('default bundle copy creates independent files rather than links into the source app', async t => {
+  const { store, plan, options, sourceApp } = await fixture(t);
+  const prepared = await prepareProfileApp(store, plan, { ...options, copyApp: undefined });
+  const copiedExecutable = await lstat(prepared.application.executable);
+  assert.equal(copiedExecutable.nlink, 1);
+  assert.notEqual(await realpath(prepared.application.executable), await realpath(join(sourceApp, 'Contents', 'MacOS', 'Codex')));
+  assert.equal(await readFile(prepared.application.executable, 'utf8'), await readFile(join(sourceApp, 'Contents', 'MacOS', 'Codex'), 'utf8'));
+});
+
+test('reuses a validated private bundle and native helper for the same profile', async t => {
+  const { store, plan, options } = await fixture(t);
+  let builds = 0, copies = 0;
+  const tracked = { ...options, build: async args => { builds += 1; return options.build(args); }, copyApp: async (...args) => { copies += 1; return options.copyApp(...args); } };
+  const first = await prepareProfileApp(store, plan, tracked);
+  const second = await prepareProfileApp(store, plan, tracked);
+  assert.deepEqual(second, first);
+  assert.equal(builds, 1);
+  assert.equal(copies, 1);
+});
+
+test('prepared-app loading is read-only and requires explicit preparation or refresh', async t => {
+  const { store, plan, options } = await fixture(t);
+  let builds = 0, copies = 0, signs = 0;
+  const tracked = { ...options,
+    build: async args => { builds += 1; return options.build(args); },
+    copyApp: async (...args) => { copies += 1; return options.copyApp(...args); },
+    signApp: async (...args) => { signs += 1; return options.signApp(...args); },
+  };
+  await assert.rejects(loadPreparedProfileApp(store, plan, tracked), error => {
+    assert.equal(error.code, 'PROFILE_APP_PREPARE_REQUIRED');
+    assert.match(error.message, /desktop prepare/);
+    return true;
+  });
+  assert.deepEqual({ builds, copies, signs }, { builds: 0, copies: 0, signs: 0 });
+
+  const prepared = await prepareProfileApp(store, plan, tracked);
+  const loaded = await loadPreparedProfileApp(store, plan, tracked);
+  assert.deepEqual(loaded, prepared);
+  assert.deepEqual({ builds, copies, signs }, { builds: 1, copies: 1, signs: 1 });
+
+  const changedArchive = Buffer.from('new vendor archive version');
+  await writeFile(join(plan.app.appPath, 'Contents', 'Resources', 'app.asar'), changedArchive);
+  plan.app.asarSha256 = digest(changedArchive);
+  await assert.rejects(loadPreparedProfileApp(store, plan, tracked), error => {
+    assert.equal(error.code, 'PROFILE_APP_REFRESH_REQUIRED');
+    assert.match(error.message, /desktop refresh/);
+    return true;
+  });
+  assert.deepEqual({ builds, copies, signs }, { builds: 1, copies: 1, signs: 1 }, 'loading must never repair stale cache');
+});
+
+test('refreshes an owned bundle when vendor or helper sources change and refuses in-place refresh on Finder launch', async t => {
+  const { root, store, plan, options } = await fixture(t);
+  const helperSource = join(root, 'profile-launcher.swift');
+  await writeFile(helperSource, 'fixture helper source v1');
+  let copies = 0, signs = 0;
+  const tracked = { ...options, source: helperSource,
+    copyApp: async (...args) => { copies += 1; return options.copyApp(...args); },
+    signApp: async (...args) => { signs += 1; return options.signApp(...args); } };
+  const initial = await prepareProfileApp(store, plan, tracked);
+  const oldAsarPath = join(initial.application.appPath, 'Contents', 'Resources', 'app.asar');
+  assert.equal(await readFile(oldAsarPath, 'utf8'), 'mock vendor archive');
+
+  const newAsar = Buffer.from('updated verified vendor archive');
+  const newExecutable = Buffer.from('#!/bin/sh\nexit 42\n');
+  await writeFile(join(plan.app.appPath, 'Contents', 'Resources', 'app.asar'), newAsar);
+  await writeFile(plan.app.executable, newExecutable);
+  plan.app.asarSha256 = digest(newAsar);
+  await writeFile(helperSource, 'fixture helper source v2');
+
+  await assert.rejects(loadPreparedProfileApp(store, plan, tracked), error => {
+    assert.equal(error.code, 'PROFILE_APP_REFRESH_REQUIRED');
+    assert.match(error.message, /xfx desktop refresh/);
+    return true;
+  });
+  assert.equal(await readFile(oldAsarPath, 'utf8'), 'mock vendor archive', 'refused refresh must preserve the running bundle');
+  assert.equal(copies, 1);
+  assert.equal(signs, 1);
+
+  const refreshed = await prepareProfileApp(store, plan, tracked);
+  assert.equal(refreshed.application.appPath, initial.application.appPath);
+  assert.equal(copies, 2);
+  assert.equal(signs, 2);
+  assert.equal(await readFile(join(refreshed.application.appPath, 'Contents', 'Resources', 'app.asar'), 'utf8'), 'updated verified vendor archive');
+  assert.deepEqual(await readFile(refreshed.application.executable), newExecutable);
+  await validateProfileApp(store, plan, refreshed.application, options);
+});
+
+test('renames only a validated owned bundle when a closed profile changes its display name', async t => {
+  const { store, plan, options } = await fixture(t);
+  const first = await prepareProfileApp(store, plan, options);
+  const renamedPlan = { ...plan, name: 'Renamed' };
+  const renamed = await prepareProfileApp(store, renamedPlan, options);
+  assert.notEqual(renamed.application.appPath, first.application.appPath);
+  await assert.rejects(lstat(first.application.appPath), { code: 'ENOENT' });
+  assert.deepEqual((await validateProfileApp(store, renamedPlan, renamed.application, options)).application, renamed.application);
+  const info = JSON.parse(await readFile(join(renamed.application.appPath, 'Contents', 'Info.plist'), 'utf8'));
+  assert.equal(info.CFBundleDisplayName, 'Codex · Renamed');
+});
+
+test('keeps cloned profiles separate while sharing the source-hash helper', async t => {
+  const { store, plan, options } = await fixture(t);
+  const other = { ...plan, profileId: profileB, name: 'Green' };
+  const a = await prepareProfileApp(store, plan, options);
+  const b = await prepareProfileApp(store, other, options);
+  assert.notEqual(a.application.appPath, b.application.appPath);
+  assert.notEqual(a.application.bundleId, b.application.bundleId);
+  assert.equal(a.helperExecutable, b.helperExecutable);
+  assert.equal(a.helperSha256, b.helperSha256);
+});
+
+test('refuses a profile directory containing an unknown app or marker', async t => {
+  const { store, plan, options } = await fixture(t);
+  const profileDir = join(store.directory, 'desktop-instances', 'apps', profileA);
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  await writeFile(join(profileDir, 'foreign.data'), 'keep');
+  await assert.rejects(prepareProfileApp(store, plan, options), { code: 'PROFILE_APP_OWNERSHIP_MISMATCH' });
+  assert.equal(await readFile(join(profileDir, 'foreign.data'), 'utf8'), 'keep');
+});
+
+test('rejects symlinked app directories and external links in source bundle', async t => {
+  const fixtureA = await fixture(t);
+  const profileDir = join(fixtureA.store.directory, 'desktop-instances', 'apps', profileA);
+  await mkdir(join(fixtureA.store.directory, 'desktop-instances', 'apps'), { recursive: true, mode: 0o700 });
+  await symlink(fixtureA.root, profileDir);
+  await assert.rejects(prepareProfileApp(fixtureA.store, fixtureA.plan, fixtureA.options), { code: 'LAUNCHER_DIRECTORY_UNSAFE' });
+
+  const fixtureB = await fixture(t);
+  const external = join(fixtureB.root, 'outside');
+  await writeFile(external, 'outside');
+  await symlink(external, join(fixtureB.sourceApp, 'Contents', 'Resources', 'external-link'));
+  await assert.rejects(prepareProfileApp(fixtureB.store, fixtureB.plan, fixtureB.options), { code: 'PROFILE_APP_EXTERNAL_LINK' });
+});
+
+test('refuses cached helper symlinks, changed bytes, and permissive cache directories', async t => {
+  const { store, plan, options } = await fixture(t);
+  const prepared = await prepareProfileApp(store, plan, options);
+  await unlink(prepared.helperExecutable);
+  await symlink('/usr/bin/true', prepared.helperExecutable);
+  await assert.rejects(prepareProfileApp(store, plan, options), { code: 'LAUNCHER_CACHE_UNSAFE' });
+  await unlink(prepared.helperExecutable);
+  await writeFile(prepared.helperExecutable, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+  await assert.rejects(prepareProfileApp(store, plan, options), { code: 'LAUNCHER_CACHE_UNSAFE' });
+  const nativeRoot = join(store.directory, 'desktop-instances', 'native');
+  const cacheDir = join(nativeRoot, (await readdir(nativeRoot)).find(name => /^[a-f0-9]{64}$/.test(name)));
+  await chmod(cacheDir, 0o755);
+  try { await assert.rejects(prepareProfileApp(store, plan, options), { code: 'LAUNCHER_CACHE_UNSAFE' }); }
+  finally { await chmod(cacheDir, 0o700); }
+});
+
+test('validation refuses modified copied vendor resources even if the bundle still exists', async t => {
+  const { store, plan, options } = await fixture(t);
+  const prepared = await prepareProfileApp(store, plan, options);
+  await writeFile(join(prepared.application.appPath, 'Contents', 'Resources', 'app.asar'), 'changed');
+  await assert.rejects(validateProfileApp(store, plan, prepared.application, options), { code: 'PROFILE_APP_CONTENT_CHANGED' });
+});
+
+test('rejects invalid UUID and non-canonical native root before creating app storage', async t => {
+  const { store, plan, options } = await fixture(t);
+  await assert.rejects(prepareProfileApp(store, { ...plan, profileId: '../escape' }, options), { code: 'INVALID_LAUNCHER_PLAN' });
+  await assert.rejects(prepareProfileApp(store, { ...plan, nativeRoot: '/tmp/../var/tmp' }, options), { code: 'INVALID_LAUNCHER_PLAN' });
+  assert.deepEqual(await readdir(store.directory), []);
+});
+
+test('refuses a source app that no longer matches its inspection identity', async t => {
+  const { store, plan, options } = await fixture(t);
+  await assert.rejects(prepareProfileApp(store, plan, { ...options, verifyOriginal: async () => ({ ...plan.app, asarSha256: '0'.repeat(64) }) }), { code: 'PROFILE_APP_SOURCE_CHANGED' });
+});
+
+test('refreshes old-policy owned bundles on CLI open and preserves validation for recovery', async t => {
+  const f = await fixture(t);
+  let copies = 0, signs = 0;
+  const options = { ...f.options,
+    copyApp: async (...args) => { copies += 1; return f.options.copyApp(...args); },
+    signApp: async (...args) => { signs += 1; return f.options.signApp(...args); },
+  };
+  const initial = await prepareProfileApp(f.store, f.plan, options);
+  const ownerPath = join(f.store.directory, 'desktop-instances', 'apps', profileA, '.xfx-profile-app-owner.json');
+  const marker = JSON.parse(await readFile(ownerPath, 'utf8'));
+  delete marker.signingPolicy;
+  await writeFile(ownerPath, `${JSON.stringify(marker)}\n`, { mode: 0o600 });
+  await validateProfileApp(f.store, f.plan, initial.application, options);
+  await assert.rejects(loadPreparedProfileApp(f.store, f.plan, options), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+  assert.equal(copies, 1, 'a Finder reopen must not replace an old-policy bundle in place');
+  assert.equal(signs, 1);
+  const refreshed = await prepareProfileApp(f.store, f.plan, options);
+  assert.equal(refreshed.application.appPath, initial.application.appPath);
+  assert.equal(copies, 2);
+  assert.equal(signs, 2);
+  assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).signingPolicy, 'main-host-disable-library-validation-v1');
+});
+
+test('shipped prebuilt bootstrap routes the disposable signed app and execs it in the same pid', {
+  skip: process.platform !== 'darwin' && 'requires macOS AppKit and codesign',
+}, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-native-bootstrap-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const storeDirectory = join(root, 'controller');
+  const sourceApp = join(root, 'fixture-vendor', 'FakeCodex.app');
+  const contents = join(sourceApp, 'Contents');
+  await mkdir(storeDirectory, { mode: 0o700 });
+  await mkdir(join(contents, 'MacOS'), { recursive: true, mode: 0o700 });
+  await mkdir(join(contents, 'Resources'), { recursive: true, mode: 0o700 });
+  const source = join(root, 'fake-vendor.c');
+  await writeFile(source, `#include <stdio.h>\n#include <stdlib.h>\n#include <unistd.h>\nstatic const char *v(const char *k){const char *x=getenv(k);return x?x:"";}\nint main(int argc,char **argv){printf("{\\\"pid\\\":%d,\\\"codex\\\":\\\"%s\\\",\\\"sqlite\\\":\\\"%s\\\",\\\"data\\\":\\\"%s\\\",\\\"home\\\":\\\"%s\\\",\\\"tmp\\\":\\\"%s\\\",\\\"arg\\\":\\\"%s\\\",\\\"launcherPid\\\":\\\"%s\\\"}\\n",getpid(),v("CODEX_HOME"),v("CODEX_SQLITE_HOME"),v("CODEX_ELECTRON_USER_DATA_PATH"),v("HOME"),v("TMPDIR"),argc>1?argv[1]:"",v("XFX_DESKTOP_LAUNCHER_PID"));return 0;}\n`);
+  const vendorExecutable = join(contents, 'MacOS', 'Codex');
+  execFileSync('/usr/bin/clang', ['-O2', source, '-o', vendorExecutable]);
+  const asar = Buffer.from('disposable native bootstrap fixture');
+  await writeFile(join(contents, 'Resources', 'app.asar'), asar, { mode: 0o600 });
+  const plistJson = join(root, 'Info.json');
+  await writeFile(plistJson, JSON.stringify({ CFBundleName: 'FakeCodex', CFBundleDisplayName: 'FakeCodex',
+    CFBundleIdentifier: 'com.openai.codex', CFBundleExecutable: 'Codex', CFBundlePackageType: 'APPL',
+    CFBundleShortVersionString: '1.0', CFBundleVersion: '1' }));
+  execFileSync('/usr/bin/plutil', ['-convert', 'xml1', '-o', join(contents, 'Info.plist'), plistJson]);
+  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--options', 'runtime', '--timestamp=none', sourceApp]);
+  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', sourceApp]);
+
+  const appPath = await realpath(sourceApp), executable = await realpath(vendorExecutable);
+  const app = { appPath, bundleId: 'com.openai.codex', executable, asarSha256: digest(asar) };
+  const plan = { profileId: profileA, name: 'Native Probe', nativeRoot: join(root, 'native', profileA), app };
+  const store = { directory: await realpath(storeDirectory) };
+  const options = {
+    nodeExecutable: await realpath(process.execPath),
+    entryPoint: await realpath(new URL('../bin/xfx.js', import.meta.url).pathname),
+    verifyOriginal: async sourcePath => ({ ...app, appPath: sourcePath }),
+  };
+  const prepared = await prepareProfileApp(store, plan, options);
+  await validateProfileApp(store, plan, prepared.application);
+  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', prepared.application.appPath]);
+  const bootstrapEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', prepared.bootstrapExecutable], { encoding: 'utf8' });
+  assert.doesNotMatch(bootstrapEntitlements, /<key>/, 'native bootstrap must not inherit vendor entitlements');
+
+  const child = spawnSync(prepared.bootstrapExecutable, ['--profile-run'], {
+    encoding: 'utf8', timeout: 10000,
+    env: { PATH: '/usr/bin:/bin', CODEX_HOME: '/private/tmp/foreign-home', CODEX_SQLITE_HOME: '/private/tmp/foreign-home',
+      CODEX_ELECTRON_USER_DATA_PATH: '/private/tmp/foreign-data', HOME: '/private/tmp/foreign-user', TMPDIR: '/private/tmp/foreign-tmp',
+      XFX_DESKTOP_LAUNCHER_PID: '999999', XFX_DESKTOP_LAUNCHER_EXECUTABLE: '/private/tmp/foreign-launcher' },
+  });
+  assert.equal(child.status, 0, child.stderr);
+  const observed = JSON.parse(child.stdout.trim());
+  assert.equal(observed.pid, child.pid, 'bootstrap must exec the vendor binary without changing pid');
+  assert.equal(observed.codex, `${plan.nativeRoot}/codex-home`);
+  assert.equal(observed.sqlite, `${plan.nativeRoot}/codex-home`);
+  assert.equal(observed.data, `${plan.nativeRoot}/desktop-data`);
+  assert.equal(observed.home, userInfo().homedir, 'Desktop must resolve the normal macOS login keychain despite inherited HOME overrides');
+  assert.equal(observed.tmp, `${plan.nativeRoot}/tmp`);
+  assert.equal(observed.arg, `--user-data-dir=${plan.nativeRoot}/desktop-data`);
+  assert.equal(observed.launcherPid, '', 'bootstrap must remove the launcher-attribution environment');
+
+  const reused = await prepareProfileApp(store, plan, options);
+  assert.deepEqual(reused, prepared, 'a validated bundle must be reused without another copy or signature replacement');
+  await validateProfileApp(store, plan, reused.application);
+
+  // A second disposable source proves only its main host is re-signed; nested
+  // publisher code retains its original bytes and signature identity.
+  const secondID = profileB;
+  const secondSourceApp = join(root, 'fixture-vendor-with-entitlements', 'FakeCodex.app');
+  const secondContents = join(secondSourceApp, 'Contents');
+  await mkdir(join(secondContents, 'MacOS'), { recursive: true, mode: 0o700 });
+  await mkdir(join(secondContents, 'Resources'), { recursive: true, mode: 0o700 });
+  const secondExecutable = join(secondContents, 'MacOS', 'Codex');
+  execFileSync('/usr/bin/clang', ['-O2', source, '-o', secondExecutable]);
+  const nestedHelper = join(secondContents, 'Helpers', 'FakeHelper.app');
+  const nestedHelperExecutable = join(nestedHelper, 'Contents', 'MacOS', 'Helper');
+  await mkdir(join(nestedHelper, 'Contents', 'MacOS'), { recursive: true, mode: 0o700 });
+  execFileSync('/usr/bin/clang', ['-O2', source, '-o', nestedHelperExecutable]);
+  const nestedInfoJson = join(root, 'nested-helper-info.json');
+  await writeFile(nestedInfoJson, JSON.stringify({
+    CFBundleIdentifier: 'com.openai.codex.helper', CFBundleExecutable: 'Helper', CFBundlePackageType: 'APPL',
+  }));
+  execFileSync('/usr/bin/plutil', ['-convert', 'xml1', '-o', join(nestedHelper, 'Contents', 'Info.plist'), nestedInfoJson]);
+  const nestedFramework = join(secondContents, 'Frameworks', 'FakeRuntime.framework');
+  await mkdir(nestedFramework, { recursive: true, mode: 0o700 });
+  const nestedFrameworkExecutable = join(nestedFramework, 'FakeRuntime');
+  execFileSync('/usr/bin/clang', ['-O2', source, '-o', nestedFrameworkExecutable]);
+  const frameworkInfoJson = join(root, 'nested-framework-info.json');
+  await writeFile(frameworkInfoJson, JSON.stringify({
+    CFBundleIdentifier: 'com.openai.codex.runtime', CFBundleExecutable: 'FakeRuntime', CFBundlePackageType: 'FMWK',
+  }));
+  execFileSync('/usr/bin/plutil', ['-convert', 'xml1', '-o', join(nestedFramework, 'Info.plist'), frameworkInfoJson]);
+  await writeFile(join(secondContents, 'Resources', 'app.asar'), asar, { mode: 0o600 });
+  await writeFile(plistJson, JSON.stringify({ CFBundleName: 'FakeCodex', CFBundleDisplayName: 'FakeCodex',
+    CFBundleIdentifier: 'com.openai.codex', CFBundleExecutable: 'Codex', CFBundlePackageType: 'APPL',
+    CFBundleShortVersionString: '1.0', CFBundleVersion: '1' }));
+  execFileSync('/usr/bin/plutil', ['-convert', 'xml1', '-o', join(secondContents, 'Info.plist'), plistJson]);
+  const entitlementsPath = join(root, 'vendor-entitlements.plist');
+  await writeFile(entitlementsPath, `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>com.apple.application-identifier</key><string>2DC432GLL2.com.openai.codex</string><key>com.apple.developer.team-identifier</key><string>2DC432GLL2</string><key>com.apple.security.application-groups</key><array><string>group.com.openai.codex</string></array><key>keychain-access-groups</key><array><string>2DC432GLL2.com.openai.codex</string></array><key>com.apple.security.device.camera</key><true/><key>com.apple.security.cs.allow-jit</key><true/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/><key>com.apple.security.cs.disable-library-validation</key><true/><key>com.apple.security.get-task-allow</key><true/><key>com.example.unrelated</key><true/></dict></plist>`);
+  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', '--options', 'runtime', '--entitlements', entitlementsPath, '--timestamp=none', secondSourceApp]);
+  execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', secondSourceApp]);
+  const nestedSourceStates = [nestedHelperExecutable, nestedFrameworkExecutable].map(path => ({
+    relative: path.slice(secondSourceApp.length), sha256: digest(readFileSync(path)), signature: signatureDetails(path),
+  }));
+  const secondAppPath = await realpath(secondSourceApp), secondExecutablePath = await realpath(secondExecutable);
+  const secondApp = { appPath: secondAppPath, bundleId: 'com.openai.codex', executable: secondExecutablePath, asarSha256: digest(asar) };
+  const secondPlan = { profileId: secondID, name: 'Entitlement Probe', nativeRoot: join(root, 'native', secondID), app: secondApp };
+  const secondPrepared = await prepareProfileApp(store, secondPlan, {
+    ...options, verifyOriginal: async sourcePath => ({ ...secondApp, appPath: sourcePath }),
+  });
+  await validateProfileApp(store, secondPlan, secondPrepared.application);
+  const secondBootstrapEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', secondPrepared.bootstrapExecutable], { encoding: 'utf8' });
+  const secondVendorEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', secondPrepared.application.executable], { encoding: 'utf8' });
+  const nestedClonedHelper = join(secondPrepared.application.appPath, 'Contents', 'Helpers', 'FakeHelper.app', 'Contents', 'MacOS', 'Helper');
+  const nestedHelperEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', nestedClonedHelper], { encoding: 'utf8' });
+  const nestedClonedFramework = join(secondPrepared.application.appPath, 'Contents', 'Frameworks', 'FakeRuntime.framework', 'FakeRuntime');
+  const nestedFrameworkEntitlements = execFileSync('/usr/bin/codesign', ['--display', '--entitlements', ':-', nestedClonedFramework], { encoding: 'utf8' });
+  assert.doesNotMatch(secondBootstrapEntitlements, /<key>/, 'bootstrap must remain entitlement-free');
+  for (const runtime of ['allow-jit', 'allow-unsigned-executable-memory', 'disable-library-validation'])
+    assert.match(secondVendorEntitlements, new RegExp(`com\\.apple\\.security\\.cs\\.${runtime}`), `main host should claim ${runtime}`);
+  for (const restricted of ['application-identifier', 'developer.team-identifier', 'application-groups', 'keychain-access-groups',
+    'security.device.camera', 'security.get-task-allow', 'com.example.unrelated'])
+    assert.doesNotMatch(secondVendorEntitlements, new RegExp(restricted.replaceAll('.', '\\.'), 'i'), `main host must not claim ${restricted}`);
+  for (const [path, output] of [[nestedClonedHelper, nestedHelperEntitlements], [nestedClonedFramework, nestedFrameworkEntitlements]]) {
+    const sourceState = nestedSourceStates.find(item => path.endsWith(item.relative));
+    assert.ok(sourceState);
+    assert.equal(digest(readFileSync(path)), sourceState.sha256, `${path} bytes and embedded signature must be unchanged`);
+    assert.equal(signatureDetails(path), sourceState.signature, `${path} signer identity must be unchanged`);
+    assert.match(output, /com\.apple\.security\.cs\.allow-jit/, 'nested vendor code retains its original signature grants');
+  }
+});

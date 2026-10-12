@@ -6,13 +6,13 @@ import { createInstallation } from './installation.js';
 import { createRamLogs } from './ram-logs.js';
 import { createDesktopRuntime } from './desktop-runtime.js';
 import { resolveHome } from './homes.js';
-import { recoverSelection } from './desktop-selection.js';
 import { acquire, release, exists, globalLock } from './metadata.js';
 import { userPaths } from './paths.js';
 import { checkNode } from './node-runtime.js';
+import { assertNoConcurrentDesktops } from './desktop-instance-guard.js';
 
-// Installation changes diagnostic log routing only after restoring ordinary
-// native paths and taking the same writer reservations as other xfx operations.
+// Installation changes diagnostic log routing while holding shared and
+// per-home reservations across client preparation and every filesystem change.
 export async function installationCommand(store, operation, {
   backgroundPath, userHome = userInfo().homedir, runtime = createDesktopRuntime(),
   source = fileURLToPath(new URL('..', import.meta.url)),
@@ -34,18 +34,17 @@ export async function installationCommand(store, operation, {
       throw new Error(`${home.name}: RAM logs are already linked; inspect status and disable RAM logging before recovery`);
   }
   const cliExecutables = homes.filter(home => home.executable).map(home => home.executable);
-  await runtime.prepareClients({ cliExecutables, includeDesktop: true });
-  await runtime.assertIdle({ cliExecutables });
-  if (await exists(join(store.directory, 'desktop-selection', 'session.json'))
-    || await exists(join(store.directory, 'activation', 'manifest.json'))) {
-    await recoverSelection(store, { runtime, noOpen: true, defaultUserHome: userHome, signal, lockPath });
-  }
   const owner = { kind: 'log-storage', pid: process.pid, host: hostname(), runId: randomUUID(), storePath: store.directory };
-  const locks = [lockPath + '.selection', lockPath, ...homes.filter(home => home.root).map(home => join(home.root, '.run-lock'))];
+  const operationLock = lockPath + '.operation';
+  const locks = [operationLock, lockPath, ...homes.filter(home => home.root).map(home => join(home.root, '.run-lock'))];
   const held = [];
   const archives = [];
   try {
-    for (const path of locks) { await acquire(path, owner, true); held.push(path); }
+    await acquire(operationLock, owner, true); held.push(operationLock);
+    await assertNoConcurrentDesktops({ lockPath });
+    await runtime.prepareClients({ cliExecutables, includeDesktop: true });
+    for (const path of locks.slice(1)) { await acquire(path, owner, true); held.push(path); }
+    await assertNoConcurrentDesktops({ lockPath });
     await runtime.assertIdle({ cliExecutables, resourcePaths: homes.map(home => home.home) });
     if (operation === 'recover') for (const home of homes) {
       const archive = await logs.archiveHome({ ...home, recoveryRoot: join(userPaths(userHome).ramlogs, 'recovery'), signal });
@@ -80,12 +79,12 @@ export async function restoreHomeLogs(home, key, {
   runtime = createDesktopRuntime(), logs = createRamLogs(), lockPath = globalLock(), signal,
 } = {}) {
   await runtime.assertExternal();
-  await runtime.prepareClients({ includeDesktop: true });
-  await runtime.assertIdle({ resourcePaths: [home] });
   const owner = { kind: 'log-storage', pid: process.pid, host: hostname(), runId: randomUUID() };
   const held = [];
   try {
-    for (const path of [lockPath + '.selection', lockPath]) { await acquire(path, owner, true); held.push(path); }
+    for (const path of [lockPath + '.operation', lockPath]) { await acquire(path, owner, true); held.push(path); }
+    await assertNoConcurrentDesktops({ lockPath });
+    await runtime.prepareClients({ includeDesktop: true });
     await runtime.assertIdle({ resourcePaths: [home] });
     return await logs.restoreHome({ home, key, signal });
   } finally { for (const path of held.reverse()) await release(path, owner); }

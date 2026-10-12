@@ -47,6 +47,7 @@ test('read-only profile preview leaves registry, profile base, and runtime untou
   const f = await fixture(t), io = terminal([]);
   const result = await profileCommand(f.store, ['create', 'alpha'], { '--base': f.base }, { input: io.input, output: io.output, clientRuntime: f.clientRuntime, defaultUserHome: f.defaultUserHome });
   assert.equal(result.status, 'preview'); assert.equal((await f.store.read()).profiles.length, 0);
+  assert.match(result.desktop, /desktop open 'alpha'.*prepared or refreshed automatically/);
   await assert.rejects(stat(f.base), { code: 'ENOENT' }); assert.deepEqual(f.calls, []);
 });
 
@@ -56,14 +57,18 @@ test('apply is rejected without an external TTY before runtime or native prepara
   assert.equal((await f.store.read()).profiles.length, 0); assert.deepEqual(f.calls, []);
 });
 
-test('minimal create records a retryable failed login, then signin completes and writes an initial activation plan', async t => {
+test('minimal create records a retryable failed login, then signin offers a separate desktop without alias activation', async t => {
   const f = await fixture(t), first = terminal(['1', 'create', 'signin']);
   const pending = await profileCommand(f.store, ['create', 'alpha'], f.options, { input: first.input, output: first.output, clientRuntime: f.clientRuntime, signIn: f.signin(4), defaultUserHome: f.defaultUserHome });
   assert.equal(pending.status, 'failed'); assert.equal(pending.login.state, 'failed'); assert.equal(pending.exitCode, 4);
   const retry = terminal(['signin']);
   const completed = await profileCommand(f.store, ['signin', 'alpha'], f.options, { input: retry.input, output: retry.output, clientRuntime: f.clientRuntime, signIn: f.signin(0), defaultUserHome: f.defaultUserHome });
-  assert.equal(completed.login.state, 'completed'); assert.equal(completed.desktop, 'initial-activation-pending');
-  assert.ok(completed.activationPlan); await stat(completed.activationPlan);
+  assert.equal(completed.login.state, 'completed'); assert.equal(completed.desktop, 'available');
+  assert.equal(completed.next, "xfx desktop open 'alpha'");
+  await assert.rejects(stat(join(completed.root, 'activation-plan.json')), { code: 'ENOENT' });
+  await assert.rejects(stat(join(f.store.directory, 'activation')), { code: 'ENOENT' });
+  assert.ok(!f.calls.includes('idle'));
+  assert.equal(await readFile(join(f.defaultUserHome, '.codex', 'config.toml'), 'utf8'), 'cli_auth_credentials_store = "file"\nmodel = "default-model"\n');
   assert.equal((await inspectHomeCreation({ store: f.store, name: 'alpha', base: f.base })).login.state, 'completed');
   assert.ok(f.calls.includes('external')); assert.ok(f.calls.includes('ram'));
 });

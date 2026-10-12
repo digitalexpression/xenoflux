@@ -3,14 +3,12 @@ import { constants } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
-import { find } from './profiles.js';
 import { listHomes, resolveHome } from './homes.js';
 import { planHomeCreation, createHome, inspectHomeCreation, startHomeSignIn } from './home-create.js';
 import { COPY_COMPONENTS, planCopy, applyCopy } from './native-copy.js';
 import { pickCopyComponents, confirmCopyAction } from './copy-picker.js';
 import { selectAdvancedCopy, reviewAdvancedConflicts } from './advanced-command.js';
-import { planActivationTarget, registerActivationTarget, readPairedPlan, preparePairedActivation } from './desktop-paired.js';
-import { privateDirectory, record } from './metadata.js';
+import { privateDirectory } from './metadata.js';
 import { probeVersion } from './version-probe.js';
 import { nativePath } from './node-runtime.js';
 
@@ -18,6 +16,7 @@ import { nativePath } from './node-runtime.js';
 const displayJSON = value => JSON.stringify(value, null, 2).replace(/[\x7f-\x9f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 const display = value => String(value).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
+const shellArgument = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 
 async function question(prompt, { input, output, signal }) {
   if (signal.aborted) return null;
@@ -55,7 +54,7 @@ async function nativeClient(store, options, signal) {
   finally { if (!preserve) await rm(scratch, { recursive: true }); }
 }
 
-/** The wizard composes existing profile, copy and activation operations. Each
+/** The wizard composes existing profile, copy and sign-in operations. Each
  * completed step survives cancellation; no native data is cloned or removed. */
 export async function profileCommand(store, params, options, { json = false, clientRuntime,
   input = process.stdin, output = process.stdout, signIn = startHomeSignIn, selectAdvanced = selectAdvancedCopy, defaultUserHome = homedir() } = {}) {
@@ -77,7 +76,7 @@ export async function profileCommand(store, params, options, { json = false, cli
   let preview = operation === 'create' ? await planHomeCreation({ store, name, base, description: options['--description'] })
     : await inspectHomeCreation({ store, name, base });
   preview = { ...preview, settings: { source: options['--from'] ?? null, included: include ?? [] },
-    desktop: 'A reviewed activation target is required for Dock reopening.', nativeSignIn: 'Explicit native login; no credentials or history are copied.' };
+    desktop: `Open this profile with xfx desktop open ${shellArgument(name)}; the app is prepared or refreshed automatically when needed.`, nativeSignIn: 'Explicit native login; no credentials or history are copied.' };
   if (!options['--apply']) {
     if (!advanced) return preview;
     const source = options['--from'] ?? 'Default';
@@ -171,29 +170,8 @@ export async function profileCommand(store, params, options, { json = false, cli
       if (setup.login.state !== 'completed') return { ...setup, status: 'setup-pending' };
     }
     if (controller.signal.aborted) return { ...setup, status: 'cancelled' };
-    let plan;
-    try {
-      const manifest = join(store.directory, 'activation', 'manifest.json');
-      // A new profile setup needs an initial activation, existing installs only add a target.
-      let current;
-      try { current = await readPairedPlan(manifest, store, { defaultUserHome }); }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
-      const profile = find(await store.read(), name);
-      if (current?.profiles.some(item => item.profileId === profile.id)) return { ...setup, desktop: 'registered', nativeAcceptance: 'pending' };
-      if (current) {
-        plan = await planActivationTarget(store, name, { runtime, defaultUserHome }); show(plan);
-        if (!await confirmCopyAction('register', io)) return { ...setup, status: controller.signal.aborted ? 'cancelled' : 'setup-pending', desktop: 'target-registration-pending' };
-        await registerActivationTarget(store, plan, { defaultUserHome });
-        return { ...setup, desktop: 'registered', nativeAcceptance: 'pending' };
-      }
-      plan = await preparePairedActivation(store, [name], { runtime, defaultUserHome });
-      const path = join(setup.root, 'activation-plan.json'); await record(path, plan);
-      return { ...setup, status: 'setup-pending', desktop: 'initial-activation-pending', activationPlan: path,
-        next: `xfx desktop activate ${JSON.stringify(name)} --approved-plan ${JSON.stringify(path)}` };
-    } catch (error) {
-      return { ...setup, status: 'setup-pending', desktop: 'target-registration-pending', reason: error.message,
-        next: `Restore Default, then rerun xfx profile create ${JSON.stringify(name)} --apply.` };
-    }
+    return { ...setup, desktop: 'available', nativeAcceptance: 'pending',
+      next: `xfx desktop open ${shellArgument(name)}` };
   } finally {
     for (const signal of signals) process.off(signal, abort);
     if (input.isTTY && typeof input.setRawMode === 'function') input.setRawMode(false);

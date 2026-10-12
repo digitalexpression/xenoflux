@@ -24,15 +24,14 @@ Then run recovery from an external interactive Terminal:
 xfx profile recover NAME --apply
 ```
 
-Apply takes the desktop operation guard and store writer lock, verifies there is
-no active desktop selection or pending paired activation, and uses Xenoflux's
-desktop and CLI process checks plus exact handle checks for the native root,
-home, workspace, desktop data, configuration, credentials, and SQLite files. It
-rechecks that the owner PID is absent and that the lock owner is unchanged before
-changing metadata, then checks ownership again before releasing the lock.
-Failed checks preserve the lock. If release is interrupted after the marker is
-updated, rerun recovery; the already reconciled marker stays unchanged.
-Recovery never shuts down clients automatically.
+Apply takes the profile operation guard and store writer lock. It uses
+Xenoflux's desktop and CLI process checks plus exact handle checks for the native
+root, home, workspace, desktop data, configuration, credentials, and SQLite
+files. It rechecks that the owner PID is absent and that the lock owner is
+unchanged before changing metadata, then checks ownership again before releasing
+the lock. Failed checks preserve the lock. If release is interrupted after the
+marker is updated, rerun recovery; the already reconciled marker stays
+unchanged. Recovery never shuts down clients automatically.
 
 For an interrupted native sign-in, recovery changes only the matching setup
 marker phase from `login-running` to `login-cancelled`, then releases the stale
@@ -45,18 +44,3 @@ of signing in again. For an interrupted standalone launch or resume, recovery
 requires the matching run report and releases only the stale run lock; the
 report stays as historical evidence. After recovery of a running, failed, or
 cancelled sign-in, retry with `xfx profile signin NAME --apply`.
-
-## Desktop selection recovery
-
-Profile-run recovery refuses active or unfinished desktop selections and
-pending paired activation state. Preserve their journals and reservations, then
-use the desktop recovery flow:
-
-```sh
-xfx desktop current --observe
-xfx desktop recover --no-open
-```
-
-No-open desktop recovery also requires clients and writers to be stopped first.
-If paired paths, ownership, or journal agreement remain ambiguous, stop and
-preserve the recovery state for inspection.

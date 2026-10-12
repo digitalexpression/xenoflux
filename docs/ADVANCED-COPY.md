@@ -93,15 +93,15 @@ xfx copy undo COPY_ID
 xfx copy undo COPY_ID --apply --close-clients
 ```
 
-Undo refuses to overwrite intervening edits. Preserve the controller's copy records and payloads until the operation is no longer needed. Interrupted copies report a recovery action; follow that action before beginning another copy.
+Undo refuses to overwrite intervening edits. Interrupted copies report a recovery action; follow that action before beginning another copy.
 
-The updated reader accepts earlier copy journals. Exact-package transactions record
-deletions and directory state as well as file contents; do not downgrade the tool
-while such a transaction needs recovery.
+The current v3 journal records selected files, package deletions, and directory
+state needed for safe undo. Preserve its record and payload until the operation is
+no longer needed.
 
 New-profile setup consists of separate preparation, copy, sign-in and desktop integration steps. Cancelling after preparation leaves the profile prepared. Continue copying with `xfx copy SOURCE TARGET --advanced --apply` or sign in using `xfx profile signin NAME --apply`. Cancelling or failing sign-in does not erase a successful settings copy.
 
-Before applying or undoing, restore the desktop to Default. The `--close-clients` option permits the existing graceful shutdown workflow; standalone terminal sessions must be closed manually when requested. Inspection and preview never close applications.
+Before applying or undoing, ensure Codex clients that can access the affected homes are quiescent. The `--close-clients` option permits the existing graceful shutdown workflow; standalone terminal sessions must be closed manually when requested. Inspection and preview never close applications.
 
 Native skill execution and automatic rule enforcement require separate acceptance
 for the client/interface used. Fixture checks and native discovery alone are not
