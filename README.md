@@ -2,17 +2,17 @@
 
 Xenoflux (`xfx`) is a Codex profile manager for macOS. It keeps named profiles separate, provides guided setup and sign-in, compares selected native settings, copies those settings with an undo record, and can route diagnostic logs to RAM while preserving the native home on disk.
 
-It is a macOS preview and does not bundle Node.js. Use a user-managed Node.js 22.x installation from 22.13.0 onward, or Node.js 23.4.0 or later, available on `PATH`. Node.js 23.0–23.3 is unsupported because its SQLite API still requires an experimental flag.
+It runs on macOS and does not bundle Node.js. Use a user-managed Node.js 22.x installation from 22.13.0 onward, or Node.js 23.4.0 or later, available on `PATH`. Node.js 23.0–23.3 is unsupported because its SQLite API still requires an experimental flag.
 
 ## Install
 
-For a published npm preview, run this from an external terminal:
+For a published npm release, run this from an external terminal:
 
 ```sh
-npm exec --yes --package=xenoflux@preview -- xfx install --close-clients
+npm exec --yes --package=xenoflux@latest -- xfx install --close-clients
 ```
 
-This uses npm to obtain the installer, then creates the managed application and launcher described below. It does not require a global npm installation. Add `~/.local/bin` to `PATH`. Use the same command to update to a newer published preview; `xfx install` reinstalls the currently installed version.
+This uses npm to obtain the installer, then creates the managed application and launcher described below. It does not require a global npm installation. Add `~/.local/bin` to `PATH`. Use the same command to update to a newer published release; `xfx install` reinstalls the currently installed version.
 
 Alternatively, build the four-file release bundle from a clean checkout with its dependencies installed:
 

@@ -1,6 +1,6 @@
 # Concurrent profile desktop development
 
-Updated: 2026-10-11. Branch: `codex/concurrent-profiles`.
+Updated: 2026-10-12. Branch: `codex/concurrent-profiles`.
 
 ## Goal and authority
 
@@ -10,6 +10,38 @@ Dock/Cmd+Tab entry per Desktop profile. Default retains normal paths including
 ordinary long-running Codex session. Local source work and disposable checks are
 authorized; the user tests real profiles afterward. No live profile/app/keychain
 mutation, client closure, installation or publication was performed.
+
+## Native open/focus acceptance on 2026-10-12
+
+The user ran the packaged launcher check successfully, then opened RC3 Check and
+Advanced Check and repeated each open. Terminal output recorded:
+
+| Profile | First open | PID | Start seconds | Repeated open |
+| --- | --- | --- | --- | --- |
+| RC3 Check | opened at 09:43:03 UTC | 66357 | 1791798183 | focused, same PID/start |
+| Advanced Check | opened at 09:43:41 UTC | 67811 | 1791798221 | focused, same PID/start |
+
+The final `desktop list --observe` reported both instances running, with their
+own profile-labelled executable paths and descendant processes, and
+`liveHomeChanged: false`. Before opening, the old journal entries still said
+running but process observation reported stopped with no processes for either
+old PID (1836 and 3106). These were fresh launches from stopped records; the
+commands did not close a live instance.
+
+This establishes actual concurrent startup and repeat-open focus using the
+current checkout after packaged-launcher validation. The transcript alone does
+not measure compilation/signing calls or prove all sign-in/data isolation,
+Dock/Cmd+Tab, Intel execution, or Default-preservation checks. No agent-side
+live-profile operation was performed to record these results.
+
+## Version 1.0.0 preparation
+
+Package metadata and lockfile target 1.0.0; stable publication uses the `latest`
+npm tag. Prepare a local four-file release bundle with the existing detached
+smoke check after committing the source. Open and review the branch PR before
+merging or publishing. Preparation does not authorize a tag, GitHub release,
+npm publication, installation, or client closure. Remaining native acceptance
+limits above must accompany the release review.
 
 ## Prebuilt launcher package
 

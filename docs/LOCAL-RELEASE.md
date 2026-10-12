@@ -1,20 +1,20 @@
 # Local release
 
-Xenoflux provides a macOS preview bundle and an npm-compatible package. It does not install or bundle Node.js. The target machine needs a user-managed Node.js 22.x executable from 22.13.0 onward, or Node.js 23.4.0 or later, on `PATH`. Node.js 23.0–23.3 is unsupported.
+Xenoflux provides a macOS release bundle and an npm-compatible package. It does not install or bundle Node.js. The target machine needs a user-managed Node.js 22.x executable from 22.13.0 onward, or Node.js 23.4.0 or later, on `PATH`. Node.js 23.0–23.3 is unsupported.
 
 ## npm setup
 
-After a preview is published, obtain and run its installer in an external terminal:
+After a release is published, obtain and run its installer in an external terminal:
 
 ```sh
-npm exec --yes --package=xenoflux@preview -- xfx install --close-clients
+npm exec --yes --package=xenoflux@latest -- xfx install --close-clients
 ```
 
-This copies the package and its dependency into `~/.xfx/app`, creates `~/.local/bin/xfx`, and configures RAM logs. The managed app remains usable independently of npm's temporary package cache. Add `~/.local/bin` to PATH. Repeat this npm command to obtain a newer preview; plain `xfx install` uses the already installed version.
+This copies the package and its dependency into `~/.xfx/app`, creates `~/.local/bin/xfx`, and configures RAM logs. The managed app remains usable independently of npm's temporary package cache. Add `~/.local/bin` to PATH. Repeat this npm command to obtain a newer release; plain `xfx install` uses the already installed version.
 
 Use `xfx uninstall --close-clients` to remove the managed app, launcher and service while preserving profile/controller data. There is no global npm package to remove in this setup flow. Avoid installing globally with an npm prefix of `~/.local`: npm's command symlink would collide with the managed launcher. Xenoflux refuses to replace an unmanaged launcher; do not force an overwrite.
 
-The package is macOS-only. For an approved publication, explicitly pass `--tag preview --access public` to `npm publish`, including when publishing a tarball; do not rely on npm honoring the package's publication defaults for every invocation. Publication is a separate maintainer action; generating a tarball or running these local checks does not publish it.
+The package is macOS-only. For an approved publication, explicitly pass `--tag latest --access public` to `npm publish`, including when publishing a tarball; do not rely on npm honoring the package's publication defaults for every invocation. Publication is a separate maintainer action; generating a tarball or running these local checks does not publish it.
 
 ## Four-file bundle
 
