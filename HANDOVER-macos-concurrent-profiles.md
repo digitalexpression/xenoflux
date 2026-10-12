@@ -1,6 +1,6 @@
 # Concurrent profile desktop development
 
-Updated: 2026-10-12. Branch: `codex/concurrent-profiles`.
+Updated: 2026-10-12. Branch: `main`; `codex/concurrent-profiles` merged through PR #4.
 
 ## Goal and authority
 
@@ -8,8 +8,9 @@ Multiple fixed-profile CLI/Desktop instances, one recognizable `Codex · NAME`
 Dock/Cmd+Tab entry per Desktop profile. Default retains normal paths including
 `~/.codex`; named Codex/UI data remains under `~/.xfx/profiles`. Preserve the
 ordinary long-running Codex session. Local source work and disposable checks are
-authorized; the user tests real profiles afterward. No live profile/app/keychain
-mutation, client closure, installation or publication was performed.
+authorized; the user supplied the real-profile acceptance below and explicitly
+authorized PR merge and GitHub/npm publication. Publication completed without
+live profile/app/keychain mutation, client closure or installation.
 
 ## Native open/focus acceptance on 2026-10-12
 
@@ -34,19 +35,39 @@ not measure compilation/signing calls or prove all sign-in/data isolation,
 Dock/Cmd+Tab, Intel execution, or Default-preservation checks. No agent-side
 live-profile operation was performed to record these results.
 
-## Version 1.0.0 preparation
+## Version 1.0.0 merged and published
 
-Package metadata and lockfile target 1.0.0; stable publication uses the `latest`
-npm tag. Prepare a local four-file release bundle with the existing detached
-smoke check after committing the source. Open and review the branch PR before
-merging or publishing. Preparation does not authorize a tag, GitHub release,
-npm publication, installation, or client closure. Remaining native acceptance
-limits above must accompany the release review.
+[PR #4](https://github.com/digitalexpression/xenoflux/pull/4) passed both macOS
+CI jobs (Node 22.13.0 and 24) on its final head
+`2f91c8d2e3d2f96c57e95d85240f00863b7f4caa`. It was squash-merged into main on
+2026-10-12 at 13:31:46 Europe/Bucharest (10:31:46 UTC), producing
+`f35a08478f1f4244a4e22f40af2781a8a6eb6fd9`.
 
-Preparation checks passed: `npm run check`, `npm run check:native`, 385 tests
-(one opt-in native skip), and the detached offline four-file release smoke.
-PR #4 targets main: https://github.com/digitalexpression/xenoflux/pull/4.
-The macOS CI jobs for Node 22.13.0 and 24 passed at commit 92b3984.
+[GitHub release v1.0.0](https://github.com/digitalexpression/xenoflux/releases/tag/v1.0.0)
+was published on 2026-10-12 at 13:33:15 Europe/Bucharest (10:33:15 UTC), as a
+stable release, not a draft or prerelease. Its tag targets the merged commit above.
+It includes all four verified assets:
+
+- `xenoflux-1.0.0.tgz`
+- `smol-toml-1.9.0.tgz`
+- `manifest.json`
+- `install.mjs`
+
+[npm xenoflux@1.0.0](https://www.npmjs.com/package/xenoflux/v/1.0.0) is publicly
+available under the `latest` tag; `preview` remains at `0.3.0-rc.7`. After npm
+processing completed, the public version/tag and downloaded tarball were verified.
+The npm download matched the GitHub asset and release manifest SHA-256:
+`762b197136363998507559da4d3c3257ee0806ca702298fab4e1d3927efb3e87`.
+The npm SHA-1 is `76c0cf762e1f7a144769905bd776c635311c2e4d`.
+
+The final bundle was built from the merged commit under
+`release-artifacts/1.0.0`, replacing the earlier branch candidates as the release
+of record. Its manifest pins that exact source revision, records dependency and
+package hashes, and reports a passed detached offline installed-package and
+installation-lifecycle smoke check. `npm run check:native` also passed on the
+merged source; the local suite had 385 passes and one opt-in native skip. The
+published tag and artifacts remain tied to the release commit; subsequent
+handover-only commits do not alter the published package.
 
 Release scope confirmed by the user on 2026-10-12: 1.0.0 is the first stable
 release. Migration from older preview installations is unsupported and is not a
@@ -54,12 +75,12 @@ release requirement. The review findings about removed paired restore/resume
 paths and v1/v2 copy-journal recovery are therefore out of scope, not blockers.
 Do not reintroduce legacy compatibility or inspect/mutate live installations to
 implement a migration. Current v3 journal validation and cached running-instance
-preservation remain in place.
+preservation remain in place. Native acceptance limits above remain distinct
+from the successful open/focus test and publication.
 
-The candidate for this scope is prepared under
-`release-artifacts/1.0.0-2026-10-12-first-stable`; its manifest pins the exact
-committed source revision. Release artifacts are ignored local outputs, not PR
-contents. Merge, tagging and publication remain separate from this preparation.
+The user's running instances were not closed or installed over. Temporary npm
+authentication files used for publication were removed; existing npm configuration
+was left unchanged. Release artifacts are ignored local outputs, not PR contents.
 
 ## Prebuilt launcher package
 
