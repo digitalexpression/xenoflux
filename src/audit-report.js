@@ -2,6 +2,7 @@ import path from 'node:path';
 import { nativeUsageAccounting, USAGE_FIELDS } from './audit-usage.js';
 import { safePluginScriptPath } from './audit-tools.js';
 import { compactInstructionSources } from './audit-instructions.js';
+import { projectResourceProvenance, compareResourceProvenance } from './audit-provenance.js';
 
 const EVENT_LIMIT = 50;
 const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
@@ -773,6 +774,8 @@ export function compareAuditRuns(left, right, options = {}) {
   if (Object.hasOwn(right?.coverage ?? {}, 'instructions')) safeRightCoverage.instructions = rightInstructions.status;
   const safeLeft = { ...left, instructionSources: leftInstructions.rows, coverage: safeLeftCoverage };
   const safeRight = { ...right, instructionSources: rightInstructions.rows, coverage: safeRightCoverage };
+  safeLeft.resourceProvenance = projectResourceProvenance(left?.resourceProvenance);
+  safeRight.resourceProvenance = projectResourceProvenance(right?.resourceProvenance);
   const controls = expectedControls(options);
   const leftTurns = turns(left), rightTurns = turns(right);
   const expected = compareExpected(left, right, controls);
@@ -833,6 +836,8 @@ export function compareAuditRuns(left, right, options = {}) {
       skillInvocations: compareSkillInvocations(left, right),
       instructionSources: compareInstructionSources(left, right),
       plugins: { left: observedPluginUsage(left), right: observedPluginUsage(right), status: 'partial-or-unknown' },
+      resourceProvenance: compareResourceProvenance(left?.resourceProvenance, right?.resourceProvenance,
+        { sameBaseline: sameVerifiedBaseline(left, right) }),
       coverage: {
         left: { ...(left?.coverage ?? {}) }, right: { ...(right?.coverage ?? {}) },
       },
@@ -1168,6 +1173,7 @@ function renderSeriesPreview(preview) {
 function renderFrozenRunEvidence(run) {
   if (!run) return [];
   const lines = [];
+  lines.push(renderResourceProvenance(run.resourceProvenance, '    '));
   lines.push(...renderNativeStorage(run.source, run.capture).map(item => `    ${item}`));
   if (run.source?.observationMode) lines.push(`    Observation: ${shown(run.source.observationMode)}${run.source.rawNativeWireSha256 ? ` · source SHA-256 ${shown(run.source.rawNativeWireSha256)}` : ''}`);
   const observations = list(run.usage?.observations);
@@ -1306,6 +1312,7 @@ function renderRun(run, { markdown = false } = {}) {
     renderToolEvidence(run),
     renderHooks(run),
     renderUsage(run),
+    renderResourceProvenance(run.resourceProvenance),
     `Metrics: ${safeJson(run.metrics ?? {})}`,
     ...(run.outcome?.checks || run.checks ? [`Verification checks:\n${renderChecks(list(run.outcome?.checks ?? run.checks))}`] : []),
     ...(run.capture ? [renderCapture(run.capture)] : []),
@@ -1316,6 +1323,36 @@ function renderRun(run, { markdown = false } = {}) {
     list(run.warnings).length ? `Warnings:\n${list(run.warnings).map(warning => `  ${shown(typeof warning === 'string' ? warning : warning.message ?? warning.reason)}`).join('\n')}` : 'Warnings: none recorded',
     'A missing observation means unknown unless the report explicitly says otherwise. Resource availability does not establish runtime use.',
   ].join('\n');
+}
+function renderResourceProvenance(value, indent = '') {
+  const block = projectResourceProvenance(value);
+  const lines = [`${indent}Resource provenance: ${shown(block.status)} · ${shown(block.counts.observed)} observed · ${shown(block.counts.omitted)} omitted · max ${shown(block.counts.snapshots)} snapshots/resource${block.reason ? ` · ${shown(block.reason)}` : ''}`,
+    `${indent}  Endpoint fingerprints describe bytes observed at capture times; stability between endpoints is not proven, and they do not establish loading or use.`];
+  for (const resource of list(block.resources).slice(0, 160)) {
+    const identity = resource.identity ?? {};
+    const provider = identity.provider ? ` · provider ${shown(identity.provider)}` : identity.providerRef ? ` · provider ref ${shown(identity.providerRef)}` : '';
+    const canonical = resource.canonicalRef && resource.canonicalRef !== identity.location ? ` · canonical ${shown(resource.canonicalRef)}` : '';
+    const aliases = list(resource.aliases).filter(alias => alias !== identity.location && alias !== resource.canonicalRef).slice(0, 16);
+    const aliasLine = aliases.length ? `\n${indent}    Aliases: ${aliases.map(shown).join(', ')}` : '';
+    const catalogs = list(resource.catalogs).slice(0, 16).map(item => `${shown(item.agentId ?? 'unknown agent')} ${shown(item.phase)} ${shown(item.status)}`).join('; ');
+    const endpoints = list(resource.snapshots).map(snapshot => {
+      const definition = snapshot.definition ?? {}, manifest = snapshot.manifest;
+      const timestamp = snapshot.capturedAt ? ` at ${shown(snapshot.capturedAt)}` : '';
+      const definitionLabel = `definition ${shown(definition.status)}${definition.fingerprint ? ` ${shown(definition.fingerprint)}` : ''}`;
+      const manifestLabel = manifest ? ` · manifest ${shown(manifest.status)}${manifest.fingerprint ? ` ${shown(manifest.fingerprint)}` : ''}${manifest.version ? ` version ${shown(manifest.version)}` : ''}` : '';
+      return `${shown(snapshot.phase)}${timestamp} · ${shown(snapshot.status)} · ${definitionLabel}${manifestLabel}`;
+    }).join('; ');
+    const catalogsLine = catalogs ? `\n${indent}    Catalog observations: ${catalogs}` : '';
+    lines.push(`${indent}  ${shown(resource.name ?? identity.location)} · ${shown(identity.origin)}${provider} · ${shown(identity.location)}${canonical}${resource.version ? ` · version ${shown(resource.version)}` : ''}${aliasLine}${catalogsLine}\n${indent}    Endpoints: ${endpoints || 'none recorded'}`);
+  }
+  if (block.counts.omitted) lines.push(`${indent}  Detail omitted: ${shown(block.counts.omitted)} resource records; comparison may be incomplete${Object.keys(block.omissionReasons ?? {}).length ? ` · reasons ${safeJson(block.omissionReasons)}` : ''}.`);
+  return lines.join('\n');
+}
+function resourceProvenanceIdentity(identity) {
+  if (!identity || typeof identity !== 'object') return shown(identity ?? 'unknown');
+  const provider = identity.provider ? ` · provider ${shown(identity.provider)}`
+    : identity.providerRef ? ` · provider ref ${shown(identity.providerRef)}` : '';
+  return `${shown(identity.origin)}${provider} · ${shown(identity.location)}`;
 }
 function renderSkillDiff(skills, { markdown = false } = {}) {
   if (!skills.length) return 'Skills: no comparable skill records.';
@@ -1333,6 +1370,7 @@ function renderComparison(value, { markdown = false } = {}) {
     if (run.source?.observationMode) lines.push(`  Observation: ${shown(run.source.observationMode)}`);
     lines.push(`  Coverage: ${Object.entries(run.coverage ?? {}).map(([key, status]) => `${shown(key)}=${shown(status)}`).join(', ') || 'unknown'}`);
     lines.push(...renderUsage(run).split('\n').map(line => `  ${line}`));
+    lines.push(renderResourceProvenance(run.resourceProvenance, '  '));
     lines.push(...renderInstructionSources(run).split('\n').map(line => `  ${line}`));
     lines.push(...renderHooks(run).split('\n').map(line => `  ${line}`));
     const agents = agentSummary(run);
@@ -1385,6 +1423,12 @@ function renderComparison(value, { markdown = false } = {}) {
     if (!list(c.hooks.counts).length) lines.push('  No aligned hook observations. Missing events remain unknown unless both captures are complete.');
   }
   if (c.plugins) for (const side of ['left', 'right']) lines.push(renderPluginUsage(c.plugins[side], `${side === 'left' ? 'Left' : 'Right'} observed plugin use`));
+  if (c.resourceProvenance) {
+    const provenance = c.resourceProvenance;
+    lines.push(`Resource provenance comparison: ${shown(provenance.status)} · same baseline ${shown(provenance.sameBaseline)} · stability proven ${shown(provenance.stabilityProven)} · ${list(provenance.changes).length} identities`);
+    for (const change of list(provenance.changes).slice(0, 160)) lines.push(`  ${resourceProvenanceIdentity(change.identity)} · ${shown(change.status)}${change.reason ? ` · ${shown(change.reason)}` : ''}`);
+    lines.push('  Fingerprints describe recorded resource bytes; they do not establish that a resource was loaded or used.');
+  }
   if (c.artifacts) {
     lines.push(`Artifact comparison: ${shown(c.artifacts.status)} · delta ${shown(c.artifacts.delta)}`);
     for (const item of list(c.artifacts.added)) lines.push(`  Added: ${shown(item.kind)} ${shown(item.path ?? item.patchPath ?? item.label ?? item.fingerprint)} · agent ${shown(item.agentId)} · turn ${shown(item.turnId)} · line ${shown(item.sourceLine)}`);

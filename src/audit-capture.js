@@ -15,6 +15,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseLiteralSkillReadDetails } from './audit-skill-read.js';
 import { nativeInstructionSourceContract, projectInstructionSources, compactInstructionSources } from './audit-instructions.js';
+import { createResourceProvenance } from './audit-provenance.js';
 
 const MAX_SKILLS = 5000;
 const MAX_EVENTS = 20000;
@@ -232,6 +233,12 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     outcome: { status: 'unknown' }, artifacts: [], warnings: [],
   };
   const capture = { status: 'partial', capabilities: { appServerV2: 'unknown', skillsList: 'unknown', runtimeEvents: 'unknown', childHydration: 'unknown', skillUseObservability: 'partial' }, errors: [], byAgent: {}, byOrigin: {} };
+  const provenance = createResourceProvenance({ workspace, profileHome: profile.home, userHome: profile.userHome });
+  const updateProvenance = () => {
+    run.resourceProvenance = provenance.snapshot();
+    run.coverage.resourceProvenance = run.resourceProvenance.status;
+  };
+  updateProvenance();
   const startedAt = Date.now();
   let endedTaskAt = null, taskEndEvidence = null;
   let eventIndex = 0, itemCount = 0, capped = false;
@@ -664,6 +671,11 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       rootSessionId = validId(started?.thread?.sessionId) ? started.thread.sessionId : null;
       agentFor(rootThreadId, null, 0, rootSessionId, workspace);
       for (const skill of run.skills) for (const catalog of skill.catalogs ?? []) if (!catalog.agentId) catalog.agentId = rootThreadId;
+      await provenance.observeCatalog(capture.capabilities.skillsList === 'available' ? run.skills : null,
+        { agentId: rootThreadId, phase: 'before-task', cwd: workspace });
+      if (run.warnings.some(w => ['skills-origin-unavailable', 'skill-inventory-limit'].includes(w)))
+        await provenance.observeCatalog(null, { agentId: rootThreadId, phase: 'before-task', cwd: workspace });
+      updateProvenance();
       capture.capabilities.runtimeEvents = 'available';
       const rootAgent = threadMap.get(rootThreadId);
       instructionSnapshot(rootAgent, started, 'thread/start');
@@ -736,16 +748,37 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
           childNativeMetadata.set(child.id, metadata);
           promoteDeferredStartupLinks(child.id);
           child.terminal = metadata.status?.type === 'idle' || metadata.status?.type === 'systemError';
+          const provenancePhase = child.terminal ? 'after-task' : 'late-observation';
           if (metadata.status?.type === 'systemError') recordWarning('linked-child-system-error');
           verifiedChildren.push(child);
           const childCwd = typeof metadata.cwd === 'string' ? nativePath(metadata.cwd) : null;
           if (childCwd) {
             try {
               const childSkills = await request('skills/list', { cwds: [childCwd], forceReload: false }, 10000);
-              if (Array.isArray(childSkills?.data)) addSkillInventory(childSkills.data, child.id);
-              else recordWarning('child-skills-unavailable');
-            } catch { recordWarning('child-skills-unavailable'); }
-          } else recordWarning('child-cwd-unavailable');
+              if (Array.isArray(childSkills?.data)) {
+                addSkillInventory(childSkills.data, child.id);
+                // Active descendants have only a late filesystem observation;
+                // never label their bytes as sampled after task completion.
+                await provenance.observeCatalog(run.skills.filter(skill =>
+                  skill.catalogs?.some(catalog => catalog.agentId === child.id)),
+                { agentId: child.id, phase: provenancePhase, cwd: childCwd });
+                if (childSkills.data.some(entry => entry?.errors?.some(error => error && typeof error === 'object'))
+                  || run.warnings.includes('skill-inventory-limit'))
+                  await provenance.observeCatalog(null, { agentId: child.id, phase: provenancePhase, cwd: childCwd });
+                updateProvenance();
+              }
+              else {
+                await provenance.observeCatalog(null, { agentId: child.id, phase: provenancePhase, cwd: childCwd });
+                updateProvenance(); recordWarning('child-skills-unavailable');
+              }
+            } catch {
+              await provenance.observeCatalog(null, { agentId: child.id, phase: provenancePhase, cwd: childCwd });
+              updateProvenance(); recordWarning('child-skills-unavailable');
+            }
+          } else {
+            await provenance.observeCatalog(null, { agentId: child.id, phase: provenancePhase, cwd: childCwd });
+            updateProvenance(); recordWarning('child-cwd-unavailable');
+          }
           const pending = pendingChildMessages.get(candidate.id) ?? [];
           for (const queued of pending) addEvent(queued.message.method, queued.message.params, queued.lineNumber, queued.observedAtMs);
           pendingChildMessageCount -= pending.length;
@@ -1154,6 +1187,8 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
   updateInstructionCoverage();
   run.usage.workflow = summarizeWorkflowUsage(run);
   run.usage.turns = summarizeTurnUsage(run);
+  await provenance.finish();
+  updateProvenance();
   capture.checkpoint = 'final';
   try { await onSession?.(run, capture); }
   catch { recordWarning('session-checkpoint-failed'); run.status = 'partial'; capture.status = 'partial'; }

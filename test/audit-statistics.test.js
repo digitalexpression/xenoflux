@@ -68,6 +68,34 @@ test('compact trial persists bounded run evidence without task, argv, or environ
   assert.deepEqual(compactAuditTrial(compact).runs[0], compact.runs[0]);
 });
 
+test('frozen series retains canonical provenance and marks byte-budget detail loss', () => {
+  const provenance = { schemaVersion: 1, status: 'complete', counts: { observed: 8, omitted: 0, snapshots: 2 }, omissionReasons: {}, resources: Array.from({ length: 8 }, (_, i) => ({
+    identity: { origin: 'project', location: `workspace/skills/skill-${i}` }, nativeSkillIds: [i.toString(16).padStart(24, '0')], agentIds: ['root'], aliases: [], catalogs: [],
+    name: `skill-${i}`, scope: 'project', snapshots: [{ phase: 'after-task', status: 'present', definition: { status: 'present', fingerprint: String(i).padStart(64, 'a').slice(-64) } }],
+  })) };
+  const frozen = compactAuditTrial({ runs: [{ ...run('provenance', 'A', 10), resourceProvenance: provenance }] });
+  assert.deepEqual(frozen.runs[0].resourceProvenance, provenance);
+  assert.deepEqual(compactAuditTrial(frozen).runs[0].resourceProvenance, provenance);
+  const tight = compactAuditTrial({ runs: [{ ...run('provenance-tight', 'A', 10), resourceProvenance: provenance }] }, { maxBytes: 300 * 1024 });
+  assert.ok(['complete', 'partial'].includes(tight.runs[0].resourceProvenance.status));
+  assert.equal(tight.runs[0].resourceProvenance.counts.observed, 8);
+  if (tight.runs[0].resourceProvenance.counts.omitted) assert.equal(tight.runs[0].resourceProvenance.status, 'partial');
+  const dense = { ...provenance, counts: { observed: 160, omitted: 0, snapshots: 1 }, resources: Array.from({ length: 160 }, (_, i) => ({
+    identity: { origin: 'project', location: `workspace/${'long-segment-'.repeat(4)}${i}` }, nativeSkillIds: [i.toString(16).padStart(24, '0')], agentIds: ['root'],
+    aliases: Array.from({ length: 16 }, (_, n) => `alias-${n}-${'x'.repeat(80)}`), name: `skill-${i}-${'n'.repeat(80)}`, scope: 'project',
+    snapshots: [{ phase: 'after-task', status: 'present', definition: { status: 'present', fingerprint: 'b'.repeat(64), before: '1:2:3:4.5', after: '1:2:3:4.5' } }],
+  })) };
+  const budgeted = compactAuditTrial({ runs: Array.from({ length: 4 }, (_, i) => ({ ...run(`provenance-budget-${i}`, 'A', 10), resourceProvenance: dense })) }, { maxBytes: 300 * 1024 });
+  assert.ok(budgeted.runs.some(item => item.resourceProvenance.counts.omitted > 0), 'the trial budget records provenance rows it removes');
+  assert.ok(budgeted.runs.every(item => item.resourceProvenance.counts.omitted === 0 || item.resourceProvenance.status === 'partial'));
+  for (const item of budgeted.runs) assert.equal(item.resourceProvenance.omissionReasons['projection-limit'] ?? 0, item.resourceProvenance.counts.omitted);
+  assert.deepEqual(compactAuditTrial(budgeted).runs, budgeted.runs);
+  const series = summarizeAuditSeries({ profiles: [{ id: 'a', name: 'A' }], spec, plan: [{ index: 1, experimentId: 'budgeted', profileOrder: ['A'] }],
+    trials: [{ ...budgeted, index: 1, experimentId: 'budgeted', status: 'complete', runs: [budgeted.runs[0]] }] });
+  assert.equal(series.trials[0].profiles[0].run.coverage.resourceProvenance, 'partial');
+  assert.equal(series.status, 'partial');
+});
+
 test('task-change counts survive frozen trial and export while raw snapshot counts remain distinct', async t => {
   const value = run('workspace-delta', 'A', 10);
   value.sourceWorkspace = { sourceCommit: 'commit-1', sourceTree: 'tree-1' };

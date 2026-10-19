@@ -50,6 +50,38 @@ test('compares skill identity and attributed evidence across all origins and age
   assert.match(report, /do not establish that a profile setup caused an outcome or is a winner/);
 });
 
+test('compares and renders canonical resource provenance without claiming runtime use', () => {
+  const provenance = fingerprint => ({ schemaVersion: 1, status: 'complete', counts: { observed: 1, omitted: 0, snapshots: 2 }, resources: [
+    { identity: { origin: 'project', provider: 'sample.plugin', location: 'workspace/skills/review' }, canonicalRef: 'workspace/.codex/skills/review',
+      aliases: ['workspace/.agents/skills/review'], version: '1.2.3', catalogs: [{ agentId: 'root', phase: 'after-task', status: 'present' }],
+      name: 'review', scope: 'project', nativeSkillIds: ['a'.repeat(24)], agentIds: ['root'], snapshots: [
+      { phase: 'before-task', capturedAt: '2026-10-19T10:10:30.000Z', status: 'present', definition: { status: 'present', fingerprint },
+        manifest: { status: 'present', fingerprint: 'c'.repeat(64), scope: 'plugin-manifest-allowlist', version: '1.2.3' } },
+      { phase: 'after-task', capturedAt: '2026-10-19T10:20:30.000Z', status: 'present', definition: { status: 'present', fingerprint },
+        manifest: { status: 'present', fingerprint: 'c'.repeat(64), scope: 'plugin-manifest-allowlist', version: '1.2.3' } },
+    ] },
+  ] });
+  const left = { ...complete, sourceWorkspace: { sourceCommit: 'commit', sourceTree: 'tree' }, resourceProvenance: provenance('a'.repeat(64)) };
+  const right = { ...structuredClone(complete), id: 'run-b', sourceWorkspace: { sourceCommit: 'commit', sourceTree: 'tree' }, resourceProvenance: provenance('b'.repeat(64)) };
+  const report = compareAuditRuns(left, right);
+  assert.equal(report.comparison.resourceProvenance.status, 'complete');
+  assert.equal(report.comparison.resourceProvenance.changes[0].status, 'changed');
+  assert.equal(report.comparison.resourceProvenance.sameBaseline, true);
+  const text = renderAudit(report, { format: 'markdown' });
+  assert.match(text, /Resource provenance comparison: complete/);
+  assert.ok(text.includes('max 2 snapshots/resource'));
+  assert.match(text, /changed/);
+  assert.ok(text.includes('project · provider sample') && text.includes('workspace/skills/review'));
+  assert.ok(text.includes('provider sample'));
+  assert.ok(text.includes('canonical workspace/\\.codex/skills/review'));
+  assert.ok(text.includes('Aliases: workspace/\\.agents/skills/review'));
+  assert.ok(text.includes('2026\\-10\\-19T10:20:30\\.000Z'));
+  assert.ok(text.includes('manifest present'));
+  assert.ok(text.includes('manifest present') && text.includes('version 1\\.2\\.3'));
+  assert.ok(text.includes('stability between endpoints is not proven'));
+  assert.ok(text.includes('do not establish that a resource was loaded or used'));
+});
+
 test('per-run show renders evaluated capture acceptance and normalized telemetry diagnostics', () => {
   const run = structuredClone(complete);
   run.status = 'ready';
@@ -910,7 +942,8 @@ test('exports and reopens frozen series and evaluation reports with Markdown sid
     plan: [], trials: [], profiles: [], comparisons: [], warnings: [] };
   const output = join(directory, 'series.md');
   const receipt = await exportAuditReport(value, { output, format: 'markdown' });
-  assert.deepEqual(await readAuditReport(receipt.evidencePath), value);
+  const reopened = await readAuditReport(receipt.evidencePath);
+  assert.deepEqual(reopened, value);
   assert.match(await readFile(output, 'utf8'), /Audit series/);
   const evaluation = { schemaVersion: 1, kind: 'audit-evaluation-report', id: 'evaluation-frozen', status: 'complete', exitCode: 0, source: {}, series: value };
   const evaluationPath = join(directory, 'evaluation.json');
@@ -944,7 +977,9 @@ test('frozen series Markdown keeps bounded hooks and verified turn totals after 
   assert.match(markdown, /\"inputTokens\":7/);
   assert.match(markdown, /sourceObservationsOmitted\":3/);
   assert.doesNotMatch(markdown, /PRIVATE/);
-  assert.deepEqual(await readAuditReport(receipt.evidencePath), value);
+  const reopened = await readAuditReport(receipt.evidencePath);
+  assert.equal(Object.hasOwn(reopened.trials[0].profiles[0].run, 'resourceProvenance'), false);
+  assert.match(markdown, /Resource provenance: unavailable/);
 });
 
 test('instruction source reporting is private, agent-scoped, and comparisons preserve unknowns', async t => {

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runAuditCapture } from '../src/audit-capture.js';
 import { parseLiteralSkillRead } from '../src/audit-skill-read.js';
+import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
 
 const serverScript = `
 let buffer = '';
@@ -623,6 +624,9 @@ test('discovers a child from current subAgentActivity metadata without retaining
 
 test('does not mark a child thread terminal from one completed turn while thread status remains active', async t => {
   const f = await fixture(t, { childStatus: 'active' });
+  const definition = join(f.dir, 'child/.agents/skills/child-skill/SKILL.md');
+  await mkdir(join(definition, '..'), { recursive: true, mode: 0o700 });
+  await writeFile(definition, 'bounded active child definition');
   const checkpoints = [];
   const { run } = await runAuditCapture({ ...f.options, limits: { childCompletionWaitMs: 25 },
     onTaskEnd: state => checkpoints.push(state.complete) });
@@ -630,6 +634,10 @@ test('does not mark a child thread terminal from one completed turn while thread
   assert.ok(run.warnings.includes('linked-child-incomplete'));
   assert.equal(run.agents.find(agent => agent.id === 'child-thread').terminal, false);
   assert.equal(run.coverage.agents, 'partial');
+  const resource = run.resourceProvenance.resources.find(r => r.identity.location.includes('child-skill'));
+  assert.deepEqual(resource.snapshots.map(snapshot => snapshot.phase), ['late-observation']);
+  assert.ok(resource.snapshots[0].definition.fingerprint);
+  assert.equal(run.coverage.resourceProvenance, 'partial');
 });
 
 test('keeps exact failed terminal status when it arrives before turn/start response and handles delayed completion', async t => {
@@ -1058,4 +1066,68 @@ test('final child counters follow source order when new usage arrives during its
   assert.equal(run.hookInvocations[0].occurrenceIndex, 0);
   assert.equal(run.coverage.hooks, 'observed');
   assert.equal(JSON.stringify(run).includes('TEST_HOOK_SOURCE'), false);
+});
+
+
+test('freezes owned root and late descendant definition provenance through file removal and export/reopen', async t => {
+  const f = await fixture(t, { grandchildLink: true });
+  const definitions = [
+    [join(f.dir, '.agents/skills/repo-skill/SKILL.md'), 'ROOT_PRIVATE_DEFINITION'],
+    [join(f.dir, 'child/.agents/skills/child-skill/SKILL.md'), 'CHILD_PRIVATE_DEFINITION'],
+    [join(f.dir, 'child/grandchild/.agents/skills/grandchild-skill/SKILL.md'), 'GRANDCHILD_PRIVATE_DEFINITION'],
+  ];
+  for (const [file, body] of definitions) { await mkdir(join(file, '..'), { recursive: true, mode: 0o700 }); await writeFile(file, body); }
+  f.options.processOptions.args[1] = f.script.replace("if (method==='turn/start') {", `if (method==='turn/start') { require('node:fs').writeFileSync(${JSON.stringify(definitions[0][0])}, 'CHANGED_PRIVATE_DEFINITION');`);
+  const checkpoints = [];
+  const result = await runAuditCapture({ ...f.options, onSession: run => checkpoints.push(structuredClone(run.resourceProvenance)) });
+  const block = result.run.resourceProvenance;
+  assert.equal(block.schemaVersion, 1);
+  const root = block.resources.find(r => r.agentIds.includes('root-thread') && r.identity.location.includes('repo-skill'));
+  const child = block.resources.find(r => r.agentIds.includes('child-thread') && r.identity.location.includes('child-skill'));
+  const grandchild = block.resources.find(r => r.agentIds.includes('grandchild-thread') && r.identity.location.includes('grandchild-skill'));
+  assert.ok(root && child && grandchild, JSON.stringify(block));
+  assert.deepEqual(root.snapshots.map(s => s.phase), ['before-task','after-task']);
+  assert.notEqual(root.snapshots[0].definition.fingerprint, root.snapshots[1].definition.fingerprint);
+  assert.deepEqual(child.snapshots.map(s => s.phase), ['after-task']);
+  assert.deepEqual(grandchild.snapshots.map(s => s.phase), ['after-task']);
+  assert.ok(checkpoints[0].resources.some(r => r.agentIds.includes('root-thread')), 'Root provenance is durable before task execution');
+  assert.deepEqual(checkpoints.at(-1), block);
+  const text = JSON.stringify(block); assert.doesNotMatch(text, /PRIVATE_DEFINITION|private description|\/Users\/|\/tmp\//);
+  const json = join(f.dir, 'provenance.json'), md = join(f.dir, 'provenance.md');
+  await exportAuditReport(result.run, { output: json }); await exportAuditReport(result.run, { output: md, format: 'markdown' });
+  for (const [file] of definitions) await rm(file);
+  assert.deepEqual((await readAuditReport(json)).resourceProvenance, block);
+  assert.deepEqual((await readAuditReport(md + '.audit.json')).resourceProvenance, block);
+});
+
+
+test('missing owned-child catalog cannot leave root provenance marked complete', async t => {
+  const f = await fixture(t);
+  const definition = join(f.dir, '.agents/skills/repo-skill/SKILL.md');
+  await mkdir(join(definition, '..'), { recursive: true, mode: 0o700 }); await writeFile(definition, 'bounded root definition');
+  f.options.processOptions.args[1] = f.script.replace("if (method==='skills/list') {", "if (method==='skills/list') { if(params.cwds?.[0]?.endsWith('/child')) return send({jsonrpc:'2.0',id,error:{code:-32603,message:'not available'}});")
+    .replace('cwd,skills:catalog,errors:[]', "cwd,skills:catalog.filter(s=>s.scope==='repo'),errors:[]");
+  const checkpoints = [];
+  const { run } = await runAuditCapture({ ...f.options, onSession: run => checkpoints.push(structuredClone(run.resourceProvenance)) });
+  assert.equal(checkpoints[0].status, 'complete');
+  assert.equal(run.resourceProvenance.status, 'partial');
+  assert.ok(run.resourceProvenance.counts.omitted > 0);
+  assert.equal(run.coverage.resourceProvenance, 'partial');
+  assert.ok(run.warnings.includes('child-skills-unavailable'));
+});
+
+test('native catalog origin errors retain partial provenance even when recorded definitions are readable', async t => {
+  const f = await fixture(t);
+  const definition = join(f.dir, '.agents/skills/repo-skill/SKILL.md');
+  await mkdir(join(definition, '..'), { recursive: true, mode: 0o700 });
+  await writeFile(definition, 'bounded root definition');
+  f.options.processOptions.args[1] = f.script.replace('cwd,skills:catalog,errors:[]',
+    "cwd,skills:catalog.filter(s=>s.scope==='repo'),errors:[{origin:'user'}]");
+  const checkpoints = [];
+  const { run } = await runAuditCapture({ ...f.options, onSession: run => checkpoints.push(structuredClone(run.resourceProvenance)) });
+  assert.equal(checkpoints[0].status, 'partial');
+  assert.ok(checkpoints[0].resources.some(resource => resource.snapshots[0].definition.fingerprint));
+  assert.equal(run.resourceProvenance.status, 'partial');
+  assert.equal(run.coverage.resourceProvenance, 'partial');
+  assert.ok(run.warnings.includes('skills-origin-unavailable'));
 });

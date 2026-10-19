@@ -102,6 +102,52 @@ xfx audit export profiles Default Research --repo /path/to/repository \
 
 JSON output is the frozen normalized report and preserves source identity, coverage, warnings, observations, and derivation metadata. Markdown output includes evidence limitations alongside findings and creates a frozen JSON sidecar at `OUTPUT.audit.json`; `show` and `diff` can reopen those files after native sources disappear. Export prints a receipt with the output path, format, evidence path, SHA-256, source kind, and source status. Raw transcripts and tool output are not included by default. Paths, resource names, and usage metadata can still reveal private information. Every output file, including the Markdown sidecar, is created exclusively; choose unused paths and keep both files together.
 
+## Per-run resource provenance (development checkout)
+
+The development checkout records bounded `resourceProvenance` with live controlled
+experiments. This is unreleased work; the published 2.0.0 package and installed
+CLI are unchanged.
+
+Provenance joins owned native skill catalogs to filesystem observations. It keeps
+logical resource locations, native skill and actor references, bounded alias and
+canonical references, definition fingerprints and supported plugin manifest
+versions. A definition fingerprint covers `SKILL.md` bytes; it does not establish
+that an entire package, scripts or dependencies are identical. Plugin fingerprints
+cover an allowlisted manifest projection, not arbitrary manifest contents.
+
+Root definitions are sampled before the task. Descendant catalogs can arrive
+later: terminal descendants receive an after-task observation; active descendants
+receive a `late-observation` with partial coverage. Neither establishes what the
+descendant loaded earlier. A second root observation can show changed
+endpoint contents. Matching endpoints do not prove uninterrupted stability,
+loaded-content identity, instruction adherence or a causal quality effect.
+Native instruction-source references remain separate from content evidence.
+
+Only bounded resource roots and regular, safely readable definitions are admitted.
+Each run admits at most 160 resources, with up to two filesystem observations per
+resource, 512 KiB per file, 8 MiB of acquisition reads, eight symlink hops and a
+128 KiB serialized provenance block. Truncated resource or alias detail remains
+explicitly partial.
+Credential/state files, unrelated paths, unsafe links, cycles, permission failures
+and acquisition limits cannot produce trusted fingerprints. Missing or unsafe
+evidence remains explicit; partial provenance does not become complete skill
+observability or change the existing partial evidence exit status 2.
+
+The versioned block survives durable checkpoints, comparisons, repeated-trial
+compaction and JSON/Markdown exports. Markdown's `.audit.json` sidecar keeps the
+same normalized provenance. Frozen `show` and `diff` read recorded evidence without
+looking up current definitions. Historical sessions without contemporaneous
+provenance report it as not recorded; they are not enriched from today's files.
+When compaction omits detail, reports retain omission counts and incomplete status
+rather than inferring matching resources from missing records.
+
+No definition bodies, credential contents or arbitrary catalog/manifest payloads
+are stored in the provenance block. Acquisition uses bounded file and byte limits,
+and no recursive package-content hashing. Logical names, aliases, versions and
+unkeyed hashes can still reveal private information: audit exports remain private
+evidence, not automatically safe public summaries. Keep machine-specific records
+and recovery details private and curate public documentation separately.
+
 ## Read results carefully
 
 Observed process completion, task success, verification success, and audit coverage are separate outcomes. A successful exit or an agent's final claim does not by itself establish task quality. Historical audits report only acceptance checks and artifacts present in selected evidence.

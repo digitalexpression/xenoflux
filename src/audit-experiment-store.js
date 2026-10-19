@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { acquire, privateDirectory, readJSON, release } from './metadata.js';
+import { projectReportResourceProvenance } from './audit-store.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_BYTES = 16 * 1024 * 1024;
@@ -13,7 +14,7 @@ const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const auditsPath = store => join(store.directory, 'audits');
 
 function encode(value) {
-  const text = `${JSON.stringify(value, null, 2)}\n`;
+  const text = `${JSON.stringify(projectReportResourceProvenance(value), null, 2)}\n`;
   if (Buffer.byteLength(text) > MAX_BYTES) throw new Error('Audit record exceeds the 16 MiB limit');
   return text;
 }
@@ -255,7 +256,7 @@ export async function readAuditRecord(store, id) {
   const expectedCaptureHome = record.profile?.home ?? record.profile?.userHome;
   if (captureCheckpoint && expectedCaptureHome && captureCheckpoint.profileHome !== expectedCaptureHome)
     throw new Error('Audit capture checkpoint profile identity is invalid; preserving it');
-  return { id, directory, record, state, report, cleanup, recovery, captureCheckpoint, finalized: report !== null };
+  return projectReportResourceProvenance({ id, directory, record, state, report, cleanup, recovery, captureCheckpoint, finalized: report !== null });
 }
 
 /** Persist the latest normalized in-memory capture under the run's immutable identity. */
@@ -274,9 +275,9 @@ export async function writeAuditCaptureCheckpoint(store, id, { run, capture } = 
   if (expectedHome && expectedHome !== profileHome) throw new Error('Audit capture profile-home identity changed; preserving checkpoint');
   if (current.captureCheckpoint && (current.captureCheckpoint.threadId !== threadId || current.captureCheckpoint.profileHome !== profileHome))
     throw new Error('Audit capture checkpoint identity changed; preserving checkpoint');
-  const value = { schemaVersion: 1, kind: 'audit-capture-checkpoint', id,
+  const value = projectReportResourceProvenance({ schemaVersion: 1, kind: 'audit-capture-checkpoint', id,
     experimentId: current.record.experimentId, threadId, profileHome,
-    capturedAt: new Date().toISOString(), run, capture };
+    capturedAt: new Date().toISOString(), run, capture });
   assertJsonRecord(value, 'Audit capture checkpoint');
   await atomicWrite(current.directory, 'capture-checkpoint.json', value);
   return value;
@@ -301,7 +302,7 @@ export async function finalizeAuditRecord(store, id, report) {
     'audit-series': 'audit-series-report', 'audit-evaluation': 'audit-evaluation-report' }[current.record.kind];
   if (!kind) throw new Error('Unsupported audit record kind');
   if (report?.kind && report.kind !== kind) throw new Error(`Expected final report kind ${kind}`);
-  const value = { ...report, schemaVersion: 1, kind, id };
+  const value = projectReportResourceProvenance({ ...report, schemaVersion: 1, kind, id });
   assertJsonRecord(value, 'Final audit report');
   await atomicWrite(current.directory, 'report.json', value, { exclusive: true });
   return value;

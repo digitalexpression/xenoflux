@@ -644,6 +644,7 @@ test('recovers after killing the owned coordinator at setup, task, capture, and 
       assert.equal(checkpoint.threadId, '11111111-1111-4111-8111-111111111111');
       assert.equal(checkpoint.run.source.threadId, checkpoint.threadId);
       assert.equal(checkpoint.run.agents.length, 2);
+      assert.equal(checkpoint.run.resourceProvenance.schemaVersion, 1, 'Private capture checkpoint retains provenance before interruption');
     } else {
       assert.equal(experiment.state.phase, 'finished');
       assert.equal(experiment.finalized, false);
@@ -685,6 +686,7 @@ test('recovers after killing the owned coordinator at setup, task, capture, and 
         '11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222',
       ]));
       assert.ok(recoveredRun.events.length > 0, 'recovery keeps the captured event evidence');
+      assert.ok(recoveredRun.resourceProvenance.resources.some(resource => resource.snapshots.some(snapshot => snapshot.definition.fingerprint)), 'Recovered partial capture preserves actual resource fingerprints');
     }
     if (phase === 'finalization') {
       assert.ok(recoveredRun.taskEnd?.patchPath);
@@ -756,6 +758,10 @@ test('executes three balanced quality trials and shows, exports, reopens, and ev
     assert.equal(child.record.baseline.repository.commit, original.record.baseline.commit, 'every child trial pins the same source baseline');
   }
   assert.deepEqual(original.report, frozen, 'CLI show and both exports derive from the same immutable series report');
+  const provenanceRuns = frozen.trials.flatMap(trial => trial.profiles.map(profile => profile.run));
+  assert.ok(provenanceRuns.length > 0);
+  assert.ok(provenanceRuns.every(run => run.resourceProvenance?.schemaVersion === 1), 'All frozen trial runs retain explicit provenance or missingness');
+  assert.ok(provenanceRuns.every(run => run.resourceProvenance.resources.some(resource => resource.snapshots.some(snapshot => snapshot.definition.fingerprint))), 'All trial runs retain captured definitions through show and both exports');
   assert.match(await readFile(markdownPath, 'utf8'), /Trial|Alpha/);
 
   const alphaRun = report.trials[0].profiles.find(item => item.profileName === 'Alpha').run;

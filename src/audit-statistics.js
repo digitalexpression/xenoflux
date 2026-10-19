@@ -2,6 +2,7 @@ import { evaluateAuditQuality, auditQualityFingerprint } from './audit-quality.j
 import { nativeUsageAccounting, USAGE_FIELDS } from './audit-usage.js';
 import { safePluginScriptPath } from './audit-tools.js';
 import { compactInstructionSources } from './audit-instructions.js';
+import { projectResourceProvenance } from './audit-provenance.js';
 
 const list = value => Array.isArray(value) ? value : [];
 const obj = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -308,7 +309,10 @@ function compactRun(run) {
   const instructionCoverage = run.coverage?.instructions === 'unavailable' || !hasKnownInstructionEvidence ? 'unavailable'
     : run.coverage?.instructions === 'partial' || instructionSources.status === 'partial' || hasMissingInstructionAgent || unownedInstructionRows ? 'partial'
       : run.coverage?.instructions === 'observed' || instructionSources.status === 'observed' ? 'observed' : 'unavailable';
-  const coverage = { ...obj(run.coverage), instructions: instructionCoverage };
+  const resourceProvenance = projectResourceProvenance(run.resourceProvenance);
+  const coverage = { ...obj(run.coverage), instructions: instructionCoverage,
+    ...(Object.hasOwn(run.coverage ?? {}, 'resourceProvenance') || (Object.hasOwn(run, 'resourceProvenance') && resourceProvenance.status !== 'unavailable')
+      ? { resourceProvenance: resourceProvenance.status } : {}) };
   if (instructionSources.omittedAgents || instructionSources.omittedSources || unownedInstructionRows) coverage.instructions = 'partial';
   const rawHooks = list(run.hookInvocations ?? run.hook_invocations);
   const hookInvocations = bounded(rawHooks, 500).map(compactHookInvocation).filter(Boolean);
@@ -388,6 +392,7 @@ function compactRun(run) {
     counts: { catalog: count(run.catalog ?? (list(run.skills).length ? run.skills : null)) ?? run.counts?.catalog ?? null, invocations: count(run.skillInvocations) ?? run.counts?.invocations ?? null, tools: count(run.toolInvocations) ?? run.counts?.tools ?? null, mcp: count(run.mcp?.servers) ?? run.counts?.mcp ?? null,
       hooks: Number.isSafeInteger(run.counts?.hooks) && run.counts.hooks >= 0 ? run.counts.hooks : rawHooks.length },
     captureStatus: run.capture?.status ?? run.captureStatus ?? null,
+    resourceProvenance,
   };
 }
 function boundFrozenTrialBytes(trial, maxBytes = 15 * 1024 * 1024) {
@@ -400,6 +405,7 @@ function boundFrozenTrialBytes(trial, maxBytes = 15 * 1024 * 1024) {
       slots.push([run, 'usageObservations', run.usage.observations]);
       slots.push([run, 'usageAgents', run.usage.byAgent]);
       slots.push([run, 'hookInvocations', run.hookInvocations]);
+      if (run.resourceProvenance?.resources?.length) slots.push([run, 'resourceProvenance', run.resourceProvenance.resources, 'provenance']);
       slots.push([run, 'instructionAgents', run.instructionSources]);
       for (const row of run.instructionSources) slots.push([run, 'instructionSources', row.sources, 'instruction-sources', row]);
       if (run.usage.turns) slots.push([run, 'turnUsageRows', run.usage.turns.turns, 'turn-usage']);
@@ -421,6 +427,14 @@ function boundFrozenTrialBytes(trial, maxBytes = 15 * 1024 * 1024) {
       if (largest.kind === 'object') {
         for (const [key] of largest.entries.slice(keep)) delete largest.rows[key];
         largest.run.usageCoverage.byAgentOmitted += removed;
+      } else if (largest.kind === 'provenance') {
+        largest.rows.splice(keep);
+        const provenance = largest.run.resourceProvenance;
+        provenance.counts.omitted += removed;
+        provenance.omissionReasons ??= {};
+        provenance.omissionReasons['projection-limit'] = (provenance.omissionReasons['projection-limit'] ?? 0) + removed;
+        provenance.status = 'partial';
+        largest.run.coverage.resourceProvenance = 'partial';
       } else if (largest.kind === 'turn-usage') {
         largest.rows.splice(keep);
         largest.run.usage.turns.turnsOmitted += removed;
@@ -432,7 +446,7 @@ function boundFrozenTrialBytes(trial, maxBytes = 15 * 1024 * 1024) {
         largest.owner.reason = 'instruction-evidence-limit';
         largest.run.coverage.instructions = 'partial';
       }
-      addOmitted(largest.run, largest.key, removed);
+      if (largest.kind !== 'provenance') addOmitted(largest.run, largest.key, removed);
       if (largest.key === 'usageObservations') largest.run.usage.observationsOmitted += removed;
       if (largest.key === 'usageAgents') largest.run.usage.byAgentOmitted += removed;
       if (largest.key === 'skillDiagnostics') largest.run.skillTelemetry.diagnostics.missingness.byAgentOmitted += removed;

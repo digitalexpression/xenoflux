@@ -12,6 +12,7 @@ import { assessUsageSequence, normalizeUsageSnapshot, USAGE_FIELDS } from './aud
 import { createAuditToolCapture } from './audit-tools.js';
 import { createAuditHookCapture } from './audit-hooks.js';
 import { parseLiteralSkillRead, parseLiteralSkillReadDetails } from './audit-skill-read.js';
+import { projectResourceProvenance } from './audit-provenance.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MAX_BYTES = 32 * 1024 * 1024, MAX_LINE = 1024 * 1024, MAX_RECORDS = 10000;
@@ -45,7 +46,7 @@ function emptyCoverage(status = 'unavailable') {
     hooks: status, workspaceDiff: 'unavailable', outcome: 'unavailable' };
 }
 function resultBase(profile, id) {
-  return { schemaVersion: 1, kind: 'audit-run', id: randomUUID(), profile: {
+  return { schemaVersion: 1, resourceProvenance: projectResourceProvenance(), kind: 'audit-run', id: randomUUID(), profile: {
     profileId: profile.profileId, profileName: profile.profileName, home: profile.home,
     userHome: profile.userHome, environmentId: profile.environmentId ?? null,
   }, status: 'unavailable', reason: null, hookCaptureBoundary: null, source: { kind: 'native-rollout', nativeSessionId: id,
@@ -911,6 +912,7 @@ async function readRollout(profile, id, path, options = {}) {
     const sourceComplete = warnings.size === 0 && turns.length > 0;
     if (!sourceComplete) { toolCoverage.tools = 'partial'; toolCoverage.mcp = 'partial'; hookCoverage = 'partial'; }
     return { status: sourceComplete ? 'ready' : 'partial', reason: warnings.size ? [...warnings].join(' ') : (!turns.length ? 'No turn contexts were recorded.' : null),
+      resourceProvenance: projectResourceProvenance(),
       source: { path, fingerprint, bytes: pos, fileBytes: before.size,
         fingerprintScope: pos === before.size ? 'source-snapshot' : 'read-prefix', recordCount: recordsTotal,
         clientVersion: safeMetaText(headerPayload?.cli_version, 128), originator: safeMetaText(headerPayload?.originator, 128) },
