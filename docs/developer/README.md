@@ -47,7 +47,8 @@ instances' pinned caches intact when changing preparation behavior.
 ## Contracts and release records
 
 - [Profile copy policy](PROFILE-COPY-POLICY.md) defines creation/copy/review behavior.
-- [Audit acceptance](AUDIT-ACCEPTANCE.md) summarizes candidate evidence and its limits.
+- [Audit acceptance](AUDIT-ACCEPTANCE.md) records the 2.0.0 release, bounded
+  installation verification and evidence limits.
 - [Release process](LOCAL-RELEASE.md) covers clean-source packaging, detached smoke
   checks and explicit publication.
 - [Concurrent profile handover](HANDOVER-macos-concurrent-profiles.md) records

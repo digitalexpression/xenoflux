@@ -1,11 +1,19 @@
 # Audit acceptance summary
 
-This is a curated public summary of verification for the local Xenoflux **2.0.0**
-`latest` candidate, prepared 2026-10-19. The candidate was built and checked locally;
-it has not been published. Private originals and raw native evidence are retained
-separately. This page intentionally contains summarized results rather than raw
-receipts, transcripts, local archive locations, task identifiers, or profile and
-project names.
+Xenoflux **2.0.0** was published on **2026-10-19** under npm's `latest` tag.
+The [npm package](https://www.npmjs.com/package/xenoflux/v/2.0.0) and
+[GitHub release](https://github.com/digitalexpression/xenoflux/releases/tag/v2.0.0)
+were verified against source revision
+`dc502ebcfcf79f64b8bb2ad4c99a38b7ab78e4d6`. Public npm package bytes and all
+four GitHub bundle assets match the tested release bundle.
+The Xenoflux tarball SHA-256 is
+`445a80487093a15bab5b77731c5e16b147d34e043fd4c461f232f8be4ceb35d9`.
+
+This curated public record contains summarized results and coverage limits.
+Private originals and raw native evidence remain separately retained. Machine-local
+paths, profile/project names, native identifiers and operational recovery details
+are excluded. This page includes post-release verification; the published 2.0.0
+assets retain their original contents and source revision.
 
 ## Recorded functional checks
 
@@ -17,11 +25,31 @@ checks passed. The checks used disposable installation state and did not operate
 real profiles or clients. The Desktop skip remains opt-in; this result does not
 claim Desktop acceptance.
 
-The rebuilt public candidate also checks the package boundary against synthetic
-private receipts and unreviewed documentation. Its bundle manifest pins the final
-source revision, package hashes and detached smoke result.
+The final published source passed **753 tests, 752 passed, 0 failed and 1 existing
+opt-in Desktop skip**, plus syntax, native-launcher and whitespace checks. Detached
+installed-package smoke and isolated global install/audit/export/reopen/uninstall
+checks passed. Package-boundary coverage rejects synthetic private receipts and
+unreviewed documentation. The full outgoing object set, source snapshot and actual
+npm archive were reviewed for known private metadata. The release manifest pins
+the final source revision, package hashes and detached smoke result. These are
+local checks; the final commit had no hosted check runs because the repository
+workflow triggers on pull requests.
 
 Machine-readable results are in the [sanitized evidence summary](evidence/audit-2.0.0-summary.json).
+
+## Existing local installation verification
+
+One existing managed macOS installation was updated to **2.0.0** from the verified
+published package. CLI help, the existing profile listing, read-only desktop
+observation and RAM-log status passed. Isolated frozen audit show/diff/export/reopen
+checks retained read corroboration and partial exit 2.
+
+The update preserved profile registrations, settings, bindings, credential
+metadata, service configuration and observed running-client process identities.
+Only the application payload was replaced; the previous app was retained privately.
+This is a dated result for that installation, not a general unattended-update
+recipe or fresh-install, native launch, sign-in, restart or reboot acceptance.
+Detailed machine state and recovery locations remain in private records.
 
 ## Audit evidence
 

@@ -28,7 +28,8 @@ changes, implementation contracts, verification and publication.
 ## Developer records
 
 [Audit acceptance](developer/AUDIT-ACCEPTANCE.md) summarizes the bounded evidence
-for the local 2.0.0 candidate and its limitations.
+for the published 2.0.0 release, a verified existing local installation and their
+coverage limits.
 
 [Concurrent profile handover](developer/HANDOVER-macos-concurrent-profiles.md)
 records dated engineering results and the 1.0.0 publication. It is not an

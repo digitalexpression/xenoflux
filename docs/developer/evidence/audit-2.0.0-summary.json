@@ -5,7 +5,14 @@
   "release": {
     "version": "2.0.0",
     "channel": "latest",
-    "publication": "not performed at preparation"
+    "publication": "published and publicly verified",
+    "publishedOn": "2026-10-19",
+    "sourceRevision": "dc502ebcfcf79f64b8bb2ad4c99a38b7ab78e4d6",
+    "npm": "https://www.npmjs.com/package/xenoflux/v/2.0.0",
+    "github": "https://github.com/digitalexpression/xenoflux/releases/tag/v2.0.0",
+    "tarballSha256": "445a80487093a15bab5b77731c5e16b147d34e043fd4c461f232f8be4ceb35d9",
+    "publicPackageBytes": "identical to tested release candidate",
+    "githubBundleAssets": "all four identical to tested release bundle"
   },
   "scope": "Curated public derivative of private acceptance records; not a runnable recipe, raw transcript or portable source evidence bundle.",
   "redactions": [
@@ -71,5 +78,39 @@
     ]
   },
   "retention": "Private originals are preserved separately and are excluded from public commits and npm packages.",
-  "details": "../AUDIT-ACCEPTANCE.md"
+  "details": "../AUDIT-ACCEPTANCE.md",
+  "releaseVerification": {
+    "tests": 753,
+    "passed": 752,
+    "failed": 0,
+    "skipped": 1,
+    "skip": "Existing opt-in Desktop open/focus/reopen check",
+    "syntax": "passed",
+    "nativeLauncher": "passed",
+    "whitespace": "passed",
+    "detachedSmoke": "passed",
+    "isolatedGlobalLifecycle": "passed",
+    "privacyReview": "Complete outgoing objects, public snapshot and actual npm archive reviewed for known private metadata",
+    "hostedChecks": "No runs on final release commit; repository workflow triggers on pull requests",
+    "boundary": "Final immutable published source and bundle; earlier functionalBaseline remains a separate dated result."
+  },
+  "localInstallation": {
+    "verifiedOn": "2026-10-19",
+    "version": "2.0.0",
+    "kind": "existing managed macOS installation",
+    "result": "passed",
+    "checks": [
+      "CLI help and existing profile listing",
+      "Read-only desktop observation and RAM-log status",
+      "Isolated frozen audit show/diff/export/reopen with partial exit 2"
+    ],
+    "preserved": [
+      "Profile registrations, settings and bindings",
+      "Credential metadata; contents not read",
+      "Managed entry, service configuration and log routing",
+      "Observed running-client process identities"
+    ],
+    "previousApplication": "Retained privately for rollback",
+    "boundary": "One existing installation; no native launch, sign-in, restart, reboot or fresh-install acceptance. Detailed machine state and recovery locations remain private."
+  }
 }
