@@ -33,6 +33,23 @@ and installation lifecycle. It does not sign in, start or quit real Codex, mount
 RAM storage, or use a real native home. The manifest records the exact source commit,
 artifact hashes and smoke result. Package scripts are ignored during packing.
 
+## Public source and package boundary
+
+Review the complete outgoing commit range and the actual tarball before sharing.
+Keep internal operational receipts and audit handovers in private storage; preserve
+their originals before producing explicitly sanitized summaries. Public summaries
+retain outcomes, failed controls and coverage limits without personal paths, private
+project identities, native session identifiers, full prompts or runtime state.
+Credential redaction alone does not remove ordinary identifying metadata.
+
+The package manifest includes reviewed documentation paths explicitly. Do not
+replace this with the entire documentation directory: ignored or newly added
+internal records can otherwise enter npm packages. The package-boundary regression
+uses synthetic private canaries; also inspect the real packed file list and content.
+Use a fresh public branch with sanitized changes from the outset; do not push
+private candidate commits and delete their contents in a later commit. Existing
+shared history is a separate boundary and is not rewritten by local preparation.
+
 ## Test global npm installation in isolation
 
 Use a temporary [npm prefix and configuration](https://docs.npmjs.com/cli/v11/using-npm/config/),

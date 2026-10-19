@@ -125,9 +125,8 @@ native concurrency support. Retest native launch and activation after app update
   Observe processes with UTF-8 output and compare kernel-derived start times.
 
 The user confirmed concurrent open and correct repeat-open focus on 2026-10-11.
-The 2026-10-12 follow-up verified the packaged launcher, opened RC3 Check (PID
-66357) and Advanced Check (PID 67811), and repeated each open with unchanged PID
-and start time. Final observations reported both running. Exact results, dated
+The 2026-10-12 follow-up verified the packaged launcher, opened two comparison profiles and repeated each open with unchanged process
+identity and start time. Final observations reported both running. Exact results, dated
 investigations and the 1.0.0 publication record live in the
 [concurrent profile handover](HANDOVER-macos-concurrent-profiles.md). This evidence does not establish current
 process state or the remaining native acceptance checks above.

@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "repository": "/absolute/path/to/your/repository",
+  "revision": "develop",
+  "task": "Review the repository's existing implementation and propose a concise, evidence-backed change to improve its setup documentation. Make the agreed documentation change in the private workspace, then summarize the change and any remaining gaps.",
+  "profiles": [
+    "Research",
+    "Careful"
+  ],
+  "variables": [
+    "existing Research profile setup",
+    "existing Careful profile setup"
+  ],
+  "trials": {
+    "count": 3,
+    "order": "balanced",
+    "budgetMs": 2160000
+  },
+  "setup": [],
+  "checks": [
+    {
+      "name": "npm test",
+      "argv": ["npm", "test"],
+      "timeoutMs": 600000
+    }
+  ],
+  "quality": {
+    "schemaVersion": 1,
+    "id": "documentation-change-quality",
+    "version": "1",
+    "checks": [
+      {
+        "name": "npm test",
+        "required": true
+      }
+    ],
+    "workspace": {
+      "maxChangedFiles": 20
+    },
+    "rubric": {
+      "id": "documentation-review",
+      "version": "1",
+      "required": false,
+      "minimumPercent": 70,
+      "criteria": [
+        {
+          "id": "correctness",
+          "label": "Documentation matches observed behavior",
+          "maxScore": 5,
+          "weight": 2
+        },
+        {
+          "id": "clarity",
+          "label": "Instructions are clear and actionable",
+          "maxScore": 5,
+          "weight": 1
+        },
+        {
+          "id": "scope",
+          "label": "The change stays within the requested scope",
+          "maxScore": 5,
+          "weight": 1
+        }
+      ]
+    }
+  },
+  "limits": {
+    "runMs": 900000,
+    "experimentMs": 1920000,
+    "outputBytes": 8388608
+  },
+  "sandbox": "workspace-write",
+  "allowIncompleteCapture": true
+}

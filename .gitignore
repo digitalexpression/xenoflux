@@ -2,3 +2,8 @@ node_modules
 *.tgz
 /release-artifacts/
 .DS_Store
+
+# Internal audit records retain private paths, prompts and runtime identities.
+/docs/developer/HANDOVER-macos-audit-*.md
+/docs/developer/evidence/audit-*.json
+!/docs/developer/evidence/audit-2.0.0-summary.json

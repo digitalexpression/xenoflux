@@ -14,6 +14,14 @@ of effective runtime state. Prefer a new profile or a small reliable update over
 complex migration of integrations and internal state. Do not maintain ongoing
 profile relationships, a synchronization baseline, or a generic migration framework.
 
+Audit and experiment observation has its own scope. Copy eligibility and the
+supported transfer surface do not limit discovery or analysis of existing setup
+and execution evidence, including project, system, plugin-provided, or otherwise
+non-copyable skills. This policy still governs any creation/copy mutation an
+experiment actually performs; observing a resource does not authorize transferring
+or activating it. See the [audit acceptance summary](AUDIT-ACCEPTANCE.md) for
+bounded evidence and limitations.
+
 ## Rules
 
 1. **One preservation policy across all entry points.** Creation from a source and
@@ -143,7 +151,7 @@ The implementation released in 1.0.0 changes that historical baseline as follows
   same marker successfully. Copy used the candidate planner/executor with isolated
   locks; this does not verify live desktop client coordination.
 - The subsequent desktop check passed on app `26.930.21537` (12776), backend
-  `0.159.0-alpha.12.1`: Advanced Check was observed active, native context discovered
+  `0.159.0-alpha.12.1`: Comparison profile was observed active, native context discovered
   the synthetic profile skill, its resource/script produced the expected tool
   outputs, and a separate task received the exact native rule denial. Default
   restoration and guarded fixture cleanup passed. Tasks used desktop-created

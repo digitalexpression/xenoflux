@@ -1,6 +1,6 @@
 {
   "name": "xenoflux",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Codex profile manager for macOS",
   "type": "module",
   "bin": {
@@ -11,13 +11,29 @@
     "src",
     "LICENSE",
     "README.md",
-    "docs"
+    "docs/README.md",
+    "docs/user/PROFILE-RECOVERY.md",
+    "docs/user/RAM-LOGS.md",
+    "docs/user/INSTALLATION.md",
+    "docs/user/ADVANCED-COPY.md",
+    "docs/user/AUDIT.md",
+    "docs/user/DESKTOP.md",
+    "docs/user/PROFILES.md",
+    "docs/examples/audit-quality-trials.json",
+    "docs/developer/README.md",
+    "docs/developer/LOCAL-RELEASE.md",
+    "docs/developer/PROFILE-COPY-POLICY.md",
+    "docs/developer/DESKTOP-IMPLEMENTATION.md",
+    "docs/developer/HANDOVER-macos-concurrent-profiles.md",
+    "docs/developer/AUDIT-ACCEPTANCE.md",
+    "docs/developer/evidence/profile-comparison-2026-10-14-summary.json",
+    "docs/developer/evidence/audit-2.0.0-summary.json"
   ],
   "engines": {
     "node": ">=22.13.0 <23 || >=23.4.0"
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
     "check": "node scripts/check.mjs",
     "build:native": "node scripts/build-profile-launcher.mjs",
     "check:native": "node scripts/build-profile-launcher.mjs --check",

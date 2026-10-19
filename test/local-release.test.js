@@ -23,6 +23,27 @@ test('local release arguments and manifests retain only reviewable artifact fact
   });
 });
 
+test('npm package includes reviewed docs and excludes private receipts and unreviewed documentation', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-package-boundary-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8'));
+  await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'xfx-package-boundary-fixture', version: '1.0.0', files: manifest.files }));
+  const paths = ['bin/xfx.js', 'src/fixture.js', 'README.md', 'LICENSE', 'docs/user/AUDIT.md',
+    'docs/developer/AUDIT-ACCEPTANCE.md', 'docs/developer/evidence/audit-2.0.0-summary.json',
+    'docs/developer/evidence/audit-private-canary.json', 'docs/developer/HANDOVER-macos-audit-release.md',
+    'docs/developer/UNREVIEWED.md', 'docs/user/PRIVATE-NOTES.md',
+    'docs/examples/private-canary.json', 'release-artifacts/private-canary.json'];
+  for (const path of paths) {
+    await mkdir(dirname(join(directory, path)), { recursive: true });
+    await writeFile(join(directory, path), 'Synthetic publication boundary fixture.\n');
+  }
+  const result = await run('npm', ['pack', '--dry-run', '--offline', '--ignore-scripts', '--json', '--cache', join(directory, 'cache')], { cwd: directory });
+  assert.equal(result.code, 0, result.stderr);
+  const included = new Set(JSON.parse(result.stdout)[0].files.map(file => file.path));
+  for (const path of paths.slice(0, 7)) assert.ok(included.has(path), `Missing reviewed input: ${path}`);
+  for (const path of paths.slice(7)) assert.equal(included.has(path), false, `Private/unreviewed input packaged: ${path}`);
+});
+
 function run(file, args, options = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(file, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });

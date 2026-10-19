@@ -4,11 +4,12 @@ import { resolve } from 'node:path';
 import { Store, renameProfile, bind, unbind, find } from '../src/profiles.js';
 import { removeProfile } from '../src/profile-removal.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
-import { compareHomes, openNativeComparison } from '../src/compare.js';
+import { auditCommand, compareAuditProfiles } from '../src/audit.js';
+import { renderAudit } from '../src/audit-report.js';
 import { registerHome, unbindHome, listHomes } from '../src/homes.js';
 import { launchPlan, launchHome } from '../src/launcher.js';
 import { pickProfile } from '../src/picker.js';
-import { listHistory } from '../src/history.js';
+import { findHistory, listHistory } from '../src/history.js';
 import { COPY_COMPONENTS, planCopy, applyCopy, planUndo, undoCopy } from '../src/native-copy.js';
 import { pickCopyComponents, confirmCopyAction } from '../src/copy-picker.js';
 import { inspectProfile } from '../src/profile-inventory.js';
@@ -41,15 +42,28 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   profile rename NAME NEW_NAME | profile delete NAME
   profile bind NAME REPOSITORY
   profile unbind NAME [REPOSITORY]        Remove the native binding, or only the supplied repository binding
-  compare LEFT RIGHT [--include config,instructions,agents]
-    [--viewer EXECUTABLE] [--viewer-arg=ARG]
+  audit profiles LEFT RIGHT [--repo DIRECTORY] [--client cli|desktop]
+  audit show --profile NAME --id TASK_ID | audit show REPORT.json
+  audit diff --left-profile NAME --left-id TASK_ID --right-profile NAME --right-id TASK_ID
+    [--expect-model MODEL --expect-effort EFFORT]
+  audit diff LEFT_REPORT.json RIGHT_REPORT.json
+  audit run --spec EXPERIMENT.json [--dry-run]
+  audit show EXPERIMENT_UUID | audit diff RUN_A_UUID RUN_B_UUID
+  audit resume SERIES_UUID                Continue only unstarted frozen trial slots
+  audit evaluate SERIES_UUID [--spec REVIEWS.json]  Save a new quality report revision
+  audit recover EXPERIMENT_UUID [--apply]  Reconcile interruption without restarting tasks
+  audit clean EXPERIMENT_UUID [--apply]    Remove verified inactive owned checkouts
+  audit export [UUID | REPORT.json | profiles LEFT RIGHT | native selection flags]
+    --output FILE [--format json|markdown]  Freeze observed evidence without copying native transcripts
   copy SOURCE TARGET [--include config,instructions,agents] [--apply]
     [--advanced]                          Search and select individual items
   copy undo COPY_ID [--apply]             Preview or undo a settings copy
   launch NAME [--repo DIRECTORY] [--dry-run]
   resume NAME TASK_ID [--dry-run]
   history [--profile NAME] [--search TEXT] [--limit COUNT] [--archived]
-  pick [--repo DIRECTORY] [--dry-run] [--viewer EXECUTABLE]
+  history --profile NAME --id TASK_ID [--turns]
+                                        Look up a task, optionally its native turn metadata
+  pick [--repo DIRECTORY] [--dry-run]
   desktop prepare NAME [--dry-run]       Prepare or refresh a stopped profile app
   desktop refresh NAME [--dry-run]       Alias for desktop prepare
   desktop open NAME [--dry-run]          Prepare as needed, then open or focus
@@ -62,7 +76,8 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   ramlogs restore-home HOME --key KEY
 
 Store: --store, XFX_HOME, or ~/.xfx/controller.
-Comparison covers copyable native settings only; skills/plugins/MCP and effective repository configuration are excluded.
+Audit discovery is independent of copy support; availability and observed use remain separate.
+Audit reports retain incomplete native evidence; hidden activity and effective configuration remain unverified.
 All copy modes preserve unselected settings and destination-only items; selected skill packages are replaced exactly.
 Default remains at Codex's standard paths; named profiles use isolated homes under the Xenoflux profile store. Native sign-in never clones credentials or history.
 --close-clients permits graceful shutdown for copy --apply or profile create/signin --apply.
@@ -77,23 +92,22 @@ try {
     const value = argv[i];
     if (value === '--json') { json = true; continue; }
     if (value === '--help' || value === '-h') { options.help = true; continue; }
-    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--advanced'].includes(value)) { options[value] = true; continue; }
+    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--advanced', '--turns'].includes(value)) { options[value] = true; continue; }
     if (value.startsWith('--')) {
       const equals = value.indexOf('=');
       const flag = equals < 0 ? value : value.slice(0, equals);
-      if (!['--store', '--description', '--repo', '--base', '--from', '--viewer', '--viewer-arg', '--codex', '--codex-version', '--profile', '--search', '--limit', '--include', '--background-path', '--key'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
-      if (options[flag] !== undefined && !['--viewer-arg'].includes(flag)) throw new Error(`Repeated option: ${flag}`);
+      if (!['--store', '--description', '--repo', '--base', '--from', '--codex', '--codex-version', '--profile', '--id', '--search', '--limit', '--include', '--background-path', '--key', '--expect-model', '--expect-effort', '--left-profile', '--left-id', '--right-profile', '--right-id', '--client', '--output', '--format', '--spec'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
+      if (options[flag] !== undefined) throw new Error(`Repeated option: ${flag}`);
       if (equals < 0 && (argv[i + 1] === undefined || argv[i + 1].startsWith('--'))) throw new Error(`Missing value for ${flag}`);
       const argument = equals < 0 ? argv[++i] : value.slice(equals + 1);
-      if (['--viewer-arg'].includes(flag)) (options[flag] ??= []).push(argument);
-      else options[flag] = argument;
+      options[flag] = argument;
     } else args.push(value);
   }
   if (options.help || !args.length) { process.stdout.write(help); }
   else {
     const [command, ...params] = args;
-    const arity = { copy: 2, compare: 2, launch: 1, resume: 2, history: 0, pick: 0, install: 0, uninstall: 0 };
-    const grouped = ['profile', 'desktop', 'ramlogs'].includes(command);
+    const arity = { copy: 2, launch: 1, resume: 2, history: 0, pick: 0, install: 0, uninstall: 0 };
+    const grouped = ['profile', 'desktop', 'ramlogs', 'audit'].includes(command);
     if (!grouped && !Object.hasOwn(arity, command)) throw new Error(`Unknown command: ${command}`);
     if (!grouped && params.length !== arity[command]) throw new Error(`Invalid arguments for ${command}; run xfx --help`);
     const installing = ['install', 'uninstall'].includes(command) || (command === 'ramlogs' && ['enable', 'disable', 'restore-home', 'recover'].includes(params[0]));
@@ -103,21 +117,26 @@ try {
       '--background-path': command === 'install' || (command === 'ramlogs' && ['enable', 'recover'].includes(params[0])),
       '--key': command === 'ramlogs' && params[0] === 'restore-home',
       '--description': settingUp && params[0] === 'create',
-      '--repo': ['launch', 'pick'].includes(command),
+      '--repo': ['launch', 'pick', 'audit'].includes(command),
       '--base': settingUp && params[0] === 'create', '--from': settingUp && params[0] === 'create',
       '--codex': command === 'profile' && ['register', 'create'].includes(params[0]),
       '--codex-version': command === 'profile' && ['register', 'create'].includes(params[0]),
-      '--viewer': ['compare', 'pick'].includes(command), '--viewer-arg': ['compare', 'pick'].includes(command),
       '--advanced': (command === 'copy' && params[0] !== 'undo') || (settingUp && params[0] === 'create'),
-      '--include': command === 'compare' || (command === 'copy' && params[0] !== 'undo') || (settingUp && params[0] === 'create'),
-      '--apply': command === 'copy' || settingUp || recoveringProfile,
+      '--include': (command === 'copy' && params[0] !== 'undo') || (settingUp && params[0] === 'create'),
+      '--apply': command === 'copy' || settingUp || recoveringProfile || (command === 'audit' && ['recover', 'clean'].includes(params[0])),
       '--dry-run': ['launch', 'resume', 'pick', 'copy'].includes(command) || settingUp
         || (command === 'desktop' && (['open', 'prepare', 'refresh'].includes(params[0])
-          || (params[0] === 'recover' && params.length === 2))),
+          || (params[0] === 'recover' && params.length === 2))) || (command === 'audit' && params[0] === 'run'),
       '--observe': command === 'desktop' && params[0] === 'list',
       '--close-clients': !options['--dry-run'] && ((command === 'copy' && options['--apply'])
         || installing || (settingUp && options['--apply'])),
-      '--profile': command === 'history', '--search': command === 'history', '--limit': command === 'history', '--archived': command === 'history',
+      '--profile': ['history', 'audit'].includes(command), '--id': ['history', 'audit'].includes(command), '--search': command === 'history', '--limit': command === 'history', '--archived': command === 'history',
+      '--turns': command === 'history',
+      '--expect-model': command === 'audit', '--expect-effort': command === 'audit',
+      '--left-profile': command === 'audit', '--left-id': command === 'audit',
+      '--right-profile': command === 'audit', '--right-id': command === 'audit',
+      '--client': command === 'audit', '--format': command === 'audit', '--output': command === 'audit',
+      '--spec': command === 'audit' && ['run', 'evaluate'].includes(params[0]),
     };
     for (const [flag, allowed] of Object.entries(allowedOptions)) {
       if (options[flag] !== undefined && !allowed) throw new Error(`${flag} is not supported by ${command}`);
@@ -258,11 +277,33 @@ try {
       else if (operation === 'recover') result = options['--dry-run']
         ? { ...(await desktopInstancePlan(store, targets[0])), status: 'recovery-preview', applyChecks: 'pending', opensDesktop: false }
         : await recoverDesktopInstance(store, targets[0]);
+    } else if (command === 'audit') {
+      const controller = new AbortController(), abort = () => controller.abort('cancelled');
+      const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+      const executes = ['run', 'resume'].includes(params[0]);
+      if (executes) for (const signal of signals) process.on(signal, abort);
+      try {
+        const report = await auditCommand(store, params, options, { signal: controller.signal });
+        result = report.value; process.exitCode = report.exitCode;
+      } finally { if (executes) for (const signal of signals) process.off(signal, abort); }
     } else if (command === 'history') {
-      if (options['--limit'] !== undefined && !/^[1-9]\d*$/.test(options['--limit'])) throw new Error('History limit must be a positive integer');
-      result = await listHistory(store, { profile: options['--profile'], query: options['--search'],
-        limit: options['--limit'] === undefined ? 50 : Number(options['--limit']), archived: options['--archived'] ?? false });
-      if (result.homes.some(h => ['unavailable','partial'].includes(h.status))) process.exitCode = 2;
+      if (options['--turns'] && options['--id'] === undefined) throw new Error('--turns requires --id and --profile');
+      if (options['--id'] !== undefined) {
+        if (!options['--profile']) throw new Error('--id requires --profile');
+        for (const flag of ['--search', '--limit', '--archived']) {
+          if (options[flag] !== undefined) throw new Error(`--id cannot be combined with ${flag}`);
+        }
+        result = await findHistory(store, options['--profile'], options['--id'], { turns: options['--turns'] ?? false });
+        result.id = options['--id'];
+        result.status = result.entry ? 'found' : result.home.status === 'ready' ? 'not-found' : 'unavailable';
+        if (result.status !== 'found') process.exitCode = result.status === 'not-found' ? 1 : 2;
+        else if (result.turnMetadata && result.turnMetadata.status !== 'ready') process.exitCode = 2;
+      } else {
+        if (options['--limit'] !== undefined && !/^[1-9]\d*$/.test(options['--limit'])) throw new Error('History limit must be a positive integer');
+        result = await listHistory(store, { profile: options['--profile'], query: options['--search'],
+          limit: options['--limit'] === undefined ? 50 : Number(options['--limit']), archived: options['--archived'] ?? false });
+        if (result.homes.some(h => ['unavailable','partial'].includes(h.status))) process.exitCode = 2;
+      }
     } else if (command === 'profile') {
       const [operation, profile, directory] = params;
       if (['create','signin'].includes(operation)) {
@@ -297,7 +338,6 @@ try {
       if (command === 'pick' && json) throw new Error('The interactive picker does not support --json; use profile list');
       if ((command === 'pick' || !options['--dry-run']) && (!process.stdin.isTTY || !process.stdout.isTTY)) throw new Error('Use an interactive terminal, or launch PROFILE --dry-run to inspect');
       if (command !== 'pick' && json && !options['--dry-run']) throw new Error('Native terminal output is not JSON; use --dry-run with --json');
-      if (options['--viewer-arg'] && !options['--viewer']) throw new Error('--viewer-arg requires --viewer');
       const controller = new AbortController(), abort = () => controller.abort();
       // A detached native group cannot receive foreground terminal signals.
       // Ctrl-Z deliberately cancels this first launcher rather than orphaning
@@ -310,8 +350,7 @@ try {
           inspect: id => launchPlan(store, id, undefined, { repository: options['--repo'] }),
           history: profile => listHistory(store, { profile }),
           async compare(leftId, rightId) {
-            return options['--viewer'] ? openNativeComparison(store, leftId, rightId, { viewer: { executable: options['--viewer'], args: options['--viewer-arg'] } })
-              : compareHomes(store, leftId, rightId);
+            return compareAuditProfiles(store, leftId, rightId, { repo: options['--repo'] });
           },
         });
         const profile = typeof selected === 'object' && selected !== null ? selected.profileId : selected;
@@ -330,27 +369,44 @@ try {
         for (const signal of terminatingSignals) process.off(signal, abort);
         if (process.stdin.isTTY) process.stdin.setRawMode(false);
       }
-    } else if (command === 'compare') {
-      if (options['--viewer-arg'] && !options['--viewer']) throw new Error('--viewer-arg requires --viewer');
-      const include = options['--include']?.split(',').map(value => value.trim());
-      result = options['--viewer'] ? await openNativeComparison(store, ...params, { include,
-        viewer: { executable: options['--viewer'], args: options['--viewer-arg'] } })
-        : await compareHomes(store, ...params, { include });
-      if ((result.summary ?? result.comparison?.summary)?.unavailable > 0) process.exitCode = 2;
     }
     if (bootstrapReplied) { /* The controller records completion after the bootstrap exec. */ }
     else if (!json && command === 'profile' && params[0] === 'list') process.stdout.write(result.length ? result.map(p => `${p.name.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')}  [${p.state}]${p.home ? `  ${p.home}` : ''}`).join('\n') + '\n' : 'No profiles. Use xfx profile create NAME.\n');
+    else if (!json && command === 'audit') process.stdout.write(result.kind === 'audit-export'
+      ? `Audit exported to ${result.output}\nFrozen evidence: ${result.evidencePath}\n`
+      : renderAudit(result));
     else if (!json && command === 'history') {
       const display = value => String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
       const when = value => { const d = new Date(value*1000); return Number.isFinite(d.getTime()) ? d.toISOString() : 'unknown date'; };
-      process.stdout.write(result.entries.length ? result.entries.map(t => `[${display(t.profileName)}] ${display(t.title)}\n  ${display(t.id)} · ${when(t.updatedAt)}\n  ${display(t.cwd)}`).join('\n')+'\n' : 'No saved tasks.\n');
-      for (const h of result.homes.filter(h => ['unavailable','partial'].includes(h.status))) process.stderr.write(`History ${h.status} for ${display(h.profileName)}.\n`);
-      if (result.truncated) process.stdout.write('More tasks are available; narrow --search or increase --limit.\n');
+      if (options['--id'] !== undefined) {
+        const t = result.entry, h = result.home;
+        process.stdout.write(t
+          ? `[${display(t.profileName)}] ${display(t.title)}\n  Task: ${display(t.id)}\n  Workspace: ${display(t.cwd)}\n  Profile: ${display(t.profileName)} (${display(t.profileId)})\n  Environment: ${display(t.environmentId ?? 'standard home')}\n  Home: ${display(t.home)}\n  Source: ${display(t.source)}\n  Archived: ${t.archived ? 'yes' : 'no'}\n  Updated: ${when(t.updatedAt)}\n`
+          : result.status === 'not-found'
+            ? `Task ${display(result.id)} not found in profile ${display(h.profileName)} (${display(h.profileId)}).\n`
+            : `History ${display(h.status)} for profile ${display(h.profileName)} (${display(h.profileId)}); cannot look up task ${display(result.id)}.\n${display(h.reason)}\n`);
+        if (result.turnMetadata) {
+          const m = result.turnMetadata, known = value => display(value ?? 'unknown');
+          process.stdout.write(`Turn metadata: ${display(m.status)}\n  Source: ${display(m.source)}\n  Rollout: ${known(m.rolloutPath)}\n  Native client: ${known(m.originator)} · ${known(m.clientVersion)}\n`);
+          if (m.parentTaskId) process.stdout.write(`  Parent task: ${display(m.parentTaskId)} · Unattributed turns excluded: ${m.unattributedTurnCount}\n`);
+          if (m.reason) process.stdout.write(`  ${display(m.reason)}\n`);
+          for (const turn of result.turns) {
+            process.stdout.write(`  ${display(turn.turnId)} · ${known(turn.recordedAt)} · line ${turn.sourceLine}\n    Workspace: ${known(turn.cwd)}\n    Roots: ${turn.workspaceRoots ? turn.workspaceRoots.map(display).join(', ') || '(none)' : 'unknown'}\n    Model: ${known(turn.model)} · Effort: ${known(turn.reasoningEffort)}\n`);
+            for (const issue of turn.issues) process.stdout.write(`    ${display(issue)}\n`);
+          }
+        }
+      } else {
+        process.stdout.write(result.entries.length ? result.entries.map(t => `[${display(t.profileName)}] ${display(t.title)}\n  ${display(t.id)} · ${when(t.updatedAt)}\n  ${display(t.cwd)}`).join('\n')+'\n' : 'No saved tasks.\n');
+        for (const h of result.homes.filter(h => ['unavailable','partial'].includes(h.status))) process.stderr.write(`History ${h.status} for ${display(h.profileName)}.\n`);
+        if (result.truncated) process.stdout.write('More tasks are available; narrow --search or increase --limit.\n');
+      }
     }
     else if (!json && ['launch','resume','pick'].includes(command) && result.reportPath) process.stdout.write(`Codex ${result.status}${result.error ? ` (${result.error})` : ''}.\nLaunch record: ${result.reportPath}\n`);
     else process.stdout.write(`${displayJSON(result)}\n`);
   }
 } catch (error) {
-  process.stderr.write(json ? `${JSON.stringify({ error: error.message })}\n` : `xfx: ${error.message}\n`);
+  const message = args[0] === 'audit'
+    ? error.message.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ') : error.message;
+  process.stderr.write(json ? `${JSON.stringify({ error: message })}\n` : `xfx: ${message}\n`);
   process.exitCode = error.code === 'CANCELLED' || error.name === 'AbortError' ? 130 : 1;
 }

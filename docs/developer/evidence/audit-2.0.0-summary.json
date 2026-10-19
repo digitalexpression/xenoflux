@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "kind": "sanitized-audit-acceptance-summary",
+  "sanitized": true,
+  "release": {
+    "version": "2.0.0",
+    "channel": "latest",
+    "publication": "not performed at preparation"
+  },
+  "scope": "Curated public derivative of private acceptance records; not a runnable recipe, raw transcript or portable source evidence bundle.",
+  "redactions": [
+    "Personal and machine-local paths",
+    "Private repository names, source revisions and working-state details",
+    "Native task, turn, profile and environment identifiers",
+    "Full prompts, output, diffs and runtime settings",
+    "Private artifact locations and operational recovery records"
+  ],
+  "functionalBaseline": {
+    "tests": 752,
+    "passed": 751,
+    "failed": 0,
+    "skipped": 1,
+    "skip": "Existing opt-in Desktop open/focus/reopen check",
+    "syntax": "passed",
+    "nativeLauncher": "passed",
+    "detachedSmoke": "passed",
+    "isolatedGlobalLifecycle": "passed",
+    "boundary": "Earlier functional candidate, before public documentation and package-boundary changes. Rebuilt candidate is identified by its own bundle manifest."
+  },
+  "native": {
+    "version": "0.163.0-alpha.10.2",
+    "actors": [
+      "root",
+      "child",
+      "grandchild"
+    ],
+    "liveDefinitionReads": 16,
+    "liveAbsoluteCatReads": 10,
+    "receivedTimestampFreeRows": 11,
+    "normalizedTimestampFreeRows": 11,
+    "historical": {
+      "sourceCommands": 16,
+      "confirmedReads": 13,
+      "absoluteCatReads": 7,
+      "nativeReadActionReads": 6,
+      "unmatchedCanonicalTargetReads": 3,
+      "scaffolding": "Original retained rollout bytes copied unchanged; disposable lookup index and profile registration reconstructed. No command, catalog, actor, cwd or alias facts injected."
+    },
+    "providerBoundary": "Local scripted provider for native capture evidence; not billing or model-quality proof."
+  },
+  "pairedCoding": {
+    "profileCount": 2,
+    "independentOracleCasesPerSide": 191,
+    "result": "passed within declared bounded recipe",
+    "boundary": "One bounded pair does not establish a causal profile winner."
+  },
+  "failedControls": [
+    "An original native harness failed a read-count expectation; later post-capture verification is separate.",
+    "A repeat-definition control expected 11 skill emissions but native delivered 9; the collector retained the received rows. A corrected distinct-definition control received and retained 11.",
+    "Protected-workspace attempts failed before a corrected disposable coding recipe; original failed attempts remain retained.",
+    "A restricted fixture suite failed local listener setup; unchanged checks passed with loopback permission."
+  ],
+  "coverage": {
+    "skills": "partial",
+    "evidenceExitCode": 2,
+    "unknowns": [
+      "Exhaustive native activity and guaranteed unique underlying executions",
+      "Every origin, hook, tool, plugin, alias shape and native version",
+      "Instruction adherence, billing, hidden activity and causal quality effects",
+      "Historical alias/canonical identity absent from retained source records"
+    ]
+  },
+  "retention": "Private originals are preserved separately and are excluded from public commits and npm packages.",
+  "details": "../AUDIT-ACCEPTANCE.md"
+}

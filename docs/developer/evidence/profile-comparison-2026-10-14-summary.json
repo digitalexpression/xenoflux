@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "kind": "sanitized-historical-acceptance-summary",
+  "sanitized": true,
+  "date": "2026-10-14",
+  "scope": "Historical two-profile Desktop pilot; selected primary phase durations and checks only.",
+  "requested": {
+    "model": "gpt-6.1-sol",
+    "reasoningEffort": "medium"
+  },
+  "stages": {
+    "profile-1": {
+      "stage1": {
+        "durationMs": 513529,
+        "acceptance": {
+          "passed": 21,
+          "failed": 0
+        },
+        "reportedChecks": {
+          "passed": 398,
+          "skipped": 1
+        }
+      },
+      "stage2": {
+        "durationMs": 281973,
+        "acceptance": {
+          "passed": 30,
+          "failed": 0
+        },
+        "reportedChecks": {
+          "passed": 401,
+          "skipped": 1
+        }
+      },
+      "stage3": {
+        "durationMs": 171311,
+        "acceptance": {
+          "passed": 30,
+          "failed": 0
+        },
+        "reportedChecks": {
+          "passed": 401,
+          "skipped": 1
+        }
+      }
+    },
+    "profile-2": {
+      "stage1": {
+        "durationMs": 174576,
+        "acceptance": {
+          "passed": 21,
+          "failed": 0
+        },
+        "reportedChecks": {
+          "passed": 398,
+          "skipped": 1
+        }
+      },
+      "stage2": {
+        "durationMs": 134224,
+        "acceptance": {
+          "passed": 30,
+          "failed": 0
+        },
+        "reportedChecks": {
+          "passed": 401,
+          "skipped": 1
+        }
+      },
+      "stage3": {
+        "durationMs": 83370,
+        "acceptance": {
+          "passed": 30,
+          "failed": 0
+        },
+        "reportedChecks": {
+          "passed": 402,
+          "skipped": 1
+        }
+      }
+    }
+  },
+  "redactions": [
+    "Personal home and temporary artifact locations",
+    "Native task, turn, child and profile identities",
+    "Full prompts, logs, detailed runtime state and raw operational receipts"
+  ],
+  "retention": "Original evidence is retained privately; this derived summary is not a replayable recipe or the original receipt.",
+  "limitations": [
+    "Phase durations can overlap delegated work and do not establish total workflow effort.",
+    "Requested controls do not prove equal effective configuration.",
+    "These historical results do not prove the current release or a causal profile winner."
+  ],
+  "currentEvidence": "../AUDIT-ACCEPTANCE.md"
+}

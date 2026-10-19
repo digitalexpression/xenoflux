@@ -51,7 +51,7 @@ async function newDirectory(path, description) {
   return realpath(path);
 }
 
-function run(executable, args, { cwd = root, env = process.env } = {}) {
+function run(executable, args, { cwd = root, env = process.env, expectedExitCode = 0 } = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(executable, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
@@ -59,7 +59,7 @@ function run(executable, args, { cwd = root, env = process.env } = {}) {
     child.stderr.on('data', value => { stderr += value; });
     child.once('error', reject);
     child.once('close', code => {
-      if (code === 0) resolveRun({ stdout, stderr });
+      if (code === expectedExitCode) resolveRun({ stdout, stderr });
       else reject(new Error(`${executable} ${args.join(' ')} exited ${code}: ${stderr || stdout}`));
     });
   });
@@ -131,11 +131,27 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
     const readonlyHome = join(temporary, 'readonly user');
     await mkdir(join(readonlyHome, '.codex'), { recursive: true, mode: 0o700 });
     await writeFile(join(readonlyHome, '.codex', 'AGENTS.md'), 'Detached comparison fixture.\n', { mode: 0o600 });
-    const comparison = JSON.parse((await run(installed, ['--store', store, 'compare', 'Default', 'Default', '--include', 'instructions'], {
-      cwd: install, env: { ...process.env, HOME: readonlyHome },
+    // Exercise the shipped audit CLI with frozen disposable evidence. Partial
+    // coverage must retain exit 2 through show, comparison and export/reopen.
+    const frozen = join(temporary, 'audit-run.json');
+    const auditFixture = { schemaVersion: 1, kind: 'audit-run', id: 'detached-smoke', status: 'partial',
+      profile: { profileId: 'smoke', profileName: 'smoke' }, source: { kind: 'native-rollout' },
+      agents: [], turns: [], events: [], skills: [{ id: 'smoke-skill', name: 'smoke-skill', path: '/recorded/skills/smoke/SKILL.md',
+        observations: [{ kind: 'definition-read-observed', agentId: 'smoke', sourceLine: 1,
+          evidence: { readCorroboration: 'native-unknown-absolute-cat' } }] }],
+      coverage: { skills: 'partial' }, warnings: [] };
+    await writeFile(frozen, JSON.stringify(auditFixture), { mode: 0o600 });
+    const audit = async args => JSON.parse((await run(installed, ['--json', '--store', store, 'audit', ...args], {
+      cwd: install, expectedExitCode: 2,
     })).stdout);
-    if (comparison.state !== 'native-settings-comparison' || comparison.summary.changed !== 0)
-      throw new Error('Installed xfx did not complete its detached read-only native settings comparison');
+    const shown = await audit(['show', frozen]);
+    if (JSON.stringify(shown) !== JSON.stringify(auditFixture)) throw new Error('Installed audit show changed frozen evidence');
+    const comparison = await audit(['diff', frozen, frozen]);
+    if (comparison.kind !== 'audit-comparison' || comparison.comparison.skills[0]?.left?.observations[0]?.evidence?.readCorroboration !== 'native-unknown-absolute-cat')
+      throw new Error('Installed audit comparison lost read corroboration');
+    const exported = await audit(['export', frozen, '--format', 'markdown', '--output', join(temporary, 'audit.md')]);
+    const reopened = await audit(['show', exported.evidencePath]);
+    if (JSON.stringify(reopened) !== JSON.stringify(auditFixture)) throw new Error('Installed audit export/reopen changed frozen evidence');
     // Exercise shipped desktop preparation and copy against disposable homes.
     const { Store } = await import(pathToFileURL(join(installedRoot, 'src', 'profiles.js')).href);
     const { desktopInstancePlan } = await import(pathToFileURL(join(installedRoot, 'src', 'desktop-instances.js')).href);

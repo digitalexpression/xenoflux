@@ -10,6 +10,7 @@ changes, implementation contracts, verification and publication.
 | --- | --- |
 | [Installation](user/INSTALLATION.md) | Install, update, remove or use the offline release bundle. |
 | [Profiles](user/PROFILES.md) | Create, sign in, inspect, launch and manage profiles. |
+| [Audit profiles and Codex runs](user/AUDIT.md) | Compare setup sources and inspect selected runs with explicit evidence limits. |
 | [Desktop](user/DESKTOP.md) | Open or focus named instances and recover stopped operations. |
 | [Selective copying](user/ADVANCED-COPY.md) | Review settings and individual items, apply copies and undo them. |
 | [Profile recovery](user/PROFILE-RECOVERY.md) | Recover an interrupted sign-in or CLI run. |
@@ -25,6 +26,9 @@ changes, implementation contracts, verification and publication.
 | [Profile copy policy](developer/PROFILE-COPY-POLICY.md) | Review or change creation/copy behavior against its contract. |
 
 ## Developer records
+
+[Audit acceptance](developer/AUDIT-ACCEPTANCE.md) summarizes the bounded evidence
+for the local 2.0.0 candidate and its limitations.
 
 [Concurrent profile handover](developer/HANDOVER-macos-concurrent-profiles.md)
 records dated engineering results and the 1.0.0 publication. It is not an
