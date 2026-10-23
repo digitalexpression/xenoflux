@@ -22,20 +22,23 @@ changes, implementation contracts, verification and publication.
 | --- | --- |
 | [Development](developer/README.md) | Set up the checkout, run checks and understand evidence boundaries. |
 | [Shared product goal](developer/AUDIT-GOAL.md) | Understand full profile diffs, both audit entry paths and the outcome contract. |
-| [Active roadmap](developer/ROADMAP.md) | Deliver the Codex CLI/Desktop macOS release before assessing UI and other providers. |
-| [Capability assessment](developer/PROFILE-AUDIT-ASSESSMENT.md) | Separate current support from proposed changes and release gaps. |
+| [Active roadmap](developer/ROADMAP.md) | Track the published 2.1.0 release and bounded documentation cleanup; UI and other providers remain deferred. |
+| [Capability assessment](developer/PROFILE-AUDIT-ASSESSMENT.md) | Review versioned 2.1.0 capabilities and evidence limits. |
 | [Release process](developer/LOCAL-RELEASE.md) | Build, verify and publish a release bundle. |
 | [Desktop implementation](developer/DESKTOP-IMPLEMENTATION.md) | Understand signing, ownership, isolation and native acceptance. |
 | [Profile copy policy](developer/PROFILE-COPY-POLICY.md) | Review or change creation/copy behavior against its contract. |
 
 ## Developer records
 
-[Audit acceptance](developer/AUDIT-ACCEPTANCE.md) summarizes the bounded evidence
-for the published 2.0.0 release, a verified existing local installation and their
-coverage limits.
+[Audit acceptance index](developer/AUDIT-ACCEPTANCE.md) links immutable,
+version-specific records, including the published and installed 2.1.0 release
+and its evidence limits. The previous
+[2.0.0 acceptance record](developer/AUDIT-ACCEPTANCE-2.0.0-HISTORY.md) and the
+[2.1.0 release-era roadmap](developer/ROADMAP-2.1.0-HISTORY.md) and
+[assessment](developer/PROFILE-AUDIT-ASSESSMENT-2.1.0-HISTORY.md) remain available
+as explicitly historical records.
 
-Detailed operational handovers remain in private engineering records. The
-[audit acceptance](developer/AUDIT-ACCEPTANCE.md) provides the reviewed public
-release evidence and coverage limits.
+Detailed operational handovers and raw receipts remain in private engineering
+records; the versioned release pages contain reviewed public summaries.
 
 [Back to Xenoflux](../README.md).

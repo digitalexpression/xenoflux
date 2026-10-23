@@ -1,7 +1,9 @@
 # Substantive evaluation fixtures
 
 These are authored coding tasks and offline preparation tools, not completed model
-evaluations. See the [frozen evaluation plan](../../docs/developer/REPEATED-SUBSTANTIVE-EVALUATION.md).
+evaluations. See the [historical frozen evaluation plan](../../docs/developer/REPEATED-SUBSTANTIVE-EVALUATION.md).
+The campaign remains dormant; these fixtures still support offline regression tests.
+Its execution gates are historical campaign constraints, not product prerequisites.
 
 `prepare.mjs --output NEW_ABSOLUTE_DIRECTORY` creates three pinned disposable Git
 repositories, blocked fake profiles in a private store, acceptance/checker copies,

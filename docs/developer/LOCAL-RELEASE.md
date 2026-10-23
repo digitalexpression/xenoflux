@@ -3,23 +3,30 @@
 Audience: maintainers. Users should follow [Installation](../user/INSTALLATION.md)
 to obtain a published npm package or offline bundle.
 
-Version 1.0.0 was the first stable release. Earlier preview migration is unsupported.
-The stable npm tag is `latest`. Publication requires an explicit release request;
-building a bundle or passing checks does not publish it or authorize installation.
+Version 1.0.0 was the first stable release. Xenoflux 2.1.0 is the current
+published release and was verified in the existing installation on 2026-10-23.
+The stable npm tag is `latest`. Publication and changes to installed user state
+require the applicable explicit request; building a bundle or passing checks
+does not authorize either action.
 
-## Product acceptance before release
+## Acceptance and documentation ownership
 
-The [active roadmap](ROADMAP.md) defines the next release gate: complete profile
-diffs and both audit entry paths for Codex CLI and Desktop on macOS, including
-optional review, repeated behavioral evidence, durable reports and preservation
-of normal profile/client state. Record acceptance against the final candidate.
-Package smoke alone does not establish those outcomes. UI and other providers
-are assessed after that release and are not prerequisites for it.
+The [shared product goal](AUDIT-GOAL.md) owns stable outcomes and acceptance.
+The [active roadmap](ROADMAP.md) owns current delivery scope and stop condition.
+The [capability assessment](PROFILE-AUDIT-ASSESSMENT.md) owns versioned
+capabilities and evidence limits. The [acceptance index](AUDIT-ACCEPTANCE.md)
+links immutable versioned records, each owning that release's source,
+publication, installation and product evidence. Keep behavior
+contracts beside the code changes they govern, especially the
+[profile copy policy](PROFILE-COPY-POLICY.md).
 
-Keep the reviewed public goal, roadmap and assessment in the package documentation
-allowlist and verify their packaged links. Private handovers and raw receipts must
-remain excluded. Current source, published package and installed executable can
-be different versions; report each identity explicitly.
+Keep the current public goal, roadmap, assessment, acceptance index, versioned
+release record and necessary linked history in the explicit package
+documentation allowlist. Verify
+actual packed-file membership and local inline Markdown links. Private handovers and raw
+receipts remain excluded. Record source revision, published npm/GitHub identities,
+artifact checksums and installed executable identity separately. Preserve
+versioned acceptance records and artifacts unchanged after release.
 
 ## Prepare the launcher and source
 
@@ -36,6 +43,7 @@ source revision and refuses untracked runtime inputs.
 npm ci
 npm run check
 npm run check:native
+npm run check:docs
 npm test
 npm run local-release -- --output /absolute/new/release-directory --smoke
 ```
@@ -63,6 +71,25 @@ uses synthetic private canaries; also inspect the real packed file list and cont
 Use a fresh public branch with sanitized changes from the outset; do not push
 private candidate commits and delete their contents in a later commit. Existing
 shared history is a separate boundary and is not rewritten by local preparation.
+
+## Documentation ownership and release closeout
+
+Keep one active roadmap. The shared goal owns acceptance outcomes, the roadmap
+owns delivery order and stop conditions, the capability assessment owns
+versioned support/limits, and the release record owns the immutable source,
+publication, artifact and installation evidence for that version. Archive
+superseded public plans with a dated historical wrapper; do not let their old
+instructions read as active authorization. Update the documentation index when
+adding or moving a public guide. Put behavior rules beside the feature's code
+changes and link them from the relevant developer guide.
+
+At release closeout, identify the merged source revision, the tested/public
+artifact checksum, the npm version/tag, GitHub tag/assets, and any installed
+executable separately. Verify source/package parity and package boundary,
+review links in the actual packed file list, and retain the accepted receipts
+and artifacts unchanged. Keep the existing syntax, native-helper, full-suite,
+package-smoke and applicable CI checks; `npm run check:docs` additionally
+checks packed documentation membership and local inline Markdown links.
 
 ## Test global npm installation in isolation
 
@@ -125,7 +152,7 @@ commands do not call `xfx install`, create/sign in to profiles, launch or close
 Codex, configure RAM logs, or modify the real npm prefix/configuration. The check
 proves package installation and CLI availability, not native profile runtime.
 For an unpublished candidate, pack the checkout and substitute its absolute
-tarball path for `xenoflux@1.0.0`; native verification remains separate.
+tarball path for `xenoflux@$XFX_RELEASE_VERSION`; native verification remains separate.
 
 ## Publish approved artifacts
 

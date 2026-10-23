@@ -29,6 +29,10 @@
     "docs/developer/PROFILE-COPY-POLICY.md",
     "docs/developer/DESKTOP-IMPLEMENTATION.md",
     "docs/developer/AUDIT-ACCEPTANCE.md",
+    "docs/developer/RELEASE-2.1.0.md",
+    "docs/developer/AUDIT-ACCEPTANCE-2.0.0-HISTORY.md",
+    "docs/developer/ROADMAP-2.1.0-HISTORY.md",
+    "docs/developer/PROFILE-AUDIT-ASSESSMENT-2.1.0-HISTORY.md",
     "docs/developer/evidence/profile-comparison-2026-10-14-summary.json",
     "docs/developer/evidence/audit-2.0.0-summary.json"
   ],
@@ -38,6 +42,7 @@
   "scripts": {
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "check": "node scripts/check.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "build:native": "node scripts/build-profile-launcher.mjs",
     "check:native": "node scripts/build-profile-launcher.mjs --check",
     "local-release": "node scripts/local-release.mjs"

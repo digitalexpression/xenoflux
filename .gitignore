@@ -1,6 +1,8 @@
 node_modules
 *.tgz
 /release-artifacts/
+# Retained illustrative design images/prompts; not implementation or package inputs.
+/output/design/
 .DS_Store
 
 # Internal audit records retain private paths, prompts and runtime identities.

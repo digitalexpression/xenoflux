@@ -11,6 +11,7 @@ Use a supported Node.js version on macOS. From the repository root:
 npm ci
 npm run check
 npm run check:native
+npm run check:docs
 npm test
 ```
 
@@ -48,17 +49,39 @@ instances' pinned caches intact when changing preparation behavior.
 
 - [Shared product goal](AUDIT-GOAL.md) defines profile setup comparison, both audit
   entry paths, optional review, consistency and the direct local workflow.
-- [Active roadmap](ROADMAP.md) delivers Codex CLI/Desktop on macOS first, through
-  product and package acceptance; UI and other providers are assessed afterward.
-- [Current capability assessment](PROFILE-AUDIT-ASSESSMENT.md) maps that goal to
-  source evidence, gaps and proposed changes; it is not implementation approval.
+- [Active roadmap](ROADMAP.md) records the published 2.1.0 release and bounded
+  documentation cleanup; work stops before UI or provider assessment.
+- [Current capability assessment](PROFILE-AUDIT-ASSESSMENT.md) records the
+  versioned 2.1.0 capabilities and evidence limits.
 - [Profile copy policy](PROFILE-COPY-POLICY.md) defines creation/copy/review behavior.
-- [Audit acceptance](AUDIT-ACCEPTANCE.md) records the 2.0.0 release, bounded
-  installation verification and evidence limits.
+- [Audit acceptance](AUDIT-ACCEPTANCE.md) indexes immutable, version-specific
+  public release records. [2.1.0](RELEASE-2.1.0.md) records publication and
+  installation identities with evidence limits. The [2.0.0 record](AUDIT-ACCEPTANCE-2.0.0-HISTORY.md)
+  and exact 2.1.0-era [roadmap](ROADMAP-2.1.0-HISTORY.md) and
+  [assessment](PROFILE-AUDIT-ASSESSMENT-2.1.0-HISTORY.md) are historical.
 - [Release process](LOCAL-RELEASE.md) covers clean-source packaging, detached smoke
   checks and explicit publication.
 Detailed operational handovers and raw receipts remain in private engineering
 records; they are not part of the published documentation package.
+
+## Maintenance boundaries
+
+Keep the goal as the outcome contract, one active roadmap as the delivery plan,
+the assessment as versioned capability evidence, and release records as the
+immutable source/publication/installation receipts. Keep behavior rules with
+their implementation changes and update the documentation index and package
+allowlist when public documents change. Preserve versioned release artifacts
+and historical records; do not rewrite them to reflect later source.
+
+The optional evaluation-isolation test harness remains dormant historical
+support because tests still reference it; substantive profile, audit, session
+and report fixtures remain active. Legacy series-reader compatibility is also
+retained. No production deletion is justified by the current reference review.
+Do not expand this into cleanup of unrelated source or configuration.
+
+Illustrative images and prompts remain in `output/design/`, narrowly ignored by
+Git and excluded from the package. They are references for a future requested
+UI assessment, not implemented controls or evidence of product behavior.
 
 Keep operational instructions in `docs/user` and implementation, verification and
 publication instructions in `docs/developer`. Update the [documentation index](../README.md)
