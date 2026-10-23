@@ -39,22 +39,25 @@ test('npm package includes reviewed docs and excludes private receipts and unrev
   t.after(() => rm(directory, { recursive: true, force: true }));
   const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8'));
   await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'xfx-package-boundary-fixture', version: '1.0.0', files: manifest.files }));
-  const paths = ['bin/xfx.js', 'src/fixture.js', 'README.md', 'LICENSE', 'docs/user/AUDIT.md',
+  const publicPaths = ['bin/xfx.js', 'src/fixture.js', 'README.md', 'LICENSE', 'docs/user/AUDIT.md',
     'docs/developer/AUDIT-ACCEPTANCE.md',
     'docs/developer/AUDIT-GOAL.md', 'docs/developer/ROADMAP.md', 'docs/developer/PROFILE-AUDIT-ASSESSMENT.md',
     'docs/developer/evidence/audit-2.0.0-summary.json', 'docs/developer/evidence/profile-comparison-2026-10-14-summary.json',
+    'docs/developer/RELEASE-2.1.0.md', 'docs/developer/AUDIT-ACCEPTANCE-2.0.0-HISTORY.md',
+    'docs/developer/ROADMAP-2.1.0-HISTORY.md', 'docs/developer/PROFILE-AUDIT-ASSESSMENT-2.1.0-HISTORY.md'];
+  const privatePaths = [
     'docs/developer/evidence/audit-private-canary.json', 'docs/developer/HANDOVER-macos-audit-release.md',
     'docs/developer/UNREVIEWED.md', 'docs/user/PRIVATE-NOTES.md',
-    'docs/examples/private-canary.json', 'release-artifacts/private-canary.json'];
-  for (const path of paths) {
+    'docs/examples/private-canary.json', 'release-artifacts/private-canary.json', 'output/design/private-canary.md'];
+  for (const path of [...publicPaths, ...privatePaths]) {
     await mkdir(dirname(join(directory, path)), { recursive: true });
     await writeFile(join(directory, path), 'Synthetic publication boundary fixture.\n');
   }
   const result = await run('npm', ['pack', '--dry-run', '--offline', '--ignore-scripts', '--json', '--cache', join(directory, 'cache')], { cwd: directory });
   assert.equal(result.code, 0, result.stderr);
   const included = new Set(JSON.parse(result.stdout)[0].files.map(file => file.path));
-  for (const path of paths.slice(0, 11)) assert.ok(included.has(path), `Missing reviewed input: ${path}`);
-  for (const path of paths.slice(11)) assert.equal(included.has(path), false, `Private/unreviewed input packaged: ${path}`);
+  for (const path of publicPaths) assert.ok(included.has(path), `Missing reviewed input: ${path}`);
+  for (const path of privatePaths) assert.equal(included.has(path), false, `Private/unreviewed input packaged: ${path}`);
 });
 
 function run(file, args, options = {}) {

@@ -10,6 +10,7 @@ For profile management, setup comparison and audit work, read
 contract. Current user instructions determine task scope and operational
 authorization; the goal itself grants neither.
 
-Use [the active roadmap](docs/developer/ROADMAP.md) for delivery order: Codex CLI
-and Desktop on macOS first; assess UI and other providers after that release.
+Use [the active roadmap](docs/developer/ROADMAP.md) for current scope and delivery
+order. Codex CLI/Desktop on macOS 2.1.0 is released; stop after repository cleanup
+before assessing UI. Other providers remain deferred.
 Historical handovers and campaign runbooks are evidence, not active prerequisites.

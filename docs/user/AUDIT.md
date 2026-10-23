@@ -13,7 +13,7 @@ xfx audit profiles Default Research --repo /path/to/repository --client desktop
 
 This compares setup sources for the selected client context and repository: settings, instruction files, agents, skills, rules, plugin components, MCP, hooks, and project resources. It reports source, origin, presence/readability, and coverage where those facts can be observed. `--repo` selects project roots; `--client` records the intended CLI or Desktop context. Static discovery currently labels client applicability unknown, including shared machine-user and version-dependent roots. Neither option starts a client or proves runtime discovery or historical loading.
 
-The working candidate adds safe setting and memory-setting values, readable
+Xenoflux 2.1.0 includes safe setting and memory-setting values, readable
 instruction/agent/rule changes, skill package resource differences, and vetted
 integration configuration fields. Changing a script while keeping `SKILL.md`
 unchanged remains visible. Truncated, unreadable, unsafe and redacted detail stays
@@ -105,7 +105,7 @@ describes intended differences; it does not prove which settings were effective.
 
 ### Read a same-task comparison
 
-The development candidate presents a comparison in this order:
+Xenoflux 2.1.0 presents a comparison in this order:
 
 1. **Comparison conditions** — task and run identities, baseline, recorded native/model/effort controls, declared setup variables, order, environment, and evidence coverage. Configured resources, loaded-source records, observed reads or invocations, and adherence are separate facts. A matching label alone does not establish equivalent conditions.
 2. **Behavioral findings** — scoped differences, similarities, or inconclusive results, with per-side coverage, pair counts, evidence references, and limits. A single pair always reports consistency as unmeasured.
@@ -138,7 +138,7 @@ their accounting and scope limits. Unknown historical context limits dependent
 claims without hiding other observations. None of these comparisons establishes
 causality or a universal winner. One pair leaves consistency unmeasured.
 
-Markdown export includes a frozen JSON sidecar (`OUTPUT.audit.json`). Reopen the JSON sidecar with `xfx audit show` without native source sessions; `xfx audit diff` accepts two frozen run JSON files. Markdown is the human-readable view, not a parsed source. Keep it with its JSON sidecar. Existing raw/full exports remain private and may contain sensitive paths or metadata. The behavior described in this section belongs to the local Xenoflux 2.1.0 release candidate; published and installed Xenoflux 2.0.0 does not include it. Candidate verification does not publish or install the package.
+Markdown export includes a frozen JSON sidecar (`OUTPUT.audit.json`). Reopen the JSON sidecar with `xfx audit show` without native source sessions; `xfx audit diff` accepts two frozen run JSON files. Markdown is the human-readable view, not a parsed source. Keep it with its JSON sidecar. Existing raw/full exports remain private and may contain sensitive paths or metadata. This behavior is included in Xenoflux 2.1.0; see the [release acceptance record](../developer/RELEASE-2.1.0.md) for evidence and limits.
 
 Native history may retain an indexed `.jsonl` rollout as `.jsonl.zst`. xfx reads
 the exact compressed sibling only when the indexed plain file is absent, preserving
@@ -180,7 +180,7 @@ xfx audit diff \
 
 These values check recorded observations; they do not change settings or prove effective backend configuration. Missing observations remain unknown.
 
-### Reopen a saved audit run in the development checkout
+### Reopen a saved audit run
 
 `xfx audit show AUDIT_RUN_ID` and `xfx audit diff LEFT_RUN_ID RIGHT_RUN_ID`
 project retained evidence without rerunning the task. Experiment and series
@@ -247,11 +247,10 @@ xfx audit export profiles Default Research --repo /path/to/repository \
 
 JSON output is the frozen normalized report and preserves source identity, coverage, warnings, observations, and derivation metadata. Markdown output includes evidence limitations alongside findings and creates a frozen JSON sidecar at `OUTPUT.audit.json`; `show` and `diff` can reopen those files after native sources disappear. Export prints a receipt with the output path, format, evidence path, SHA-256, source kind, and source status. Raw transcripts and tool output are not included by default. Paths, resource names, and usage metadata can still reveal private information. Every output file, including the Markdown sidecar, is created exclusively; choose unused paths and keep both files together.
 
-## Per-run resource provenance (development checkout)
+## Per-run resource provenance
 
-The development checkout records bounded `resourceProvenance` with live controlled
-experiments. This is unreleased work; the published 2.0.0 package and installed
-CLI are unchanged.
+Xenoflux 2.1.0 records bounded `resourceProvenance` with live controlled
+experiments.
 
 Provenance joins owned native skill catalogs to filesystem observations. It keeps
 logical resource locations, native skill and actor references, bounded alias and
@@ -793,7 +792,7 @@ access for the Codex task. `read-only` disables workspace writes and network
 access. Setup/check commands are outside that app-server sandbox as described
 above.
 
-The 2.1.0 candidate resolves the supported Desktop-bundled Codex wrapper to its
+Xenoflux 2.1.0 resolves the supported Desktop-bundled Codex wrapper to its
 verified native executable before preparing the command sandbox. This fixes the
 `sandbox_apply: Operation not permitted` startup failure observed through that
 wrapper. Both read-only and workspace-write preflights passed with saved-profile
@@ -846,11 +845,10 @@ requires complete capture, which best-effort skill telemetry cannot establish.
 Use explicit requirements for controlled acceptance, or `allowIncompleteCapture:
 true` for an exploratory report. Neither option makes unknown evidence complete.
 
-### Required loaded context (development checkout)
+### Required loaded context
 
-The development checkout supports `captureRequirements.context` for required
-native instruction-source references in the actual audit workspace. This is
-unreleased work; installed and published xfx 2.0.0 remain unchanged.
+Xenoflux 2.1.0 supports `captureRequirements.context` for required
+native instruction-source references in the actual audit workspace.
 
 ```json
 {

@@ -20,5 +20,6 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run check:native
+      - run: npm run check:docs
       - run: npm test
       - run: npm run local-release -- --output "$RUNNER_TEMP/xfx-release" --smoke

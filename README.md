@@ -39,7 +39,7 @@ interrupted sign-in. Use `xfx --help` for all commands.
   [Desktop implementation](docs/developer/DESKTOP-IMPLEMENTATION.md)
   and [Copy policy](docs/developer/PROFILE-COPY-POLICY.md).
 
-The [documentation index](docs/README.md) includes developer handovers and release records.
+The [documentation index](docs/README.md) includes the active roadmap and public release records.
 
 ## License
 
