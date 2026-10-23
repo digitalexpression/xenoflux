@@ -45,16 +45,18 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   audit profiles LEFT RIGHT [--repo DIRECTORY] [--client cli|desktop]
   audit show --profile NAME --id TASK_ID | audit show REPORT.json
   audit diff --left-profile NAME --left-id TASK_ID --right-profile NAME --right-id TASK_ID
-    [--expect-model MODEL --expect-effort EFFORT]
+    [--same-task LABEL] [--variables LABEL,LABEL] [--expect-model MODEL --expect-effort EFFORT]
   audit diff LEFT_REPORT.json RIGHT_REPORT.json
   audit run --spec EXPERIMENT.json [--dry-run]
+  audit cohort --spec COHORT.json         Compare selected repeated sessions or frozen run pairs
   audit show EXPERIMENT_UUID | audit diff RUN_A_UUID RUN_B_UUID
   audit resume SERIES_UUID                Continue only unstarted frozen trial slots
-  audit evaluate SERIES_UUID [--spec REVIEWS.json]  Save a new quality report revision
+  audit evaluate UUID|REPORT.json [--spec REVIEWS.json]  Save a review packet or reviewed revision
   audit recover EXPERIMENT_UUID [--apply]  Reconcile interruption without restarting tasks
   audit clean EXPERIMENT_UUID [--apply]    Remove verified inactive owned checkouts
   audit export [UUID | REPORT.json | profiles LEFT RIGHT | native selection flags]
     --output FILE [--format json|markdown]  Freeze observed evidence without copying native transcripts
+    [--include-content]                   Include redacted source text in a profile setup export
   copy SOURCE TARGET [--include config,instructions,agents] [--apply]
     [--advanced]                          Search and select individual items
   copy undo COPY_ID [--apply]             Preview or undo a settings copy
@@ -92,11 +94,11 @@ try {
     const value = argv[i];
     if (value === '--json') { json = true; continue; }
     if (value === '--help' || value === '-h') { options.help = true; continue; }
-    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--advanced', '--turns'].includes(value)) { options[value] = true; continue; }
+    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--advanced', '--turns', '--include-content'].includes(value)) { options[value] = true; continue; }
     if (value.startsWith('--')) {
       const equals = value.indexOf('=');
       const flag = equals < 0 ? value : value.slice(0, equals);
-      if (!['--store', '--description', '--repo', '--base', '--from', '--codex', '--codex-version', '--profile', '--id', '--search', '--limit', '--include', '--background-path', '--key', '--expect-model', '--expect-effort', '--left-profile', '--left-id', '--right-profile', '--right-id', '--client', '--output', '--format', '--spec'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
+      if (!['--store', '--description', '--repo', '--base', '--from', '--codex', '--codex-version', '--profile', '--id', '--search', '--limit', '--include', '--background-path', '--key', '--expect-model', '--expect-effort', '--same-task', '--variables', '--left-profile', '--left-id', '--right-profile', '--right-id', '--client', '--output', '--format', '--spec'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
       if (options[flag] !== undefined) throw new Error(`Repeated option: ${flag}`);
       if (equals < 0 && (argv[i + 1] === undefined || argv[i + 1].startsWith('--'))) throw new Error(`Missing value for ${flag}`);
       const argument = equals < 0 ? argv[++i] : value.slice(equals + 1);
@@ -133,10 +135,12 @@ try {
       '--profile': ['history', 'audit'].includes(command), '--id': ['history', 'audit'].includes(command), '--search': command === 'history', '--limit': command === 'history', '--archived': command === 'history',
       '--turns': command === 'history',
       '--expect-model': command === 'audit', '--expect-effort': command === 'audit',
+      '--same-task': command === 'audit', '--variables': command === 'audit',
+      '--include-content': command === 'audit' && params[0] === 'export',
       '--left-profile': command === 'audit', '--left-id': command === 'audit',
       '--right-profile': command === 'audit', '--right-id': command === 'audit',
       '--client': command === 'audit', '--format': command === 'audit', '--output': command === 'audit',
-      '--spec': command === 'audit' && ['run', 'evaluate'].includes(params[0]),
+      '--spec': command === 'audit' && ['run', 'cohort', 'evaluate'].includes(params[0]),
     };
     for (const [flag, allowed] of Object.entries(allowedOptions)) {
       if (options[flag] !== undefined && !allowed) throw new Error(`${flag} is not supported by ${command}`);

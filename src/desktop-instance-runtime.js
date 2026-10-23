@@ -48,12 +48,15 @@ function parsePs(stdout) {
   const rows = [];
   for (const line of stdout.split('\n')) {
     if (!line.trim()) continue;
-    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+?)\s*$/);
+    // macOS may report a negative UID sentinel (for example -2) for a
+    // process whose account cannot be resolved. Such a row cannot belong to
+    // the current numeric UID and is irrelevant to same-user ownership.
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(-?\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+?)\s*$/);
     if (!m) throw fail('PROCESS_OBSERVATION_INVALID');
     // A zombie retains a PID and start time but no longer has a live executable
     // or open resources. Do not compare its ps command label with the former
     // executable identity or try to control it.
-    if (m[5].startsWith('Z')) continue;
+    if (+m[3] < 0 || m[5].startsWith('Z')) continue;
     rows.push({ pid: +m[1], ppid: +m[2], uid: +m[3], startedAt: `${m[4]} UTC`, executable: m[6] });
   }
   return rows;

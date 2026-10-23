@@ -7,7 +7,7 @@ import { Store, create } from '../src/profiles.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome } from '../src/homes.js';
 import { compareAuditProfiles } from '../src/audit.js';
-import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
+import { exportAuditReport, readAuditReport, projectReportResourceProvenance } from '../src/audit-store.js';
 import { renderAudit } from '../src/audit-report.js';
 
 async function put(path, content) {
@@ -28,7 +28,7 @@ async function fixture(t) {
   return { root, store, native, options: { defaultUserHome: root, adminRoots: [] } };
 }
 
-test('setup comparison retains private-value uncertainty and shows public changes without inferring absent skills', async t => {
+test('setup comparison retains private-value uncertainty and proves skill absence only from complete inventory', async t => {
   const f = await fixture(t);
   await put(join(f.native[0].home, 'config.toml'), 'model="model-a"\ncredential_blob="PRIVATE_A"\n');
   await put(join(f.native[1].home, 'config.toml'), 'model="model-b"\ncredential_blob="PRIVATE_B"\n');
@@ -36,11 +36,15 @@ test('setup comparison retains private-value uncertainty and shows public change
   const value = await compareAuditProfiles(f.store, 'A', 'B', f.options);
   assert.ok(value.comparison.resources.changed.some(row => row.name === 'model' && row.left.value === 'model-a' && row.right.value === 'model-b'));
   assert.ok(value.comparison.resources.unavailable.some(row => row.name === 'credential_blob' && row.comparison === 'unknown'));
-  assert.ok(value.comparison.resources.unavailable.some(row => row.name === 'solo' && row.comparison === 'unverified-on-right'));
-  assert.equal(value.comparison.resources.removed.some(row => row.name === 'solo'), false);
+  assert.ok(value.comparison.resources.removed.some(row => row.name === 'solo'));
   assert.doesNotMatch(JSON.stringify(value), /PRIVATE_A|PRIVATE_B/);
   const rendered = renderAudit(value);
   assert.match(rendered, /model-a/); assert.match(rendered, /model-b/);
+  await rm(join(f.native[1].home, 'skills'), { recursive: true, force: true });
+  await symlink(join(f.native[0].home, 'skills'), join(f.native[1].home, 'skills'));
+  const partial = await compareAuditProfiles(f.store, 'A', 'B', f.options);
+  assert.ok(partial.comparison.resources.unavailable.some(row => row.name === 'solo' && row.comparison === 'unverified-on-right'));
+  assert.equal(partial.comparison.resources.removed.some(row => row.name === 'solo'), false);
 });
 
 test('comparison does not collapse same-name project resources in distinct ancestor roots', async t => {
@@ -57,7 +61,11 @@ test('frozen reports reject links and invalid schemas and preserve existing Mark
   const f = await fixture(t), value = { schemaVersion: 1, kind: 'audit-run', id: 'frozen', status: 'partial', profile: {}, coverage: { skills: 'partial' } };
   const original = join(f.root, 'original.json');
   const receipt = await exportAuditReport(value, { output: original });
-  assert.deepEqual(await readAuditReport(receipt.evidencePath), value);
+  const reopened = await readAuditReport(receipt.evidencePath);
+  assert.deepEqual(reopened, projectReportResourceProvenance(value));
+  assert.equal(reopened.id, value.id);
+  assert.equal(reopened.status, value.status);
+  assert.ok(reopened.comparisonEvidence);
   assert.equal((await stat(original)).mode & 0o777, 0o600);
   const linked = join(f.root, 'linked.json'); await symlink(original, linked);
   await assert.rejects(readAuditReport(linked), /unsafe/);

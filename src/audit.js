@@ -1,10 +1,12 @@
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { discoverAuditProfile } from './audit-discovery.js';
+import { discoverAuditProfile, auditResourceAbsent } from './audit-discovery.js';
 import { auditNativeSession } from './audit-session.js';
 import { compareAuditRuns, auditExitCode } from './audit-report.js';
 import { exportAuditReport, readAuditReport } from './audit-store.js';
 import { auditExperimentCommand, isAuditRecordId, showAuditRecord } from './audit-experiment.js';
+import { comparableAuditResource, compareAuditResourceDetails } from './audit-profile-diff.js';
+import { auditSelectionOptions } from './audit-selection.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const plain = value => typeof value === 'string' && value.trim() && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
@@ -19,8 +21,7 @@ function resourceKey(resource, profile) {
   }
   return [resource.category, resource.scope, resource.sourceRole ?? '', resource.provider ?? '', path, resource.name].join('\0');
 }
-const comparable = resource => ({ status: resource.status, fingerprint: resource.fingerprint ?? null,
-  value: resource.value ?? null, version: resource.version ?? null });
+const comparable = comparableAuditResource;
 
 export async function compareAuditProfiles(store, left, right, options = {}) {
   const snapshots = await Promise.allSettled([discoverAuditProfile(store, left, options), discoverAuditProfile(store, right, options)]);
@@ -33,7 +34,9 @@ export async function compareAuditProfiles(store, left, right, options = {}) {
   const resources = { added: [], removed: [], changed: [], unchanged: [], unavailable: [] };
   for (const key of [...new Set([...first.keys(), ...second.keys()])].sort()) {
     const l = first.get(key), r = second.get(key);
-    if (!l) resources.unavailable.push({ ...r, comparison: 'unverified-on-left',
+    if (!l && auditResourceAbsent(r, a)) resources.added.push(r);
+    else if (!r && auditResourceAbsent(l, b)) resources.removed.push(l);
+    else if (!l) resources.unavailable.push({ ...r, comparison: 'unverified-on-left',
       reason: 'Observed on the right; the left discovery source has no corroborating record.' });
     else if (!r) resources.unavailable.push({ ...l, comparison: 'unverified-on-right',
       reason: 'Observed on the left; the right discovery source has no corroborating record.' });
@@ -41,8 +44,10 @@ export async function compareAuditProfiles(store, left, right, options = {}) {
     else if (l.status === 'missing' && r.status === 'present') resources.added.push(r);
     else if (l.status === 'present' && r.status === 'missing') resources.removed.push(l);
     else if (l.status === 'missing' && r.status === 'missing') resources.unchanged.push(r);
-    else if (!isDeepStrictEqual(comparable(l), comparable(r))) resources.changed.push({ ...r, left: l, right: r });
+    else if (!isDeepStrictEqual(comparable(l), comparable(r))) resources.changed.push({ ...r, left: l, right: r,
+      detailDiff: compareAuditResourceDetails(l, r) });
     else if ([l, r].some(item => ['unknown', 'partial'].includes(item.comparison)
+      || ['partial', 'omitted'].includes(item.valueStatus)
       || (!item.fingerprint && item.value === undefined && ['config', 'mcp', 'hook', 'plugin'].includes(item.category))))
       resources.unavailable.push({ ...r, left: l, right: r, comparison: 'unknown',
         reason: 'Public metadata matches; undisclosed values or runtime state remain unverified.' });
@@ -67,15 +72,27 @@ async function selectedRun(store, profile, id, options) {
 
 export async function auditCommand(store, params, flags, context = {}) {
   const [operation, ...args] = params;
-  if (['run', 'recover', 'clean', 'resume', 'evaluate'].includes(operation)) return auditExperimentCommand(store, params, flags, context);
+  if (['run', 'cohort', 'recover', 'clean', 'resume', 'evaluate'].includes(operation)) {
+    if (flags['--same-task'] !== undefined || flags['--variables'] !== undefined)
+      throw new Error('Task and variable declarations require an audit comparison; run declarations belong in the spec');
+    return auditExperimentCommand(store, params, flags, context);
+  }
   if (!['profiles', 'show', 'diff', 'export'].includes(operation)) throw new Error('Use audit profiles, show, diff, or export');
   const present = key => flags[`--${key}`] !== undefined;
   const native = ['profile', 'id'].some(present), paired = ['left-profile', 'left-id', 'right-profile', 'right-id'].some(present);
   const expectations = ['expect-model', 'expect-effort'].some(present);
+  const declarations = ['same-task', 'variables'].some(present);
   if (['spec', 'dry-run', 'apply'].some(present)) throw new Error('Experiment execution flags require audit run, recover, or clean');
   if (native && paired) throw new Error('Choose one native session or a left/right comparison');
-  if (expectations && operation !== 'diff' && !(operation === 'export' && paired)) throw new Error('Control expectations require an audit diff selection');
+  if (expectations && operation !== 'diff' && !(operation === 'export' && (paired || args.length === 2 && args[0] !== 'profiles'))) throw new Error('Control expectations require an audit diff selection');
+  if (declarations && !(operation === 'diff' || operation === 'export' && (paired || args.length === 2 && args[0] !== 'profiles')))
+    throw new Error('Task and variable declarations require an audit comparison');
+  const selection = auditSelectionOptions({
+    ...(present('same-task') ? { taskAssociation: { status: 'user-declared', taskId: flags['--same-task'] } } : {}),
+    ...(present('variables') ? { declaredVariables: typeof flags['--variables'] === 'string' ? flags['--variables'].split(',').map(value => value.trim()) : null } : {}),
+  });
   if (operation !== 'export' && (present('output') || present('format'))) throw new Error('--output and --format are supported by audit export only');
+  if (present('include-content') && operation !== 'export') throw new Error('--include-content is supported by profile setup export only');
   if (operation === 'export' && !present('output')) throw new Error('audit export requires --output');
   if (present('format') && !['json', 'markdown'].includes(flags['--format'])) throw new Error('Choose export --format json or markdown');
   const profileMode = operation === 'profiles' || (operation === 'export' && args[0] === 'profiles');
@@ -96,19 +113,20 @@ export async function auditCommand(store, params, flags, context = {}) {
     if (!['left-profile', 'left-id', 'right-profile', 'right-id'].every(present) || args.length || operation === 'show') throw new Error('audit diff requires both explicit profile/session pairs');
     // Validate both identifiers before either source is read.
     for (const side of ['left', 'right']) if (!plain(flags[`--${side}-profile`]) || !UUID.test(flags[`--${side}-id`] ?? '')) throw new Error('Invalid native profile/session selection');
-    const control = { expectModel: flags['--expect-model'], expectEffort: flags['--expect-effort'] };
+    const control = { expectModel: flags['--expect-model'], expectEffort: flags['--expect-effort'], ...selection };
     compareAuditRuns({ turns: [] }, { turns: [] }, control); // validate controls before any source reads
     const [left, right] = await Promise.all(['left', 'right'].map(side => selectedRun(store, flags[`--${side}-profile`], flags[`--${side}-id`], options)));
     value = compareAuditRuns(left, right, control);
   } else {
-    const count = operation === 'diff' ? 2 : 1;
+    const compareFiles = operation === 'diff' || operation === 'export' && args.length === 2;
+    const count = compareFiles ? 2 : 1;
     if (args.length !== count) throw new Error('Select explicit native sessions or exported JSON report file(s)');
     const reports = await Promise.all(args.map(value => isAuditRecordId(value) ? showAuditRecord(store, value) : readAuditReport(value)));
-    if (operation === 'diff') {
+    if (compareFiles) {
       if (reports.some(item => item.kind !== 'audit-run')) throw new Error('audit diff FILE FILE requires two frozen run reports');
-      value = compareAuditRuns(...reports, { expectModel: flags['--expect-model'], expectEffort: flags['--expect-effort'] });
+      value = compareAuditRuns(...reports, { expectModel: flags['--expect-model'], expectEffort: flags['--expect-effort'], ...selection });
     } else value = reports[0];
   }
   const exitCode = auditExitCode(value);
-  return { value: operation === 'export' ? await exportAuditReport(value, { output: flags['--output'], format: flags['--format'] ?? 'json' }) : value, exitCode };
+  return { value: operation === 'export' ? await exportAuditReport(value, { output: flags['--output'], format: flags['--format'] ?? 'json', includeContent: present('include-content') }) : value, exitCode };
 }

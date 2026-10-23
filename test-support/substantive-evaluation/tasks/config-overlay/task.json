@@ -1,0 +1,18 @@
+{
+  "id": "config-overlay",
+  "title": "Layered configuration overlay",
+  "goal": "Implement a deterministic, validated layered configuration resolver and JSON-stdin CLI with map merging, list replacement, clear semantics, provenance, and mutation safety.",
+  "editableFiles": [
+    "src/config-overlay.js"
+  ],
+  "referenceFiles": {
+    "src/config-overlay.js": "oracle/reference/config-overlay.js"
+  },
+  "visibleCommand": [
+    "node",
+    "--test",
+    "test/visible.test.js"
+  ],
+  "oracle": "oracle/acceptance.test.mjs",
+  "kind": "configuration-and-cli"
+}

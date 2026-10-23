@@ -1,6 +1,6 @@
 {
   "name": "xenoflux",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Codex profile manager for macOS",
   "type": "module",
   "bin": {
@@ -20,17 +20,20 @@
     "docs/user/DESKTOP.md",
     "docs/user/PROFILES.md",
     "docs/examples/audit-quality-trials.json",
+    "docs/examples/audit-booking-ledger-comparison.md",
     "docs/developer/README.md",
     "docs/developer/LOCAL-RELEASE.md",
+    "docs/developer/AUDIT-GOAL.md",
+    "docs/developer/ROADMAP.md",
+    "docs/developer/PROFILE-AUDIT-ASSESSMENT.md",
     "docs/developer/PROFILE-COPY-POLICY.md",
     "docs/developer/DESKTOP-IMPLEMENTATION.md",
-    "docs/developer/HANDOVER-macos-concurrent-profiles.md",
     "docs/developer/AUDIT-ACCEPTANCE.md",
     "docs/developer/evidence/profile-comparison-2026-10-14-summary.json",
     "docs/developer/evidence/audit-2.0.0-summary.json"
   ],
   "engines": {
-    "node": ">=22.13.0 <23 || >=23.4.0"
+    "node": ">=22.15.0 <23 || >=23.8.0"
   },
   "scripts": {
     "test": "node --test --test-concurrency=1 test/*.test.js",

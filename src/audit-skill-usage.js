@@ -1,6 +1,8 @@
 // Merge bounded native skill-invocation telemetry into an already-normalized
 // audit run. Events identify a skill by name/scope, never by resource path.
 import { redactValue } from './redact.js';
+import { projectDeliveryAccounting, projectTelemetryJournal } from './audit-delivery.js';
+import { projectSkillSourceTime } from './audit-source-time.js';
 const MAX_RECORDS = 20_000;
 const MAX_OBSERVATIONS = 20_000;
 const ID = /^[A-Za-z0-9._:-]{1,160}$/;
@@ -86,11 +88,13 @@ export function mergeAuditSkillTelemetry(run, telemetrySnapshot) {
     const invalidPluginId = raw.pluginId != null && pluginId === null;
     const invocationType = TYPES.has(raw.invocationType) ? raw.invocationType : null;
     const timestampNs = safeTimestamp(raw.timestampNs);
+    const sourceTime = Object.hasOwn(raw, 'sourceTime') ? projectSkillSourceTime(raw.sourceTime) : null;
     const actorId = threadId && knownAgents.has(threadId) ? threadId : null;
     const event = {
       ...(observationId(raw.observationId) ? { observationId: raw.observationId } : {}),
       ...(actorId ? { agentId: actorId } : { agentId: null, ...(threadId ? { unattributedActorId: threadId } : {}) }),
       turnId, skillName, scope, pluginId, invocationType, timestampNs, source: SOURCE,
+      ...(sourceTime ? { sourceTime } : {}),
     };
     if (!actorId) {
       event.resolution = 'unattributed';
@@ -134,7 +138,8 @@ export function mergeAuditSkillTelemetry(run, telemetrySnapshot) {
           && observation.metadata?.timestampNs === timestampNs);
         if (!duplicate) {
           skill.observations.push({ kind: 'native-invocation-observed', agentId: actorId, turnId,
-            metadata: { skillName, scope, pluginId, invocationType, timestampNs, source: SOURCE } });
+            metadata: { skillName, scope, pluginId, invocationType, timestampNs, source: SOURCE,
+              ...(sourceTime ? { sourceTime } : {}) } });
           if (event.observationId) skill.observations.at(-1).metadata.observationId = event.observationId;
           observationCount++;
         }
@@ -176,10 +181,17 @@ export function mergeAuditSkillTelemetry(run, telemetrySnapshot) {
   }
   const safeCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
   const transportWarnings = [...warnings].filter(value => value.startsWith('telemetry-')).slice(0, 100);
-  const journal = metadata.journal && typeof metadata.journal === 'object' ? {
-    status: ['available', 'observed', 'partial', 'unavailable', 'disabled', 'unknown'].includes(metadata.journal.status) ? metadata.journal.status : 'unknown',
-    bytes: safeCount(metadata.journal.bytes), eventCount: safeCount(metadata.journal.eventCount),
-  } : { status: 'unknown', bytes: null, eventCount: null };
+  // Older journal readers supplied flat health metadata. Keep that legacy
+  // shape unverified; current readers and live capture use nested diagnostics.
+  const rawJournal = metadata.journal ?? (Object.hasOwn(metadata, 'status')
+    ? { status: metadata.status, bytes: metadata.bytes, eventCount: metadata.eventCount,
+      mode: 'unknown', format: null, commit: 'legacy-unverified', committedBytes: null, committedEvents: null, uncertainBytes: null }
+    : null);
+  const journal = projectTelemetryJournal(rawJournal) ?? {
+    status: 'unknown', mode: 'unknown', format: null, commit: 'unknown', bytes: null, eventCount: null,
+    committedBytes: null, committedEvents: null, uncertainBytes: null,
+  };
+  const deliveryAccounting = projectDeliveryAccounting(metadata.deliveryAccounting);
   run.skillTelemetry = {
     status, delivery, capability,
     boundary: 'Native skill invocation events only; detection and delivery are best-effort and not exhaustive. Observer identities count received records, not guaranteed unique executions; legacy rows without identity retain coarse replay deduplication.',
@@ -188,6 +200,7 @@ export function mergeAuditSkillTelemetry(run, telemetrySnapshot) {
       transport: { status: transportWarnings.length ? 'partial' : metadata.transport === 'otlp-http-json' ? 'observed' : 'unknown',
         receivedBytes: safeCount(metadata.receivedBytes), rejectedRequests: safeCount(metadata.rejectedRequests), warnings: transportWarnings },
       journal,
+      ...(deliveryAccounting ? { deliveryAccounting } : {}),
       missingness: { byAgent },
     },
   };

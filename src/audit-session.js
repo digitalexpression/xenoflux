@@ -1,22 +1,27 @@
 // Read-only, bounded ingestion of one selected native Codex workflow.
 // Native session content is untrusted data: only whitelisted metadata leaves this module.
 import { constants } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
-import { basename, join, relative, resolve, sep } from 'node:path';
+import { lstat, open, realpath, opendir } from 'node:fs/promises';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
+import * as zlib from 'node:zlib';
 import { redactText } from './redact.js';
+import { NODE_REQUIREMENT } from './node-runtime.js';
 import { resolveAuditProfile } from './audit-discovery.js';
 import { assessUsageSequence, normalizeUsageSnapshot, USAGE_FIELDS } from './audit-usage.js';
+import { deriveRecordedThreadUsage, deriveRecordedUsage, recordedUsageAccounting } from './audit-recorded-usage.js';
 import { createAuditToolCapture } from './audit-tools.js';
 import { createAuditHookCapture } from './audit-hooks.js';
 import { parseLiteralSkillRead, parseLiteralSkillReadDetails } from './audit-skill-read.js';
 import { projectResourceProvenance } from './audit-provenance.js';
+import { extractNamedActions, unambiguousExitCode, countLiteralActionCalls } from './audit-actions.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MAX_BYTES = 32 * 1024 * 1024, MAX_LINE = 1024 * 1024, MAX_RECORDS = 10000;
 const MAX_CHILDREN = 100, MAX_DEPTH = 4, MAX_CANDIDATES = 10000, MAX_PHYSICAL_LINES = 100000;
+const DATE_PARTS = [/^\d{4}$/, /^\d{2}$/, /^\d{2}$/];
 const HOOK_HISTORY_BOUNDARY = 'rollout-hook-lifecycle-not-observed';
 const SAFE_TEXT = (v, n = 256) => typeof v === 'string' && v.length > 0 && v.length <= n
   && !/[\x00-\x1f\x7f-\x9f]/.test(v) && redactText(v, 'metadata.txt') === v;
@@ -26,6 +31,15 @@ const catalogPath = v => validPath(v) || (typeof v === 'string' && /^r\d+\/[A-Za
 const safeArtifactPath = v => (validPath(v) && SAFE_TEXT(v, 4096)) || (typeof v === 'string' && v.length <= 4096 && !v.startsWith('/')
   && !/[\x00-\x1f\x7f-\x9f]/.test(v) && !v.split(/[\\/]/).includes('..') && SAFE_TEXT(v, 4096));
 const inside = (root, path) => { const rel = relative(root, path); return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`); };
+function projectRecordedArtifactPath(value, turnId, repoRoot, turnCwds) {
+  if (!safeArtifactPath(value)) return { path: null };
+  const retainSource = isAbsolute(value) ? { recordedPath: value } : {};
+  if (!repoRoot || turnCwds.get(turnId) !== repoRoot) return { path: null, ...retainSource };
+  const absolute = isAbsolute(value) ? resolve(value) : resolve(repoRoot, value);
+  if (!validPath(absolute) || !inside(repoRoot, absolute)) return { path: null, ...retainSource };
+  const path = relative(repoRoot, absolute).split(sep).join('/');
+  return path && safeArtifactPath(path) ? { path, ...retainSource } : { path: null, ...retainSource };
+}
 const uuid = v => typeof v === 'string' && UUID.test(v);
 const USAGE_SOURCE_FIELDS = Object.freeze({ input_tokens: 'inputTokens', output_tokens: 'outputTokens',
   cached_input_tokens: 'cachedInputTokens', reasoning_output_tokens: 'reasoningOutputTokens',
@@ -50,8 +64,9 @@ function resultBase(profile, id) {
     profileId: profile.profileId, profileName: profile.profileName, home: profile.home,
     userHome: profile.userHome, environmentId: profile.environmentId ?? null,
   }, status: 'unavailable', reason: null, hookCaptureBoundary: null, source: { kind: 'native-rollout', nativeSessionId: id,
+    provider: 'codex', client: 'unknown', clientEvidence: 'unknown', recordedSetup: { status: 'unavailable', source: 'unknown', model: [], effort: [], fullHistoricalSetup: 'unavailable' },
     path: null, fingerprint: null, bytes: null, recordCount: 0, clientVersion: null, originator: null },
-  agents: [], events: [], turns: [], skills: [], toolInvocations: [], hookInvocations: [], mcp: { servers: [], inventory: 'not-requested' }, usage: { status: 'unavailable', observations: [], totals: null },
+  agents: [], events: [], turns: [], skills: [], actions: [], actionCoverage: 'unavailable', toolInvocations: [], hookInvocations: [], mcp: { servers: [], inventory: 'not-requested' }, usage: { status: 'unavailable', observations: [], totals: null },
   metrics: { recordedSpanMs: null }, coverage: emptyCoverage(), outcome: { status: 'unverified', checks: [] }, artifacts: [], warnings: [] };
 }
 
@@ -64,6 +79,16 @@ async function safeRegular(root, path) {
     if (canonicalPath !== path || !inside(canonicalRoot, canonicalPath)) return null;
     return expected;
   } catch { return null; }
+}
+async function locateRollout(root, path) {
+  if (!validPath(path) || !inside(resolve(root), resolve(path))) return null;
+  const expected = await safeRegular(root, path);
+  if (expected) return { path, expected, compression: path.endsWith('.jsonl.zst') ? 'zstd' : 'none' };
+  // A compressed sibling is considered only when the indexed plain file is absent.
+  try { await lstat(path); return null; } catch (error) { if (error.code !== 'ENOENT') return null; }
+  if (!path.endsWith('.jsonl')) return null;
+  const compressedPath = `${path}.zst`, compressed = await safeRegular(root, compressedPath);
+  return compressed ? { path: compressedPath, expected: compressed, compression: 'zstd' } : null;
 }
 async function checkedIndex(home) {
   const path = join(home, 'state_5.sqlite');
@@ -101,12 +126,35 @@ async function exactRow(home, id) {
         if (!['cli', 'vscode', 'exec'].includes(row.native_source))
           return { row, status: 'unavailable', lineageError: 'The selected child lineage metadata is malformed.' };
       }
+      if (['cli', 'vscode', 'exec'].includes(row.native_source)) row.indexSource = row.native_source;
     }
     return { row: row ?? null, status: row ? 'ready' : 'not-found' };
   } finally { db.close(); }
 }
 function decode(bytes) { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
 function safeMetaText(v, limit = 256) { return SAFE_TEXT(v, limit) ? v : null; }
+
+function recordedClient(originator, indexSource) {
+  const signals = [];
+  const label = typeof originator === 'string' ? originator.trim().toLowerCase().replace(/[ _]+/g, '-') : '';
+  if (['codex-cli', 'codex-cli-rs', 'codex-exec'].includes(label)) signals.push({ client: 'cli', source: 'recorded-originator' });
+  else if (['codex-desktop', 'codex-app'].includes(label)) signals.push({ client: 'desktop', source: 'recorded-originator' });
+  if (['cli', 'exec'].includes(indexSource)) signals.push({ client: 'cli', source: 'recorded-index-source' });
+  // VS Code and future index labels do not establish either supported client.
+  const clients = new Set(signals.map(signal => signal.client));
+  const client = clients.size === 1 ? [...clients][0] : 'unknown';
+  const evidence = signals.length === 0 ? 'unknown'
+    : clients.size > 1 ? 'conflicting-recorded-signals'
+      : signals.map(signal => signal.source).join('+');
+  return { client, evidence };
+}
+
+function recordedSetupContext(turns) {
+  const values = field => [...new Set(turns.map(turn => safeMetaText(turn[field], 160)).filter(Boolean))].sort();
+  const model = values('model'), effort = values('reasoningEffort');
+  return { status: model.length || effort.length ? 'partial' : 'unavailable', source: model.length || effort.length ? 'native-turn-context' : 'unknown',
+    model, effort, fullHistoricalSetup: 'unavailable' };
+}
 
 // Extract skill metadata only when the native record carries structured catalog
 // entries or an explicit absolute skill-definition/resource path. Never parse
@@ -246,11 +294,19 @@ function literalCatTargets(command) {
   return tokens.slice(1);
 }
 
+// A recorded path can identify the known bundled-cache layout, but arbitrary
+// directory names (including /etc or admin/skills) establish no managed authority.
+// Do not consult today's filesystem when classifying historical evidence.
+function recordedBundledSkillPath(profile, path) {
+  const homes = [profile?.home, ...[profile?.defaultUserHome, profile?.userHome]
+    .filter(value => typeof value === 'string').map(value => join(value, '.codex'))];
+  return homes.some(home => validPath(home) && path.startsWith(`${join(home, 'skills', '.system')}/`));
+}
+
 function inferOrigin(profile, path) {
   if (/^r\d+\//.test(path)) return path.split('/')[0];
   if (path.includes('/plugins/cache/')) return 'plugin-cache';
-  if (path.startsWith('/etc/') || path.includes('/admin/skills/')) return 'admin';
-  if (path.includes('/skills/.system/') || /\/(?:opt|usr\/share)\/.*(?:codex|skills)/i.test(path)) return 'system';
+  if (recordedBundledSkillPath(profile, path)) return 'system';
   for (const root of [profile?.defaultUserHome, profile?.userHome].filter(Boolean))
     if (path.startsWith(`${root}/.agents/skills/`) || path.startsWith(`${root}/.codex/skills/`)) return 'user';
   if (profile?.home && path.startsWith(`${profile.home}/`)) return 'profile-home';
@@ -261,8 +317,7 @@ function inferOrigin(profile, path) {
 }
 function inferScope(profile, path) {
   if (path.includes('/plugins/cache/')) return 'plugin';
-  if (path.startsWith('/etc/') || path.includes('/admin/skills/')) return 'admin';
-  if (path.includes('/skills/.system/') || /\/(?:opt|usr\/share)\/.*(?:codex|skills)/i.test(path)) return 'system';
+  if (recordedBundledSkillPath(profile, path)) return 'system';
   for (const root of [profile?.defaultUserHome, profile?.userHome].filter(Boolean))
     if (path.startsWith(`${root}/.agents/skills/`) || path.startsWith(`${root}/.codex/skills/`)) return 'user';
   if (profile?.home && path.startsWith(`${profile.home}/`)) return 'profile';
@@ -276,13 +331,32 @@ function recordedProjectSkillPath(profile, path) {
   if (!match || !match[1]) return false;
   return [...(profile?.recordedCwds ?? [])].some(cwd => cwd === match[1] || cwd.startsWith(`${match[1]}/`));
 }
-function parseRenderedCatalog(text, profile) {
+function parseRenderedCatalog(text, profile, warnings = new Set()) {
   if (typeof text !== 'string' || text.length > 256 * 1024) return [];
   const block = text.match(/<skills_instructions\b[^>]*>([\s\S]*?)<\/skills_instructions>/i)?.[1] ?? text;
   const roots = new Map();
+  const invalidRoots = new Set();
+  const conflictedRoots = new Set();
   for (const line of block.split(/\r?\n/)) {
-    const root = line.match(/^\s*[-*]\s*`(r\d+)`\s*=\s*`([^`]+)`\s*$/i);
-    if (root && validPath(root[2])) roots.set(root[1], root[2]);
+    const root = line.match(/^\s*[-*]\s*`(r\d+)`\s*=\s*`([^`]*)`\s*$/i);
+    if (!root) continue;
+    const label = root[1].toLowerCase();
+    const path = root[2];
+    if (!validPath(path)) {
+      invalidRoots.add(label);
+      roots.delete(label);
+      warnings.add('Invalid rendered skill root alias was omitted.');
+      continue;
+    }
+    if (invalidRoots.has(label) || conflictedRoots.has(label)) continue;
+    const previous = roots.get(label);
+    if (previous !== undefined && previous !== path) {
+      roots.delete(label);
+      conflictedRoots.add(label);
+      warnings.add('Conflicting rendered skill root alias was omitted.');
+      continue;
+    }
+    roots.set(label, path);
   }
   if (!/<skills_instructions\b/i.test(text) && !/^\s*[-*]\s*(?:skill\s*:|[^\s:]+(?:[^:]*):\s+).*\(file\s*:/im.test(block)) return [];
   const rows = [];
@@ -292,10 +366,15 @@ function parseRenderedCatalog(text, profile) {
     let name = match[1].trim(), recordedPath = match[2].replaceAll('`', ''), path = recordedPath, rootAlias = null;
     const alias = recordedPath.match(/^(r\d+)\/(.+)$/i);
     if (alias) {
-      rootAlias = alias[1]; const root = roots.get(rootAlias);
-      if (!root) continue;
+      rootAlias = alias[1].toLowerCase();
+      const root = roots.get(rootAlias);
+      if (conflictedRoots.has(rootAlias) || invalidRoots.has(rootAlias)) continue;
+      if (!root) { warnings.add('Unknown rendered skill root alias was omitted.'); continue; }
       const relativePath = alias[2]; path = resolve(root, relativePath);
-      if (!inside(root, path) || !path.endsWith('/SKILL.md')) continue;
+      if (!inside(root, path) || !path.endsWith('/SKILL.md')) {
+        warnings.add('Unsafe rendered skill root alias path was omitted.');
+        continue;
+      }
     }
     if (!catalogPath(path)) continue;
     if (name.toLowerCase() === 'skill') name = line.match(/^\s*[-*]\s*skill\s*:\s*([^:()]{1,160})\s*:/i)?.[1]?.trim() ?? name;
@@ -397,7 +476,12 @@ function legacyMcpToolItem(payload, phase) {
   }
   if (phase === 'completed') {
     const result = payload.result;
-    if (result && typeof result === 'object' && (Object.hasOwn(result, 'Err') || Object.hasOwn(result, 'err'))) item.status = 'failed';
+    if (result && typeof result === 'object') {
+      const returned = firstOwn(result, 'Ok', 'ok');
+      // Ok means the RPC returned; the tool may still report an MCP error.
+      if (Object.hasOwn(result, 'Err') || Object.hasOwn(result, 'err')
+        || returned?.isError === true || returned?.is_error === true) item.status = 'failed';
+    }
     const duration = nativeDurationMs(payload.duration);
     if (duration !== undefined) item.durationMs = duration;
   }
@@ -446,25 +530,56 @@ function historicalHookRun(raw) {
 }
 
 async function readRollout(profile, id, path, options = {}) {
-  const unavailable = reason => ({ status: 'unavailable', reason, source: { path: null, fingerprint: null, bytes: null, recordCount: 0 }, agents: [], turns: [], events: [], skills: [], toolInvocations: [], hookInvocations: [], mcp: { servers: [], inventory: 'not-requested' }, toolCoverage: { tools: 'unavailable', mcp: 'unavailable' }, hookCoverage: 'unavailable', hookCaptureBoundary: null, toolWarnings: [], hookWarnings: [], artifacts: [], outcomeClaim: null, usage: { status: 'unavailable', observations: [], totals: null, byAgent: [] }, metrics: { recordedSpanMs: null }, warnings: [] });
+  const unavailable = reason => ({ status: 'unavailable', reason, source: { path: null, fingerprint: null, bytes: null, recordCount: 0 }, agents: [], turns: [], events: [], skills: [], actions: [], toolInvocations: [], hookInvocations: [], mcp: { servers: [], inventory: 'not-requested' }, toolCoverage: { tools: 'unavailable', mcp: 'unavailable' }, hookCoverage: 'unavailable', hookCaptureBoundary: null, toolWarnings: [], hookWarnings: [], artifacts: [], outcomeClaim: null, usage: { status: 'unavailable', observations: [], totals: null, byAgent: [] }, metrics: { recordedSpanMs: null }, warnings: [] });
   if (!path || typeof path !== 'string' || path.length > 4096) return unavailable('No rollout is indexed for this session.');
-  const expected = await safeRegular(profile.home, path);
-  if (!expected) return unavailable('The selected rollout path is unsafe or unavailable.');
+  const located = await locateRollout(profile.home, path);
+  if (!located) return unavailable('The selected rollout path is unsafe or unavailable.');
+  path = located.path;
+  const { expected, compression } = located;
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await handle.stat();
     if (!before.isFile() || before.nlink !== 1 || before.uid !== process.getuid?.() || before.dev !== expected.dev || before.ino !== expected.ino
       || !await safeRegular(profile.home, path)) return unavailable('The selected rollout changed or is unsafe.');
-    const upper = Math.min(before.size, MAX_BYTES), hash = createHash('sha256');
+    if (compression === 'zstd' && before.size > MAX_BYTES)
+      return unavailable('The stored compressed rollout exceeds the byte limit.');
+    const hash = createHash('sha256');
+    let decoded = null, storedBytes = 0;
+    if (compression === 'zstd') {
+      if (typeof zlib.zstdDecompressSync !== 'function' || zlib.constants.ZSTD_d_windowLogMax === undefined)
+        return unavailable(`Zstandard rollout decoding is unavailable in this Node runtime. Use Node ${NODE_REQUIREMENT} with built-in Zstandard support.`);
+      const stored = Buffer.alloc(before.size);
+      while (storedBytes < stored.length) {
+        const { bytesRead } = await handle.read(stored, storedBytes, stored.length - storedBytes, storedBytes);
+        if (!bytesRead) return unavailable('The compressed rollout was truncated during read.');
+        hash.update(stored.subarray(storedBytes, storedBytes + bytesRead));
+        storedBytes += bytesRead;
+      }
+      try {
+        const result = zlib.zstdDecompressSync(stored, { info: true, maxOutputLength: MAX_BYTES,
+          params: { [zlib.constants.ZSTD_d_windowLogMax]: 25 } });
+        if (!result?.engine || !Number.isSafeInteger(result.engine.bytesWritten))
+          return unavailable('Zstandard rollout framing cannot be verified in this Node runtime.');
+        // Do not count a first decoded frame as a complete JSONL source if trailing bytes were ignored.
+        if (result.engine.bytesWritten !== stored.length)
+          return unavailable('The compressed rollout has trailing or undecoded data.');
+        decoded = result.buffer;
+      } catch { return unavailable('The compressed rollout is malformed or exceeds the decoded byte limit.'); }
+    }
+    const upper = compression === 'zstd' ? decoded.length : Math.min(before.size, MAX_BYTES);
     let sourceLine = 0, relevant = 0, recordsTotal = 0, physicalLines = 0, pending = Buffer.alloc(0), pos = 0, discarding = false;
     const physicalLimit = Number.isSafeInteger(options.maxPhysicalLines)
       ? Math.max(1, Math.min(MAX_PHYSICAL_LINES, options.maxPhysicalLines)) : MAX_PHYSICAL_LINES;
-    let header = false, badIdentity = false, firstAt = null, lastAt = null, headerPayload, outcomeClaim = null;
-    const turns = [], events = [], skills = new Map(), usageRows = [], artifacts = [], warnings = new Set();
+    let header = false, badIdentity = false, firstAt = null, lastAt = null, headerPayload, outcomeClaim = null, actionRepoRoot = null;
+    let actionCallsSeen = false, actionEvidencePartial = false;
+    let recordedInputIncomplete = false;
+    const turns = [], events = [], skills = new Map(), usageRows = [], artifacts = [], actions = [], warnings = new Set();
+    const recordedUsageRows = [], recordedTerminals = [], pendingActions = new Map(), resolvedActionResults = new Map(), ambiguousActionCalls = new Set();
     const toolCapture = createAuditToolCapture({ maxInvocations: MAX_RECORDS, maxServers: 1000 });
     const hookCapture = createAuditHookCapture({ maxInvocations: 500 });
     const turnById = new Map();
+    const turnWorkspaceCwds = new Map();
     const actorCwds = [], absoluteReads = [];
     const calls = new Map(), itemStarts = new Map(); let currentTurn = null;
     const agents = [{ id, parentId: options.parentId ?? null, depth: options.depth ?? 0, role: options.parentId ? 'subagent' : 'primary', sessionId: id, status: 'selected', source: { path: null, fingerprint: null } }];
@@ -485,6 +600,13 @@ async function readRollout(profile, id, path, options = {}) {
         if (!validRoot && !validChild) { badIdentity = true; return; }
         header = true; headerPayload = record.payload;
         const sessionCwd = nativeCwd(record.payload.cwd);
+        // Named actions are derived only from the cwd recorded in this native
+        // session. Never probe the current checkout: historical workspaces may
+        // have moved or disappeared, and their recorded path is attribution
+        // context rather than permission to read files there.
+        if (options.actionRepoRoot) {
+          if (sessionCwd === options.actionRepoRoot) actionRepoRoot = options.actionRepoRoot;
+        } else if (sessionCwd) actionRepoRoot = sessionCwd;
         if (sessionCwd) { profile.recordedCwds.add(sessionCwd); actorCwds.push({ cwd: sessionCwd, source: 'session', sourceLine }); }
         return;
       }
@@ -493,6 +615,8 @@ async function readRollout(profile, id, path, options = {}) {
       if (!turnId && (record.type === 'response_item' || record.type === 'event_msg')) turnId = currentTurn;
       if (!uuid(turnId) && turnId !== null) {
         const subType = record.type === 'event_msg' ? p.type : null;
+        if (record.type === 'token_usage_record' || record.type === 'turn_context'
+          || ['task_complete', 'turn_complete', 'turn_aborted'].includes(subType)) recordedInputIncomplete = true;
         const rawItem = p.item ?? p;
         const typedTool = rawItem && typeof rawItem === 'object' && HISTORICAL_TOOL_TYPES.has(firstOwn(rawItem, 'type', 'item_type', 'itemType'));
         if (['item_started','item_completed','mcp_tool_call_begin','mcp_tool_call_end','exec_command_begin','exec_command_end','hook_started','hook_completed'].includes(subType) || typedTool)
@@ -501,6 +625,14 @@ async function readRollout(profile, id, path, options = {}) {
       }
       if (['turn_context', 'event_msg', 'response_item', 'token_count', 'token_usage_record'].includes(record.type)) {
         if (++relevant > MAX_RECORDS) { warnings.add('Relevant rollout record limit reached.'); return; }
+      }
+      if (record.type === 'token_usage_record' && recordedUsageRows.length <= 512) {
+        const counters = value => value && typeof value === 'object'
+          ? Object.fromEntries(Object.keys(USAGE_SOURCE_FIELDS).filter(key => Object.hasOwn(value, key))
+            .map(key => [key, typeof value[key] === 'number' ? value[key] : null])) : null;
+        recordedUsageRows.push({ thread_id: p.thread_id, session_id: p.session_id, turn_id: p.turn_id,
+          root_turn_id: p.root_turn_id, response_id: p.response_id, sourceLine,
+          usage: counters(p.usage), turn_token_usage: counters(p.turn_token_usage), thread_token_usage: counters(p.thread_token_usage) });
       }
       if (options.parentId && record.type === 'token_usage_record') {
         if (!uuid(p.thread_id) || !uuid(p.session_id) || !uuid(p.turn_id) || !uuid(p.root_turn_id)) { warnings.add('Child turn ownership metadata is incomplete.'); return; }
@@ -543,6 +675,11 @@ async function readRollout(profile, id, path, options = {}) {
         return;
       }
       if (record.type === 'turn_context') {
+        if (uuid(turnId)) {
+          const contextCwd = typeof p.cwd === 'string' ? p.cwd : null;
+          if (!turnWorkspaceCwds.has(turnId)) turnWorkspaceCwds.set(turnId, contextCwd);
+          else if (turnWorkspaceCwds.get(turnId) !== contextCwd) turnWorkspaceCwds.set(turnId, null);
+        }
         if (validPath(p.cwd) && SAFE_TEXT(p.cwd, 4096)) {
           profile.recordedCwds.add(p.cwd); actorCwds.push({ cwd: p.cwd, source: 'turn', turnId, sourceLine });
         }
@@ -551,11 +688,18 @@ async function readRollout(profile, id, path, options = {}) {
         turns.push(row); turnById.set(turnId, row); currentTurn = turnId;
         if (!options.parentId || uuid(turnId)) {
           addCatalogSkills(p, id, turnId, sourceLine, skills, []);
-          for (const entry of parseRenderedCatalog(p.skills_instructions, profile)) addCatalogSkills({ skills: [entry] }, id, turnId, sourceLine, skills, []);
+          for (const entry of parseRenderedCatalog(p.skills_instructions, profile, warnings)) addCatalogSkills({ skills: [entry] }, id, turnId, sourceLine, skills, []);
         }
       } else if (record.type === 'event_msg') {
         const sub = safeMetaText(p.type, 80);
+        if (sub === 'item_completed' && actionRepoRoot) {
+          const extracted = extractNamedActions([{ type: 'event_msg', payload: p, sourceLine }],
+            { repoRoot: actionRepoRoot });
+          for (const action of extracted) actions.push({ ...action, agentId: id });
+        }
         if (sub === 'task_started' && uuid(turnId)) currentTurn = turnId;
+        if (['task_complete', 'turn_complete', 'turn_aborted'].includes(sub)) recordedTerminals.push({ turnId,
+          terminalLine: sourceLine, status: sub === 'turn_aborted' ? 'interrupted' : p.error ? 'failed' : 'completed' });
         if (sub === 'item_started' || sub === 'item_completed') {
           const rawItem = p.item && typeof p.item === 'object' ? p.item : p;
           const item = historicalToolItem(rawItem);
@@ -679,7 +823,8 @@ async function readRollout(profile, id, path, options = {}) {
                 metadata: { id: key, status: safeMetaText(item.status, 64), changeCount: changes.length,
                   sourceChangeCount: sourceChanges.length, retainedChangeCount: changes.length, truncated } });
               for (const [path, detail] of changes) artifacts.push({ kind: 'recorded-file-change', agentId: id, turnId, sourceLine,
-                path: safeArtifactPath(path) ? path : null, status: safeMetaText(detail?.kind ?? detail?.type ?? detail?.status, 48) });
+                ...projectRecordedArtifactPath(path, turnId, actionRepoRoot, turnWorkspaceCwds),
+                status: safeMetaText(detail?.kind ?? detail?.type ?? detail?.status, 48) });
             } else if (!call && /function_call|tool_call|custom_tool_call|mcp|command_execution/i.test(itemType ?? '')) {
               call = toolEvents({ timestamp: record.timestamp, payload: item }, sourceLine, id, turnId, events, skills);
               if (!call && key) call = events.find(entry => entry.kind === 'tool-call' && entry.metadata.callId === key);
@@ -742,12 +887,68 @@ async function readRollout(profile, id, path, options = {}) {
           if (event?.sourceLine === sourceLine && event.agentId === id) event.metadata = {
             sourceChangeCount: sourceChanges.length, retainedChangeCount: changes.length, truncated };
           for (const item of changes) artifacts.push({ kind: 'recorded-file-change', agentId: id, turnId, sourceLine,
-            path: typeof item?.path === 'string' && SAFE_TEXT(item.path, 4096) ? item.path : null,
+            ...projectRecordedArtifactPath(item?.path, turnId, actionRepoRoot, turnWorkspaceCwds),
             status: safeMetaText(item?.kind ?? item?.status, 48) });
         }
         if (['task_complete','turn_complete'].includes(sub)) currentTurn = null;
       } else if (record.type === 'response_item') {
         const response = p.item ?? p, responseType = response.type ?? p.type;
+        if (actionRepoRoot && responseType === 'custom_tool_call') {
+          actionCallsSeen = true;
+          const extracted = extractNamedActions([{ type: 'response_item', payload: p, sourceLine }],
+            { repoRoot: actionRepoRoot });
+          const callId = safeMetaText(response.call_id ?? response.id ?? p.call_id, 128);
+          const callCount = countLiteralActionCalls(response.input);
+          const actionTurnId = uuid(turnId) ? turnId : null;
+          const actionCallKey = callId ? JSON.stringify([actionTurnId, callId]) : null;
+          if (callId && callCount !== null && extracted.length && actionCallKey
+            && !ambiguousActionCalls.has(actionCallKey) && !pendingActions.has(actionCallKey)
+            && !resolvedActionResults.has(actionCallKey)) {
+            pendingActions.set(actionCallKey, { actions: extracted.map(action => ({ ...action, agentId: id,
+              turnId: actionTurnId })), callCount });
+          } else {
+            actionEvidencePartial = true;
+            if (actionCallKey) {
+              ambiguousActionCalls.add(actionCallKey);
+              pendingActions.delete(actionCallKey);
+              const priorIndexes = resolvedActionResults.get(actionCallKey) ?? [];
+              for (const index of priorIndexes) actions[index] = { ...actions[index], resultSourceLine: null, resultIndex: null, exitCode: null };
+              resolvedActionResults.delete(actionCallKey);
+            }
+          }
+        } else if (responseType === 'custom_tool_call_output') {
+          const callId = safeMetaText(response.call_id ?? response.id ?? p.call_id, 128);
+          const outputTurnId = uuid(turnId) ? turnId : null;
+          const actionCallKey = callId ? JSON.stringify([outputTurnId, callId]) : null;
+          const call = actionCallKey ? pendingActions.get(actionCallKey) : null;
+          if (call) {
+            const results = [];
+            for (const [outputIndex, block] of (Array.isArray(response.output) ? response.output : []).slice(0, 100).entries()) {
+              if (block?.type !== 'input_text' || typeof block.text !== 'string' || block.text.length > 64 * 1024) continue;
+              try { results.push({ record: JSON.parse(block.text), outputIndex }); } catch { /* status prose is not a result record */ }
+            }
+            const positionsMatch = results.length === call.callCount;
+            if (!positionsMatch) actionEvidencePartial = true;
+            const resolvedIndexes = [];
+            for (const action of call.actions) {
+              const result = positionsMatch ? results[action.invocationIndex] : null;
+              resolvedIndexes.push(actions.length);
+              actions.push({ ...action, agentId: id, resultSourceLine: positionsMatch ? sourceLine : null,
+                resultIndex: result?.outputIndex ?? null,
+                exitCode: result ? unambiguousExitCode(result.record) : null });
+            }
+            resolvedActionResults.set(actionCallKey, resolvedIndexes);
+            pendingActions.delete(actionCallKey);
+          } else {
+            actionEvidencePartial = true;
+            if (actionCallKey && resolvedActionResults.has(actionCallKey)) {
+              ambiguousActionCalls.add(actionCallKey);
+              for (const index of resolvedActionResults.get(actionCallKey))
+                actions[index] = { ...actions[index], resultSourceLine: null, resultIndex: null, exitCode: null };
+              resolvedActionResults.delete(actionCallKey);
+            }
+          }
+        }
         const typedItem = historicalToolItem(response);
         if (typedItem) {
           if (!toolCapture.consumeItem({ item: typedItem, agentId: id, turnId, phase: 'completed', source: 'native-rollout-response-item', sourceLine }))
@@ -763,7 +964,7 @@ async function readRollout(profile, id, path, options = {}) {
           events.push({ agentId: id, turnId, kind: 'file-change', recordedAt: time, sourceLine,
             metadata: { sourceChangeCount: sourceChanges.length, retainedChangeCount: changes.length, truncated } });
           for (const item of changes) artifacts.push({ kind: 'recorded-file-change', agentId: id, turnId, sourceLine,
-            path: typeof item?.path === 'string' && SAFE_TEXT(item.path, 4096) ? item.path : null,
+            ...projectRecordedArtifactPath(item?.path, turnId, actionRepoRoot, turnWorkspaceCwds),
             status: safeMetaText(item?.kind ?? item?.status, 48) });
         }
         if (/^(?:function_call|tool_call|custom_tool_call)_output$/.test(responseType ?? '')) {
@@ -788,7 +989,7 @@ async function readRollout(profile, id, path, options = {}) {
           if (['developer','system'].includes(response.role)) {
             for (const block of (Array.isArray(response.content) ? response.content : [])) {
               if (block?.type !== 'input_text' || typeof block.text !== 'string') continue;
-              for (const entry of parseRenderedCatalog(block.text, profile)) addCatalogSkills({ skills: [entry] }, id, turnId, sourceLine, skills, []);
+              for (const entry of parseRenderedCatalog(block.text, profile, warnings)) addCatalogSkills({ skills: [entry] }, id, turnId, sourceLine, skills, []);
             }
           }
           if (response.role === 'user') {
@@ -837,9 +1038,14 @@ async function readRollout(profile, id, path, options = {}) {
     };
     const buf = Buffer.alloc(65536);
     readLoop: while (pos < upper && relevant <= MAX_RECORDS && physicalLines <= physicalLimit) {
-      const { bytesRead } = await handle.read(buf, 0, Math.min(buf.length, upper-pos), pos);
+      const bytesRead = compression === 'zstd'
+        ? Math.min(buf.length, upper - pos)
+        : (await handle.read(buf, 0, Math.min(buf.length, upper-pos), pos)).bytesRead;
       if (!bytesRead) { warnings.add('Rollout truncated during read.'); break; }
-      const chunk = pending.length ? Buffer.concat([pending, buf.subarray(0, bytesRead)]) : buf.subarray(0, bytesRead); pos += bytesRead; hash.update(buf.subarray(0, bytesRead));
+      if (compression === 'zstd') decoded.copy(buf, 0, pos, pos + bytesRead);
+      const readChunk = buf.subarray(0, bytesRead);
+      const chunk = pending.length ? Buffer.concat([pending, readChunk]) : readChunk; pos += bytesRead;
+      if (compression !== 'zstd') { hash.update(readChunk); storedBytes += bytesRead; }
       let offset = 0, end;
       while ((end = chunk.indexOf(10, offset)) !== -1) {
         if (++physicalLines > physicalLimit) { warnings.add('Physical rollout line limit reached.'); break readLoop; }
@@ -852,7 +1058,7 @@ async function readRollout(profile, id, path, options = {}) {
     }
     if (pending.length && relevant <= MAX_RECORDS && physicalLines < physicalLimit) { parse(pending); warnings.add('Unterminated final rollout record.'); }
     if (!header || badIdentity) return unavailable('The rollout identity could not be verified.');
-    if (before.size > MAX_BYTES) warnings.add('Rollout byte limit reached.');
+    if (compression !== 'zstd' && before.size > MAX_BYTES) warnings.add('Rollout byte limit reached.');
     const after = await handle.stat(); if (after.size !== before.size || after.mtimeMs !== before.mtimeMs) warnings.add('Rollout changed during ingestion.');
     const toolResult = toolCapture.result(), hookResult = hookCapture.result();
     let toolInvocations = toolResult.toolInvocations;
@@ -904,24 +1110,54 @@ async function readRollout(profile, id, path, options = {}) {
     const recordedSpanMs = retainedTimes
       ? (retainedTimes.length >= 2 ? Math.max(...retainedTimes) - Math.min(...retainedTimes) : null)
       : (firstAt === null || lastAt === null ? null : Math.max(0, lastAt-firstAt));
+    if (recordedInputIncomplete && recordedUsageAccounting(headerPayload.cli_version))
+      warnings.add('Malformed native usage or terminal identity omitted.');
     const usage = summarizeUsage(usageRows, warnings);
+    for (const turn of turns) if (actionRepoRoot) turn.workspaceMatched = turnWorkspaceCwds.get(turn.turnId) === actionRepoRoot;
     const sortedSkills = [...skills.values()].filter(skill => skill.observations.length).map(skill => ({ ...skill, observations: skill.observations }));
     const agentStatus = warnings.size ? 'partial' : 'ready';
     const fingerprint = hash.digest('hex');
     agents[0].source = { path, fingerprint };
+    const client = recordedClient(headerPayload?.originator, options.indexSource);
+    const sourceSnapshot = { path, fingerprint, bytes: storedBytes, fileBytes: before.size,
+      sourceScope: 'stored-source-bytes', decodedBytes: compression === 'zstd' ? decoded.length : before.size,
+      parsedBytes: pos, compression, fingerprintRepresentation: 'stored-source-bytes',
+      fingerprintScope: storedBytes === before.size ? 'source-snapshot' : 'read-prefix', recordCount: recordsTotal,
+      provider: 'codex', client: client.client, clientEvidence: client.evidence,
+      recordedSetup: recordedSetupContext(turns), clientVersion: safeMetaText(headerPayload?.cli_version, 128), originator: safeMetaText(headerPayload?.originator, 128) };
+    if (recordedUsageAccounting(headerPayload.cli_version)) {
+      Object.assign(sourceSnapshot, { kind: 'native-rollout', nativeSessionId: id });
+      agents[0].source = { ...sourceSnapshot };
+    }
+    const scopedActions = actionRepoRoot ? actions.filter(action => action.turnId && turnWorkspaceCwds.get(action.turnId) === actionRepoRoot) : actions;
+    const actionWorkspaceMismatch = scopedActions.length !== actions.length
+      || [...turnWorkspaceCwds.values()].some(cwd => cwd !== actionRepoRoot);
     const sourceComplete = warnings.size === 0 && turns.length > 0;
+    usage.recordedThread = deriveRecordedThreadUsage({ agentId: id, sessionId: headerPayload.session_id ?? id,
+      parentId: options.parentId ?? null, rootTurnIds: options.rootTurnIds ?? turns.map(turn => turn.turnId),
+      source: sourceSnapshot,
+      version: headerPayload.cli_version, sourceComplete: sourceComplete && pos === upper && storedBytes === before.size
+        && !recordedInputIncomplete
+        && recordedTerminals.every(terminal => turns.some(turn => turn.turnId === terminal.turnId)),
+      records: recordedUsageRows, turns: turns.map(turn => {
+        const terminals = recordedTerminals.filter(row => row.turnId === turn.turnId);
+        return { turnId: turn.turnId, contextLine: turn.sourceLine,
+          terminalLine: terminals.length === 1 ? terminals[0].terminalLine : null,
+          status: terminals.length === 1 ? terminals[0].status : null };
+      }) });
     if (!sourceComplete) { toolCoverage.tools = 'partial'; toolCoverage.mcp = 'partial'; hookCoverage = 'partial'; }
     return { status: sourceComplete ? 'ready' : 'partial', reason: warnings.size ? [...warnings].join(' ') : (!turns.length ? 'No turn contexts were recorded.' : null),
       resourceProvenance: projectResourceProvenance(),
-      source: { path, fingerprint, bytes: pos, fileBytes: before.size,
-        fingerprintScope: pos === before.size ? 'source-snapshot' : 'read-prefix', recordCount: recordsTotal,
-        clientVersion: safeMetaText(headerPayload?.cli_version, 128), originator: safeMetaText(headerPayload?.originator, 128) },
+      source: sourceSnapshot,
       agents, turns, events: events.map(({ _callId, ...event }) => event), skills: sortedSkills, usage, artifacts,
+      actions: scopedActions.map(action => ({ ...action, sourceFingerprint: fingerprint })),
+      actionCoverage: pendingActions.size || actionEvidencePartial || actionWorkspaceMismatch ? 'partial' : scopedActions.length ? 'observed' : actionCallsSeen ? 'partial' : 'unavailable',
       toolInvocations, mcp: toolResult.mcp, toolCoverage, toolWarnings: toolResult.warnings,
       hookInvocations, hookCoverage, hookCaptureBoundary, hookWarnings: hookResult.warnings,
       metrics: { recordedSpanMs, recordedSpanKind: options.parentId ? 'owned-turn-evidence' : 'source-recorded-span' },
       warnings: [...warnings], outcomeClaim, sessionRootId: headerPayload.session_id ?? id,
-      _agentStatus: agentStatus, _verifiedChild: !options.parentId || turns.length > 0 || events.length > 0 };
+      _agentStatus: agentStatus, _verifiedChild: !options.parentId || turns.length > 0 || events.length > 0,
+      _actionCwdMatches: !options.actionRepoRoot || actionRepoRoot !== null };
   } catch { return unavailable('The rollout could not be read safely.'); }
   finally { await handle?.close(); }
 }
@@ -936,18 +1172,34 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
   let selected;
   try { selected = await exactRow(profile.home, id); }
   catch { base.status = 'unavailable'; base.reason = 'The selected native history index is unavailable.'; base.coverage = emptyCoverage(); return base; }
-  if (!selected.row) { base.status = selected.status; base.reason = selected.status === 'not-found' ? 'The session is not present in the selected profile home.' : 'The selected native session is unavailable.'; base.coverage = emptyCoverage(selected.status); return base; }
+  let retainedFallback = false;
+  if (!selected.row && selected.status === 'not-found') {
+    const retained = await locateRetainedRollout(profile.home, id);
+    if (retained.status !== 'ready') { base.status = retained.status; base.reason = retained.reason; base.coverage = emptyCoverage(retained.status); return base; }
+    selected = { row: { rollout_path: retained.path }, status: 'ready' };
+    retainedFallback = true;
+  }
+  if (!selected.row) { base.status = selected.status; base.reason = 'The selected native session is unavailable.'; base.coverage = emptyCoverage(selected.status); return base; }
   if (selected.lineageError) { base.status = 'unavailable'; base.reason = selected.lineageError; base.coverage = emptyCoverage(); return base; }
   const selectedParent = selected.row.parentId ?? null;
   const selectedOwners = { owners: new Map(), ownedTurns: new Set() };
   const root = await readRollout(profile, id, selected.row.rollout_path, selectedParent
-    ? { parentId: selectedParent, ...selectedOwners, depth: 1, maxPhysicalLines: options.maxPhysicalLines }
-    : { maxPhysicalLines: options.maxPhysicalLines });
+    ? { parentId: selectedParent, ...selectedOwners, depth: 1, maxPhysicalLines: options.maxPhysicalLines, actionRepoRoot: options.actionRepoRoot, indexSource: selected.row.indexSource }
+    : { maxPhysicalLines: options.maxPhysicalLines, actionRepoRoot: options.actionRepoRoot, indexSource: selected.row.indexSource });
+  if (retainedFallback) {
+    base.source.discovery = 'exact-retained-rollout';
+    base.source.historyIndex = 'unavailable-or-missing-row';
+  }
   base.source = { ...base.source, ...root.source };
   base.status = root.status; base.reason = root.reason; base.agents = root.agents; base.turns = root.turns; base.events = root.events;
   if (base.agents[0]) base.agents[0].status = root.status;
   base.skills = root.skills; base.usage = root.usage; base.metrics = root.metrics; base.warnings = root.warnings;
+  if (retainedFallback) base.warnings.push('Session was discovered by exact UUID in the selected profile sessions directory because the history index had no row; selected index metadata is unavailable and child coverage may be incomplete.');
+  const recordedThreads = root.usage.recordedThread ? [root.usage.recordedThread] : [];
+  delete base.usage.recordedThread;
   base.artifacts = root.artifacts;
+  base.actions = root.actions ?? [];
+  base.actionCoverage = root.actionCoverage ?? 'unavailable';
   base.toolInvocations = root.toolInvocations ?? [];
   base.hookInvocations = root.hookInvocations ?? [];
   base.hookCaptureBoundary = root.hookCaptureBoundary ?? null;
@@ -979,7 +1231,11 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
         const depth = parent.depth + 1;
         if (scannedChildren > MAX_CHILDREN) { childIndex.partial = true; childIndex.reason = 'Child session limit reached.'; break; }
         const childAudit = await readRollout(profile, child.id, child.rollout_path, { parentId: parent.id, sessionRootId: root.sessionRootId,
-          depth, owners: new Map(), ownedTurns: new Set(), maxPhysicalLines: options.maxPhysicalLines });
+          depth, owners: new Map(), ownedTurns: new Set(), maxPhysicalLines: options.maxPhysicalLines,
+          actionRepoRoot: options.actionRepoRoot,
+          rootTurnIds: root.turns.map(turn => turn.turnId) });
+        if (childAudit.usage.recordedThread) recordedThreads.push(childAudit.usage.recordedThread);
+        delete childAudit.usage.recordedThread;
         const verified = childAudit._verifiedChild === true;
         const agent = { id: child.id, parentId: parent.id, depth, role: 'subagent', sessionId: child.id, source: childAudit.source,
           status: verified ? childAudit.status : 'unavailable', ...(verified ? {} : { reason: childAudit.reason ?? 'Child ownership could not be corroborated.' }) };
@@ -1000,6 +1256,9 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
         }
         queue.push({ id: child.id, depth });
         base.turns.push(...childAudit.turns); base.events.push(...childAudit.events);
+        base.actions.push(...(childAudit.actions ?? []));
+        if (childAudit.actionCoverage === 'partial') base.actionCoverage = 'partial';
+        else if (childAudit.actionCoverage === 'observed' && base.actionCoverage === 'unavailable') base.actionCoverage = 'observed';
       base.toolInvocations.push(...(childAudit.toolInvocations ?? []));
       base.hookInvocations.push(...(childAudit.hookInvocations ?? []));
       const childMcpServers = childAudit.mcp?.servers ?? [];
@@ -1038,6 +1297,112 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
     if (base.skills.length) base.coverage.skills = 'partial';
   } catch { base.warnings.push('Same-home child discovery is unavailable.'); base.coverage.agents = 'partial';
     base.coverage.tools = 'partial'; base.coverage.mcp = 'partial'; base.coverage.hooks = 'partial'; if (base.status === 'ready') base.status = 'partial'; }
+  if (recordedUsageAccounting(root.source?.clientVersion))
+    base.usage.recorded = deriveRecordedUsage({ rootAgentId: id, source: base.source, threads: recordedThreads });
+  return base;
+}
+
+async function safeSessionDirectory(path) {
+  try {
+    const info = await lstat(path);
+    if (!info.isDirectory() || info.isSymbolicLink() || await realpath(path) !== path) return false;
+    return true;
+  } catch { return false; }
+}
+
+async function boundedNames(path, limit) {
+  const names = [];
+  try {
+    const dir = await opendir(path);
+    for await (const entry of dir) {
+      if (names.length >= limit) return null;
+      names.push({ name: entry.name, isDirectory: entry.isDirectory(), isFile: entry.isFile(), isSymbolicLink: entry.isSymbolicLink() });
+    }
+    names.sort((a, b) => a.name.localeCompare(b.name));
+    return names;
+  } catch { return null; }
+}
+
+// Locate an exact retained UUID under the owning profile home. The bounded
+// date-tree walk is shared by replay and the missing-index audit fallback.
+async function locateRetainedRollout(home, id) {
+  const sessions = join(home, 'sessions');
+  if (!await safeSessionDirectory(home))
+    return { status: 'unavailable', reason: 'The saved profile session directory is unavailable or unsafe.' };
+  try { await lstat(sessions); } catch (error) {
+    if (error.code === 'ENOENT') return { status: 'not-found', reason: 'No retained rollout matches the selected session ID.' };
+    return { status: 'unavailable', reason: 'The saved profile session directory is unavailable or unsafe.' };
+  }
+  if (!await safeSessionDirectory(sessions)) return { status: 'unavailable', reason: 'The saved profile session directory is unavailable or unsafe.' };
+  let names = await boundedNames(sessions, MAX_CANDIDATES);
+  if (!names) return { status: 'partial', reason: 'The saved profile session scan exceeded its bound or could not be read.' };
+  let directories = names.filter(entry => entry.isDirectory && !entry.isSymbolicLink && DATE_PARTS[0].test(entry.name)).map(entry => join(sessions, entry.name));
+  let visited = names.length;
+  for (let depth = 1; depth < DATE_PARTS.length; depth++) {
+    const next = [];
+    for (const directory of directories) {
+      if (!await safeSessionDirectory(directory)) continue;
+      names = await boundedNames(directory, Math.max(1, MAX_CANDIDATES - visited));
+      if (!names) return { status: 'partial', reason: 'The saved profile session scan exceeded its bound or could not be read.' };
+      visited += names.length;
+      next.push(...names.filter(entry => entry.isDirectory && !entry.isSymbolicLink && DATE_PARTS[depth].test(entry.name)).map(entry => join(directory, entry.name)));
+      if (visited > MAX_CANDIDATES) return { status: 'partial', reason: 'The saved profile session scan exceeded its bound.' };
+    }
+    directories = next;
+  }
+  const candidates = [];
+  for (const directory of directories) {
+    if (!await safeSessionDirectory(directory)) continue;
+    names = await boundedNames(directory, Math.max(1, MAX_CANDIDATES - visited));
+    if (!names) return { status: 'partial', reason: 'The saved profile session scan exceeded its bound or could not be read.' };
+    visited += names.length;
+    for (const entry of names) if (entry.isFile && !entry.isSymbolicLink && entry.name.startsWith('rollout-')
+      && (entry.name.endsWith(`-${id}.jsonl`) || entry.name.endsWith(`-${id}.jsonl.zst`))) candidates.push(join(directory, entry.name));
+    if (visited > MAX_CANDIDATES) return { status: 'partial', reason: 'The saved profile session scan exceeded its bound.' };
+  }
+  if (candidates.length !== 1) return { status: candidates.length ? 'unavailable' : 'not-found',
+    reason: candidates.length ? 'Multiple retained rollouts match the selected session ID.' : 'No retained rollout matches the selected session ID.' };
+  return { status: 'ready', path: candidates[0] };
+}
+
+/** Read one retained rollout by exact UUID under a saved profile home, without consulting its history index. */
+export async function auditRetainedNativeSession(savedProfile, id, options = {}) {
+  if (!uuid(id)) throw new Error('Invalid native session ID');
+  if (!savedProfile || typeof savedProfile !== 'object' || !validPath(savedProfile.home)
+    || typeof savedProfile.profileId !== 'string' || typeof savedProfile.profileName !== 'string')
+    throw new Error('A saved native profile home is required');
+  const profile = { profileId: savedProfile.profileId, profileName: savedProfile.profileName,
+    home: savedProfile.home, userHome: validPath(savedProfile.userHome) ? savedProfile.userHome : savedProfile.home,
+    nativeRoot: validPath(savedProfile.nativeRoot) ? savedProfile.nativeRoot : null,
+    environmentId: typeof savedProfile.environmentId === 'string' ? savedProfile.environmentId : null,
+    executable: null, version: null, defaultUserHome: options.defaultUserHome ?? savedProfile.userHome ?? homedir(),
+    recordedCwds: new Set() };
+  const base = resultBase(profile, id);
+  // The retained replay response is a normalized evidence view. Never expose
+  // profile-home, rollout, or cwd paths from the native source records.
+  base.profile = { profileId: profile.profileId, profileName: profile.profileName, environmentId: profile.environmentId };
+  const located = await locateRetainedRollout(profile.home, id);
+  if (located.status !== 'ready') {
+    base.status = located.status; base.reason = located.reason; base.coverage = emptyCoverage(located.status); return base;
+  }
+  const root = await readRollout(profile, id, located.path, { actionRepoRoot: options.actionRepoRoot,
+    maxPhysicalLines: options.maxPhysicalLines });
+  if (options.actionRepoRoot && root._actionCwdMatches !== true) {
+    base.reason = 'The retained rollout workspace does not match the selected action workspace.';
+    base.coverage.timeline = 'unavailable';
+    return base;
+  }
+  base.status = root.status; base.reason = root.reason;
+  base.source = { ...base.source, ...root.source, path: null };
+  base.agents = (root.agents ?? []).map(agent => ({ ...agent, source: { ...agent.source, path: null } }));
+  base.turns = (root.turns ?? []).map(turn => ({ agentId: turn.agentId, turnId: turn.turnId,
+    model: turn.model ?? null, reasoningEffort: turn.reasoningEffort ?? null, sourceLine: turn.sourceLine,
+    workspaceMatched: turn.workspaceMatched === true }));
+  base.actions = root.actions ?? [];
+  base.actionCoverage = root.actionCoverage ?? 'unavailable';
+  base.warnings = root.warnings ?? [];
+  base.metrics = root.metrics ?? base.metrics;
+  base.coverage = { ...emptyCoverage(root.status), timeline: base.turns.length ? root.status : 'unavailable', agents: 'partial' };
   return base;
 }
 

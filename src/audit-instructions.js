@@ -5,7 +5,7 @@ import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { redactValue } from './redact.js';
 
-const VERSION = '0.163.0-alpha.10.2';
+const CONTRACT = 'codex-owned-loaded-instruction-sources-v1';
 const ID = /^[A-Za-z0-9._:-]{1,160}$/;
 const REFERENCE = /^sha256:[a-f0-9]{64}$/;
 const STATUSES = new Set(['reported', 'reported-empty', 'partial', 'unavailable']);
@@ -21,9 +21,12 @@ const REASONS = new Set(['unsupported-native-version', 'field-unavailable', 'inv
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 const limit = (value, fallback, max) => Number.isSafeInteger(value) && value >= 0 ? Math.min(max, value) : fallback;
 
-export function nativeInstructionSourceContract(version) {
-  return version === VERSION ? { version: VERSION, contract: 'codex-owned-loaded-instruction-sources-v1',
-    sourceRevision: '4ebc485ca321243727539187169425fcf972f2c4' } : null;
+/** Accept native instruction metadata only when its shape positively proves the capability. */
+export function nativeInstructionSourceContract(value, { maxSources = 128 } = {}) {
+  const cap = limit(maxSources, 128, 128);
+  if (!Array.isArray(value) || value.length > cap) return null;
+  if (value.some(path => !absolutePath(path))) return null;
+  return CONTRACT;
 }
 
 function absolutePath(value) {
@@ -57,6 +60,12 @@ function referenceFor(value, { workspace, profileHome, userHome } = {}) {
     origin, name: NAMES.has(name) ? name : 'instruction-file' };
 }
 
+/** Stable identity for a validated logical source path; does not touch the filesystem. */
+export function instructionReferenceId(origin, logicalPath) {
+  if (!['repository', 'profile', 'user'].includes(origin) || typeof logicalPath !== 'string') return null;
+  return `sha256:${createHash('sha256').update(`${origin}\0${logicalPath}`).digest('hex')}`;
+}
+
 export function projectInstructionSources(value, { agentId, source, phase, sourceLine = null,
   workspace, profileHome, userHome, reason = null, maxSources = 128 } = {}) {
   if (!ID.test(agentId ?? '') || !SOURCES.has(source) || !PHASES.has(phase)) throw new TypeError('Invalid instruction source ownership');
@@ -73,7 +82,8 @@ export function projectInstructionSources(value, { agentId, source, phase, sourc
     if (!reference) { row.rejectedCount++; continue; }
     row.sources.push(reference);
   }
-  row.status = row.omittedCount || row.rejectedCount ? 'partial' : row.sources.length ? 'reported' : 'reported-empty';
+  row.status = nativeInstructionSourceContract(value, { maxSources: cap })
+    ? row.sources.length ? 'reported' : 'reported-empty' : 'partial';
   row.reason = row.omittedCount ? 'source-list-limit' : row.rejectedCount ? 'unsafe-source-path' : null;
   return row;
 }

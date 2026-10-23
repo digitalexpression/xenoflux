@@ -69,25 +69,26 @@ export function createAuditHookCapture({ maxInvocations = 500 } = {}) {
     const metadata = {
       agentId, turnId, hookRunId: id, eventName: run.eventName, scope: run.scope,
       sourceKind: run.source, handlerType: run.handlerType,
-      executionMode: run.executionMode, status: run.status,
+      executionMode: run.executionMode, status: timingContradiction ? null : run.status,
       startedAtSeconds: timingContradiction ? null : startedAtSeconds,
       completedAtSeconds: timingContradiction ? null : completedAtSeconds,
       durationMs: timingContradiction ? null : durationMs, source, sourceLine,
     };
-    let currentKey = input.phase === 'completed' ? active.get(identity) : null;
+    let currentKey = input.phase === 'completed' ? active.get(identity)?.key : null;
     let current = currentKey ? records.get(currentKey) : null;
     const createOccurrence = (uncertain = false) => {
       if (records.size >= cap) { dropped++; warn('hook invocation limit reached'); return null; }
       const occurrenceIndex = occurrenceCounts.get(identity) ?? 0;
       occurrenceCounts.set(identity, occurrenceIndex + 1);
       const recordKey = `${identity}\0${occurrenceIndex}`;
-      records.set(recordKey, { ...metadata, occurrenceIndex, uncertain, hasStartedEvent: false });
+      records.set(recordKey, { ...metadata, occurrenceIndex, uncertain });
       latest.set(identity, recordKey);
       return recordKey;
     };
 
     if (input.phase === 'started') {
-      const activeKey = active.get(identity);
+      const activeRun = active.get(identity);
+      const activeKey = activeRun?.key;
       if (activeKey) {
         const previous = records.get(activeKey);
         if (previous) {
@@ -97,19 +98,18 @@ export function createAuditHookCapture({ maxInvocations = 500 } = {}) {
           previous.durationMs = null;
           previous.uncertain = true;
         }
-        active.delete(identity);
         currentKey = createOccurrence(true);
         if (currentKey) {
-          records.get(currentKey).status = null;
-          records.get(currentKey).hasStartedEvent = true;
+          Object.assign(records.get(currentKey), { status: null, startedAtSeconds: null, completedAtSeconds: null, durationMs: null });
         }
+        // Keep the ambiguity active until every outstanding start has a completion.
+        active.set(identity, { key: currentKey ?? activeKey, pending: activeRun.pending + 1 });
         warn('overlapping indistinguishable hook runs');
         return Boolean(currentKey);
       }
       currentKey = createOccurrence(false);
       if (currentKey) {
-        records.get(currentKey).hasStartedEvent = true;
-        active.set(identity, currentKey);
+        active.set(identity, { key: currentKey, pending: 1 });
       }
       return Boolean(currentKey);
     }
@@ -118,7 +118,7 @@ export function createAuditHookCapture({ maxInvocations = 500 } = {}) {
       const latestKey = latest.get(identity);
       const latestRecord = latestKey ? records.get(latestKey) : null;
       if (latestRecord?.uncertain) return true;
-      if (latestRecord && latestRecord.startedAtSeconds === metadata.startedAtSeconds) {
+      if (latestRecord && latestRecord.startedAtSeconds === startedAtSeconds) {
         currentKey = latestKey;
         current = latestRecord;
       } else {
@@ -127,8 +127,13 @@ export function createAuditHookCapture({ maxInvocations = 500 } = {}) {
       }
     }
     if (!current) return false;
-    if (active.get(identity) === currentKey) active.delete(identity);
+    const activeRun = active.get(identity);
+    if (activeRun?.key === currentKey) {
+      if (activeRun.pending > 1) activeRun.pending--;
+      else active.delete(identity);
+    }
     if (timingContradiction) {
+      current.status = null;
       current.startedAtSeconds = null;
       current.completedAtSeconds = null;
       current.durationMs = null;
@@ -158,7 +163,7 @@ export function createAuditHookCapture({ maxInvocations = 500 } = {}) {
       return false;
     }
     if (TERMINAL.has(current.status) && metadata.status === 'running') return true;
-    if (!current.hasStartedEvent && TERMINAL.has(current.status) && TERMINAL.has(metadata.status) &&
+    if (TERMINAL.has(current.status) && TERMINAL.has(metadata.status) &&
         ((current.completedAtSeconds !== null && metadata.completedAtSeconds !== null && current.completedAtSeconds !== metadata.completedAtSeconds) ||
          (current.durationMs !== null && metadata.durationMs !== null && current.durationMs !== metadata.durationMs))) {
       current.status = null;
@@ -166,7 +171,7 @@ export function createAuditHookCapture({ maxInvocations = 500 } = {}) {
       current.completedAtSeconds = null;
       current.durationMs = null;
       current.uncertain = true;
-      warn('conflicting completion-only hook timing');
+      warn('conflicting hook completion timing');
       return true;
     }
     if (input.phase === 'completed' || TERMINAL.has(metadata.status)) {
@@ -179,7 +184,7 @@ export function createAuditHookCapture({ maxInvocations = 500 } = {}) {
 
   function result() {
     return {
-      hookInvocations: [...records.values()].map(({ uncertain, hasStartedEvent, ...record }) => ({ ...record })),
+      hookInvocations: [...records.values()].map(({ uncertain, ...record }) => ({ ...record })),
       coverage: { hooks: partial || dropped > 0 ? 'partial' : records.size === 0 ? 'none-recorded' : 'observed' },
       warnings: warnings.slice(),
     };

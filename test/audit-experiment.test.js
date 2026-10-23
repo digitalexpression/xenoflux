@@ -4,7 +4,7 @@ import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_proce
 import { once } from 'node:events';
 import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,7 @@ import { compareAuditRuns } from '../src/audit-report.js';
 import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
 import { evaluateAuditSeries, resumeAuditSeries, runAuditSeries } from '../src/audit-series.js';
 import { auditQualityFingerprint } from '../src/audit-quality.js';
+import { createTelemetryJournal } from '../src/audit-telemetry-journal.js';
 
 const execFile = promisify(execFileCallback);
 const version = '0.162.0-alpha.17.2';
@@ -35,11 +36,13 @@ async function git(root, ...args) {
   } })).stdout.trim();
 }
 
-function appServer(counterPath, protocolErrorsPath, pauseOnTurnStartMarker = null, pausePidMarker = null) {
+function appServer(counterPath, protocolErrorsPath, pauseOnTurnStartMarker = null, pausePidMarker = null,
+  nativeVersion = version, contextSource = null) {
   return `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
-const VERSION = ${JSON.stringify(version)};
+const VERSION = ${JSON.stringify(nativeVersion)};
+const CONTEXT_SOURCE = ${JSON.stringify(contextSource)};
 const PAUSE_ON_TURN_START = ${JSON.stringify(pauseOnTurnStartMarker)};
 const PAUSE_PID_MARKER = ${JSON.stringify(pausePidMarker)};
 const { createServer } = require('node:http');
@@ -107,8 +110,16 @@ async function respond(message) {
     if (!only(params,['ephemeral','experimentalRawEvents','sandbox','approvalPolicy','historyMode']) || !path.isAbsolute(process.cwd())
       || params.ephemeral !== false || params.experimentalRawEvents !== false || params.sandbox !== 'workspace-write'
       || params.approvalPolicy !== 'never' || params.historyMode !== 'paginated') return fail(id,'thread-start-schema');
-    return reply(id,{cwd:process.cwd(),thread:{id:'11111111-1111-4111-8111-111111111111',sessionId:'root-session',cwd:process.cwd()},model:(fs.readFileSync(path.join(process.env.CODEX_HOME,'config.toml'),'utf8').match(/^model\\s*=\\s*"([^"]+)"/m)||[])[1],reasoningEffort:'medium'});
+    return reply(id,{cwd:process.cwd(),thread:{id:'11111111-1111-4111-8111-111111111111',sessionId:'root-session',cwd:process.cwd()},
+      ...(CONTEXT_SOURCE ? {instructionSources:[CONTEXT_SOURCE==='workspace' ? path.join(process.cwd(),'AGENTS.md') : CONTEXT_SOURCE]} : {}),
+      model:(fs.readFileSync(path.join(process.env.CODEX_HOME,'config.toml'),'utf8').match(/^model\\s*=\\s*"([^"]+)"/m)||[])[1],reasoningEffort:'medium'});
   }
+  if (method === 'command/exec') {
+    if (JSON.stringify(params.command) !== JSON.stringify(['/usr/bin/true']) || params.cwd !== process.cwd()
+      || params.sandboxPolicy?.type !== 'workspaceWrite' || params.sandboxPolicy?.networkAccess !== false) return fail(id,'command-probe-schema');
+    return reply(id,{exitCode:0,stdout:'',stderr:''});
+  }
+  if (method === 'thread/loaded/list') return reply(id,{data:['11111111-1111-4111-8111-111111111111'],nextCursor:null});
   if (method === 'turn/start') {
     const policy=params.sandboxPolicy;
     if (!only(params,['threadId','cwd','sandboxPolicy','approvalPolicy','input']) || params.threadId !== '11111111-1111-4111-8111-111111111111'
@@ -173,7 +184,8 @@ async function runObserveAccessFixture(profile, options = {}) {
   return result;
 }
 
-async function fixture(t, { pauseOnTurnStartMarker = null, pauseOnTurnStartPidMarker = null } = {}) {
+async function fixture(t, { pauseOnTurnStartMarker = null, pauseOnTurnStartPidMarker = null,
+  nativeVersion = version, contextSource = null } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-audit-experiment-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, 'source'); await mkdir(repo, { mode: 0o700 });
@@ -187,13 +199,15 @@ async function fixture(t, { pauseOnTurnStartMarker = null, pauseOnTurnStartPidMa
   await writeFile(sharedSkill, 'PRIVATE_REPOSITORY_SKILL_BODY\n', { mode: 0o600 });
   await writeFile(childSkill, 'PRIVATE_CHILD_SKILL_BODY\n', { mode: 0o600 });
   await writeFile(join(repo, 'README.md'), 'same committed baseline\n', { mode: 0o600 });
+  if (contextSource) await writeFile(join(repo, 'AGENTS.md'), 'PRIVATE_CONTEXT_INSTRUCTION_BODY\n', { mode: 0o600 });
   await git(repo, 'add', '-A'); await git(repo, 'commit', '-qm', 'fixture baseline');
   const commit = await git(repo, 'rev-parse', 'HEAD');
   const counter = join(root, 'app-server-launches.txt'), protocolErrors = join(root, 'protocol-errors.txt'), telemetry = `${counter}.telemetry`;
   const executable = join(root, 'fake-codex');
-  await writeFile(executable, appServer(counter, protocolErrors, pauseOnTurnStartMarker, pauseOnTurnStartPidMarker), { mode: 0o700 });
+  await writeFile(executable, appServer(counter, protocolErrors, pauseOnTurnStartMarker, pauseOnTurnStartPidMarker,
+    nativeVersion, contextSource === 'source' ? join(repo, 'AGENTS.md') : contextSource), { mode: 0o700 });
   const native = await Promise.all(['alpha','beta'].map(name => prepareNativeHome({
-    directory: join(root, `native-${name}`), executable, codexVersion: version,
+    directory: join(root, `native-${name}`), executable, codexVersion: nativeVersion,
   })));
   const storeDirectory = join(root, 'store'); await mkdir(storeDirectory, { mode: 0o700 });
   const store = new Store(storeDirectory);
@@ -202,7 +216,7 @@ async function fixture(t, { pauseOnTurnStartMarker = null, pauseOnTurnStartPidMa
     await bind(data, 'Alpha', repo); await bind(data, 'Beta', repo);
   });
   for (const [index, name] of ['Alpha','Beta'].entries()) {
-    await registerHome(store, name, native[index].root, { executable, version });
+    await registerHome(store, name, native[index].root, { executable, version: nativeVersion });
     await writeFile(join(native[index].home, 'config.toml'), `model = "model-${name.toLowerCase()}"\nmodel_reasoning_effort = "medium"\ncli_auth_credentials_store = "file"\nsqlite_home = ${JSON.stringify(native[index].home)}\n`, { mode: 0o600 });
     await writeFile(join(native[index].home, 'auth.json'), `{"api_key":"PRIVATE_PROFILE_SECRET_${name}"}\n`, { mode: 0o600 });
   }
@@ -220,6 +234,51 @@ async function launchCount(path) {
   try { return (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean).length; }
   catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
 }
+
+test('relocated experiments require reported workspace context and persist denial without model work or checks', async t => {
+  for (const contextSource of ['workspace', 'source']) await t.test(contextSource, async t => {
+    const f = await fixture(t, { nativeVersion: '0.163.0-alpha.10.2', contextSource });
+    const input = { ...f.spec, allowIncompleteCapture: true,
+      captureRequirements: { context: [{ origin: 'repository', path: 'AGENTS.md', phase: 'before-task' }] },
+      checks: [{ name: 'context-quality', argv: [process.execPath, '-e', "require('node:fs').writeFileSync('check-ran.txt','checked')"], timeoutMs: 10000 }] };
+    const result = await runAuditExperiment(f.store, input, { baseDirectory: join(f.store.directory, 'audits'),
+      observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store }) });
+    assert.equal(result.runs.length, 2, JSON.stringify(result));
+    assert.equal(result.status, contextSource === 'workspace' ? 'partial' : 'failed');
+    for (const run of result.runs) {
+      const record = await readAuditRecord(f.store, run.id), report = record.report;
+      assert.equal(record.finalized, true);
+      assert.equal(report.captureAcceptance.status, contextSource === 'workspace' ? 'passed' : 'failed');
+      assert.equal(report.profileSettings.status, 'unchanged');
+      assert.equal(report.runningClients.status, 'unchanged');
+      const workspace = join(record.directory, 'workspace');
+      assert.notEqual(workspace, f.repo);
+      if (contextSource === 'workspace') {
+        assert.equal(run.checks.length, 1);
+        assert.equal(await readFile(join(workspace, 'check-ran.txt'), 'utf8'), 'checked');
+      } else {
+        assert.equal(run.phase, 'required-context-unavailable');
+        assert.equal(report.captureAcceptance.mode, 'required-context-preflight');
+        assert.deepEqual(run.checks, []);
+        assert.deepEqual(report.turns, []);
+        assert.equal(record.captureCheckpoint.run.captureAcceptance.mode, 'required-context-preflight');
+        assert.equal(record.captureCheckpoint.run.captureAcceptance.status, 'failed');
+        await assert.rejects(stat(join(workspace, 'result.txt')), { code: 'ENOENT' });
+        await assert.rejects(stat(join(workspace, 'check-ran.txt')), { code: 'ENOENT' });
+        assert.equal(await readFile(join(workspace, 'AGENTS.md'), 'utf8'), 'PRIVATE_CONTEXT_INSTRUCTION_BODY\n', 'File presence cannot satisfy loaded context');
+      }
+      for (const format of ['json', 'markdown']) {
+        const exported = await exportAuditReport(report, { output: join(f.root, `${run.id}-${format}`), format });
+        assert.deepEqual((await readAuditReport(exported.evidencePath)).captureAcceptance, report.captureAcceptance);
+      }
+      assert.doesNotMatch(JSON.stringify(report.captureAcceptance), /PRIVATE_CONTEXT_INSTRUCTION_BODY|PRIVATE_PROFILE_SECRET|\/Users\/|\/private\//);
+    }
+    assert.deepEqual(await readFile(f.store.file), f.savedStore);
+    assert.deepEqual(await Promise.all(f.native.map(home => readFile(join(home.home, 'config.toml')))), f.savedConfigs);
+    assert.deepEqual(await Promise.all(f.native.map(home => readFile(join(home.home, 'auth.json')))), f.savedAuth);
+    assert.equal(await git(f.repo, 'status', '--porcelain=v1'), '');
+  });
+});
 
 async function waitForPidExit(pid, timeoutMs = 5000) {
   if (!Number.isSafeInteger(pid) || pid < 1) return;
@@ -536,11 +595,19 @@ test('reconciles a dead coordinator from persisted workspace evidence without re
     process: { pid: deadPid, host: hostname() }, workspace: { directory: workspace.directory, owner, active: true } });
   await writeAuditState(f.store, experiment.id, { status: 'running', phase: 'task', coordinator: stoppedCoordinator });
   const telemetryJournal = join(run.directory, 'skill-telemetry.jsonl');
-  await writeFile(telemetryJournal, [
-    JSON.stringify({ source: 'native-otel-skill-invocation', threadId: 'unknown-recovery-thread', turnId: 'recovery-turn',
-      skillName: 'recovered-skill', scope: 'repo', invocationType: 'explicit', timestampNs: '1760500000000000000' }),
-    '{"source":"native-otel-skill-invocation","threadId":"truncated',
-  ].join('\n'), { flag: 'wx', mode: 0o600 });
+  const zeroAccounting = { schemaVersion: 1, scope: 'receiver-lifetime', classification: 'complete',
+    requests: { received: 0, admitted: 0, rejected: 0 }, records: { examined: 0, relevant: 0, accepted: 0, durable: 0,
+      invalidRelevant: 0, unclassified: 0, ignored: 0, eventLimitDropped: 0, persistenceRejected: 0, unexamined: 0 },
+    upstreamLoss: 'unknown', acknowledgements: 'unknown' };
+  const journal = createTelemetryJournal(telemetryJournal, zeroAccounting);
+  const event = { source: 'native-otel-skill-invocation', threadId: 'unknown-recovery-thread', turnId: 'recovery-turn',
+    skillName: 'recovered-skill', scope: 'repo', invocationType: 'explicit', timestampNs: '1760500000000000000' };
+  const observedAccounting = { ...zeroAccounting, scope: 'receiver-lifetime', classification: 'bounded',
+    requests: { received: 1, admitted: 1, rejected: 0 }, records: { ...zeroAccounting.records,
+      examined: 1, relevant: 1, accepted: 1, durable: 1 } };
+  assert.equal(journal.append([event], observedAccounting), true);
+  journal.close();
+  await appendFile(telemetryJournal, '{"source":"native-otel-skill-invocation","threadId":"truncated');
 
   const before = await launchCount(f.counter);
   const recovered = await recoverAuditExperiment(f.store, experiment.id, { apply: true });
@@ -548,8 +615,12 @@ test('reconciles a dead coordinator from persisted workspace evidence without re
   assert.equal(recovered.runs[0].execution.recovery, 'process-stopped-no-rerun');
   assert.equal(recovered.runs[0].skillInvocations?.[0]?.resolution, 'unattributed');
   assert.equal(recovered.runs[0].skillInvocations?.[0]?.unattributedActorId, 'unknown-recovery-thread');
-  assert.ok(recovered.runs[0].skillTelemetry?.warnings.includes('telemetry-journal-truncated-tail'));
+  assert.ok(recovered.runs[0].skillTelemetry?.warnings.includes('telemetry-journal-uncommitted-tail'));
   assert.ok(recovered.runs[0].skillTelemetry?.warnings.includes('skill-telemetry-recovered-partial'));
+  assert.equal(recovered.runs[0].skillTelemetry.diagnostics.deliveryAccounting.scope, 'committed-prefix');
+  assert.equal(recovered.runs[0].skillTelemetry.diagnostics.deliveryAccounting.records.durable, 1);
+  assert.equal(recovered.runs[0].skillTelemetry.diagnostics.journal.commit, 'committed-prefix');
+  assert.ok(recovered.runs[0].skillTelemetry.diagnostics.journal.uncertainBytes > 0);
   const recoveredSnapshot = recovered.runs[0].artifacts.find(item => item.kind === 'audit-workspace-snapshot');
   assert.ok(recoveredSnapshot, JSON.stringify(recovered, null, 2));
   assert.match(await readFile(recoveredSnapshot.patchPath, 'utf8'), /interrupted-result/);
@@ -716,6 +787,10 @@ test('executes three balanced quality trials and shows, exports, reopens, and ev
   assert.deepEqual(report.plan.map(item => item.profileOrder), [['Alpha', 'Beta'], ['Beta', 'Alpha'], ['Alpha', 'Beta']]);
   assert.equal(report.coverage.plannedSlots, 3);
   assert.equal(report.coverage.missingSlots, 0);
+  assert.equal(report.consistency.kind, 'audit-series-consistency');
+  assert.equal(report.consistency.comparisons[0].coverage.plannedPairs, 3);
+  assert.equal(report.consistency.comparisons[0].coverage.selectedPairs, 3);
+  assert.equal(report.consistency.comparisons[0].coverage.missingPairs, 0);
   assert.equal(await launchCount(f.counter), 6, 'each of six planned profile runs starts exactly one app server');
   for (const name of ['Alpha', 'Beta']) {
     const summary = report.profiles.find(item => item.profileName === name);
@@ -751,6 +826,7 @@ test('executes three balanced quality trials and shows, exports, reopens, and ev
   const frozenMarkdownData = await readAuditReport(`${markdownPath}.audit.json`);
   assert.equal(frozen.kind, 'audit-series-report');
   assert.deepEqual(frozen, frozenMarkdownData);
+  assert.deepEqual(frozen.consistency, report.consistency, 'scheduled consistency survives ordinary export');
   const original = await readAuditRecord(f.store, report.id);
   assert.equal(original.record.baseline.commit, f.commit);
   for (const slot of original.record.plan) {
@@ -795,6 +871,32 @@ test('executes three balanced quality trials and shows, exports, reopens, and ev
   assert.equal(frozenEvaluation.status, report.exitCode, frozenEvaluation.stderr);
   assert.deepEqual(JSON.parse(frozenEvaluation.stdout), evaluated);
   assert.deepEqual((await readAuditRecord(f.store, report.id)).report, original.report, 'human review creates a new revision without mutating the original');
+  const packetCLI = invokeCLI(f.store.directory, 'audit', 'evaluate', report.id);
+  assert.equal(packetCLI.status, report.exitCode, packetCLI.stderr);
+  const packet = JSON.parse(packetCLI.stdout);
+  assert.equal(packet.subject.kind, 'audit-series-report');
+  assert.ok(packet.reviewPacket.subject.runIds.includes(alphaRun.id));
+  const typedReviewPath = join(f.root, 'typed-review.json');
+  await writeFile(typedReviewPath, JSON.stringify({ schemaVersion: 1, kind: 'xfx-audit-review-submission',
+    evidenceFingerprint: packet.reviewPacket.evidenceFingerprint, supplementalChecks: [], reviews: [{
+      id: 'external-agent', reviewer: { type: 'ai', name: 'fixture-agent', model: 'fixture-model' },
+      reviewedAt: '2026-10-22T12:00:00Z', method: 'packet-review', scope: `run:${alphaRun.id}`,
+      conclusion: 'positive', summary: 'The fixture result meets the rubric.', evidenceRefs: [`run:${alphaRun.id}`],
+      assessments: [{ runId: alphaRun.id, ratings: review.ratings }],
+    }] }), { flag: 'wx', mode: 0o600 });
+  const typedCLI = invokeCLI(f.store.directory, 'audit', 'evaluate', packet.id, '--spec', typedReviewPath);
+  assert.equal(typedCLI.status, report.exitCode, typedCLI.stderr);
+  const typed = JSON.parse(typedCLI.stdout);
+  assert.equal(typed.reviewState.reviews[0].assessments[0].scorePercent, 80);
+  const typedPath = join(f.root, 'typed-evaluation.md');
+  const typedExport = invokeCLI(f.store.directory, 'audit', 'export', typed.id, '--format', 'markdown', '--output', typedPath);
+  assert.equal(typedExport.status, report.exitCode, typedExport.stderr);
+  const typedText = await readFile(typedPath, 'utf8');
+  assert.match(typedText, /Original series human scores/);
+  assert.match(typedText, /ai fixture/);
+  assert.match(typedText, /score 80%/);
+  const typedReopened = await readAuditReport(`${typedPath}.audit.json`);
+  assert.deepEqual(typedReopened.reviewHistory, typed.reviewHistory);
   assert.equal(await launchCount(f.counter), 6, 'reviewing saved evidence launches no more tasks');
 });
 

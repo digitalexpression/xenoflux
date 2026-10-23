@@ -4,8 +4,8 @@
 // Keep the runtime check before loading any application or Node core module.
 const version = process.versions.node.split('.').map(Number);
 if (!Number.isInteger(version[0]) || !Number.isInteger(version[1])
-  || version[0] < 22 || (version[0] === 22 && version[1] < 13) || (version[0] === 23 && version[1] < 4)) {
-  process.stderr.write(`Node 22.13.0+ (22.x) or 23.4.0+ is required; found v${process.versions.node}\n`);
+  || version[0] < 22 || (version[0] === 22 && version[1] < 15) || (version[0] === 23 && version[1] < 8)) {
+  process.stderr.write(`Node 22.15.0+ (22.x) or 23.8.0+ is required; found v${process.versions.node}\n`);
   process.exitCode = 1;
 } else {
   const [{ createHash }, fs, childProcess, path, os, url] = await Promise.all([

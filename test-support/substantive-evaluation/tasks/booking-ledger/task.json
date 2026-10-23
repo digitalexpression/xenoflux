@@ -1,0 +1,10 @@
+{
+  "id": "booking-ledger",
+  "title": "Implement an idempotent capacity booking ledger",
+  "goal": "Implement immutable booking and cancellation transitions with half-open overlap capacity, replay identity, validation and structured rejection reasons.",
+  "editableFiles": ["src/booking-ledger.js"],
+  "referenceFiles": {"src/booking-ledger.js": "oracle/reference/booking-ledger.js"},
+  "visibleCommand": ["node", "--test", "test/visible.test.js"],
+  "oracle": "oracle/acceptance.test.mjs",
+  "kind": "domain-state-transitions"
+}

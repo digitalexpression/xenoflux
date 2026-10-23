@@ -1,19 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import * as zlib from 'node:zlib';
 import { Store, create } from '../src/profiles.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome } from '../src/homes.js';
-import { auditNativeSession } from '../src/audit-session.js';
+import { auditNativeSession, auditRetainedNativeSession } from '../src/audit-session.js';
 import { resolveAuditProfile } from '../src/audit-discovery.js';
 import { auditExitCode, compareAuditRuns, renderAudit } from '../src/audit-report.js';
 import { compactAuditTrial } from '../src/audit-statistics.js';
-import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
+import { exportAuditReport, readAuditReport, projectReportResourceProvenance } from '../src/audit-store.js';
 
 const exec = promisify(execFile), id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const rec = (timestamp, type, payload) => ({ timestamp, type, payload });
@@ -39,6 +40,10 @@ async function seedIndex(home, threads) {
 async function writeRollout(path, rows) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, rows.map(x => JSON.stringify(x)).join('\n') + '\n', { mode: 0o600 });
+}
+async function writeCompressedRollout(path, rows) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, zlib.zstdCompressSync(Buffer.from(rows.map(x => JSON.stringify(x)).join('\n') + '\n')), { mode: 0o600 });
 }
 const meta = idValue => rec('2026-10-15T10:00:00.000Z', 'session_meta', { id: idValue, session_id: idValue, cli_version: '0.153.4', originator: 'codex_cli_rs' });
 const context = (turn, extras = {}) => rec('2026-10-15T10:00:01.000Z', 'turn_context', { turn_id: turn, cwd: '/repo', model: 'gpt-test', effort: 'medium', ...extras });
@@ -86,6 +91,9 @@ test('ingests a selected archived CLI session with whitelisted timeline, tool ev
     rec('2026-10-15T10:00:06.000Z', 'token_count', { turn_id: turn, info: { total_token_usage: { input_tokens: -1 } } })]);
   const before = await readFile(rollout), report = await auditNativeSession(f.store, 'A', task);
   assert.equal(report.status, 'ready'); assert.equal(report.source.nativeSessionId, task); assert.equal(report.source.clientVersion, '0.153.4');
+  assert.equal(report.source.provider, 'codex'); assert.equal(report.source.client, 'cli');
+  assert.equal(report.source.clientEvidence, 'recorded-originator+recorded-index-source');
+  assert.deepEqual(report.source.recordedSetup, { status: 'partial', source: 'native-turn-context', model: ['gpt-test'], effort: ['medium'], fullHistoricalSetup: 'unavailable' });
   assert.deepEqual(report.turns.map(x => x.turnId), [turn]);
   assert.equal(report.metrics.recordedSpanMs, 5500);
   assert.equal(report.events.find(x => x.kind === 'tool-call').metadata.tool, 'functions.exec');
@@ -115,7 +123,7 @@ test('ingests a selected archived CLI session with whitelisted timeline, tool ev
   assert.equal(report.skills.find(x => x.name === 'aliased').rootAlias, 'r0');
   assert.equal(report.skills.find(x => x.name === 'aliased').path, `${profile.userHome}/.codex/skills/aliased/SKILL.md`);
   assert.equal(report.skills.find(x => x.name === 'product-design:image-to-code').rootAlias, 'r6');
-  assert.equal(report.skills.find(x => x.name === 'system-check').scope, 'system');
+  assert.equal(report.skills.find(x => x.name === 'system-check').scope, 'system-or-external');
   assert.equal(report.skills.filter(x => x.name === 'same').length, 2);
   assert.equal(report.skills.find(x => x.name === 'planner').scope, 'user');
   assert.ok(report.events.some(x => x.kind === 'skill-invoked' && x.metadata.reason === 'ambiguous-skill-name'
@@ -134,6 +142,78 @@ test('ingests a selected archived CLI session with whitelisted timeline, tool ev
   assert.equal(report.coverage.skills, 'partial'); assert.equal(report.coverage.outcome, 'partial');
   assert.doesNotMatch(JSON.stringify(report), /PRIVATE|sk-123|aggregated_output|parsed_cmd|"cmd"/);
   assert.deepEqual(await readFile(rollout), before);
+});
+
+test('session provenance uses recorded client signals and leaves ambiguous clients unknown', async t => {
+  const f = await fixture(t), desktop = id(901), unknown = id(902), conflict = id(903);
+  const entries = [
+    [desktop, 'vscode', 'Codex Desktop'],
+    [unknown, 'vscode', 'future_codex_surface'],
+    [conflict, 'cli', 'Codex Desktop'],
+    [id(904), 'exec', 'codex_exec'],
+    [id(905), 'exec', undefined],
+  ];
+  await seedIndex(f.home, entries.map(([task, source]) => ({ id: task, path: join(f.home, 'sessions', `${task}.jsonl`), source })));
+  for (const [task, , originator] of entries) await writeRollout(join(f.home, 'sessions', `${task}.jsonl`), [
+    rec('2026-10-15T10:00:00Z', 'session_meta', { id: task, session_id: task, originator }),
+    context(id(Number(task.slice(-1)) + 910)),
+  ]);
+  const reports = await Promise.all(entries.map(([task]) => auditNativeSession(f.store, 'A', task)));
+  assert.equal(reports[0].source.client, 'desktop');
+  assert.equal(reports[0].source.clientEvidence, 'recorded-originator');
+  assert.equal(reports[1].source.client, 'unknown');
+  assert.equal(reports[1].source.clientEvidence, 'unknown');
+  assert.equal(reports[2].source.client, 'unknown');
+  assert.equal(reports[2].source.clientEvidence, 'conflicting-recorded-signals');
+  assert.equal(reports[3].source.client, 'cli');
+  assert.equal(reports[3].source.clientEvidence, 'recorded-originator+recorded-index-source');
+  assert.equal(reports[4].source.client, 'cli');
+  assert.equal(reports[4].source.clientEvidence, 'recorded-index-source');
+  assert.equal(reports[0].source.recordedSetup.fullHistoricalSetup, 'unavailable');
+});
+
+test('direct CLI and Desktop sessions derive named actions from recorded cwd without reading the workspace', async t => {
+  const f = await fixture(t), cli = id(906), desktop = id(907), mismatch = id(908), unknown = id(909);
+  const cases = [
+    [cli, 'cli', 'codex_cli_rs', '/historical/cli-repo', '/historical/cli-repo'],
+    [desktop, 'vscode', 'Codex Desktop', '/historical/desktop-repo', '/historical/desktop-repo'],
+    [mismatch, 'cli', 'codex_cli_rs', '/historical/old-repo', '/historical/other-repo'],
+    [unknown, 'cli', 'codex_cli_rs', null, '/historical/unknown-repo'],
+  ];
+  const indexRows = [];
+  for (const [task, source, originator, sessionCwd, turnCwd] of cases) {
+    const path = join(f.home, 'sessions', `${task}.jsonl`), turn = id(Number(task.slice(-1)) + 910);
+    indexRows.push({ id: task, path, source });
+    await writeRollout(path, [rec('2026-10-15T10:00:00Z', 'session_meta', {
+      id: task, session_id: task, originator, ...(sessionCwd ? { cwd: sessionCwd } : {}),
+    }), context(turn, { cwd: turnCwd }), rec('2026-10-15T10:00:02Z', 'event_msg', {
+      type: 'item_completed', turn_id: turn, item: { type: 'CommandExecution', id: `test-${task}`,
+        command: ['node', '--test', 'test/ledger.test.js'], cwd: turnCwd, status: 'completed', exit_code: 0 },
+    }), rec('2026-10-15T10:00:03Z', 'event_msg', {
+      type: 'item_completed', turn_id: turn, item: { type: 'FileChange', id: `change-${task}`, status: 'completed',
+        changes: { [`${turnCwd}/src/ledger.js`]: { kind: 'update' } } },
+    })]);
+  }
+  await seedIndex(f.home, indexRows);
+  const reports = new Map(await Promise.all(cases.map(async ([task]) => [task, await auditNativeSession(f.store, 'A', task)])));
+  for (const task of [cli, desktop]) {
+    const report = reports.get(task);
+    assert.equal(report.actions.length, 1);
+    assert.deepEqual(report.actions[0].targets, ['test/ledger.test.js']);
+    assert.equal(report.actions[0].name, 'run-test-file');
+    assert.equal(report.actionCoverage, 'observed');
+    const change = report.artifacts.find(artifact => artifact.kind === 'recorded-file-change');
+    assert.equal(change.path, 'src/ledger.js');
+    assert.equal(change.recordedPath, `${task === cli ? '/historical/cli-repo' : '/historical/desktop-repo'}/src/ledger.js`);
+  }
+  assert.equal(reports.get(mismatch).actions.length, 0);
+  assert.equal(reports.get(mismatch).actionCoverage, 'partial');
+  assert.equal(reports.get(mismatch).artifacts[0].path, null);
+  assert.equal(reports.get(mismatch).artifacts[0].recordedPath, '/historical/other-repo/src/ledger.js');
+  assert.equal(reports.get(unknown).actions.length, 0);
+  assert.equal(reports.get(unknown).actionCoverage, 'partial');
+  assert.equal(reports.get(unknown).artifacts[0].path, null);
+  assert.equal(reports.get(unknown).artifacts[0].recordedPath, '/historical/unknown-repo/src/ledger.js');
 });
 
 test('projects typed historical tool lifecycles with native ownership, outcomes, plugin identity, and privacy bounds', async t => {
@@ -315,7 +395,157 @@ test('reports missing and unsafe selected rollouts without cross-home fallback o
   await seedIndex(f.home, [{ id: missing, path: join(f.home, 'sessions', '..', 'outside.jsonl') }]);
   const report = await auditNativeSession(f.store, 'A', missing);
   assert.equal(report.status, 'unavailable'); assert.match(report.reason, /unsafe|unavailable/i);
-  const absent = await auditNativeSession(f.store, 'A', id(22)); assert.equal(absent.status, 'not-found');
+  const absent = await auditNativeSession(f.store, 'A', id(22)); assert.equal(absent.status, 'not-found', absent.reason);
+});
+
+test('reads exact compressed root and child rollouts with stored-byte fingerprints and retained source-free export', async t => {
+  const f = await fixture(t), root = id(121), child = id(122), rootTurn = id(123), childTurn = id(124);
+  const rootPlain = join(f.home, 'sessions', '2026', '10', '15', `rollout-2026-10-15T10-00-00-${root}.jsonl`);
+  const childPlain = join(f.home, 'sessions', `${child}.jsonl`);
+  const currentMeta = (identity, session = identity, lineage = {}) => rec('2026-10-15T10:00:00.000Z', 'session_meta', {
+    ...meta(identity).payload, session_id: session, cli_version: '0.163.0-alpha.10.2', ...lineage });
+  const rootRows = [currentMeta(root), context(rootTurn)];
+  await seedIndex(f.home, [
+    { id: root, path: rootPlain, source: 'cli' },
+    { id: child, path: childPlain, source: { subagent: { thread_spawn: { parent_thread_id: root } } } },
+  ]);
+  await writeCompressedRollout(`${rootPlain}.zst`, rootRows);
+  await writeCompressedRollout(`${childPlain}.zst`, [
+    currentMeta(child, root, { parent_thread_id: root,
+      source: { subagent: { thread_spawn: { parent_thread_id: root } } }, forked_from_id: root }),
+    context(childTurn),
+    rec('2026-10-15T10:00:02Z', 'token_usage_record', { thread_id: child, session_id: root,
+      turn_id: childTurn, root_turn_id: rootTurn, total_token_usage: { input_tokens: 1 } }),
+  ]);
+  const rootStored = await readFile(`${rootPlain}.zst`), rootDecoded = Buffer.from(rootRows.map(x => JSON.stringify(x)).join('\n') + '\n');
+  const report = await auditNativeSession(f.store, 'A', root);
+  assert.equal(report.status, 'ready', JSON.stringify({ reason: report.reason, warnings: report.warnings, agents: report.agents }));
+  assert.equal(report.source.path, `${rootPlain}.zst`);
+  assert.equal(report.source.compression, 'zstd');
+  assert.equal(report.source.fingerprintRepresentation, 'stored-source-bytes');
+  assert.equal(report.source.fingerprint, createHash('sha256').update(rootStored).digest('hex'));
+  assert.equal(report.source.bytes, rootStored.length);
+  assert.equal(report.source.fileBytes, rootStored.length);
+  assert.equal(report.source.decodedBytes, rootDecoded.length);
+  assert.equal(report.source.fingerprintScope, 'source-snapshot');
+  assert.equal(report.source.sourceScope, 'stored-source-bytes');
+  assert.equal(report.source.parsedBytes, rootDecoded.length);
+  assert.equal(report.agents.find(agent => agent.id === root)?.source.compression, 'zstd');
+  assert.equal(report.agents.find(agent => agent.id === child)?.status, 'ready');
+  assert.equal(report.agents.find(agent => agent.id === child)?.source.compression, 'zstd');
+  assert.deepEqual(report.turns.map(turn => turn.agentId), [root, child]);
+
+  const retained = await auditRetainedNativeSession({ profileId: 'retained', profileName: 'Retained', home: f.home, userHome: '/user' }, root);
+  assert.equal(retained.status, 'ready', JSON.stringify({ reason: retained.reason, warnings: retained.warnings, source: retained.source }));
+  assert.equal(retained.source.path, null);
+  assert.equal(retained.source.compression, 'zstd');
+  assert.doesNotMatch(JSON.stringify(retained), new RegExp(f.home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  const exportedPath = join(f.root, 'compressed-retained.json');
+  const exported = await exportAuditReport(retained, { output: exportedPath });
+  const reopened = await readAuditReport(exported.evidencePath);
+  assert.equal(reopened.source.path, null);
+  assert.equal(reopened.source.compression, 'zstd');
+  assert.equal(reopened.source.fingerprintRepresentation, 'stored-source-bytes');
+  assert.deepEqual(await readFile(`${rootPlain}.zst`), rootStored);
+  await writeRollout(rootPlain, rootRows);
+  const ambiguous = await auditRetainedNativeSession({ profileId: 'retained', profileName: 'Retained', home: f.home, userHome: '/user' }, root);
+  assert.equal(ambiguous.status, 'unavailable');
+  assert.match(ambiguous.reason, /Multiple retained rollouts/);
+});
+
+test('audits an exact retained root rollout when the selected home has no history index row', async t => {
+  const f = await fixture(t), task = id(141), turn = id(142);
+  const rollout = join(f.home, 'sessions', '2026', '10', '15', `rollout-2026-10-15T10-00-00-${task}.jsonl`);
+  await writeRollout(rollout, [meta(task), context(turn),
+    rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'task_complete', turn_id: turn, success: true, status: 'completed' }),
+    rec('2026-10-15T10:00:03Z', 'token_count', { turn_id: turn, info: { total_token_usage: { input_tokens: 12, output_tokens: 4 } } })]);
+  const report = await auditNativeSession(f.store, 'A', task);
+  assert.equal(report.status, 'partial', JSON.stringify({ reason: report.reason, warnings: report.warnings }));
+  assert.equal(report.source.path, rollout);
+  assert.equal(report.source.discovery, 'exact-retained-rollout');
+  assert.equal(report.source.historyIndex, 'unavailable-or-missing-row');
+  assert.equal(report.turns[0].turnId, turn);
+  assert.equal(report.events.find(event => event.kind === 'task-complete').metadata.success, true);
+  assert.deepEqual(report.usage.totals.values, { input_tokens: 12, output_tokens: 4 });
+  assert.match(report.warnings.join(' '), /exact UUID.*index metadata is unavailable and child coverage may be incomplete/);
+});
+
+test('native fallback rejects ambiguous, mismatched, symlinked, cross-profile, and malformed-index sources', async t => {
+  const task = id(143), other = id(144), turn = id(145);
+  const retainedPath = (home, name = `rollout-2026-10-15T10-00-00-${task}.jsonl`) =>
+    join(home, 'sessions', '2026', '10', '15', name);
+  const rows = identity => [meta(identity), context(turn)];
+
+  await t.test('ambiguous exact candidates', async st => {
+    const f = await fixture(st);
+    await writeRollout(retainedPath(f.home), rows(task));
+    await writeRollout(retainedPath(f.home, `rollout-2026-10-16T10-00-00-${task}.jsonl`), rows(task));
+    const report = await auditNativeSession(f.store, 'A', task);
+    assert.equal(report.status, 'unavailable'); assert.match(report.reason, /Multiple retained rollouts/);
+  });
+
+  await t.test('candidate filename cannot override a mismatched header', async st => {
+    const f = await fixture(st);
+    await writeRollout(retainedPath(f.home), rows(other));
+    const report = await auditNativeSession(f.store, 'A', task);
+    assert.equal(report.status, 'unavailable'); assert.match(report.reason, /safely|identity|rollout/i);
+  });
+
+  await t.test('symlink candidate is not followed', async st => {
+    const f = await fixture(st), linkPath = retainedPath(f.home), target = join(f.root, 'outside.jsonl');
+    await writeRollout(target, rows(task)); await mkdir(dirname(linkPath), { recursive: true }); await symlink(target, linkPath);
+    const report = await auditNativeSession(f.store, 'A', task);
+    assert.equal(report.status, 'not-found'); assert.match(report.reason, /No retained rollout/);
+  });
+
+  await t.test('same UUID in another profile home is not selected', async st => {
+    const f = await fixture(st), native = await prepareNativeHome({ directory: join(f.root, 'other-native'), executable: join(f.root, 'fake-codex'), codexVersion: '0.153.4' });
+    await f.store.update(data => create(data, 'B'));
+    await registerHome(f.store, 'B', native.root, { executable: join(f.root, 'fake-codex'), version: '0.153.4' });
+    await writeRollout(retainedPath(native.home), rows(task));
+    const report = await auditNativeSession(f.store, 'A', task);
+    assert.equal(report.status, 'not-found');
+  });
+
+  await t.test('malformed index remains unavailable and does not trigger fallback', async st => {
+    const f = await fixture(st);
+    await writeRollout(retainedPath(f.home), rows(task));
+    await writeFile(join(f.home, 'state_5.sqlite'), 'not a sqlite database', { mode: 0o600 });
+    const report = await auditNativeSession(f.store, 'A', task);
+    assert.equal(report.status, 'unavailable'); assert.match(report.reason, /history index is unavailable/);
+    assert.equal(report.source.discovery, undefined);
+  });
+});
+
+test('bounds malformed, oversized, and unsafe compressed rollout handling', async t => {
+  const f = await fixture(t), malformed = id(125), bomb = id(126), unsafe = id(127), trailing = id(130), hardlinked = id(132);
+  const sessions = join(f.home, 'sessions');
+  const malformedPlain = join(sessions, `${malformed}.jsonl`), bombPlain = join(sessions, `${bomb}.jsonl`), trailingPlain = join(sessions, `${trailing}.jsonl`);
+  const unsafePlain = join(sessions, `${unsafe}.jsonl`), hardlinkedPlain = join(sessions, `${hardlinked}.jsonl`);
+  await seedIndex(f.home, [
+    { id: malformed, path: malformedPlain }, { id: bomb, path: bombPlain }, { id: unsafe, path: unsafePlain }, { id: trailing, path: trailingPlain },
+    { id: hardlinked, path: hardlinkedPlain },
+  ]);
+  await mkdir(sessions, { recursive: true, mode: 0o700 });
+  await writeFile(`${malformedPlain}.zst`, Buffer.from('not a zstandard frame'), { mode: 0o600 });
+  await writeCompressedRollout(`${bombPlain}.zst`, [meta(bomb), context(id(128)), rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'diagnostic', value: 'x'.repeat(32 * 1024 * 1024) })]);
+  await writeCompressedRollout(join(sessions, `${unsafe}.jsonl.zst`), [meta(unsafe), context(id(129))]);
+  const firstFrame = zlib.zstdCompressSync(Buffer.from(JSON.stringify(meta(trailing)) + '\n'));
+  await writeFile(`${trailingPlain}.zst`, Buffer.concat([firstFrame, zlib.zstdCompressSync(Buffer.from(JSON.stringify(context(id(131))) + '\n'))]), { mode: 0o600 });
+  await symlink(join(sessions, 'absent-target.jsonl'), unsafePlain);
+  const hardlinkSource = join(f.root, 'hardlink-source');
+  await writeFile(hardlinkSource, 'not a rollout', { mode: 0o600 });
+  await link(hardlinkSource, hardlinkedPlain);
+  await writeCompressedRollout(`${hardlinkedPlain}.zst`, [meta(hardlinked), context(id(133))]);
+  for (const task of [malformed, bomb, unsafe, trailing, hardlinked]) {
+    const report = await auditNativeSession(f.store, 'A', task);
+    assert.equal(report.status, 'unavailable');
+    assert.equal(report.turns.length, 0);
+    if (task === malformed) assert.match(report.reason, /malformed|decoded byte limit/i);
+    if (task === bomb) assert.match(report.reason, /malformed|decoded byte limit/i);
+    if (task === unsafe || task === hardlinked) assert.match(report.reason, /unsafe|unavailable/i);
+    if (task === trailing) assert.match(report.reason, /trailing|undecoded/i);
+  }
 });
 
 test('marks typed histories partial when a known hook row has an unsupported source enum or malformed turn', async t => {
@@ -533,7 +763,10 @@ test('historical absolute cat reads require one matching unknown action, recorde
     for (const format of ['json', 'markdown']) {
       const exported = await exportAuditReport(value, { output: join(f.root, `${randomUUID()}.${format}`), format });
       const reopened = await readAuditReport(exported.evidencePath);
-      assert.deepEqual(reopened, JSON.parse(JSON.stringify(value)));
+      assert.deepEqual(reopened, projectReportResourceProvenance(JSON.parse(JSON.stringify(value))));
+      assert.equal(reopened.kind, value.kind);
+      assert.equal(reopened.status, value.status);
+      assert.ok(reopened.comparisonEvidence ?? reopened.left?.comparisonEvidence);
       assert.equal(auditExitCode(reopened), 2);
     }
   }
@@ -625,4 +858,46 @@ test('auditing a selected child verifies its indexed parent and excludes inherit
   assert.deepEqual(report.turns.map(x => x.turnId), [own]);
   assert.equal(report.metrics.recordedSpanMs, 3000);
   assert.equal(report.metrics.recordedSpanKind, 'owned-turn-evidence');
+});
+
+test('legacy MCP tool errors inside Ok stay failed through frozen export and source removal', async t => {
+  const f = await fixture(t), task = id(901), turn = id(902), path = join(f.home, 'sessions', 'mcp-outcomes.jsonl');
+  await seedIndex(f.home, [{ id: task, path, source: 'cli' }]);
+  const outcomes = [
+    ['ok', { Ok: { isError: false, content: [{ text: 'PRIVATE_MCP_RESULT_BODY' }] } }, 'completed'],
+    ['tool-error', { Ok: { isError: true, content: [{ text: 'PRIVATE_MCP_TOOL_ERROR' }], structuredContent: { private: 'PRIVATE_MCP_STRUCTURED' } } }, 'failed'],
+    ['transport-error', { Err: 'PRIVATE_MCP_TRANSPORT_ERROR' }, 'failed'],
+    ['default-ok', { Ok: { content: [{ text: 'PRIVATE_MCP_DEFAULT_RESULT' }] } }, 'completed'],
+    ['legacy-error', { ok: { is_error: true, content: [{ text: 'PRIVATE_MCP_LEGACY_ERROR' }] } }, 'failed'],
+  ];
+  await writeRollout(path, [meta(task), context(turn), ...outcomes.flatMap(([call_id, result]) => [
+    rec('2026-10-15T10:00:02.000Z', 'event_msg', { type: 'mcp_tool_call_begin', turn_id: turn, call_id,
+      plugin_id: 'example-plugin@local-market', invocation: { server: 'local-plugin-server', tool: 'lookup', arguments: { private: 'PRIVATE_MCP_ARGUMENT' } } }),
+    rec('2026-10-15T10:00:03.000Z', 'event_msg', { type: 'mcp_tool_call_end', turn_id: turn, call_id,
+      plugin_id: 'example-plugin@local-market', invocation: { server: 'local-plugin-server', tool: 'lookup' },
+      duration: { secs: 0, nanos: 1000000 }, result }),
+  ]), rec('2026-10-15T10:00:04.000Z', 'event_msg', { type: 'task_complete', turn_id: turn })]);
+  const before = await readFile(path), run = await auditNativeSession(f.store, 'A', task);
+  assert.deepEqual(await readFile(path), before);
+  assert.deepEqual(run.toolInvocations.map(call => [call.itemId, call.status, call.failed]),
+    outcomes.map(([name, , status]) => [name, status, status === 'failed']));
+  assert.ok(run.toolInvocations.every(call => call.agentId === task && call.turnId === turn
+    && call.pluginId === 'example-plugin@local-market' && call.durationMs === 1));
+  const compact = { ...compactAuditTrial({ runs: [run] }).runs[0], schemaVersion: 1, kind: 'audit-run' };
+  const exported = [];
+  for (const [label, candidate] of [['full', run], ['compact', compact]]) for (const format of ['json', 'markdown']) {
+    const output = await exportAuditReport(candidate, { output: join(f.root, `${label}.${format}`), format });
+    exported.push({ candidate, output });
+  }
+  await rm(path);
+  for (const { candidate, output } of exported) {
+    const reopened = await readAuditReport(output.evidencePath);
+    assert.deepEqual(reopened.toolInvocations, candidate.toolInvocations);
+    assert.equal(auditExitCode(reopened), 2);
+    const comparison = compareAuditRuns(candidate, reopened);
+    assert.equal(comparison.comparison.tools.left.byAgent[0].statuses.failed, 3);
+    assert.equal(comparison.comparison.plugins.left.byPlugin.find(plugin => plugin.pluginId === 'example-plugin@local-market').count, 5);
+    assert.doesNotMatch(await readFile(output.output, 'utf8'), /PRIVATE_MCP_/);
+    assert.doesNotMatch(JSON.stringify(reopened) + renderAudit(reopened, { format: 'markdown' }), /PRIVATE_MCP_/);
+  }
 });

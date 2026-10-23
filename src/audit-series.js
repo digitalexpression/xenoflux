@@ -11,12 +11,13 @@ import { getAuditProcessIdentity, observeAuditProcess } from './audit-process.js
 import { acquire, release, privateDirectory, readJSON } from './metadata.js';
 import { auditQualityFingerprint, validateAuditReview } from './audit-quality.js';
 import { compactAuditTrial, summarizeAuditSeries } from './audit-statistics.js';
+import { buildAuditComparisonConditions } from './audit-conditions.js';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const profileKeys = ['profileId', 'profileName', 'home', 'userHome', 'nativeRoot', 'environmentId',
-  'executable', 'executableIdentity', 'version', 'bindingRepository'];
+  'executable', 'executableIdentity', 'version', 'bindingRepository', 'nativeConfig'];
 const identityOf = profile => Object.fromEntries(profileKeys.map(key => [key, profile[key] ?? null]));
 const stableError = code => Object.assign(new Error(code.replaceAll('-', ' ')), { code });
 const environment = epoch => ({ platform: process.platform, architecture: process.arch, nodeVersion: process.version,
@@ -63,7 +64,8 @@ export async function previewAuditSeries(store, input, context = {}) {
 async function freezeProfiles(store, spec, context) {
   const profiles = [];
   for (const selection of spec.profiles) {
-    const profile = await (context.resolveProfile ?? resolveAuditExecutionProfile)(store, selection, { repository: spec.repository });
+    const resolved = await (context.resolveProfile ?? resolveAuditExecutionProfile)(store, selection, { repository: spec.repository });
+    const profile = { ...resolved, ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}) };
     const snapshot = await (context.snapshotSettings ?? snapshotAuditProfileSettings)(profile);
     const settingsIdentity = (context.settingsIdentity ?? auditSettingsIdentity)(snapshot);
     if (!settingsIdentity) throw stableError('series-settings-unavailable');
@@ -122,7 +124,8 @@ async function claimSeries(store, current, { fresh = false, ...context } = {}) {
 
 function publicProfiles(profiles) {
   return profiles.map(profile => ({ profileId: profile.profileId, profileName: profile.profileName,
-    executable: profile.executable, version: profile.version }));
+    executable: profile.executable, version: profile.version,
+    ...(profile.nativeConfig !== undefined ? { nativeConfig: { ...profile.nativeConfig } } : {}) }));
 }
 
 async function childMembers(store, child) {
@@ -139,7 +142,7 @@ async function childMembers(store, child) {
 async function childEvidence(store, child) {
   const members = await childMembers(store, child), runs = [];
   const show = (await import('./audit-experiment.js')).showAuditRecord;
-  for (const member of members) runs.push(member.report ?? await show(store, member.id));
+  for (const member of members) runs.push(await show(store, member.id));
   return { ...(child.report ?? {}), kind: 'audit-experiment-report',
     status: child.report?.status ?? 'interrupted', runs };
 }
@@ -161,6 +164,19 @@ async function collectTrials(store, current) {
       if (child.record.series?.id !== current.id || child.record.series.trialIndex !== slot.trialIndex)
         throw stableError('series-trial-identity-changed');
       const report = await childEvidence(store, child);
+      const profileOrder = current.record.plan.find(item => item.index === slot.index)?.profileOrder ?? [];
+      report.runs = report.runs.map(run => {
+        // A pre-frozen core is immutable evidence. Do not relabel it using the
+        // current series recipe; only add richer frozen context before first freeze.
+        if (Object.hasOwn(run, 'comparisonEvidence')) return run;
+        if (run.reportProjection && run.reportProjection.context !== 'verified') return run;
+        const comparisonConditions = buildAuditComparisonConditions({ spec: current.record.spec,
+          baseline: current.record.baseline,
+          profile: current.record.spec.profiles.find(item => item.name === run.profile?.profileName),
+          profileOrder, trialIndex: slot.trialIndex, environment: saved?.environment, recipe: current.record.recipe });
+        return JSON.stringify(run.comparisonConditions) === JSON.stringify(comparisonConditions)
+          ? run : { ...run, comparisonConditions };
+      });
       trials.push(compactAuditTrial(report, { index: slot.index, experimentId: slot.experimentId,
         status: child.report ? report.status : 'interrupted', environment: saved?.environment,
         maxBytes: trialEvidenceBudget(current.record) }));
@@ -193,7 +209,8 @@ async function guardedProfiles(store, current, context, lease) {
   const resolved = new Map();
   for (const selection of current.record.spec.profiles) {
     if (!equal(await readJSON(join(lease.path, 'owner.json')), lease.owner)) throw stableError('series-coordinator-changed');
-    const profile = await (context.resolveProfile ?? resolveAuditExecutionProfile)(store, selection, { repository: current.record.spec.repository });
+    const resolvedProfile = await (context.resolveProfile ?? resolveAuditExecutionProfile)(store, selection, { repository: current.record.spec.repository });
+    const profile = { ...resolvedProfile, ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}) };
     const frozen = current.record.profiles.find(item => item.profileName === selection.name);
     if (!frozen || !equal(identityOf(profile), identityOf(frozen))) throw stableError('series-profile-identity-changed');
     const token = (context.settingsIdentity ?? auditSettingsIdentity)(await (context.snapshotSettings ?? snapshotAuditProfileSettings)(profile));
@@ -252,6 +269,7 @@ async function executeSeries(store, initial, { fresh = false, ...context } = {})
       await context.onTrialPrepared?.({ seriesId: current.id, slot });
       const result = await (context.runTrial ?? runAuditExperiment)(store, trial, { ...context,
         experimentId: slot.experimentId, series: { id: current.id, trialIndex: slot.trialIndex },
+        profileOrder: slot.profileOrder, comparisonEnvironment: envObservation,
         resolveProfile: async (selectedStore, selection) => {
           const profiles = await guardedProfiles(selectedStore, current, context, lease);
           const profile = profiles.get(selection.name.toLowerCase());

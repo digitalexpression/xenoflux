@@ -159,7 +159,7 @@ The implementation released in 1.0.0 changes that historical baseline as follows
   native profile loading in those contexts, not arbitrary project precedence or
   another interactive copy test. Existing profile data and sign-in were preserved.
 
-Record candidate-specific check results in the
-[concurrent profile handover](HANDOVER-macos-concurrent-profiles.md). Do not present
-historical candidates or fixture evidence as complete native acceptance for a
-released client version.
+Record candidate-specific results in private operational records. The published
+[audit acceptance](AUDIT-ACCEPTANCE.md) summarizes reviewed public evidence. Do not
+present historical candidates or fixture evidence as complete native acceptance
+for a released client version.

@@ -7,6 +7,7 @@ import { stringify } from 'smol-toml';
 import { Store, bind, create } from '../src/profiles.js';
 import { registerHome } from '../src/homes.js';
 import { hostname } from 'node:os';
+import { validateAuditSpec } from '../src/audit-spec.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { auditSettingsIdentity, compareAuditProfileSettings, observeAuditProfileIdle, resolveAuditExecutionProfile,
   snapshotAuditProfileSettings, parseNativeResourceResult, observeAuditProfileAccess, inspectNativeResources } from '../src/audit-profile.js';
@@ -50,18 +51,53 @@ test('named execution profile reuses the bound home and keeps only approved envi
 test('per-trial executable override is validated and never changes the saved native binding', async t => {
   const f = await fixture(t), alternate = join(f.root, 'codex-alt');
   await writeFile(alternate, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
-  const profile = await resolveAuditExecutionProfile(f.store, { name: 'Research', executable: alternate, version: '0.163.1', skills: ['review-helper'] }, { repository: f.repository });
+  const profile = await resolveAuditExecutionProfile(f.store, { name: 'Research', executable: alternate, version: '0.163.1', skills: ['review-helper'] },
+    { repository: f.repository, probe: async () => null });
   assert.equal(profile.executable, alternate);
-  assert.equal(profile.version, '0.163.1');
+  assert.equal(profile.version, null);
   assert.equal(profile.executableSource, 'explicit-per-trial');
-  assert.equal(profile.versionSource, 'explicit-per-trial');
+  assert.equal(profile.versionSource, 'unavailable');
+  assert.equal(profile.requestedVersion, '0.163.1');
   assert.deepEqual(profile.skills, ['review-helper']);
   assert.deepEqual(await readFile(f.store.file), f.profileStore);
-  await assert.rejects(resolveAuditExecutionProfile(f.store, { name: 'Research', executable: alternate }, { repository: f.repository }), /requires its declared version/);
+  await writeFile(alternate, '#!/bin/sh\nprintf "codex-cli 99.1.0\\n"\n', { mode: 0o700 });
+  const observed = await resolveAuditExecutionProfile(f.store, { name: 'Research', executable: alternate },
+    { repository: f.repository, probe: async () => '99.1.0' });
+  assert.equal(observed.version, '99.1.0');
+  assert.equal(observed.versionSource, 'observed');
+  assert.deepEqual(await readFile(f.store.file), f.profileStore);
+  const spec = validateAuditSpec({ schemaVersion: 1, repository: f.repository, revision: 'HEAD', task: 'Fixture',
+    profiles: [{ name: 'Research', executable: alternate }, { name: 'Other', executable: alternate }] });
+  assert.equal(Object.hasOwn(spec.profiles[0], 'version'), false);
   await assert.rejects(resolveAuditExecutionProfile(f.store, { name: 'Research', executable: f.repository, version: '0.1.0' }, { repository: f.repository }), /regular file/);
 });
 
-test('Default needs an existing trusted repository entry and explicit executable/version', async t => {
+test('explicit executable version probing propagates unsafe shutdown and cancellation', async t => {
+  const f = await fixture(t), alternate = join(f.root, 'codex-alt');
+  await writeFile(alternate, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  for (const code of ['SHUTDOWN_FAILED', 'CANCELLED']) {
+    const failure = Object.assign(new Error('private probe detail'), { code });
+    await assert.rejects(resolveAuditExecutionProfile(f.store, { name: 'Research', executable: alternate },
+      { repository: f.repository, probe: async () => { throw failure; } }), error => error === failure);
+  }
+});
+
+test('native config overrides are narrowly validated, normalized, and retained per execution profile', async t => {
+  const f = await fixture(t);
+  const nativeConfig = { forced_login_method: 'chatgpt', plan_mode_reasoning_effort: 'low', model_reasoning_effort: 'low' };
+  const spec = validateAuditSpec({ schemaVersion: 1, repository: f.repository, revision: 'HEAD', task: 'Fixture',
+    profiles: [{ name: 'Research', nativeConfig }, { name: 'Other' }] });
+  assert.deepEqual(spec.profiles[0].nativeConfig, { forced_login_method: 'chatgpt', model_reasoning_effort: 'low', plan_mode_reasoning_effort: 'low' });
+  const profile = await resolveAuditExecutionProfile(f.store, spec.profiles[0], { repository: f.repository });
+  assert.deepEqual(profile.nativeConfig, spec.profiles[0].nativeConfig);
+  assert.deepEqual(await readFile(f.store.file), f.profileStore);
+  for (const bad of [{ model_reasoning_effort: 'turbo' }, { forced_login_method: 'other' }, { profile: 'changed' }, { model: '' }]) {
+    assert.throws(() => validateAuditSpec({ schemaVersion: 1, repository: f.repository, revision: 'HEAD', task: 'Fixture',
+      profiles: [{ name: 'Research', nativeConfig: bad }, { name: 'Other' }] }));
+  }
+});
+
+test('Default needs an existing trusted repository entry and explicit executable', async t => {
   const f = await fixture(t), userHome = join(f.root, 'user');
   await mkdir(userHome, { mode: 0o700 });
   const home = join(userHome, '.codex'); await mkdir(home, { mode: 0o700 });
@@ -78,7 +114,7 @@ test('Default needs an existing trusted repository entry and explicit executable
   assert.equal(profile.bindingRepository, f.repository);
   assert.equal(profile.env.CODEX_HOME, home);
   assert.equal(profile.env.OPENAI_API_KEY, undefined);
-  await assert.rejects(resolveAuditExecutionProfile(f.store, 'Default', { repository: f.repository, defaultUserHome: userHome }), /explicit Codex executable and version/);
+  await assert.rejects(resolveAuditExecutionProfile(f.store, 'Default', { repository: f.repository, defaultUserHome: userHome }), /explicit Codex executable/);
   await writeFile(join(home, 'config.toml'), `${stringify({ projects: { [f.repository]: { trust_level: 'untrusted' } } })}\n`, { mode: 0o600 });
   await assert.rejects(resolveAuditExecutionProfile(f.store, input, { repository: f.repository, defaultUserHome: userHome }), /existing trusted repository entry/);
 });

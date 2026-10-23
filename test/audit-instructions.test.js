@@ -72,9 +72,13 @@ test('frozen source limits preserve missingness and survive repeated projection'
   assert.equal(compactInstructionSources([]).status, 'unavailable');
 });
 
-test('pins the loaded-thread observation contract and rejects unowned source envelopes', () => {
-  assert.ok(nativeInstructionSourceContract('0.163.0-alpha.10.2'));
-  assert.equal(nativeInstructionSourceContract('0.163.0'), null);
+test('detects the loaded-thread capability from validated metadata, independent of client version', () => {
+  assert.equal(nativeInstructionSourceContract(['/private/workspace/AGENTS.md']), 'codex-owned-loaded-instruction-sources-v1');
+  assert.equal(nativeInstructionSourceContract([]), 'codex-owned-loaded-instruction-sources-v1');
+  assert.equal(nativeInstructionSourceContract(undefined), null);
+  assert.equal(nativeInstructionSourceContract('/private/workspace/AGENTS.md'), null);
+  assert.equal(nativeInstructionSourceContract(['/private/workspace/AGENTS.md', null]), null);
+  assert.equal(nativeInstructionSourceContract(Array.from({ length: 129 }, () => '/private/workspace/AGENTS.md')), null);
   assert.throws(() => projectInstructionSources([], { ...context, agentId: '/unowned' }));
   assert.throws(() => projectInstructionSources([], { ...context, source: 'invented-source' }));
 });

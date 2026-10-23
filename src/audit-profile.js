@@ -14,9 +14,12 @@ import { nativePath } from './node-runtime.js';
 import { privateDirectory, readJSON } from './metadata.js';
 import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
 import { hostname } from 'node:os';
+import { probeAuditVersion } from './audit-native-version.js';
+import { validateAuditNativeConfig } from './audit-spec.js';
 
 const execFile = promisify(nodeExecFile);
-const VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const VERSION = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 100
+  && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const MAX_SETTINGS_FILES = 2048;
 const MAX_SETTINGS_DEPTH = 12;
@@ -30,14 +33,13 @@ function selectionOf(value) {
   if (selection.executable !== undefined && (typeof selection.executable !== 'string' || !selection.executable.trim()
     || !selection.executable.startsWith('/') || /[\x00-\x1f\x7f]/.test(selection.executable)))
     throw new Error('Audit executable must be an absolute path');
-  if (selection.version !== undefined && (typeof selection.version !== 'string' || !VERSION.test(selection.version)))
-    throw new Error('Audit Codex version must be recognizable');
-  if (selection.executable !== undefined && selection.version === undefined)
-    throw new Error('An explicit audit executable requires its declared version');
+  if (selection.version !== undefined && !VERSION(selection.version))
+    throw new Error('Audit Codex version context must be short plain text');
   if (selection.skills !== undefined && (!Array.isArray(selection.skills)
     || selection.skills.some(skill => typeof skill !== 'string' || !skill.trim() || /[\x00-\x1f\x7f]/.test(skill))
     || new Set(selection.skills).size !== selection.skills.length)) throw new Error('Audit skills must be unique nonempty names');
-  return selection;
+  const nativeConfig = validateAuditNativeConfig(selection.nativeConfig);
+  return nativeConfig === undefined ? selection : { ...selection, nativeConfig };
 }
 
 async function canonicalDirectory(path, label, { privateOnly = false } = {}) {
@@ -80,6 +82,9 @@ async function executableInfo(path) {
   return { executable: invocation, executableIdentity: JSON.stringify([info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]) };
 }
 
+/** Recheck the selected executable's file identity before an audit task starts. */
+export async function inspectAuditExecutable(path) { return executableInfo(path); }
+
 async function defaultProfile(name, { repository, defaultUserHome }) {
   const userHome = resolve(defaultUserHome);
   await canonicalDirectory(userHome, 'Default user home');
@@ -96,7 +101,7 @@ async function defaultProfile(name, { repository, defaultUserHome }) {
 }
 
 /** Resolve one explicit profile to a launch-ready, credential-minimal environment. */
-export async function resolveAuditExecutionProfile(store, input, { repository, defaultUserHome = homedir() } = {}) {
+export async function resolveAuditExecutionProfile(store, input, { repository, defaultUserHome = homedir(), probe = probeAuditVersion } = {}) {
   const selection = selectionOf(input);
   const isDefault = selection.name.trim().toLowerCase() === 'default';
   let profile;
@@ -122,10 +127,8 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
   if (selection.executable !== undefined) binary = await executableInfo(selection.executable);
   else if (profile._nativeExecutable) binary = { executable: profile._nativeExecutable,
     executableIdentity: profile._nativeIdentity };
-  else throw new Error('Default profile audit requires an explicit Codex executable and version');
+  else throw new Error('Default profile audit requires an explicit Codex executable');
 
-  const version = selection.version ?? profile._nativeVersion;
-  if (!version || !VERSION.test(version)) throw new Error('Audit Codex version is unavailable; provide an explicit version');
   const env = profile._nativeEnv ? { ...profile._nativeEnv } : {
     PATH: nativePath(process.env), HOME: profile.userHome, CODEX_HOME: profile.home,
     CODEX_SQLITE_HOME: profile.home, TMPDIR: profile.home, TMP: profile.home, TEMP: profile.home,
@@ -135,13 +138,29 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
   for (const key of Object.keys(env)) if (!allowed.has(key)) delete env[key];
   env.PATH = nativePath({ PATH: env.PATH });
   env.HOME = profile.userHome; env.CODEX_HOME = profile.home; env.CODEX_SQLITE_HOME = profile.home;
+  let version = profile._nativeVersion ?? null;
+  let versionSource = version ? 'registered' : 'unavailable';
+  if (selection.executable !== undefined) {
+    version = null;
+    versionSource = 'unavailable';
+    try {
+      const observed = await probe({ executable: binary.executable, env,
+        cwd: profile.bindingRepository ?? profile.userHome });
+      if (VERSION(observed)) { version = observed; versionSource = 'observed'; }
+    } catch (error) {
+      // A version flag/output shape is descriptive, but an unconfirmed child
+      // shutdown or cancellation must remain a hard safety boundary.
+      if (['SHUTDOWN_FAILED', 'CANCELLED'].includes(error?.code)) throw error;
+    }
+  }
   const result = { profileId: profile.profileId, profileName: profile.profileName,
     home: profile.home, userHome: profile.userHome, nativeRoot: profile.nativeRoot,
     reservationRoot: profile.reservationRoot, environmentId: profile.environmentId,
     executable: binary.executable, executableIdentity: binary.executableIdentity, version,
     executableSource: selection.executable === undefined ? 'registered' : 'explicit-per-trial',
-    versionSource: selection.version === undefined ? 'registered' : 'explicit-per-trial',
+    versionSource, ...(selection.version !== undefined ? { requestedVersion: selection.version } : {}),
     env, bindingRepository: profile.bindingRepository,
+    ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}),
     ...(selection.skills ? { skills: [...selection.skills] } : {}) };
   return result;
 }

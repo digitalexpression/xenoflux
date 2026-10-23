@@ -73,11 +73,20 @@ export async function observeAuditProcess(expected, { identityProbe = identity }
   if (!current) {
     try { process.kill(expected.pid, 0); return { status: 'unknown' }; }
     catch (error) {
-      if (error?.code === 'ESRCH') return { status: 'stopped' };
-      return { status: 'unknown' };
+      if (error?.code !== 'ESRCH') return { status: 'unknown' };
+    }
+    // A detached leader can exit before its children. Absence of its PID
+    // does not establish that the owned group stopped; recovery never signals
+    // this saved group, including when the read-only probe is denied.
+    try { process.kill(-expected.pid, 0); return { status: 'unknown' }; }
+    catch (error) {
+      return { status: error?.code === 'ESRCH' ? 'stopped' : 'unknown' };
     }
   }
-  if (current.started !== expected.started || (expected.command && current.command !== expected.command)) return { status: 'different' };
+  if (current.started !== expected.started) return { status: 'different' };
+  // exec() replaces a wrapper's command without ending its process. A command
+  // change with the same start identity cannot prove the recorded owner stopped.
+  if (expected.command && current.command !== expected.command) return { status: 'unknown' };
   return { status: 'running', processIdentity: current };
 }
 

@@ -254,16 +254,32 @@ async function identify(skill, roots, io) {
   };
   return {
     root, rel, alias, identity, name, scope, providerForManifest: providerRaw,
+    canonicalPath: resolved.status === 'resolved' ? resolved.path : join(root.root, rel),
     version: undefined,
     nativeSkillId: typeof skill.id === 'string' && /^[a-f0-9]{24}$/.test(skill.id) ? skill.id : undefined
   };
 }
 
+async function sameRootBinding(root, io) {
+  try {
+    const st = await io.lstat(root.aliasRoot);
+    return st.isDirectory() && !st.isSymbolicLink() && !(st.mode & 0o022) && !(st.mode & 0o7000)
+      && await realpath(root.aliasRoot) === root.root && inside(await realpath(root.base), root.root);
+  } catch {
+    return false;
+  }
+}
+
 async function readDefinition(found, budget, io) {
+  if (!await sameRootBinding(found.root, io)) return { status: 'outside-boundary' };
   const resolved = await resolveWithin(found.root, found.rel, io);
   if (resolved.status !== 'resolved') return { status: resolved.status };
+  if (found.canonicalPath && resolved.path !== found.canonicalPath) return { status: 'changed-during-read' };
   const result = await readSafe(resolved.path, found.root.root, budget, io);
   if (result.status !== 'present') return { status: result.status };
+  // Bind the sampled bytes to the same observed alias target, including after-task sampling.
+  const after = await resolveWithin(found.root, found.rel, io);
+  if (after.status !== 'resolved' || after.path !== resolved.path || !await sameRootBinding(found.root, io)) return { status: 'changed-during-read' };
   return {
     status: 'present',
     fingerprint: hash(result.data),
@@ -276,9 +292,13 @@ function manifestProjection(data) {
   try {
     const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(data));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    for (const key of ['id', 'name']) {
+      if (Object.hasOwn(parsed, key) && (typeof parsed[key] !== 'string' || parsed[key].length > 128 ||
+          !/^[A-Za-z0-9._+/@-]+$/.test(parsed[key]) || secretLike(parsed[key]))) return null;
+    }
     const out = {};
     for (const k of ['id', 'name']) {
-      if (typeof parsed[k] === 'string' && parsed[k].length <= 128 && /^[A-Za-z0-9._+/-]+$/.test(parsed[k]) && !secretLike(parsed[k])) {
+      if (typeof parsed[k] === 'string' && parsed[k].length <= 128 && /^[A-Za-z0-9._+/@-]+$/.test(parsed[k]) && !secretLike(parsed[k])) {
         out[k] = parsed[k];
       }
     }
@@ -288,33 +308,76 @@ function manifestProjection(data) {
     return null;
   }
 }
+
+// Bind cache layout and provider spelling once so acquisition and comparison
+// agree about which package owns a skill path.
+function pluginCacheBinding(parts, provider) {
+  const cacheAt = parts.indexOf('cache');
+  if (cacheAt < 0) return undefined;
+  const tail = parts.slice(cacheAt + 1);
+  const skillsAt = tail.indexOf('skills');
+  if (skillsAt < 0) return undefined;
+  let packageParts;
+  let versionAt;
+  let identity;
+  if (tail[0] && tail[1] && tail[2] && skillsAt === 3 && provider === `${tail[1]}@${tail[0]}`) {
+    // Native Codex cache: <market>/<plugin>/<version>/skills/...
+    packageParts = tail.slice(0, 3);
+    versionAt = cacheAt + 3;
+    identity = { provider, name: tail[1], native: true };
+  } else if (tail[0] && skillsAt === 2 && provider === tail[0]) {
+    packageParts = tail.slice(0, 2);
+    versionAt = cacheAt + 2;
+    identity = { provider, name: tail[0] };
+  } else if (tail[0] && tail[1] && skillsAt === 3 && provider === `${tail[0]}/${tail[1]}`) {
+    packageParts = tail.slice(0, 3);
+    versionAt = cacheAt + 3;
+    identity = { provider, name: tail[1] };
+  } else if (tail[0] && tail[1] && skillsAt === 2 && provider === `${tail[0]}/${tail[1]}`) {
+    packageParts = tail.slice(0, 2);
+    versionAt = undefined;
+    identity = { provider, name: tail[1] };
+  } else if (tail[0] && skillsAt === 1 && provider === tail[0]) {
+    packageParts = tail.slice(0, 1);
+    versionAt = undefined;
+    identity = { provider, name: tail[0] };
+  } else {
+    return undefined;
+  }
+  return { packageParts: parts.slice(0, cacheAt + 1).concat(packageParts), versionAt, identity };
+}
+
 async function readManifest(found, definition, budget, io) {
   if (!definition.privatePath || !found.root.pluginRoot) return undefined;
   const parts = relative(found.root.root, definition.privatePath).split(sep);
-  const skillsAt = parts.indexOf('skills');
-  let packageParts;
   const provider = found.providerForManifest;
-  if (parts[0] !== 'cache' || skillsAt < 2) return { status: 'missing', scope: 'plugin-manifest-allowlist' };
-  if (skillsAt >= 3 && parts[2] && parts[1] && provider === `${parts[1]}/${parts[2]}` && (skillsAt === 3 || skillsAt === 4)) {
-    packageParts = parts.slice(0, skillsAt);
-  } else if (parts[1] && provider === parts[1] && (skillsAt === 2 || skillsAt === 3)) {
-    packageParts = parts.slice(0, skillsAt);
-  } else {
+  const binding = parts[0] === 'cache' && pluginCacheBinding(parts, provider);
+  if (!binding) {
     return { status: 'missing', scope: 'plugin-manifest-allowlist' };
   }
-  const packageRoot = join(found.root.root, ...packageParts);
-  const alternatives = [
-    join(packageRoot, '.codex-plugin', 'plugin.json'),
-    join(packageRoot, 'plugin.json'),
-    join(packageRoot, 'manifest.json')
-  ];
+  const packageRoot = join(found.root.root, ...binding.packageParts);
+  const canonicalManifest = join(packageRoot, '.codex-plugin', 'plugin.json');
+  const alternatives = binding.identity.native
+    ? [canonicalManifest]
+    : [canonicalManifest, join(packageRoot, 'plugin.json'), join(packageRoot, 'manifest.json')];
   for (const file of alternatives) {
     const resolved = await resolveWithin(found.root, relative(found.root.root, file), io);
-    if (resolved.status !== 'resolved') continue;
+    if (resolved.status !== 'resolved') {
+      if (binding.identity.native) return { status: 'missing', scope: 'plugin-manifest-allowlist' };
+      continue;
+    }
     const raw = await readSafe(resolved.path, found.root.root, budget, io);
-    if (raw.status !== 'present') continue;
+    if (raw.status !== 'present') {
+      if (binding.identity.native) return { status: 'missing', scope: 'plugin-manifest-allowlist' };
+      continue;
+    }
     const safe = manifestProjection(raw.data);
-    if (!safe || (safe.id && safe.id !== provider)) continue;
+    if (!safe || (binding.identity.native && (!safe.name || !safe.version || !binding.versionAt ||
+        parts[binding.versionAt] !== safe.version)) || (safe.id && safe.id !== binding.identity.provider) ||
+        (safe.name && safe.name !== binding.identity.name)) {
+      if (binding.identity.native) return { status: 'missing', scope: 'plugin-manifest-allowlist' };
+      continue;
+    }
     return {
       status: 'present',
       fingerprint: hash(JSON.stringify(safe)),
@@ -455,27 +518,22 @@ export function compareResourceProvenance(left, right, { sameBaseline = false } 
   const comparisonLocation = r => {
     if (r.identity.origin !== 'plugin' || !r.version || !semver(r.version)) return r.identity.location;
     const parts = r.identity.location.split('/');
-    const cacheAt = parts.indexOf('cache');
-    if (cacheAt < 0) return r.identity.location;
-
-    let packageParts;
-    let versionAt;
-    if (parts[cacheAt + 1] && parts[cacheAt + 2] && parts[cacheAt + 3] && parts[cacheAt + 4] === 'skills') {
-      packageParts = [parts[cacheAt + 1], parts[cacheAt + 2]];
-      versionAt = cacheAt + 3;
-    } else if (parts[cacheAt + 1] && parts[cacheAt + 2] && parts[cacheAt + 3] === 'skills') {
-      packageParts = [parts[cacheAt + 1]];
-      versionAt = cacheAt + 2;
-    } else {
-      return r.identity.location;
-    }
-
     const provider = r.identity.provider;
     const providerRef = r.identity.providerRef;
-    const packageIds = [packageParts.join('/'), packageParts.at(-1)];
-    const providerMatches = packageIds.some(id => provider === id || providerRef === `opaque-${hash(id).slice(0, 24)}`);
+    const binding = pluginCacheBinding(parts, provider);
+    // Opaque provider values are never decoded; only hash the exact provider
+    // spelling implied by the native layout and compare it to the stored ref.
+    const native = parts.slice(parts.indexOf('cache') + 1);
+    const nativeProvider = native[1] && native[0] ? `${native[1]}@${native[0]}` : undefined;
+    const tail = parts.slice(parts.indexOf('cache') + 1);
+    const providerCandidates = [nativeProvider, tail[0] && tail[1] ? `${tail[0]}/${tail[1]}` : undefined, tail[0]]
+      .filter(Boolean);
+    const opaqueCandidate = providerRef && providerCandidates.find(value =>
+      providerRef === `opaque-${hash(value).slice(0, 24)}`);
+    const resolvedBinding = binding ?? (opaqueCandidate ? pluginCacheBinding(parts, opaqueCandidate) : undefined);
+    const versionAt = resolvedBinding?.versionAt;
     const manifestVersions = r.snapshots.map(s => s.manifest?.version);
-    if (!providerMatches || parts[versionAt] !== r.version || !semver(parts[versionAt]) ||
+    if (!resolvedBinding || parts[versionAt] !== r.version || !semver(parts[versionAt]) ||
         !manifestVersions.length || manifestVersions.some(version => version !== parts[versionAt])) {
       return r.identity.location;
     }
@@ -631,7 +689,7 @@ export function createResourceProvenance({ workspace, profileHome, userHome, lim
         name: found.name,
         scope: found.scope,
         snapshots: [],
-        private: { root: found.root, rel: found.rel, providerForManifest: found.providerForManifest }
+        private: { root: found.root, rel: found.rel, canonicalPath: found.canonicalPath, providerForManifest: found.providerForManifest }
       };
       if (!rec.canonicalRef || rec.canonicalRef === found.identity.location) {
         const canonicalPath = definition.privatePath ? relative(found.root.root, definition.privatePath) : undefined;
@@ -697,9 +755,14 @@ export function createResourceProvenance({ workspace, profileHome, userHome, lim
         const budget = { used: bytesRead, limit: byteCap };
         for (const r of resources) {
           if (!r.snapshots.some(s => s.phase === 'before-task') || r.snapshots.some(s => s.phase === 'after-task')) continue;
-          const root = roots.find(x => x.aliasRoot === r.private.root.aliasRoot);
-          const found = { ...r.private, root: root ?? r.private.root };
-          const definition = await readDefinition(found, budget, io);
+          // Reapprove child-directory roots too; a retained canonical path alone
+          // cannot authorize a sample after its workspace/home alias disappears.
+          const candidates = roots.some(x => x.aliasRoot === r.private.root.aliasRoot)
+            ? roots : await approvedRoots(r.private.root.base);
+          const root = candidates.find(x => x.aliasRoot === r.private.root.aliasRoot);
+          const found = { ...r.private, root };
+          const definition = root && root.root === r.private.root.root
+            ? await readDefinition(found, budget, io) : { status: 'outside-boundary' };
           if (definition.status !== 'present') partial = true;
           let manifest;
           if (definition.status === 'present' && found.root.pluginRoot) {

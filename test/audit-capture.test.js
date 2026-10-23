@@ -6,6 +6,10 @@ import { join } from 'node:path';
 import { runAuditCapture } from '../src/audit-capture.js';
 import { parseLiteralSkillRead } from '../src/audit-skill-read.js';
 import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
+import { evaluateCaptureRequirements } from '../src/audit-evidence.js';
+import { compactAuditTrial } from '../src/audit-statistics.js';
+import { auditExitCode, compareAuditRuns, renderAudit } from '../src/audit-report.js';
+import { spawnSync } from 'node:child_process';
 
 const serverScript = `
 let buffer = '';
@@ -41,6 +45,7 @@ function respond(msg) {
       || params.ephemeral!==false || params.historyMode!=='paginated') return send({jsonrpc:'2.0',id,error:{code:-32602,message:'invalid thread sandbox/history'}});
     return send({jsonrpc:'2.0',id,result:{cwd:'/repo',thread:{id:'root-thread',sessionId:'session-root',cwd:'/repo'},instructionSources:__ROOT_INSTRUCTION_SOURCES__}});
   }
+  if (method==='command/exec') return send({jsonrpc:'2.0',id,result:{exitCode:0,stdout:'',stderr:''}});
   if (method==='turn/start') {
     const policy = params.sandboxPolicy;
     if (!onlyKeys(['threadId','cwd','sandboxPolicy','approvalPolicy','input']) || !policy || params.sandbox !== undefined || !params.input.some(x=>x.type==='text')
@@ -285,15 +290,15 @@ test('invalidates instruction provenance and workflow accounting when loaded sna
   }
 });
 
-test('keeps missing and unsupported native instruction sources explicitly unavailable', async t => {
-  for (const supported of [false, true]) {
+test('missing instruction-source capability stays unavailable across native versions', async t => {
+  for (const version of ['0.163.0-alpha.10.2', '0.163.0-alpha.11', '99.1.0']) {
     const f = await fixture(t, { nativeInstructionSources: true, instructionFault: 'missing-field' });
-    if (supported) f.options.profile.version = '0.163.0-alpha.10.2';
+    f.options.profile.version = version;
     const { run } = await runAuditCapture(f.options);
     assert.equal(run.instructionSources[1].status, 'unavailable');
-    assert.equal(run.instructionSources[1].reason, supported ? 'field-unavailable' : 'unsupported-native-version');
+    assert.equal(run.instructionSources[1].reason, 'field-unavailable');
     assert.equal(run.warnings.includes('instruction-snapshot-continuity-unknown'), false);
-    if (!supported) assert.equal(run.coverage.instructions, 'unavailable');
+    assert.equal(run.coverage.instructions, 'partial');
   }
 });
 
@@ -672,7 +677,7 @@ test('refuses missing, different or inconsistent inherited native working direct
     const executable = join(f.dir, 'fake-codex');
     await writeFile(executable, `#!/usr/bin/env node\n${script}`, { mode: 0o700 });
     const { process, run, capture } = await runAuditCapture({ ...f.options,
-      profile: { ...f.options.profile, executable },
+      profile: { ...f.options.profile, executable, home: f.dir, userHome: f.dir },
       processOptions: { ...f.options.processOptions, args: undefined,
         env: { ...f.options.processOptions.env, HOME: f.dir, CODEX_HOME: f.dir } },
       onSession: (_run, capture) => { checkpoints.push(capture.checkpoint); }, onTaskEnd: () => { taskEnds++; } });
@@ -902,6 +907,44 @@ ${f.script.replace("if (method==='thread/start') {", `if (method==='thread/start
 });
 
 
+test('native startup refuses an incompatible command sandbox before any model turn', async t => {
+  for (const response of ['{exitCode:71,stdout:"",stderr:"private sandbox error"}', '{}']) {
+    const f = await fixture(t), home = join(f.dir, 'home'); await mkdir(home);
+    const binary = join(f.dir, 'fake-codex');
+    const script = f.script.replace('result:{exitCode:0,stdout:\'\',stderr:\'\'}', `result:${response}`);
+    await writeFile(binary, '#!/usr/bin/env node\n' + script, { mode: 0o700 });
+    const { run, capture, process: result } = await runAuditCapture({ ...f.options,
+      profile: { ...f.options.profile, home, userHome: f.dir, executable: binary },
+      processOptions: { ...f.options.processOptions, args: undefined,
+        env: { PATH: process.env.PATH ?? '', HOME: f.dir, CODEX_HOME: home } } });
+    assert.equal(result.status, 'exited');
+    assert.equal(run.status, 'unavailable');
+    assert.equal(run.turns.length, 0);
+    assert.equal(capture.checkpoint, 'final');
+    assert.equal(capture.observer.startupPreservation.commandSandbox, 'unavailable');
+    assert.ok(capture.errors.some(error => error.code === 'startup-command-sandbox-unavailable'));
+    const requests = await readFile(f.options.processOptions.stdoutPath, 'utf8');
+    assert.doesNotMatch(requests, /root-turn/);
+    assert.doesNotMatch(JSON.stringify(capture.errors), /private sandbox error/);
+  }
+});
+
+test('native readiness-only capture verifies the command sandbox without starting a task', async t => {
+  const f = await fixture(t), home = join(f.dir, 'home'); await mkdir(home);
+  const binary = join(f.dir, 'fake-codex');
+  const config = { forced_login_method: 'chatgpt', model_reasoning_effort: 'low', plan_mode_reasoning_effort: 'low' };
+  const argvPath = join(f.dir, 'invocation.json');
+  await writeFile(binary, '#!/usr/bin/env node\nrequire("node:fs").writeFileSync(' + JSON.stringify(argvPath) + ',JSON.stringify(process.argv));\n' + f.script, { mode: 0o700 });
+  const { run, capture } = await runAuditCapture({ ...f.options, preflightOnly:true,
+    profile: { ...f.options.profile, home, userHome: f.dir, executable: binary, nativeConfig:config },
+    processOptions: { ...f.options.processOptions, args:undefined, env:{PATH:process.env.PATH??'',HOME:f.dir,CODEX_HOME:home} } });
+  assert.deepEqual(capture.nativeReadiness,{status:'ready',taskStarted:false,commandSandbox:'verified-noop'});
+  assert.equal(run.turns.length,0);
+  const args = JSON.parse(await readFile(argvPath,'utf8'));
+  for(const [key,value]of Object.entries(config)) assert.ok(args.includes(`${key}=${JSON.stringify(value)}`));
+  assert.doesNotMatch(await readFile(f.options.processOptions.stdoutPath,'utf8'), /root-turn/);
+});
+
 test('workspace task-end callback runs only after the owned app-server group has stopped', async t => {
   const f = await fixture(t);
   let spawnedPid, observed;
@@ -1130,4 +1173,129 @@ test('native catalog origin errors retain partial provenance even when recorded 
   assert.equal(run.resourceProvenance.status, 'partial');
   assert.equal(run.coverage.resourceProvenance, 'partial');
   assert.ok(run.warnings.includes('skills-origin-unavailable'));
+});
+
+test('required root context is checkpointed before task start and descendant context retains its own phase', async t => {
+  const f = await fixture(t, { nativeInstructionSources: true });
+  const context = [{ origin: 'repository', path: 'AGENTS.md', phase: 'before-task' },
+    { agents: 'descendants', origin: 'repository', path: 'child/AGENTS.md', phase: 'after-task' }];
+  const checkpoints = [];
+  const { run } = await runAuditCapture({ ...f.options,
+    profile: { ...f.options.profile, version: '0.163.0-alpha.10.2' }, requiredContext: context,
+    onSession: run => checkpoints.push(structuredClone(run.captureAcceptance)) });
+  assert.equal(checkpoints[0].mode, 'required-context-preflight');
+  assert.equal(checkpoints[0].status, 'passed');
+  assert.equal(checkpoints[0].checks.length, 1, 'Descendant evidence is pending before the root task');
+  assert.ok(run.turns.length > 0);
+  const acceptance = evaluateCaptureRequirements(run, { context });
+  assert.equal(acceptance.status, 'passed', JSON.stringify(acceptance));
+  assert.equal(acceptance.checks.find(check => check.id === 'context:1').checks[0].agentId, 'child-thread');
+  assert.equal(evaluateCaptureRequirements(run, { context: [{ ...context[1], phase: 'before-task' }] }).status, 'failed');
+});
+
+test('missing required root context cannot be filled from present files or start a model task', async t => {
+  const f = await fixture(t, { nativeInstructionSources: true });
+  await mkdir(join(f.dir, 'required'), { mode: 0o700 });
+  await writeFile(join(f.dir, 'required/AGENTS.md'), 'PRIVATE_REQUIRED_CONTEXT_BODY');
+  const checkpoints = []; let taskEnds = 0;
+  const { run, capture, process: child } = await runAuditCapture({ ...f.options,
+    profile: { ...f.options.profile, version: '0.163.0-alpha.10.2' },
+    requiredContext: [{ origin: 'repository', path: 'required/AGENTS.md' }],
+    onTaskEnd: () => { taskEnds++; }, onSession: run => checkpoints.push(structuredClone(run.captureAcceptance)) });
+  assert.equal(child.status, 'exited'); assert.equal(child.exitCode, 0);
+  assert.equal(child.shutdown.groupTerminated, true);
+  assert.deepEqual(run.turns, []); assert.equal(taskEnds, 0);
+  assert.equal(run.status, 'unavailable');
+  assert.ok(capture.errors.some(error => error.code === 'required-context-unavailable'));
+  assert.ok(checkpoints.every(checkpoint => checkpoint.status === 'failed'));
+  assert.equal(run.captureAcceptance.checks[0].reason, 'required-context-not-observed');
+  assert.doesNotMatch(JSON.stringify(run.captureAcceptance), /PRIVATE_REQUIRED_CONTEXT_BODY|\/Users\/|\/private\//);
+});
+
+test('valid native instruction metadata supports root context independently of version', async t => {
+  for (const version of ['0.163.0-alpha.11', '99.1.0']) {
+    const f = await fixture(t, { nativeInstructionSources: true });
+    const { run } = await runAuditCapture({ ...f.options, profile: { ...f.options.profile, version },
+      requiredContext: [{ origin: 'repository', path: 'AGENTS.md' }] });
+    assert.equal(run.captureAcceptance.status, 'passed');
+    assert.ok(run.turns.length > 0);
+  }
+});
+
+test('plugin MCP observations retain verified actors, failure and startup boundaries through offline reopen', async t => {
+  const pluginId = 'example-plugin@local-market';
+  const item = (id, status) => ({ id, type: 'mcpToolCall', server: 'shared-server', tool: 'lookup', pluginId, status,
+    arguments: { private: 'PRIVATE_INTEGRATION_ARGUMENT' },
+    result: { isError: status === 'failed', content: [{ text: 'PRIVATE_INTEGRATION_RESULT' }] },
+    error: status === 'failed' ? { message: 'PRIVATE_INTEGRATION_ERROR' } : null });
+  const notification = (threadId, id, status, phase = 'completed') => ({ jsonrpc: '2.0', method: `item/${phase}`,
+    params: { threadId, turnId: threadId === 'root-thread' ? 'root-turn' : 'child-turn', item: item(id, status) } });
+  const nativeEvents = [
+    { jsonrpc: '2.0', method: 'mcpServer/startupStatus/updated', params: { name: 'shared-server', status: 'ready', pluginId,
+      error: 'PRIVATE_INTEGRATION_STARTUP' } },
+    { jsonrpc: '2.0', method: 'mcpServer/startupStatus/updated', params: { name: 'unready-server', status: 'failed',
+      failureReason: 'reauthenticationRequired', error: 'PRIVATE_INTEGRATION_STARTUP' } },
+    notification('root-thread', 'root-mcp', 'inProgress', 'started'),
+    notification('root-thread', 'root-mcp', 'completed'),
+    notification('child-thread', 'child-mcp-failed', 'inProgress', 'started'),
+    notification('child-thread', 'child-mcp-failed', 'failed'),
+    notification('child-thread', 'child-mcp-ok', 'completed'),
+    notification('child-thread', 'child-mcp-failed', 'failed'),
+    notification('foreign-thread', 'foreign-mcp', 'failed'),
+  ];
+  const output = await mkdtemp(join(tmpdir(), 'xfx-mcp-frozen-'));
+  t.after(() => rm(output, { recursive: true, force: true }));
+  for (const wrongParent of [false, true]) await t.test(wrongParent ? 'rejects unverified child' : 'accepts corroborated child', async t => {
+    const f = await fixture(t, { nativeEvents, wrongParent });
+    const { run, process: ownedProcess } = await runAuditCapture(f.options);
+    assert.equal(ownedProcess.status, 'exited');
+    const calls = run.toolInvocations.filter(call => call.kind === 'mcp');
+    assert.deepEqual(calls.map(call => [call.agentId, call.itemId, call.status, call.failed]), wrongParent
+      ? [['root-thread', 'root-mcp', 'completed', false]]
+      : [['root-thread', 'root-mcp', 'completed', false], ['child-thread', 'child-mcp-failed', 'failed', true],
+        ['child-thread', 'child-mcp-ok', 'completed', false]]);
+    assert.ok(calls.every(call => call.pluginId === pluginId && call.serverName === 'shared-server'));
+    assert.equal(calls.some(call => call.itemId === 'foreign-mcp'), false);
+    assert.equal(run.mcp.servers.find(server => server.pluginId === pluginId).status, null);
+    const startup = run.mcp.servers.find(server => server.name === 'shared-server' && server.pluginId === null);
+    assert.equal(startup.status, 'ready');
+    assert.equal(startup.source, 'app-server-process');
+    assert.equal(run.mcp.servers.find(server => server.name === 'unready-server').failureReason, 'reauthenticationRequired');
+    assert.equal(run.coverage.mcp, 'partial', 'unowned events leave capture incomplete');
+    const requirements = { tools: [{ agent: 'descendant', kind: 'mcp', pluginId, tool: 'lookup', min: 2 }] };
+    const expectedRequirement = wrongParent ? 'failed' : 'passed';
+    assert.equal(evaluateCaptureRequirements(run, requirements).checks.find(check => check.id === 'tools:0').status, expectedRequirement);
+    const compact = { ...compactAuditTrial({ runs: [run] }).runs[0], schemaVersion: 1, kind: 'audit-run' };
+    const exports = [];
+    for (const [name, candidate] of [['full', run], ['compact', compact]]) for (const format of ['json', 'markdown']) {
+      const receipt = await exportAuditReport(candidate, { output: join(output, `${wrongParent}-${name}.${format}`), format });
+      exports.push({ receipt, candidate });
+    }
+    assert.match(await readFile(join(f.dir, 'stdout.jsonl'), 'utf8'), /PRIVATE_INTEGRATION_/);
+    await rm(f.dir, { recursive: true, force: true });
+    for (const { receipt, candidate } of exports) {
+      const reopened = await readAuditReport(receipt.evidencePath);
+      assert.deepEqual(reopened.toolInvocations, candidate.toolInvocations);
+      assert.deepEqual(reopened.mcp?.servers ?? reopened.mcpServers, candidate.mcp?.servers ?? candidate.mcpServers);
+      assert.equal(auditExitCode(reopened), 2);
+      assert.equal(evaluateCaptureRequirements(reopened, requirements).checks.find(check => check.id === 'tools:0').status, expectedRequirement);
+      const compared = compareAuditRuns(candidate, reopened);
+      assert.equal(compared.comparison.plugins.left.byPlugin.find(plugin => plugin.pluginId === pluginId).count, calls.length);
+      assert.equal(compared.comparison.mcp.status, 'partial-or-unknown');
+      assert.equal(compared.comparison.mcp.left.servers.find(server => server.name === 'shared-server' && !server.pluginId)?.status, 'ready');
+      assert.equal(compared.comparison.mcp.left.servers.find(server => server.name === 'unready-server')?.failureReason, 'reauthenticationRequired');
+      assert.equal(compared.comparison.mcp.left.inventory, 'not-requested');
+      const artifact = await readFile(receipt.output, 'utf8');
+      assert.match(artifact.replaceAll('\\', ''), /shared-server/);
+      assert.match(artifact, /reauthenticationRequired/);
+      assert.doesNotMatch(artifact, /PRIVATE_INTEGRATION_/);
+      assert.doesNotMatch(JSON.stringify(reopened) + renderAudit(reopened, { format: 'markdown' }), /PRIVATE_INTEGRATION_/);
+      const cli = spawnSync(process.execPath, ['bin/xfx.js', '--store', join(output, 'empty-store'), '--json', 'audit', 'show', receipt.evidencePath],
+        { cwd: new URL('..', import.meta.url), encoding: 'utf8', timeout: 5000,
+          env: { PATH: process.env.PATH ?? '', HOME: output, CODEX_HOME: join(output, 'empty-native') } });
+      assert.equal(cli.status, 2, cli.stderr);
+      assert.deepEqual(JSON.parse(cli.stdout).mcp?.servers ?? JSON.parse(cli.stdout).mcpServers, reopened.mcp?.servers ?? reopened.mcpServers);
+      assert.doesNotMatch(cli.stdout + cli.stderr, /PRIVATE_INTEGRATION_/);
+    }
+  });
 });

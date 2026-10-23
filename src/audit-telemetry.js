@@ -1,8 +1,10 @@
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { constants as fsConstants, closeSync, fstatSync, fsyncSync, openSync, readSync, writeSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { redactValue } from './redact.js';
+import { skillSourceTimeFromRecord, validSkillSourceTime } from './audit-source-time.js';
+import { createTelemetryJournal, readTelemetryJournal } from './audit-telemetry-journal.js';
+import { projectDeliveryAccounting, projectTelemetryJournal } from './audit-delivery.js';
 
 const DEFAULT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_EVENTS = 20000;
@@ -41,59 +43,41 @@ function validProjectedEvent(event) {
     || !ID.test(event.threadId ?? '') || !ID.test(event.turnId ?? '')
     || redactValue(event.threadId) !== event.threadId || redactValue(event.turnId) !== event.turnId
     || !boundedString(event.skillName, 120) || !SAFE_INVOCATION.has(event.invocationType)) return false;
-  const allowed = new Set(['source', 'threadId', 'turnId', 'skillName', 'scope', 'pluginId', 'invocationType', 'timestampNs', 'observationId']);
+  const allowed = new Set(['source', 'threadId', 'turnId', 'skillName', 'scope', 'pluginId', 'invocationType', 'timestampNs', 'observationId', 'sourceTime']);
   if (Object.keys(event).some(key => !allowed.has(key))) return false;
   if (event.scope !== undefined && !SAFE_SCOPE.has(event.scope)) return false;
   if (event.pluginId !== undefined && !boundedPluginId(event.pluginId)) return false;
   if (event.timestampNs !== undefined && positiveTimestampNs(event.timestampNs) === null) return false;
+  if (event.sourceTime !== undefined && !validSkillSourceTime(event.sourceTime)) return false;
   if (event.observationId !== undefined && (typeof event.observationId !== 'string' || !OBSERVATION_ID.test(event.observationId))) return false;
   return true;
 }
 
-/** Read a bounded JSONL journal containing projected events only. */
+/** Recover verified committed rows, or explicitly unverified legacy rows. */
 export function readAuditSkillTelemetry(journalPath, { maxBytes = MAX_JOURNAL_BYTES, maxEvents = DEFAULT_EVENTS } = {}) {
-  const events = [], warnings = [];
-  maxBytes = limit(maxBytes, MAX_JOURNAL_BYTES, MAX_JOURNAL_BYTES);
   maxEvents = limit(maxEvents, DEFAULT_EVENTS, DEFAULT_EVENTS);
-  let fd;
-  try {
-    if (typeof journalPath !== 'string' || !isAbsolute(journalPath)) throw new Error();
-    fd = openSync(journalPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0));
-    const stat = fstatSync(fd, { bigint: true });
-    const uid = typeof process.getuid === 'function' ? BigInt(process.getuid()) : null;
-    const privateFile = stat.isFile() && stat.nlink === 1n && (stat.mode & 0o077n) === 0n && (uid === null || stat.uid === uid);
-    if (!privateFile || stat.size > BigInt(maxBytes)) {
-      warnings.push(!privateFile ? 'telemetry-journal-not-private' : 'telemetry-journal-byte-limit');
-      return { events, metadata: { status: 'partial', delivery: 'best-effort', bytes: 0, eventCount: 0, warnings } };
-    }
-    const size = Number(stat.size);
-    const buffer = Buffer.alloc(size);
-    let offset = 0;
-    while (offset < size) {
-      const count = readSync(fd, buffer, offset, size - offset, offset);
-      if (count <= 0) break;
-      offset += count;
-    }
-    const after = fstatSync(fd, { bigint: true });
-    if (stat.dev !== after.dev || stat.ino !== after.ino || stat.size !== after.size
-      || stat.mtimeNs !== after.mtimeNs || stat.ctimeNs !== after.ctimeNs || stat.mode !== after.mode
-      || stat.uid !== after.uid || stat.nlink !== after.nlink)
-      warnings.push('telemetry-journal-changed-during-read');
-    const text = buffer.subarray(0, offset).toString('utf8');
-    const completeLength = text.lastIndexOf('\n') + 1;
-    if (completeLength !== text.length) warnings.push('telemetry-journal-truncated-tail');
-    for (const line of text.slice(0, completeLength).split('\n')) {
-      if (!line) continue;
-      if (events.length >= maxEvents) { warnings.push('telemetry-journal-event-limit'); break; }
-      let value;
-      try { value = JSON.parse(line); } catch { warnings.push('telemetry-journal-malformed-record'); continue; }
-      if (!validProjectedEvent(value)) { warnings.push('telemetry-journal-invalid-record'); continue; }
-      events.push(value);
-    }
-    return { events, metadata: { status: warnings.length ? 'partial' : events.length ? 'available' : 'unknown', delivery: 'best-effort', bytes: offset, eventCount: events.length, warnings } };
-  } catch {
-    return { events, metadata: { status: 'unavailable', delivery: 'best-effort', bytes: 0, eventCount: 0, warnings: ['telemetry-journal-unavailable'] } };
-  } finally { if (fd !== undefined) closeSync(fd); }
+  const recovered = readTelemetryJournal(journalPath, { maxBytes });
+  const events = [], warnings = [...recovered.warnings];
+  const accounting = projectDeliveryAccounting(recovered.accounting);
+  if (accounting?.records.invalidRelevant) warnings.push('telemetry-invalid-record');
+  if (accounting?.records.unclassified) warnings.push('telemetry-unclassified-record');
+  if (accounting?.records.eventLimitDropped) warnings.push('telemetry-event-limit');
+  if (accounting?.classification === 'bounded') warnings.push('telemetry-record-classification-incomplete');
+  if (accounting?.requests.rejected) warnings.push('telemetry-requests-rejected');
+  for (const line of recovered.lines) {
+    if (events.length >= maxEvents) { warnings.push('telemetry-journal-event-limit'); break; }
+    let value;
+    try { value = JSON.parse(line); } catch { warnings.push('telemetry-journal-malformed-record'); continue; }
+    if (!validProjectedEvent(value)) { warnings.push('telemetry-journal-invalid-record'); continue; }
+    events.push(value);
+  }
+  return { events, metadata: {
+    status: recovered.journal.status === 'unavailable' ? 'unavailable' : warnings.length ? 'partial' : events.length ? 'available' : 'unknown',
+    delivery: 'best-effort', bytes: recovered.bytes, eventCount: events.length,
+    journal: projectTelemetryJournal(recovered.journal),
+    deliveryAccounting: accounting,
+    warnings: [...new Set(warnings)],
+  } };
 }
 
 function attrMap(raw) {
@@ -107,48 +91,61 @@ function attrMap(raw) {
   return result;
 }
 
-function project(body, events, maxEvents) {
+function project(body, capacity) {
+  const events = [];
+  const counts = { examined: 0, relevant: 0, invalidRelevant: 0, unclassified: 0,
+    ignored: 0, eventLimitDropped: 0, unexamined: 0 };
+  let invalid = false;
   if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.resourceLogs))
-    return { accepted: 0, invalid: true, invalidRecords: 0, truncated: false };
-  let accepted = 0, processed = 0, invalidRecords = 0, truncated = false;
-  for (const resource of body.resourceLogs) {
-    if (!Array.isArray(resource?.scopeLogs)) continue;
+    return { events, counts: { ...counts, unexamined: null }, invalid: true };
+  outer: for (const resource of body.resourceLogs) {
+    if (!Array.isArray(resource?.scopeLogs)) { invalid = true; counts.unexamined = null; continue; }
     for (const scope of resource.scopeLogs) {
-      if (!Array.isArray(scope?.logRecords)) continue;
+      if (!Array.isArray(scope?.logRecords)) { invalid = true; counts.unexamined = null; continue; }
       for (const record of scope.logRecords) {
-        if (processed >= MAX_RECORDS_PER_REQUEST) { truncated = true; break; }
-        processed++;
+        if (counts.examined >= MAX_RECORDS_PER_REQUEST) { counts.unexamined = null; break outer; }
+        counts.examined++;
         const attrs = attrMap(record?.attributes);
-        if (!attrs) { invalidRecords++; continue; }
-        if (attrs['event.name'] !== 'codex.skill_invocation' || events.length >= maxEvents) continue;
+        // A missing/ambiguous event name is not proof of an invalid skill row.
+        if (!attrs || !attrs['event.name']) { counts.unclassified++; continue; }
+        if (attrs['event.name'] !== 'codex.skill_invocation') { counts.ignored++; continue; }
+        counts.relevant++;
         const conversationId = attrs['conversation.id'];
         const turnId = attrs['turn.id'];
         const name = boundedString(attrs['skill.name'], 120);
         const skillScope = boundedString(attrs['skill.scope'], 40);
         const pluginId = boundedPluginId(attrs['skill.plugin_id']);
         const invocationType = boundedString(attrs['skill.invocation_type'], 20);
-        // IDs and skill name/type are required for attribution. Optional fields
-        // remain omitted when absent; invalid values never enter the snapshot.
         if (!ID.test(conversationId ?? '') || !ID.test(turnId ?? '')
           || redactValue(conversationId) !== conversationId || redactValue(turnId) !== turnId
           || !name || !SAFE_INVOCATION.has(invocationType)
-          || (attrs['skill.plugin_id'] !== undefined && !pluginId)) { invalidRecords++; continue; }
-        const event = {
-          source: 'native-otel-skill-invocation', threadId: conversationId, turnId,
-          skillName: name, invocationType,
-        };
+          || (attrs['skill.plugin_id'] !== undefined && !pluginId)) { counts.invalidRelevant++; continue; }
+        if (events.length >= capacity) { counts.eventLimitDropped++; continue; }
+        const event = { source: 'native-otel-skill-invocation', threadId: conversationId, turnId,
+          skillName: name, invocationType, sourceTime: skillSourceTimeFromRecord(record, attrs['event.timestamp']) };
         if (SAFE_SCOPE.has(skillScope)) event.scope = skillScope;
         if (pluginId) event.pluginId = pluginId;
         const timestamp = positiveTimestampNs(record.timeUnixNano) ?? positiveTimestampNs(attrs['event.timestamp']);
         if (timestamp) event.timestampNs = timestamp;
         events.push(event);
-        accepted++;
       }
-      if (truncated) break;
     }
-    if (truncated) break;
   }
-  return { accepted, invalid: false, invalidRecords, truncated };
+  return { events, counts, invalid };
+}
+
+function initialAccounting(required) {
+  return { schemaVersion: 1, scope: 'receiver-lifetime', classification: 'complete',
+    requests: { received: 0, admitted: 0, rejected: 0 },
+    records: { examined: 0, relevant: 0, accepted: 0, durable: required ? 0 : null,
+      invalidRelevant: 0, unclassified: 0, ignored: 0, eventLimitDropped: 0,
+      persistenceRejected: 0, unexamined: 0 }, upstreamLoss: 'unknown', acknowledgements: 'unknown' };
+}
+
+// Saturation becomes unknown; never silently round a counter into a false total.
+function increment(object, key, amount = 1) {
+  const next = object[key] === null || amount === null ? null : object[key] + amount;
+  object[key] = Number.isSafeInteger(next) && next >= 0 ? next : null;
 }
 
 function limit(value, fallback, hard) {
@@ -166,58 +163,35 @@ export async function startAuditTelemetry({ maxBytes = DEFAULT_BYTES, maxEvents 
   // Receipt identity belongs to this observer, not the native event. Preserve
   // each received row even without a timestamp, while replaying a snapshot or
   // its journal stays idempotent. Never accept a caller-supplied identity.
-  const streamId = randomBytes(16).toString('hex');
+  let accounting = initialAccounting(journalPath !== undefined);
+  if (journalPath !== undefined && (typeof journalPath !== 'string' || !isAbsolute(journalPath)))
+    throw new TypeError('Invalid telemetry journal path');
+  const journal = journalPath === undefined ? null : createTelemetryJournal(journalPath, accounting);
+  const streamId = journal?.streamId ?? randomBytes(16).toString('hex');
   let observationIndex = 0;
   const events = [];
   const warnings = new Set();
-  let journalFd = null, journalBytes = 0, journalEventCount = 0, journalStatus = journalPath ? 'available' : 'disabled';
-  if (journalPath !== undefined) {
-    if (typeof journalPath !== 'string' || !isAbsolute(journalPath)) throw new TypeError('Invalid telemetry journal path');
-    try {
-      journalFd = openSync(journalPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
-      const stat = fstatSync(journalFd);
-      const uid = typeof process.getuid === 'function' ? process.getuid() : null;
-      if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 || (uid !== null && stat.uid !== uid)) throw new Error('invalid journal file');
-    } catch { if (journalFd !== null) closeSync(journalFd); throw new Error('Unable to create private telemetry journal'); }
-  }
-  const persistEvents = projected => {
-    if (journalFd === null || projected.length === 0) return true;
-    const data = Buffer.from(projected.map(event => `${JSON.stringify(event)}\n`).join(''), 'utf8');
-    if (journalBytes + data.length > MAX_JOURNAL_BYTES) { warnings.add('telemetry-journal-byte-limit'); journalStatus = 'partial'; return false; }
-    try {
-      let offset = 0;
-      while (offset < data.length) {
-        const written = writeSync(journalFd, data, offset, data.length - offset);
-        if (written <= 0) throw new Error('journal write made no progress');
-        offset += written;
-      }
-      fsyncSync(journalFd);
-      journalBytes += data.length;
-      journalEventCount += projected.length;
-      return true;
-    } catch {
-      warnings.add('telemetry-journal-write-failed'); journalStatus = 'partial';
-      try { closeSync(journalFd); } catch {}
-      journalFd = null;
-      return false;
-    }
-  };
-  const flushJournal = () => {
-    if (journalFd === null) return;
-    try { fsyncSync(journalFd); } catch { warnings.add('telemetry-journal-flush-failed'); journalStatus = 'partial'; }
-    try { closeSync(journalFd); } catch { warnings.add('telemetry-journal-close-failed'); journalStatus = 'partial'; }
-    journalFd = null;
-  };
+  const flushJournal = () => journal?.close();
+  const markUnexamined = () => { accounting.records.unexamined = null; accounting.classification = 'bounded'; };
   let receivedBytes = 0, inFlightBytes = 0, active = 0, closed = false, rejected = 0;
   const server = createServer((req, res) => {
-    if (closed) { res.writeHead(503).end(); return; }
-    if (active >= maxConnections) { rejected++; warnings.add('telemetry-connection-limit'); res.writeHead(503).end(); req.resume(); return; }
+    increment(accounting.requests, 'received');
+    if (closed) { increment(accounting.requests, 'rejected'); markUnexamined(); res.writeHead(503).end(); return; }
+    if (active >= maxConnections) { rejected++; increment(accounting.requests, 'rejected'); markUnexamined(); warnings.add('telemetry-connection-limit'); res.writeHead(503).end(); req.resume(); return; }
     active++;
-    let done = false;
+    let done = false, settled = false;
+    const rejectedRequest = () => {
+      if (settled) return;
+      settled = true; rejected++; increment(accounting.requests, 'rejected');
+    };
     const finish = () => { if (!done) { done = true; active--; } };
-    req.on('close', finish);
+    req.on('close', () => {
+      if (!settled) { rejectedRequest(); markUnexamined(); warnings.add('telemetry-request-incomplete'); }
+      finish();
+    });
     const reject = (status, warning) => {
-      rejected++; if (warning) warnings.add(warning);
+      rejectedRequest(); if (warning) warnings.add(warning);
+      if (status !== 503) markUnexamined();
       if (!res.headersSent) res.writeHead(status);
       res.end();
       let drained = 0;
@@ -245,27 +219,42 @@ export async function startAuditTelemetry({ maxBytes = DEFAULT_BYTES, maxEvents 
       if (requestBytes > maxBytes || receivedBytes + inFlightBytes > maxBytes) { tooLarge = true; req.destroy(); return; }
       chunks.push(chunk);
     });
-    req.on('error', () => { releaseBytes(); warnings.add('telemetry-byte-limit'); rejected++; finish(); });
+    req.on('error', () => { releaseBytes(); warnings.add(tooLarge ? 'telemetry-byte-limit' : 'telemetry-request-incomplete'); rejectedRequest(); markUnexamined(); finish(); });
     req.on('end', () => {
       releaseBytes();
-      if (tooLarge) { warnings.add('telemetry-byte-limit'); rejected++; finish(); return; }
+      if (tooLarge) { warnings.add('telemetry-byte-limit'); rejectedRequest(); markUnexamined(); finish(); return; }
       receivedBytes += requestBytes;
       let payload;
       try { payload = JSON.parse(Buffer.concat(chunks, requestBytes).toString('utf8')); }
       catch { return reject(400, 'telemetry-malformed-json'); }
-      const projection = project(payload, events, maxEvents);
-      if (projection.accepted) warnings.add('telemetry-events-observed');
+      const projection = project(payload, maxEvents - events.length);
+      for (const [key, count] of Object.entries(projection.counts)) increment(accounting.records, key, count);
+      if (projection.counts.unexamined === null) markUnexamined();
       if (projection.invalid) warnings.add('telemetry-invalid-otlp-payload');
-      if (projection.invalidRecords) warnings.add('telemetry-invalid-record');
-      if (projection.truncated) warnings.add('telemetry-record-limit');
-      if (events.length >= maxEvents) warnings.add('telemetry-event-limit');
-      const projected = events.slice(events.length - projection.accepted);
+      if (projection.counts.invalidRelevant) warnings.add('telemetry-invalid-record');
+      if (projection.counts.unclassified) warnings.add('telemetry-unclassified-record');
+      if (projection.counts.unexamined === null) warnings.add('telemetry-record-classification-incomplete');
+      if (projection.counts.eventLimitDropped) warnings.add('telemetry-event-limit');
+      const projected = projection.events;
       for (const event of projected) event.observationId = `${streamId}:${++observationIndex}`;
-      if (!persistEvents(projected)) {
-        events.splice(events.length - projection.accepted, projection.accepted);
+      const next = structuredClone(accounting);
+      increment(next.requests, 'admitted');
+      increment(next.records, 'accepted', projected.length);
+      if (journal) increment(next.records, 'durable', projected.length);
+      if (journal && !journal.append(projected, next)) {
+        increment(accounting.records, 'persistenceRejected', projected.length);
         return reject(503, 'telemetry-journal-unavailable');
       }
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ partialSuccess: {} }));
+      accounting = next;
+      events.push(...projected);
+      settled = true;
+      const rejectedLogRecords = projection.counts.invalidRelevant + projection.counts.unclassified + projection.counts.eventLimitDropped;
+      const incomplete = projection.counts.unexamined === null;
+      const partialSuccess = rejectedLogRecords || incomplete ? {
+        rejectedLogRecords,
+        errorMessage: incomplete ? 'Record classification incomplete; unexamined count unknown.' : 'Some examined records were invalid, unclassified or over the event limit.',
+      } : {};
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ partialSuccess }));
       finish();
     });
   });
@@ -289,7 +278,7 @@ export async function startAuditTelemetry({ maxBytes = DEFAULT_BYTES, maxEvents 
   return {
     args: ['-c', `otel.exporter=${exporter}`, '-c', 'otel.log_user_prompt=false'],
     snapshot() {
-      const snapshotWarnings = [...warnings].filter(value => value !== 'telemetry-events-observed');
+      const snapshotWarnings = [...new Set([...warnings, ...(journal?.snapshot().warnings ?? [])])];
       const status = snapshotWarnings.length ? 'partial' : events.length ? 'observed' : 'unknown';
       return {
         events: structuredClone(events),
@@ -299,7 +288,9 @@ export async function startAuditTelemetry({ maxBytes = DEFAULT_BYTES, maxEvents 
           observerEffects: ['enables native OTLP log export for this process', 'other native log events are discarded'],
           promptLogging: false, receivedBytes, rejectedRequests: rejected,
           warnings: snapshotWarnings,
-          journal: { status: journalStatus, bytes: journalBytes, eventCount: journalEventCount },
+          journal: projectTelemetryJournal(journal?.snapshot() ?? { status: 'disabled', mode: 'disabled', format: null, commit: 'disabled',
+            bytes: 0, eventCount: 0, committedBytes: 0, committedEvents: 0, uncertainBytes: 0 }),
+          deliveryAccounting: projectDeliveryAccounting(accounting),
         },
       };
     },

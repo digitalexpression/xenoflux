@@ -84,18 +84,18 @@ test('RAM mode is explicit, private, and survives a new settings read', async t 
 });
 
 test('Node prerequisite checks use the passed environment and never pin an executable path', async () => {
-  for (const version of ['v20.0.0', 'v22.12.9', 'v23.0.0', 'v23.3.0'])
+  for (const version of ['v20.0.0', 'v22.14.9', 'v23.0.0', 'v23.7.0'])
     assert.equal(supportedNode(version), false, version);
-  for (const version of ['v22.13.0', 'v22.14.0', 'v23.4.0', 'v23.11.0', 'v24.0.0'])
+  for (const version of ['v22.15.0', 'v22.16.0', 'v23.8.0', 'v23.11.0', 'v24.0.0'])
     assert.equal(supportedNode(version), true, version);
   assert.throws(() => nativePath({PATH:'.:/bin'}), /absolute/);
   let seen;
   await checkNode({env:{HOME:'/fixture/user',PATH:'/fixture/bin:/bin'}, execute:async (...args) => {
-    seen = args; return {stdout:'v22.13.0\n'};
+    seen = args; return {stdout:'v22.15.0\n'};
   }});
   assert.equal(seen[0], 'node');
   assert.deepEqual(seen[2].env, {HOME:'/fixture/user',PATH:'/fixture/bin:/bin'});
-  await assert.rejects(checkNode({execute: async () => ({stdout:'v20.0.0'})}), /22.13.0/);
+  await assert.rejects(checkNode({execute: async () => ({stdout:'v20.0.0'})}), /22.15.0/);
 });
 
 for (const recoveryFailure of [false, true]) test(`service failure, archive recovery and retry use native environment IDs (retry fails: ${recoveryFailure})`, async t => {

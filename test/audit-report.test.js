@@ -8,6 +8,7 @@ import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
 import { evaluateCaptureRequirements } from '../src/audit-evidence.js';
 import { mergeAuditSkillTelemetry } from '../src/audit-skill-usage.js';
 import { nativeUsageAccounting } from '../src/audit-usage.js';
+import { bookingLedgerPair } from '../test-support/audit-explanation/booking-ledger.js';
 
 const complete = {
   schemaVersion: 1, kind: 'audit-run', id: 'run-a', status: 'ready',
@@ -28,6 +29,12 @@ const complete = {
   coverage: { timeline: 'ready', agents: 'ready', skills: 'partial', usage: 'ready', workspaceDiff: 'unknown', outcome: 'unknown' },
   outcome: { status: 'unverified' }, artifacts: [], warnings: [],
 };
+const [eligibleA, eligibleB] = bookingLedgerPair();
+// This shared normalized fixture has a frozen synthetic task/check/setup and
+// declared skill variation. It supplies eligibility to tests of other evidence.
+complete.comparisonConditions = structuredClone(eligibleA.comparisonConditions);
+complete.sourceWorkspace = { sourceCommit: eligibleA.comparisonConditions.baseline.commit,
+  sourceTree: eligibleA.comparisonConditions.baseline.tree };
 
 test('compares skill identity and attributed evidence across all origins and agents', () => {
   const right = structuredClone(complete);
@@ -100,18 +107,50 @@ test('per-run show renders evaluated capture acceptance and normalized telemetry
   run.captureAcceptance = evaluateCaptureRequirements(run, { minAgents: 2, usage: { agents: 'root', fields: ['inputTokens'], minTurns: 1 } });
   assert.equal(run.captureAcceptance.status, 'passed');
   mergeAuditSkillTelemetry(run, { events: [], metadata: { transport: 'otlp-http-json', receivedBytes: 250, rejectedRequests: 1,
-    journal: { status: 'partial', bytes: 128, eventCount: 0 } } });
+    journal: { status: 'partial', mode: 'required', format: 2, commit: 'committed-prefix', bytes: 128, eventCount: 0,
+      committedBytes: 96, committedEvents: 0, uncertainBytes: 32 },
+    deliveryAccounting: { schemaVersion: 1, scope: 'receiver-lifetime', classification: 'bounded',
+      requests: { received: 2, admitted: 1, rejected: 1 }, records: { examined: 4, relevant: 2, accepted: 1, durable: 1,
+        invalidRelevant: 0, unclassified: 0, ignored: 2, eventLimitDropped: 0, persistenceRejected: 0, unexamined: null },
+      upstreamLoss: 'unknown', acknowledgements: 'unknown' } } });
   assert.equal(run.skillTelemetry.diagnostics.missingness.byAgent.child.project.catalogCount, 1);
   const report = renderAudit(run);
   assert.match(report, /Capture acceptance: passed · mode declared-observations/);
   assert.match(report, /usage:root:root-turn · passed/);
   assert.match(report, /Skill-use capability: enabled-empty · delivery unknown/);
   assert.match(report, /Skill telemetry transport: observed · received 250 bytes · rejected 1/);
-  assert.match(report, /Skill telemetry journal: partial · 128 bytes · 0 events/);
+  assert.match(report, /Skill telemetry journal: partial · required · committed-prefix · 96 committed \/ 128 bytes · 0 committed \/ 0 events · 32 uncertain bytes/);
+  assert.match(report, /delivery accounting \(receiver-lifetime, bounded\): requests 1 admitted \/ 2 received \/ 1 rejected; records 1 durable \/ 1 accepted \/ 2 relevant \/ 4 examined/);
   assert.match(report, /Skill telemetry child · project · catalog 1 · invocations 0 · unknown/);
   assert.match(report, /Native storage: session native-owned-session · rollouts profile-owned-new-rollouts · SQLite private-per-process/);
   assert.match(report, /saved settings changed false/);
   assert.equal(report.includes('PRIVATE_EFFECT_DETAIL'), false);
+});
+
+test('skill invocation comparisons retain per-side receiver accounting without cross-domain deltas', async t => {
+  const accounting = (scope, accepted) => ({ schemaVersion: 1, scope, classification: 'complete',
+    requests: { received: 1, admitted: 1, rejected: 0 }, records: { examined: accepted, relevant: accepted,
+      accepted, durable: accepted, invalidRelevant: 0, unclassified: 0, ignored: 0, eventLimitDropped: 0,
+      persistenceRejected: 0, unexamined: 0 }, upstreamLoss: 'unknown', acknowledgements: 'unknown' });
+  const left = { ...structuredClone(complete), skillTelemetry: { status: 'observed', diagnostics: {
+    deliveryAccounting: accounting('receiver-lifetime', 2) } }, skillInvocations: [] };
+  const right = { ...structuredClone(complete), skillTelemetry: { status: 'observed', diagnostics: {
+    deliveryAccounting: accounting('committed-prefix', 3) } }, skillInvocations: [] };
+  const reportValue = compareAuditRuns(left, right);
+  const compared = reportValue.comparison.skillInvocations;
+  assert.equal(compared.left.deliveryAccounting.scope, 'receiver-lifetime');
+  assert.equal(compared.right.deliveryAccounting.scope, 'committed-prefix');
+  assert.equal(Object.hasOwn(compared, 'deliveryAccountingDelta'), false);
+  const report = renderAudit(compareAuditRuns(left, right));
+  assert.match(report, /left receiver accounting \(receiver-lifetime, complete\)/);
+  assert.match(report, /right receiver accounting \(committed-prefix, complete\)/);
+  assert.doesNotMatch(report, /delivery accounting delta/);
+  compared.left.deliveryAccounting.private = 'PRIVATE_NESTED_DELIVERY';
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-delivery-comparison-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const receipt = await exportAuditReport(reportValue, { format: 'json', output: join(directory, 'comparison.json') });
+  const reopened = await readAuditReport(receipt.evidencePath);
+  assert.equal(reopened.comparison.skillInvocations.left.deliveryAccounting.private, undefined);
+  assert.equal(JSON.stringify(reopened).includes('PRIVATE_NESTED_DELIVERY'), false);
 });
 
 test('reports observed plugin use only from attributed skill and MCP call evidence', () => {
@@ -328,6 +367,9 @@ test('compares only source-reported root token totals and preserves per-agent co
   const left = structuredClone(complete);
   const right = structuredClone(complete);
   left.source.threadId = 'root-left'; right.source.threadId = 'root-right';
+  left.source.nativeSessionId = 'root-left'; right.source.nativeSessionId = 'root-right';
+  left.turns = left.turns.map(turn => ({ ...turn, agentId: turn.agentId === 'root' ? 'root-left' : 'child-left' }));
+  right.turns = right.turns.map(turn => ({ ...turn, agentId: turn.agentId === 'root' ? 'root-right' : 'child-right' }));
   left.agents = [{ id: 'root-left', parentId: null, depth: 0 }, { id: 'child-left', parentId: 'root-left', depth: 1 }];
   right.agents = [{ id: 'root-right', parentId: null, depth: 0 }, { id: 'child-right', parentId: 'root-right', depth: 1 }];
   left.usage = {
@@ -400,7 +442,7 @@ test('reports safe hook observations and compares only uniquely aligned event ev
     run.coverage = { ...run.coverage, hooks: 'complete', agents: 'complete' };
     run.agents = [{ id: `root-${id}`, parentId: null, depth: 0, role: 'root' },
       { id: `worker-${id}`, parentId: `root-${id}`, depth: 1, role: 'review' }];
-    run.turns = [{ agentId: `root-${id}`, turnId: `turn-${id}` }];
+    run.turns = [{ agentId: `root-${id}`, turnId: `turn-${id}`, model: 'model-a', reasoningEffort: 'high' }];
     run.hookInvocations = [{ agentId: `root-${id}`, turnId: `turn-${id}`, hookRunId, eventName: 'preToolUse',
       scope: 'turn', sourceKind: 'project', handlerType: 'command', executionMode: 'sync', status: 'completed',
       startedAtSeconds: 10, completedAtSeconds: 11, durationMs, source: 'hook/completed', sourceLine: 44,
@@ -432,7 +474,7 @@ test('reports and compares only verified whole-turn usage, keeping response last
     run.source = { kind: 'native-app-server-v2', threadId: `root-${id}`, version: contract.version,
       historyMode: contract.historyMode, freshThread: contract.freshThread };
     run.agents = [{ id: `root-${id}`, parentId: null, depth: 0, role: 'root' }];
-    run.turns = [{ agentId: `root-${id}`, turnId: `turn-${id}` }];
+    run.turns = [{ agentId: `root-${id}`, turnId: `turn-${id}`, model: 'model-a', reasoningEffort: 'high' }];
     run.usage = { accounting: contract, observations: [
       { source: 'thread/tokenUsage/updated', sourceLine: 10, agentId: `root-${id}`, turnId: `turn-${id}`, last: { inputTokens: 12 }, total: { inputTokens: turnTotal } },
       { source: 'thread/tokenUsage/updated', sourceLine: 11, agentId: `root-${id}`, turnId: `turn-${id}`, last: { inputTokens: 3 }, total: { inputTokens: turnTotal } },
@@ -463,7 +505,7 @@ test('reports and compares only verified whole-turn usage, keeping response last
     const childId = `child-${run.id}`;
     const childTurnId = `child-turn-${run.id}`;
     run.agents.push({ id: childId, parentId: root.id, depth: 1, role: 'review' });
-    run.turns.push({ agentId: childId, turnId: childTurnId });
+    run.turns.push({ agentId: childId, turnId: childTurnId, model: 'model-a', reasoningEffort: 'high' });
     run.usage.turns.turns.push({ agentId: childId, turnId: childTurnId, status: 'complete',
       values: { inputTokens: childTokens }, fields: { inputTokens: { status: 'observed' } } });
   }
@@ -476,9 +518,9 @@ test('reports and compares only verified whole-turn usage, keeping response last
     const root = run.agents[0];
     run.agents = [root, { id: `child-a-${run.id}`, parentId: root.id, depth: 1, role: 'worker' },
       { id: `child-b-${run.id}`, parentId: root.id, depth: 1, role: 'worker' }];
-    run.turns = [{ agentId: root.id, turnId: `root-turn-${run.id}` },
-      { agentId: run.agents[1].id, turnId: `child-turn-a-${run.id}` },
-      { agentId: run.agents[2].id, turnId: `child-turn-b-${run.id}` }];
+    run.turns = [{ agentId: root.id, turnId: `root-turn-${run.id}`, model: 'model-a', reasoningEffort: 'high' },
+      { agentId: run.agents[1].id, turnId: `child-turn-a-${run.id}`, model: 'model-a', reasoningEffort: 'high' },
+      { agentId: run.agents[2].id, turnId: `child-turn-b-${run.id}`, model: 'model-a', reasoningEffort: 'high' }];
     run.usage.turns.turns[0].turnId = run.turns[0].turnId;
     run.usage.turns.turns[0].agentId = root.id;
     run.usage.turns.turns.push(...run.turns.slice(1).map((turn, index) => ({ ...turn, status: 'complete',
@@ -751,6 +793,7 @@ test('compares workspace snapshot fingerprints only against the same verified ba
   for (const run of [left, right]) {
     run.coverage.workspaceDiff = 'ready';
     run.sourceWorkspace = { directory: '/tmp/work-a', sourceCommit: 'commit-1', sourceTree: 'tree-1' };
+    run.comparisonConditions.baseline = { commit: 'commit-1', tree: 'tree-1' };
     run.workspace = { taskEnd: { fingerprint: 'same', fileCount: 4, captureComplete: true, timing: 'task-end' }, checkEnd: { fingerprint: 'check-a', fileCount: 5 } };
   }
   right.sourceWorkspace.directory = '/tmp/work-b';
