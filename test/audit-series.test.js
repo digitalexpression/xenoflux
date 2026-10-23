@@ -217,6 +217,21 @@ test('frozen task tampering blocks resume before any trial executes', async t =>
   assert.equal((await readAuditRecord(f.store, series.id)).state.trials[1].status, 'not-started');
 });
 
+test('native config is frozen into the series recipe and cannot drift on resume', async t => {
+  const f = await fixture(t);
+  f.spec.profiles[0].nativeConfig = { forced_login_method: 'chatgpt', model_reasoning_effort: 'low', plan_mode_reasoning_effort: 'low' };
+  const { series } = await startAtPreparedSlot(f);
+  assert.deepEqual(series.record.profiles[0].nativeConfig, f.spec.profiles[0].nativeConfig);
+  assert.deepEqual(series.record.spec.profiles[0].nativeConfig, f.spec.profiles[0].nativeConfig);
+  assert.ok(series.record.recipe.fingerprint, 'native config is included in the frozen recipe fingerprint');
+  const recordPath = join(series.directory, 'series.json'), saved = JSON.parse(await readFile(recordPath, 'utf8'));
+  saved.spec.profiles[0].nativeConfig.forced_login_method = 'api';
+  await writeFile(recordPath, `${JSON.stringify(saved, null, 2)}\n`, { mode: 0o600 });
+  await assert.rejects(resumeAuditSeries(f.store, series.id, { ...f.context,
+    runTrial: async () => assert.fail('tampered native config must stop resume') }),
+  error => error.code === 'series-frozen-definition-changed');
+});
+
 test('series recovery and cleanup lifecycle calls do not advance pending slots', async t => {
   const f = await fixture(t), { series } = await startAtPreparedSlot(f);
   const before = (await readAuditRecord(f.store, series.id)).state.trials;

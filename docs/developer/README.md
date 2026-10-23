@@ -46,14 +46,19 @@ instances' pinned caches intact when changing preparation behavior.
 
 ## Contracts and release records
 
+- [Shared product goal](AUDIT-GOAL.md) defines profile setup comparison, both audit
+  entry paths, optional review, consistency and the direct local workflow.
+- [Active roadmap](ROADMAP.md) delivers Codex CLI/Desktop on macOS first, through
+  product and package acceptance; UI and other providers are assessed afterward.
+- [Current capability assessment](PROFILE-AUDIT-ASSESSMENT.md) maps that goal to
+  source evidence, gaps and proposed changes; it is not implementation approval.
 - [Profile copy policy](PROFILE-COPY-POLICY.md) defines creation/copy/review behavior.
 - [Audit acceptance](AUDIT-ACCEPTANCE.md) records the 2.0.0 release, bounded
   installation verification and evidence limits.
 - [Release process](LOCAL-RELEASE.md) covers clean-source packaging, detached smoke
   checks and explicit publication.
-- [Concurrent profile handover](HANDOVER-macos-concurrent-profiles.md) records
-  historical native evidence,
-  PR #4 and the 1.0.0 publication; it does not represent current process state.
+Detailed operational handovers and raw receipts remain in private engineering
+records; they are not part of the published documentation package.
 
 Keep operational instructions in `docs/user` and implementation, verification and
 publication instructions in `docs/developer`. Update the [documentation index](../README.md)

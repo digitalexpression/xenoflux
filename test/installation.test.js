@@ -13,8 +13,8 @@ async function fixture(t, options = {}) {
   const calls = [], prepared = [], restored = [];
   const instance = createInstallation({
     source: process.cwd(),
-    execute: async (file, args, options) => { calls.push(['execute', file, args, options.env]); return { stdout: 'v22.13.0\n' }; },
-    check: async ({ env }) => { calls.push(['node', env]); return 'v22.13.0'; },
+    execute: async (file, args, options) => { calls.push(['execute', file, args, options.env]); return { stdout: 'v22.15.0\n' }; },
+    check: async ({ env }) => { calls.push(['node', env]); return 'v22.15.0'; },
     runService: async (file, args, options) => { calls.push([file, args, options.env]); },
     serviceLoaded: async () => false,
     readLogSettings: () => options.settings ?? { enabled: false, backgroundPath: '/fixture/node:/usr/bin:/bin' },
@@ -39,8 +39,8 @@ test('install validates Node first, stages a runnable package, and writes a port
 });
 
 test('missing or unsupported Node fails before installation writes', async t => {
-  const f = await fixture(t, { check: async () => { throw new Error('Node 22.13.0 or newer is required; found v20.0.0'); } });
-  await assert.rejects(f.instance.install({ env: f.env }), /Node 22\.13\.0/);
+  const f = await fixture(t, { check: async () => { throw new Error('Node 22.15.0 or newer is required; found v20.0.0'); } });
+  await assert.rejects(f.instance.install({ env: f.env }), /Node 22\.15\.0/);
   await assert.rejects(access(userPaths(f.home).app));
 });
 
@@ -51,7 +51,7 @@ test('launcher setup failure reports that the package is installed', async t => 
       await mkdir(join(home, '.local', 'bin'), { recursive: true });
       await mkdir(userPaths(home).bin);
     }
-    return { stdout: 'v22.13.0\\n' };
+    return { stdout: 'v22.15.0\\n' };
   } });
   home = f.home;
   await assert.rejects(f.instance.install({ env: f.env }),
@@ -85,7 +85,7 @@ test('saved custom background PATH survives enable, disable, and reinstall', asy
       f?.calls.push(['node', env]);
       if (env.PATH !== '/caller/node:/usr/bin:/bin' && env.PATH !== customPath)
         throw new Error(`Unexpected background PATH: ${env.PATH}`);
-      return 'v22.13.0';
+      return 'v22.15.0';
     },
   });
 
@@ -110,7 +110,7 @@ for (const savedPath of [null, '/removed/node:/usr/bin:/bin']) {
       readLogSettings: undefined, writeLogSettings: undefined,
       check: async ({ env }) => {
         if (env.PATH !== '/caller/node:/usr/bin:/bin') throw new Error('Node is unavailable on PATH');
-        return 'v22.13.0';
+      return 'v22.15.0';
       },
     });
     if (savedPath) await writeLogSettings({ enabled: false, backgroundPath: savedPath }, { home: f.home });
@@ -125,7 +125,7 @@ for (const savedPath of [null, '/removed/node:/usr/bin:/bin']) {
 test('missing background Node leaves RAM startup explicitly disabled without preparing or registering', async t => {
   const f = await fixture(t, { check: async ({ env }) => {
     if (env.PATH === '/usr/bin:/bin') throw new Error('Node is unavailable on PATH');
-    return 'v22.13.0';
+    return 'v22.15.0';
   } });
   const result = await f.instance.install({ env: f.env, backgroundPath: '/usr/bin:/bin' });
   assert.deepEqual(result.ramStartup, { enabled: false, reason: 'Node is unavailable on PATH' });
@@ -136,7 +136,7 @@ test('missing background Node leaves RAM startup explicitly disabled without pre
 test('explicit enable fails on unsupported background Node after restoring disk mode', async t => {
   const f = await fixture(t, { check: async ({ env }) => {
     if (env.PATH === '/usr/bin:/bin') throw new Error('Node is unavailable on PATH');
-    return 'v22.13.0';
+    return 'v22.15.0';
   } });
   const installed = await f.instance.install({ env: f.env, backgroundPath: '/usr/bin:/bin' });
   assert.equal(installed.enabled, false);

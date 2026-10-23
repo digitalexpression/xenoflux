@@ -42,7 +42,7 @@ test('projects only allow-listed native skill event metadata and encodes a run-o
   const snapshot = receiver.snapshot();
   assert.ok(snapshot.events.every(e => /^[a-f0-9]{32}:[1-9][0-9]*$/.test(e.observationId)));
   assert.equal(new Set(snapshot.events.map(e => e.observationId)).size, 3);
-  assert.deepEqual(snapshot.events.map(({ observationId, ...event }) => event), [
+  assert.deepEqual(snapshot.events.map(({ observationId, sourceTime, ...event }) => event), [
     { source: 'native-otel-skill-invocation', threadId: 'thread-123', turnId: 'turn-456',
       skillName: 'product-design:image-to-code', invocationType: 'explicit', scope: 'user', pluginId: 'sites@openai-curated-remote', timestampNs: '1780000000123456789' },
     { source: 'native-otel-skill-invocation', threadId: 'thread-123', turnId: 'turn-456',
@@ -177,11 +177,11 @@ test('journal reader rejects group-readable files and files with multiple hard l
   const publicPath = join(dir, 'public.jsonl');
   await writeFile(publicPath, row, { mode: 0o600 });
   await chmod(publicPath, 0o640);
-  assert.equal(readAuditSkillTelemetry(publicPath).metadata.status, 'partial');
+  assert.equal(readAuditSkillTelemetry(publicPath).metadata.status, 'unavailable');
   const linkedPath = join(dir, 'linked.jsonl');
   await writeFile(linkedPath, row, { mode: 0o600 });
   await link(linkedPath, join(dir, 'second-link.jsonl'));
   const linked = readAuditSkillTelemetry(linkedPath);
-  assert.equal(linked.metadata.status, 'partial');
+  assert.equal(linked.metadata.status, 'unavailable');
   assert.equal(linked.events.length, 0);
 });

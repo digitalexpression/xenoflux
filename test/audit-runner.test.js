@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compareAuditWorkspaceDelta, previewAuditExperiment, runAuditExperiment } from '../src/audit-runner.js';
 import { renderAudit, auditExitCode } from '../src/audit-report.js';
+import { runAuditProcess } from '../src/audit-process.js';
 
 const spec = repository => ({ schemaVersion: 1, repository, revision: 'deadbeef', task: 'Inspect the fixture.',
   profiles: [{ name: 'Alpha' }, { name: 'Beta' }], limits: { runMs: 5000, experimentMs: 15000, outputBytes: 4096 },
@@ -29,11 +30,12 @@ async function harness(t, overrides = {}) {
   const captureFixture = async input => {
     calls.push(`capture:${input.profile.profileName}`);
     await input.processOptions.onSpawn?.({ pid: 200 + calls.length, processIdentity: { pid: 200, started: 'fixture', command: 'codex', host: 'test' } });
+    const threadId = `thread-${input.profile.profileName}`;
     const run = { schemaVersion: 1, kind: 'audit-run', id: input.limits.id, status: 'ready', profile: { profileId: input.profile.profileId },
-      agents: [{ id: 'root', parentId: null, depth: 0 }], turns: [{ agentId: 'root', turnId: 'turn-1' }], events: [],
-      skills: [{ id: 'skill-origin-one', name: 'demo', origin: 'plugin', scope: 'system', path: '/plugins/demo/SKILL.md', observations: [{ kind: 'advertised', agentId: 'root' }] }],
+      agents: [{ id: threadId, parentId: null, depth: 0 }], turns: [{ agentId: threadId, turnId: 'turn-1', model: 'fixture-model', reasoningEffort: 'high' }], events: [],
+      skills: [{ id: 'skill-origin-one', name: 'demo', origin: 'plugin', scope: 'system', path: '/plugins/demo/SKILL.md', observations: [{ kind: 'advertised', agentId: threadId }] }],
       usage: {}, metrics: { wallMs: 10, processElapsedMs: 8, toolsActiveIntervalMs: 6, activeWaitMs: 2 }, coverage: { skills: 'complete', agents: 'complete', timeline: 'complete' }, outcome: { status: 'native-claim', nativeTurnStatus: 'completed' },
-      source: { threadId: `thread-${input.profile.profileName}` } };
+      source: { kind: 'native-rollout', nativeSessionId: threadId, threadId, clientVersion: '1.2.3' } };
     await input.onTaskEnd?.({ at: new Date().toISOString(), run, complete: true });
     return { process: { status: 'exited', exitCode: 0, elapsedMs: 10, pid: 200, processIdentity: null,
       shutdown: { groupTerminated: true }, output: { bytes: 1, truncated: false } }, run,
@@ -43,6 +45,7 @@ async function harness(t, overrides = {}) {
     baseDirectory: auditRoot,
     inspectRepository: async () => ({ repository, commit: 'a'.repeat(40), tree: 'b'.repeat(40), files: 1, bytes: 12, clean: true }),
     resolveProfile: async (_store, selection) => profiles.get(selection.name),
+    inspectExecutable: async executable => ({ executable, executableIdentity: [...profiles.values()].find(profile => profile.executable === executable)?.executableIdentity }),
     probeVersion: async options => { probes.push(options.executable); return '1.2.3'; },
     observeAccess: async () => ({ status: 'ready', clients: [], sourceReservation: null }),
     snapshotSettings: async () => ({ status: 'ready', revision: settingsRevision }),
@@ -194,20 +197,38 @@ test('outcome coverage distinguishes evaluated failure, interrupted checks and a
   });
 });
 
-test('preview rejects a pinned version mismatch before reserving either profile', async t => {
+test('an unfamiliar or different version is context and does not gate actual protocol checks', async t => {
   const h = await harness(t, { probeVersion: async () => '9.9.9' });
-  const preview = await previewAuditExperiment(h.store, spec(h.repository), h.context);
-  assert.equal(preview.status, 'blocked');
-  assert.equal(preview.failures.filter(failure => failure.code === 'version-mismatch').length, 2);
+  const input = spec(h.repository);
+  input.profiles[0].version = 'future-build-identifier';
+  const preview = await previewAuditExperiment(h.store, input, h.context);
+  assert.equal(preview.status, 'ready');
+  assert.equal(preview.failures.some(failure => /version/.test(failure.code)), false);
+  assert.deepEqual(preview.profiles.map(profile => profile.checks.find(check => check.name === 'codex-version').status), ['observed', 'observed']);
   assert.equal(h.reservations.length, 0);
+  const report = await runAuditExperiment(h.store, input, h.context);
+  assert.equal(report.status, 'complete');
+  assert.equal(report.runs[0].profile.version, '9.9.9');
+  assert.equal(report.runs[0].profile.requestedVersion, 'future-build-identifier');
 });
 
-test('version probe failures expose stable codes without raw process error text', async t => {
+test('unavailable version output stays unknown while native protocol evidence controls readiness', async t => {
   const h = await harness(t, { probeVersion: async () => { throw Object.assign(new Error('token=secret-value'), { code: 'PROTOCOL_ERROR' }); } });
   const preview = await previewAuditExperiment(h.store, spec(h.repository), h.context);
-  assert.equal(preview.status, 'blocked');
-  assert.equal(preview.failures[0].code, 'version-probe-failed');
+  assert.equal(preview.status, 'ready');
+  assert.equal(preview.profiles[0].checks.find(check => check.name === 'codex-version').status, 'unknown');
   assert.doesNotMatch(JSON.stringify(preview), /secret-value/);
+  const report = await runAuditExperiment(h.store, spec(h.repository), h.context);
+  assert.equal(report.status, 'complete');
+  assert.equal(report.runs[0].profile.version, null);
+});
+
+test('executable identity changes still block before any native task starts', async t => {
+  const h = await harness(t, { inspectExecutable: async executable => ({ executable, executableIdentity: 'changed' }) });
+  const report = await runAuditExperiment(h.store, spec(h.repository), h.context);
+  assert.equal(report.status, 'partial');
+  assert.equal(report.failures.some(failure => failure.code === 'executable-changed'), true);
+  assert.equal(h.calls.some(call => call.startsWith('capture:')), false);
 });
 
 test('run stops if the revision resolves to a different commit after preview', async t => {
@@ -246,7 +267,7 @@ test('two profiles run sequentially with a task-end diff before checks and origi
     assert.match(run.taskEnd.fingerprint, /task-end/);
     assert.match(run.finalWorkspace.fingerprint, /after-checks/);
     assert.equal(run.skills[0].origin, 'plugin');
-    assert.equal(run.agents[0].id, 'root');
+    assert.equal(run.agents[0].id, run.source.threadId);
     const stored = h.finalized.get(run.id);
     assert.equal(stored.capture.status, 'ready');
     assert.ok(stored.execution);
@@ -296,6 +317,18 @@ test('reservation race prevents every model task and releases only reservations 
   assert.ok(report.runs.some(run => run.phase === 'reservation'));
   assert.ok(report.runs.some(run => run.phase === 'not-started'));
   assert.equal(h.finalized.size, 2); // acquired run plus experiment; uncertain acquisition stays unfinished
+});
+
+test('native config stays attached to its selected profile through execution and reporting', async t => {
+  const h = await harness(t), nativeConfig = { forced_login_method: 'chatgpt', model_reasoning_effort: 'low' };
+  const observed = [];
+  h.context.capture = async input => { observed.push({ name: input.profile.profileName, config: input.profile.nativeConfig }); return h.captureFixture(input); };
+  const input = spec(h.repository);
+  input.profiles[0].nativeConfig = nativeConfig;
+  const report = await runAuditExperiment(h.store, input, h.context);
+  assert.deepEqual(observed, [{ name: 'Alpha', config: nativeConfig }, { name: 'Beta', config: undefined }]);
+  assert.deepEqual(report.runs[0].profile.nativeConfig, nativeConfig);
+  assert.equal(Object.hasOwn(report.runs[1].profile, 'nativeConfig'), false);
 });
 
 test('profile settings drift stops later profiles and is recorded without restoration', async t => {
@@ -474,6 +507,106 @@ test('client identity loss during a task stops later profiles and preserves the 
   assert.equal(report.runs[0].runningClients.missing[0].pid, 101);
   assert.equal(report.runs[1].phase, 'not-started');
   assert.equal(h.releases.length, 2);
+});
+
+test('cancellation across execution phases stops later profiles and finalizes only after owned groups stop', async t => {
+  for (const phase of ['setup', 'task', 'checks', 'finalization']) await t.test(phase, async subtest => {
+    const controller = new AbortController();
+    let ownedGroupStopped = false, spawned = 0;
+    const h = await harness(subtest, {
+      signal: controller.signal,
+      release: async options => {
+        if (options.owner.profileId === 'profile-0' && ['setup', 'task', 'checks'].includes(phase))
+          assert.equal(ownedGroupStopped, true, 'profile lease is released after its owned group is confirmed stopped');
+        h.releases.push(options);
+      },
+      process: async options => {
+        if (phase === 'finalization') {
+          h.calls.push(`check:${options.cwd}`);
+          await options.onSpawn?.({ pid: 100 + h.calls.length, processIdentity: { pid: 100, started: 'fixture', command: 'fixture', host: 'test' } });
+          return { status: 'exited', exitCode: 0, elapsedMs: 5,
+            processIdentity: { pid: 100, started: 'fixture', command: 'fixture', host: 'test' },
+            shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } };
+        }
+        const result = await runAuditProcess({ ...options, executable: process.execPath,
+          args: ['-e', 'setInterval(() => {}, 1000)'], onSpawn: async info => {
+            await options.onSpawn?.(info);
+            assert.equal(h.states.get('run-1').process.pid, info.pid, 'persist process ownership before cancellation');
+            spawned++;
+            controller.abort('fixture-cancel');
+          } });
+        ownedGroupStopped = result.shutdown?.groupTerminated === true;
+        return result;
+      },
+      ...(phase === 'task' ? { capture: async input => {
+        h.calls.push(`capture:${input.profile.profileName}`);
+        const result = await runAuditProcess({ ...input.processOptions, cwd: input.workspace, executable: process.execPath,
+          args: ['-e', 'setInterval(() => {}, 1000)'], onSpawn: async info => {
+            await input.processOptions.onSpawn?.(info);
+            assert.equal(h.states.get('run-1').process.pid, info.pid, 'persist task process ownership before cancellation');
+            spawned++;
+            controller.abort('fixture-cancel');
+          } });
+        ownedGroupStopped = result.shutdown?.groupTerminated === true;
+        return { process: result, capture: { status: 'partial' }, capabilities: { appServerV2: 'unavailable', skillsList: 'unavailable' },
+          run: { schemaVersion: 1, kind: 'audit-run', status: 'partial', profile: { profileId: input.profile.profileId },
+            agents: [], turns: [], events: [], skills: [], usage: {}, metrics: {}, coverage: { skills: 'unavailable' },
+            outcome: { status: 'unverified', nativeTurnStatus: 'unknown' }, source: { threadId: 'fixture-task' } } };
+      } } : {}),
+      snapshotWorkspace: async options => {
+        const snapshot = { label: options.label, fingerprint: `fingerprint-${options.label}`, status: 'changed',
+          files: [{ path: 'result.txt' }], patchPath: `/private/${options.label}.patch`, metadataPath: `/private/${options.label}.json` };
+        h.calls.push(`snapshot:${options.label}`);
+        if (phase === 'finalization' && options.label === 'after-checks') controller.abort('fixture-cancel-after-checks');
+        return snapshot;
+      },
+    });
+    const input = spec(h.repository);
+    input.setup = phase === 'setup' ? [{ name: 'cancel-setup', argv: ['true'], timeoutMs: 10000 }] : [];
+    input.checks = phase === 'checks' || phase === 'finalization'
+      ? [{ name: 'cancel-check', argv: ['true'], timeoutMs: 10000 }] : [];
+
+    const report = await runAuditExperiment(h.store, input, h.context);
+    const alpha = report.runs.find(run => run.profile.profileName === 'Alpha');
+    const beta = report.runs.find(run => run.profile.profileName === 'Beta');
+    assert.ok(alpha, JSON.stringify(report));
+    assert.ok(beta, JSON.stringify(report));
+    assert.equal(beta.phase, 'not-started', `cancellation stops the later profile before workspace or task setup: ${JSON.stringify(report)}`);
+    assert.equal(h.calls.some(call => call === 'capture:Beta'), false);
+    assert.equal(h.finalized.has(alpha.id), true, 'cancellation leaves immutable run evidence');
+    assert.equal(h.states.get(alpha.id).reservation, null);
+    assert.equal(h.states.get(beta.id).reservation, null);
+    assert.equal(h.releases.length, 2, 'all acquired leases are released after cancellation cleanup');
+
+    if (['setup', 'task', 'checks'].includes(phase)) {
+      assert.equal(spawned, 1);
+      assert.equal(ownedGroupStopped, true);
+      assert.equal(report.status, 'cancelled');
+      assert.equal(alpha.status, 'cancelled');
+      if (phase !== 'checks') assert.equal(alpha.error?.code, 'cancelled');
+      assert.ok(alpha.finalWorkspace?.timing === 'failure-finalization' || alpha.finalWorkspace?.fingerprint,
+        'workspace evidence records the completed cleanup boundary');
+      assert.ok(h.releases.length > 0);
+    } else {
+      assert.equal(spawned, 0);
+      assert.equal(report.status, 'cancelled');
+      assert.equal(alpha.status, 'complete', 'all checks completed before cancellation stopped the next profile');
+      assert.equal(alpha.outcome.status, 'passed');
+      assert.ok(alpha.finalWorkspace.fingerprint);
+      assert.ok(alpha.artifacts.some(item => item.label === 'after-checks'));
+    }
+    if (phase === 'task') {
+      assert.equal(alpha.execution.status, 'cancelled');
+      assert.equal(alpha.outcome.status, 'unverified');
+      assert.notEqual(alpha.task.status, 'passed');
+    }
+    if (phase === 'checks') {
+      assert.equal(alpha.checks[0].status, 'cancelled');
+      assert.equal(alpha.outcome.status, 'cancelled');
+    }
+    if (phase === 'setup') assert.equal(alpha.setup[0].status, 'cancelled');
+    for (const run of report.runs) assert.ok(h.finalized.has(run.id), `final evidence is available for ${run.id}`);
+  });
 });
 
 test('normalized capture checkpoints persist before phase markers can expose a crash boundary', async t => {

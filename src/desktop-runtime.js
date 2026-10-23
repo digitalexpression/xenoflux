@@ -83,8 +83,11 @@ function parsePs(stdout) {
     // lstart is deliberately retained as a start identity instead of parsing
     // locale-sensitive text. `comm` is requested specifically so ps provides
     // the executable, not command arguments.
-    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+?)\s*$/);
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(-?\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+?)\s*$/);
     if (!match) throw error('PROCESS_OBSERVATION_INVALID');
+    // macOS can report a negative UID sentinel (for example -2) when it
+    // cannot resolve a process account. It cannot belong to the current UID.
+    if (Number(match[3]) < 0) continue;
     rows.push({ pid: Number(match[1]), ppid: Number(match[2]), uid: Number(match[3]), startedAt: match[4], executable: match[5] });
   }
   return rows;

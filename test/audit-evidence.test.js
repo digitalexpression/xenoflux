@@ -36,6 +36,18 @@ test('validates observed delegated evidence separately from exhaustive skill con
   assert.equal(spec.allowIncompleteCapture, false);
 });
 
+test('validates loaded context declarations and integrates checks into capture acceptance', () => {
+  const requirements = { minAgents: 1, context: [{ origin: 'repository', path: 'AGENTS.md' }] };
+  const normalized = validateCaptureRequirements(requirements);
+  assert.deepEqual(normalized.context, [{ agents: 'root', origin: 'repository', path: 'AGENTS.md' }]);
+  assert.throws(() => validateCaptureRequirements({ context: [{ origin: 'user', path: '../AGENTS.md' }] }));
+  const result = evaluateCaptureRequirements({ ...fixture(), source: { kind: 'native-app-server-v2', version: '0.163.0-alpha.10.2', threadId: 'root' },
+    coverage: { agents: 'complete' }, instructionSources: [] }, requirements);
+  assert.equal(result.status, 'failed');
+  assert.ok(result.checks.some(check => check.id === 'context:0' && check.status === 'failed'));
+  assert.deepEqual(result.requirements.context, normalized.context);
+});
+
 test('absent, ambiguous and foreign skill events and server availability do not satisfy invocation requirements', () => {
   const run = fixture();
   run.skillInvocations[0].resolution = 'ambiguous';

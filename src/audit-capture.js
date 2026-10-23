@@ -14,8 +14,11 @@ import { redactValue } from './redact.js';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseLiteralSkillReadDetails } from './audit-skill-read.js';
-import { nativeInstructionSourceContract, projectInstructionSources, compactInstructionSources } from './audit-instructions.js';
+import { projectInstructionSources, compactInstructionSources } from './audit-instructions.js';
 import { createResourceProvenance } from './audit-provenance.js';
+import { evaluateRequiredContext, validateRequiredContextRules } from './audit-context.js';
+import { prepareAuditStartup } from './audit-startup.js';
+import { validateAuditNativeConfig } from './audit-spec.js';
 
 const MAX_SKILLS = 5000;
 const MAX_EVENTS = 20000;
@@ -211,13 +214,16 @@ function linkedAgentCandidates(item) {
  * bounded runner; profile must already contain executable/env selection.
  */
 export async function runAuditCapture({ profile, workspace, task, selectedSkills = [], sandbox = 'workspace-write', processOptions = {},
-  onSession, onPhase, onTaskEnd, limits = {}, telemetryFactory = startAuditTelemetry } = {}) {
+  onSession, onPhase, onTaskEnd, requiredContext, preflightOnly = false, limits = {}, telemetryFactory = startAuditTelemetry } = {}) {
   if (!profile || typeof profile.executable !== 'string' || !profile.executable.startsWith('/')
     || typeof workspace !== 'string' || !workspace.startsWith('/') || typeof task !== 'string' || task.length === 0
     || !['read-only', 'workspace-write', 'danger-full-access'].includes(sandbox)
-    || !processOptions.env || !processOptions.stdoutPath || !processOptions.stderrPath) {
+    || !processOptions.env || !processOptions.stdoutPath || !processOptions.stderrPath
+    || typeof preflightOnly !== 'boolean' || preflightOnly && processOptions.args !== undefined) {
     throw new TypeError('Invalid audit capture input');
   }
+  const contextRules = requiredContext === undefined ? null : validateRequiredContextRules(requiredContext);
+  const nativeConfig = validateAuditNativeConfig(profile.nativeConfig);
   const maxEvents = Math.min(MAX_EVENTS, limits.maxEvents ?? MAX_EVENTS);
   const maxItems = Math.min(MAX_ITEMS, limits.maxItems ?? MAX_ITEMS);
   const toolCapture = createAuditToolCapture({ maxInvocations: maxItems, maxServers: 1000 });
@@ -258,13 +264,12 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
   const rpcEvidence = new WeakMap();
   const childNativeMetadata = new Map();
   const streamedAgentIds = new Set();
-  const instructionContract = nativeInstructionSourceContract(profile.version);
   const instructionSnapshot = (agent, result, source, reason = null) => {
     const row = projectInstructionSources(result?.instructionSources, { agentId: agent.id,
       source, phase: source === 'thread/start' ? 'before-task' : 'after-task',
       sourceLine: result && rpcEvidence.get(result)?.sourceLine,
       workspace, profileHome: profile.home, userHome: profile.userHome,
-      reason: instructionContract ? reason : 'unsupported-native-version' });
+      reason });
     run.instructionSources.push(row);
     return row;
   };
@@ -681,7 +686,8 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       instructionSnapshot(rootAgent, started, 'thread/start');
       rootAgent.model = safeText(started.model, 100);
       rootAgent.reasoningEffort = safeText(started.reasoningEffort, 40);
-      run.source = { kind: 'native-app-server-v2', version: safeText(profile.version, 100), threadId: rootThreadId,
+      run.source = { kind: 'native-app-server-v2', provider: 'codex', client: 'cli', clientEvidence: 'xfx-cli-runner',
+        version: safeText(profile.version, 100), threadId: rootThreadId,
         model: safeText(started.model, 100), reasoningEffort: safeText(started.reasoningEffort, 40), workspace: safeText(workspace, 512),
         persistence: 'native-owned-session', historyMode: 'paginated', freshThread: true };
       // Verified only for the exact native release in the source receipt. Its
@@ -690,6 +696,25 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       run.usage.accounting = nativeUsageAccounting(profile.version);
       capture.checkpoint = 'native-session-started';
       updateInstructionCoverage();
+      let contextRejected = false;
+      if (contextRules) {
+        const rootRules = contextRules.filter(rule => rule.agents !== 'descendants');
+        if (rootRules.length) {
+          const acceptance = evaluateRequiredContext(run, rootRules, { rootOnly: true });
+          run.captureAcceptance = { schemaVersion: 1, mode: 'required-context-preflight',
+            status: acceptance.status, requirements: { context: acceptance.requirements }, checks: acceptance.checks,
+            exhaustiveConsumption: false,
+            boundary: 'Validates reported root instruction-source references before task start; descendant requirements remain pending. It does not establish loaded bytes, trust grants or instruction effects.' };
+          run.coverage.captureRequirements = acceptance.status;
+          contextRejected = acceptance.status === 'failed';
+          if (contextRejected) {
+            capture.errors.push({ code: 'required-context-unavailable' });
+            capture.checkpoint = 'required-context-rejected';
+            run.status = 'unavailable'; capture.status = 'unavailable';
+            run.reason = 'Required root loaded context was not verified; no model task was started';
+          }
+        }
+      }
       try { await onSession?.(run, capture); }
       catch {
         recordWarning('session-checkpoint-failed');
@@ -697,10 +722,33 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
         run.reason = 'Could not checkpoint the native session before task start';
         return;
       }
+      if (contextRejected) return;
+      const sandboxPolicy = sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false }
+        : sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' }
+          : { type: 'workspaceWrite', writableRoots: [workspace], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
+      if (runtime) {
+        // The outer profile write guard must coexist with the native command
+        // sandbox. Check that before spending a model turn; never bypass either.
+        let result;
+        try { result = await request('command/exec', { command: ['/usr/bin/true'], cwd: workspace, sandboxPolicy }, 5000); }
+        catch { /* Unsupported or timed-out capability is unavailable, not success. */ }
+        const verified = result?.exitCode === 0;
+        capture.observer.startupPreservation.commandSandbox = verified ? 'verified-noop' : 'unavailable';
+        if (!verified) {
+          capture.errors.push({ code: 'startup-command-sandbox-unavailable' });
+          capture.checkpoint = 'startup-command-sandbox-rejected';
+          capture.status = 'unavailable'; run.status = 'unavailable';
+          run.reason = 'Profile write protection and native command sandbox could not be verified together; no model task was started';
+          return;
+        }
+      }
+      if (preflightOnly) {
+        capture.nativeReadiness = { status: 'ready', taskStarted: false, commandSandbox: 'verified-noop' };
+        run.reason = 'Native readiness only; no model task was requested';
+        return;
+      }
       const turnResponse = await request('turn/start', { threadId: rootThreadId, cwd: workspace,
-        sandboxPolicy: sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false }
-          : sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' }
-            : { type: 'workspaceWrite', writableRoots: [workspace], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+        sandboxPolicy,
         approvalPolicy: 'never', input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, processOptions.timeoutMs ?? 300000);
       rootTurnId = turnResponse?.turn?.id;
       if (!validId(rootTurnId)) throw new Error('turn-start-missing-id');
@@ -963,7 +1011,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       const quiescent = complete && !capped && !childWaitIncomplete && descendants.every(agent => agent.terminal === true)
         && !run.warnings.some(w => incompleteAgentWarnings.has(w));
       for (const child of descendants) {
-        if (!instructionContract || !quiescent) {
+        if (!quiescent) {
           instructionSnapshot(child, null, 'thread/resume-loaded', 'agent-not-idle');
           continue;
         }
@@ -1103,7 +1151,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     if (!processOptions.args) {
       runtime = await privateRuntimeDirectory(processOptions.stdoutPath, processOptions.runtimeDirectory);
       const isolated = isolatedNativeOptions(processOptions.env, runtime);
-      nativeArgs = isolated.args;
+      nativeArgs = [...Object.entries(nativeConfig ?? {}).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]), ...isolated.args];
       nativeEnv = isolated.env;
       capture.observer = { transport: 'loopback-otlp-http-json', savedSettingsChanged: false,
         profileHomeUsedForReadOnlySettingsAndSkills: true,
@@ -1117,8 +1165,15 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
   }
   let process;
   try {
-    process = await runAuditProcess({ executable: profile.executable,
-      args: [...(receiver?.args ?? []), ...nativeArgs, ...(processOptions.args ?? ['app-server'])], cwd: workspace,
+    const args = [...(receiver?.args ?? []), ...nativeArgs, ...(processOptions.args ?? ['app-server'])];
+    const launch = runtime ? await prepareAuditStartup({ profile,
+      directory: join(runtime.root, 'startup-protection'), args, commandSandbox: true }) : { executable: profile.executable, args };
+    if (runtime) capture.observer.startupPreservation = { status: 'write-protected',
+      mechanism: 'macos-process-policy', scope: 'saved-profile-auth-config-instructions-agents-skills-rules',
+      credentialCopies: false, savedPermissionsChanged: false,
+      commandSandboxTransition: 'native-image-only-with-reentry-denied' };
+    process = await runAuditProcess({ executable: launch.executable,
+      args: launch.args, cwd: workspace,
       env: nativeEnv, timeoutMs: processOptions.timeoutMs ?? 300000, outputLimitBytes: processOptions.outputLimitBytes,
       stdoutPath: processOptions.stdoutPath, stderrPath: processOptions.stderrPath, signal: processOptions.signal,
       onSpawn: processOptions.onSpawn, onEvent, input: drive });
@@ -1162,9 +1217,6 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
   for (const warning of hooks.warnings) recordWarning(warning);
   mergeAuditSkillTelemetry(run, telemetrySnapshot);
   capture.capabilities.skillUseObservability = run.skillInvocations?.length ? 'native-runtime-detected' : receiver ? 'enabled-unverified' : 'unavailable';
-  capture.skillTelemetry = run.skillTelemetry;
-  if (receiver && telemetrySnapshot.metadata?.journal)
-    capture.skillTelemetryJournal = telemetrySnapshot.metadata.journal;
   if (!runtime) capture.observer = { transport: receiver ? 'loopback-otlp-http-json' : 'unavailable', savedSettingsChanged: false,
     effects: receiver ? ['per-process native log exporter override', 'prompt logging disabled', 'non-skill telemetry discarded'] : [] };
   run.metrics.wallMs = Date.now() - startedAt;

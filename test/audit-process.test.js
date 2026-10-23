@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { runAuditProcess, observeAuditProcess } from '../src/audit-process.js';
 
 async function fixture(t) {
@@ -129,4 +130,74 @@ test('identity probe denial does not misreport a live process as stopped', async
     identityProbe: async () => null,
   });
   assert.equal(observation.status, 'unknown');
+});
+
+test('a live wrapper exec command change does not establish that its recorded owner stopped', { timeout: 10000 }, async t => {
+  const child = spawn('/bin/sh', ['-c',
+    `printf 'wrapper-ready\\n'; read ignored; exec "$1" -e 'process.stdout.write(JSON.stringify({pid:process.pid}));setInterval(()=>{},1000)'`, 'owned-wrapper', process.execPath],
+  { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} });
+  await once(child.stdout, 'data');
+  const saved = { pid: child.pid, started: 'fixture-start', command: '/bin/sh', host: hostname() };
+  const ready = once(child.stdout, 'data');
+  child.stdin.end('continue\n');
+  const [output] = await ready;
+  const current = { ...saved, pid: JSON.parse(output).pid, command: process.execPath };
+  assert.equal(saved.pid, current.pid);
+  assert.equal(saved.started, current.started);
+  assert.notEqual(saved.command, current.command);
+  assert.equal((await observeAuditProcess(saved, { identityProbe: async () => current })).status, 'unknown');
+  assert.doesNotThrow(() => process.kill(child.pid, 0));
+  const reused = await observeAuditProcess(saved, { identityProbe: async () => ({ ...current, started: 'different-start' }) });
+  assert.equal(reused.status, 'different');
+});
+
+test('a missing leader with a surviving group is uncertain until the owned group stops', { timeout: 10000 }, async t => {
+  const leader = spawn(process.execPath, ['-e', String.raw`
+    const {spawn}=require('node:child_process');
+    process.stdin.once('data',()=>{
+      const child=spawn(process.execPath,['-e',"process.on('SIGHUP',()=>{});setInterval(()=>{},1000);process.send('ready');"],
+        {stdio:['ignore','ignore','ignore','ipc']});
+      child.once('message',()=>process.stdout.write(JSON.stringify({pid:child.pid})+'\n',()=>process.exit(0)));
+    });`], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => { try { process.kill(-leader.pid, 'SIGKILL'); } catch {} });
+  const identity = { pid: leader.pid, started: 'fixture-start', command: process.execPath, host: hostname() };
+  const closed = once(leader, 'close');
+  leader.stdin.end('start');
+  let output = '';
+  for await (const chunk of leader.stdout) output += chunk;
+  const [code] = await closed;
+  assert.equal(code, 0);
+  const child = JSON.parse(output);
+  assert.doesNotThrow(() => process.kill(child.pid, 0));
+  assert.doesNotThrow(() => process.kill(-leader.pid, 0));
+  assert.equal((await observeAuditProcess(identity)).status, 'unknown');
+  assert.doesNotThrow(() => process.kill(child.pid, 0), 'recovery observation must not signal a saved group');
+  process.kill(-leader.pid, 'SIGKILL');
+  const deadline = Date.now() + 3000;
+  let observed;
+  do {
+    observed = await observeAuditProcess(identity);
+    if (observed.status === 'stopped') break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  } while (Date.now() < deadline);
+  assert.equal(observed.status, 'stopped');
+});
+
+test('owned group shutdown does not claim or terminate an escaped detached child', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  let escaped;
+  t.after(() => { if (escaped) { try { process.kill(-escaped, 'SIGKILL'); } catch {} } });
+  const script = String.raw`
+    const {spawn}=require('node:child_process');
+    const child=spawn(process.execPath,['-e',"setInterval(()=>{},1000);process.send('ready');"],
+      {detached:true,stdio:['ignore','ignore','ignore','ipc']});
+    child.once('message',()=>process.stdout.write(JSON.stringify({escapedPid:child.pid})+'\n',()=>process.exit(0)));`;
+  const result = await f.run(script, { onEvent: event => { escaped = event.value?.escapedPid ?? escaped; } });
+  assert.equal(result.status, 'exited');
+  assert.equal(result.shutdown.groupTerminated, true);
+  assert.equal(result.shutdown.escapedDescendantsUnverified, true);
+  assert.ok(escaped);
+  assert.doesNotThrow(() => process.kill(escaped, 0));
+  assert.doesNotThrow(() => process.kill(-escaped, 0));
 });

@@ -40,6 +40,16 @@ export function manifestFor({ packageName, version, tarball, sha256, dependencie
   return { schemaVersion: 1, package: packageName, version, tarball, sha256, dependencies, sourceRevision, smoke };
 }
 
+export function preservesFrozenAuditFields(actual, frozen) {
+  return Boolean(actual && Object.entries(frozen).every(([key, value]) =>
+    JSON.stringify(actual[key]) === JSON.stringify(value)));
+}
+
+export function hasReadCorroboration(report) {
+  return report?.comparisonEvidence?.actions?.some(action => action.kind === 'resource-read' &&
+    action.corroboration === 'native-unknown-absolute-cat') === true;
+}
+
 async function exists(path) {
   try { await access(path); return true; } catch { return false; }
 }
@@ -145,13 +155,16 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
       cwd: install, expectedExitCode: 2,
     })).stdout);
     const shown = await audit(['show', frozen]);
-    if (JSON.stringify(shown) !== JSON.stringify(auditFixture)) throw new Error('Installed audit show changed frozen evidence');
+    if (!preservesFrozenAuditFields(shown, auditFixture) || !hasReadCorroboration(shown))
+      throw new Error('Installed audit show changed frozen evidence or lost its derived read corroboration');
     const comparison = await audit(['diff', frozen, frozen]);
     if (comparison.kind !== 'audit-comparison' || comparison.comparison.skills[0]?.left?.observations[0]?.evidence?.readCorroboration !== 'native-unknown-absolute-cat')
       throw new Error('Installed audit comparison lost read corroboration');
     const exported = await audit(['export', frozen, '--format', 'markdown', '--output', join(temporary, 'audit.md')]);
     const reopened = await audit(['show', exported.evidencePath]);
-    if (JSON.stringify(reopened) !== JSON.stringify(auditFixture)) throw new Error('Installed audit export/reopen changed frozen evidence');
+    if (!preservesFrozenAuditFields(reopened, auditFixture) || !hasReadCorroboration(reopened) ||
+      JSON.stringify(reopened.comparisonEvidence) !== JSON.stringify(shown.comparisonEvidence))
+      throw new Error('Installed audit export/reopen changed frozen evidence or lost its derived read corroboration');
     // Exercise shipped desktop preparation and copy against disposable homes.
     const { Store } = await import(pathToFileURL(join(installedRoot, 'src', 'profiles.js')).href);
     const { desktopInstancePlan } = await import(pathToFileURL(join(installedRoot, 'src', 'desktop-instances.js')).href);
@@ -238,9 +251,9 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
       check: async ({ env }) => {
         if (env.PATH === '/missing/node:/usr/bin:/bin')
           throw new Error('background Node is unavailable');
-        return 'v22.13.0';
+        return 'v22.15.0';
       },
-      execute: async () => ({ stdout: 'v22.13.0\n' }),
+      execute: async () => ({ stdout: 'v22.15.0\n' }),
       runService: async () => { serviceCalls += 1; throw new Error('Smoke must not invoke launchctl'); },
       serviceLoaded: async () => false,
       prepareLogs: async () => { prepared += 1; },

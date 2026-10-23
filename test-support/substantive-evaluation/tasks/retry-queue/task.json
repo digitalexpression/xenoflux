@@ -1,0 +1,10 @@
+{
+  "id": "retry-queue",
+  "title": "Implement a bounded async retry queue",
+  "goal": "Implement a sequential async queue with finite retries, injected waiting, AbortSignal support, and deterministic result and attempt accounting.",
+  "editableFiles": ["src/retry-queue.js"],
+  "referenceFiles": { "src/retry-queue.js": "oracle/reference/retry-queue.js" },
+  "visibleCommand": ["node", "--test", "test/visible.test.js"],
+  "oracle": "oracle/acceptance.test.mjs",
+  "kind": "async-control-flow"
+}

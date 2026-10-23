@@ -7,8 +7,8 @@ Audience: users. Building and publishing packages is covered in the
 
 - macOS 13 or later for the packaged launcher; the installed Codex app's own
   requirements also apply.
-- Node.js 22.13.0 or later in the 22.x line, or Node.js 23.4.0 or later,
-  available on `PATH`. Node.js 23.0–23.3 is unsupported.
+- Node.js 22.15.0 or later in the 22.x line, or Node.js 23.8.0 or later,
+  available on `PATH`. Node.js 23.0–23.7 is unsupported.
 - A supported Codex CLI executable to create or run CLI profiles, discovered
   through `PATH`, a registered profile or an explicit `--codex` path.
 - The installed Codex desktop app if you use desktop profiles.
@@ -17,6 +17,10 @@ Audience: users. Building and publishing packages is covered in the
 
 Xenoflux does not bundle Node.js. Its prebuilt launcher supports Apple Silicon and
 Intel Macs; users do not need a Swift compiler or Xcode Command Line Tools.
+The 2.1.0 Node minimum includes the Zstandard decoder needed for compressed
+Codex Desktop history. When updating from 2.0.0, check `node --version` first;
+update Node separately if it is below this requirement. Profile data needs no
+migration for this runtime requirement change.
 Version 1.0.0 is the first stable release. Migration from older previews is unsupported.
 
 ## Install globally with npm

@@ -3,9 +3,23 @@
 Audience: maintainers. Users should follow [Installation](../user/INSTALLATION.md)
 to obtain a published npm package or offline bundle.
 
-Version 1.0.0 is the first stable release. Earlier preview migration is unsupported.
+Version 1.0.0 was the first stable release. Earlier preview migration is unsupported.
 The stable npm tag is `latest`. Publication requires an explicit release request;
 building a bundle or passing checks does not publish it or authorize installation.
+
+## Product acceptance before release
+
+The [active roadmap](ROADMAP.md) defines the next release gate: complete profile
+diffs and both audit entry paths for Codex CLI and Desktop on macOS, including
+optional review, repeated behavioral evidence, durable reports and preservation
+of normal profile/client state. Record acceptance against the final candidate.
+Package smoke alone does not establish those outcomes. UI and other providers
+are assessed after that release and are not prerequisites for it.
+
+Keep the reviewed public goal, roadmap and assessment in the package documentation
+allowlist and verify their packaged links. Private handovers and raw receipts must
+remain excluded. Current source, published package and installed executable can
+be different versions; report each identity explicitly.
 
 ## Prepare the launcher and source
 
@@ -59,13 +73,16 @@ bin being available without changing the current shell or startup files. An
 explicit `--store` is important because Xenoflux also uses the macOS account home
 in some paths; changing HOME alone is not a complete isolation boundary.
 
-Run this in a shell with supported Node.js and npm available. It installs the
-published 1.0.0 package, checks the npm-created CLI link and empty isolated profile
-list, then uninstalls and removes the temporary files:
+Run this in a shell with supported Node.js and npm available. Set
+`XFX_RELEASE_VERSION` to the exact published release being verified. This installs
+that package, checks the npm-created CLI link and empty disposable profile list,
+then uninstalls and removes the temporary files. It is post-publication
+verification; the detached bundle smoke above verifies an unpublished candidate.
 
 ```sh
 (
   set -eu
+  : "${XFX_RELEASE_VERSION:?Set the exact published xfx release to verify}"
   xfx_test_root=$(mktemp -d "${TMPDIR:-/tmp}/xfx-global-test.XXXXXX")
   trap 'rm -rf "$xfx_test_root"' EXIT
   mkdir -p "$xfx_test_root/home"
@@ -85,7 +102,7 @@ list, then uninstalls and removes the temporary files:
       "$@"
   }
 
-  xfx_test npm install -g xenoflux@1.0.0 \
+  xfx_test npm install -g "xenoflux@$XFX_RELEASE_VERSION" \
     --prefix "$xfx_test_root/prefix" --registry https://registry.npmjs.org \
     --ignore-scripts --no-audit --no-fund
 
@@ -139,5 +156,4 @@ CI and fixture checks establish the paths they exercise, not all native runtime
 behavior. Record actual sign-in, Dock/Cmd+Tab identity, data separation, shutdown,
 and reboot/RAM-service results separately when those operations are authorized.
 See [Desktop verification](DESKTOP-IMPLEMENTATION.md#verification-and-native-acceptance)
-and the [concurrent profile handover](HANDOVER-macos-concurrent-profiles.md) for
-dated evidence and remaining limits.
+and [audit acceptance](AUDIT-ACCEPTANCE.md) for reviewed evidence and its limits.

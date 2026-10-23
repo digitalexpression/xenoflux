@@ -21,6 +21,9 @@ changes, implementation contracts, verification and publication.
 | Guide | Use it to |
 | --- | --- |
 | [Development](developer/README.md) | Set up the checkout, run checks and understand evidence boundaries. |
+| [Shared product goal](developer/AUDIT-GOAL.md) | Understand full profile diffs, both audit entry paths and the outcome contract. |
+| [Active roadmap](developer/ROADMAP.md) | Deliver the Codex CLI/Desktop macOS release before assessing UI and other providers. |
+| [Capability assessment](developer/PROFILE-AUDIT-ASSESSMENT.md) | Separate current support from proposed changes and release gaps. |
 | [Release process](developer/LOCAL-RELEASE.md) | Build, verify and publish a release bundle. |
 | [Desktop implementation](developer/DESKTOP-IMPLEMENTATION.md) | Understand signing, ownership, isolation and native acceptance. |
 | [Profile copy policy](developer/PROFILE-COPY-POLICY.md) | Review or change creation/copy behavior against its contract. |
@@ -31,8 +34,8 @@ changes, implementation contracts, verification and publication.
 for the published 2.0.0 release, a verified existing local installation and their
 coverage limits.
 
-[Concurrent profile handover](developer/HANDOVER-macos-concurrent-profiles.md)
-records dated engineering results and the 1.0.0 publication. It is not an
-installation guide or a live process inventory.
+Detailed operational handovers remain in private engineering records. The
+[audit acceptance](developer/AUDIT-ACCEPTANCE.md) provides the reviewed public
+release evidence and coverage limits.
 
 [Back to Xenoflux](../README.md).

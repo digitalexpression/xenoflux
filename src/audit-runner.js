@@ -9,12 +9,13 @@ import { inspectAuditRepository, authorizeAuditWorkspaceParent, createAuditWorks
 import { createExperiment, createExperimentRun, writeAuditState, finalizeAuditRecord,
   reserveAuditProfile, releaseAuditProfileReservation, writeAuditCaptureCheckpoint } from './audit-experiment-store.js';
 import { resolveAuditExecutionProfile, observeAuditProfileAccess, snapshotAuditProfileSettings,
-  compareAuditProfileSettings } from './audit-profile.js';
+  compareAuditProfileSettings, inspectAuditExecutable } from './audit-profile.js';
 import { runAuditCapture } from './audit-capture.js';
 import { runAuditProcess, getAuditProcessIdentity } from './audit-process.js';
 import { compareAuditRuns, auditExitCode } from './audit-report.js';
-import { probeVersion } from './version-probe.js';
+import { probeAuditVersion } from './audit-native-version.js';
 import { evaluateCaptureRequirements } from './audit-evidence.js';
+import { buildAuditComparisonConditions } from './audit-conditions.js';
 
 const now = () => new Date().toISOString();
 const duration = (start, end = Date.now()) => Math.max(0, end - start);
@@ -23,7 +24,9 @@ const safeProfile = profile => ({ id: profile.profileId, name: profile.profileNa
   userHome: profile.userHome, executable: profile.executable, executableIdentity: profile.executableIdentity,
   nativeRoot: profile.nativeRoot ?? null, environmentId: profile.environmentId ?? null,
   executableSource: profile.executableSource, version: profile.version, versionSource: profile.versionSource,
-  bindingRepository: profile.bindingRepository });
+  ...(profile.requestedVersion !== undefined ? { requestedVersion: profile.requestedVersion } : {}),
+  bindingRepository: profile.bindingRepository,
+  ...(profile.nativeConfig !== undefined ? { nativeConfig: { ...profile.nativeConfig } } : {}) });
 const SAFE_ERROR_TEXT = {
   'repository-limit': 'The source repository exceeds the supported Git tree or capture bounds.',
   'profile-repository-unbound': 'The selected repository is not already bound to this profile; no binding was changed.',
@@ -33,12 +36,13 @@ const SAFE_ERROR_TEXT = {
   'profile-reservation-failed': 'A selected profile could not be reserved.',
   'profile-settings-changed': 'Profile settings changed or became unverifiable.',
   'profile-settings-unavailable': 'Profile settings could not be safely fingerprinted.',
-  'version-mismatch': 'The Codex executable version did not match the pinned version.',
-  'version-probe-failed': 'The Codex executable version could not be verified.',
+  'executable-changed': 'The selected Codex executable changed after preflight.',
+  'version-probe-failed': 'The Codex executable version could not be observed.',
   'commit-changed': 'The selected repository commit changed during preflight.',
   timeout: 'The bounded experiment time limit expired.',
   cancelled: 'The experiment was cancelled.',
   'capture-incomplete': 'Required capture evidence is incomplete.',
+  'required-context-unavailable': 'Required loaded context was not verified in the audit workspace.',
   'task-failed': 'The Codex task process did not complete successfully.',
   'setup-failed': 'A setup command failed.',
   'process-shutdown-failed': 'A process group could not be confirmed stopped.',
@@ -100,10 +104,11 @@ function dependencies(context) {
   return {
     inspectRepository: context.inspectRepository ?? inspectAuditRepository,
     resolveProfile: context.resolveProfile ?? resolveAuditExecutionProfile,
+    inspectExecutable: context.inspectExecutable ?? inspectAuditExecutable,
     observeAccess: context.observeAccess ?? observeAuditProfileAccess,
     snapshotSettings: context.snapshotSettings ?? snapshotAuditProfileSettings,
     compareSettings: context.compareSettings ?? compareAuditProfileSettings,
-    probeVersion: context.probeVersion ?? probeVersion,
+    probeVersion: context.probeVersion ?? probeAuditVersion,
     capture: context.capture ?? runAuditCapture,
     process: context.process ?? runAuditProcess,
     createExperiment: context.createExperiment ?? createExperiment,
@@ -139,13 +144,14 @@ export async function previewAuditExperiment(store, input, context = {}) {
   catch (error) { failures.push({ scope: 'repository', code: errorCode(error), message: errorText(error) }); }
   for (const selection of spec.profiles) {
     try {
-      const profile = await deps.resolveProfile(store, selection, { repository: repository?.repository ?? spec.repository });
+      const resolvedProfile = await deps.resolveProfile(store, selection, { repository: repository?.repository ?? spec.repository });
+      const profile = { ...resolvedProfile, ...(selection.version !== undefined ? { requestedVersion: selection.version } : {}) };
       const requested = selectionProfile(spec, profile);
       const checks = [];
-      if (!profile.profileId || !profile.home || !profile.reservationRoot || !profile.executable || !profile.version)
-        throw new Error('Profile executable, version, or isolated home is unavailable');
-      if (requested.executable && (profile.executable !== requested.executable || profile.version !== requested.version))
-        throw new Error('Pinned profile executable or version could not be verified');
+      if (!profile.profileId || !profile.home || !profile.reservationRoot || !profile.executable)
+        throw new Error('Profile executable or home is unavailable');
+      if (requested.executable && profile.executable !== requested.executable)
+        throw new Error('Selected profile executable could not be verified');
       if (repository && profile.bindingRepository && await realpath(profile.bindingRepository).catch(() => null) !== repository.repository)
         throw new Error('Profile repository binding does not match the selected source repository');
       if (!profile.bindingRepository) checks.push({ name: 'repository-binding', status: 'unknown' });
@@ -157,18 +163,16 @@ export async function previewAuditExperiment(store, input, context = {}) {
         code: access?.status === 'blocked' ? 'profile-access-blocked' : 'profile-access-unavailable',
         message: 'Safe coexistence with this profile could not be established.' });
       else {
-        let observedVersion;
+        let observedVersion = null;
         try { observedVersion = await deps.probeVersion({ executable: profile.executable, cwd: repository?.repository ?? spec.repository,
-          env: profile.env, timeoutMs: 2000 }); }
+          env: profile.env, timeoutMs: 2000 }) ?? null; }
         catch (error) {
-          failures.push({ scope: 'profile', profile: profile.profileName, code: 'version-probe-failed', message: 'Codex executable version could not be verified.' });
+          if (['SHUTDOWN_FAILED', 'CANCELLED'].includes(error?.code))
+            failures.push({ scope: 'profile', profile: profile.profileName, code: 'version-probe-failed', message: SAFE_ERROR_TEXT['version-probe-failed'] });
         }
-        if (observedVersion) {
-          const expected = requested.version ?? profile.version;
-          checks.push({ name: 'codex-version', status: observedVersion === expected ? 'ready' : 'mismatch', expected, observed: observedVersion });
-          if (observedVersion !== expected) failures.push({ scope: 'profile', profile: profile.profileName,
-            code: 'version-mismatch', message: SAFE_ERROR_TEXT['version-mismatch'] });
-        }
+        checks.push({ name: 'codex-version', status: observedVersion ? 'observed' : 'unknown',
+          observed: observedVersion, registered: profile.version ?? null,
+          ...(requested.version !== undefined ? { requested: requested.version } : {}) });
       }
       checks.push({ name: 'capture-protocol', status: 'pending', reason: 'Confirmed by app-server initialize and skills/list during the run.' });
       let settings;
@@ -178,7 +182,8 @@ export async function previewAuditExperiment(store, input, context = {}) {
       if (settings?.status !== 'ready') failures.push({ scope: 'profile', profile: profile.profileName,
         code: 'profile-settings-unavailable', message: 'Profile settings cannot be safely fingerprinted; execution is blocked.' });
       profiles.push({ profileId: profile.profileId, profileName: profile.profileName, home: profile.home,
-        executable: profile.executable, version: profile.version,
+        executable: profile.executable, version: profile.version ?? null, versionSource: profile.versionSource ?? 'unavailable',
+        ...(profile.requestedVersion !== undefined ? { requestedVersion: profile.requestedVersion } : {}),
         status: failures.some(f => f.profile === profile.profileName) ? 'blocked' : 'ready',
         busy: (access?.clients?.length ?? 0) > 0, reason: null, checks });
     } catch (error) {
@@ -290,7 +295,10 @@ export async function runAuditExperiment(store, input, context = {}) {
     await deps.writeState(store, experiment.id, { status: 'reserving', phase: 'reservation', coordinator: await coordinatorIdentity() });
     // Resolve and reserve every profile before the first model task starts.
     for (const selection of spec.profiles) {
-      const profile = await deps.resolveProfile(store, selection, { repository: repository.repository });
+      const resolvedProfile = await deps.resolveProfile(store, selection, { repository: repository.repository });
+      const profile = { ...resolvedProfile,
+        ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}),
+        ...(selection.version !== undefined ? { requestedVersion: selection.version } : {}) };
       const beforeAccess = await deps.observeAccess(profile, { store });
       requireProfileAccess(beforeAccess);
       const beforeSettings = await deps.snapshotSettings(profile);
@@ -319,15 +327,25 @@ export async function runAuditExperiment(store, input, context = {}) {
     // Recheck access and the original clients before launching any model work.
     for (const { profile } of reservations) {
       const prepared = [...bySelection.values()].find(item => item.profile.profileId === profile.profileId);
+      const executable = await deps.inspectExecutable(profile.executable);
+      if (executable.executableIdentity !== profile.executableIdentity)
+        throw Object.assign(new Error(SAFE_ERROR_TEXT['executable-changed']), { code: 'executable-changed' });
       const access = await deps.observeAccess(profile, { store, expectedClients: prepared.beforeAccess.clients });
       requireProfileAccess(access);
       if (compareProfileAccess(prepared.beforeAccess, access).status !== 'unchanged')
         throw Object.assign(new Error(SAFE_ERROR_TEXT['profile-clients-changed']), { code: 'profile-clients-changed' });
       if (deps.compareSettings(prepared.beforeSettings, await deps.snapshotSettings(profile)).status !== 'unchanged')
         throw Object.assign(new Error(SAFE_ERROR_TEXT['profile-settings-changed']), { code: 'profile-settings-changed' });
-      const observedVersion = await deps.probeVersion({ executable: profile.executable, cwd: repository.repository,
-        env: profile.env, timeoutMs: 2000, signal: controller.signal });
-      if (observedVersion !== prepared.profile.version) throw Object.assign(new Error('Version changed after reservation.'), { code: 'version-mismatch' });
+      let observedVersion = null;
+      try { observedVersion = await deps.probeVersion({ executable: profile.executable, cwd: repository.repository,
+        env: profile.env, timeoutMs: 2000, signal: controller.signal }) ?? null; }
+      catch (error) {
+        if (['SHUTDOWN_FAILED', 'CANCELLED'].includes(error?.code)) throw error;
+      }
+      // Versions are descriptive metadata. Actual app-server initialize and
+      // skills/list responses establish whether the native capture protocol works.
+      profile.version = observedVersion;
+      profile.versionSource = observedVersion ? 'observed' : 'unavailable';
     }
     await deps.writeState(store, experiment.id, { status: 'running', phase: 'workspace', startedAt: now(),
       coordinator: await coordinatorIdentity(), runs: runReferences.map(({ runRecord, profile }) => ({ id: runRecord.id, profileId: profile.profileId, status: 'prepared' })) });
@@ -405,6 +423,7 @@ export async function runAuditExperiment(store, input, context = {}) {
         const taskTimeout = Math.max(1, Math.min(spec.limits.runMs - duration(phaseStart), experimentDeadline - Date.now()));
         const selectedSkills = selection.skills ?? [];
         const captured = await deps.capture({ profile, workspace: workspace.directory, task: spec.task, selectedSkills,
+          requiredContext: spec.captureRequirements?.context,
           processOptions: { env: profile.env, timeoutMs: taskTimeout, outputLimitBytes: spec.limits.outputBytes,
             stdoutPath: join(runRecord.directory, 'codex.stdout'), stderrPath: join(runRecord.directory, 'codex.stderr'),
             signal: controller.signal,
@@ -495,6 +514,21 @@ export async function runAuditExperiment(store, input, context = {}) {
         runResult.coverage.workspaceDiff = !taskEndSnapshot ? 'unavailable'
           : taskEndCaptureComplete ? 'complete' : 'partial';
         runResult.coverage.captureProtocol = runResult.captureProtocol.status;
+        if (spec.captureRequirements?.context) {
+          const preflight = runResult.normalized.captureAcceptance;
+          if (preflight?.mode === 'required-context-preflight' && preflight.status === 'failed') {
+            runResult.captureAcceptance = preflight;
+            runResult.coverage.captureRequirements = 'failed';
+            throw Object.assign(new Error(SAFE_ERROR_TEXT['required-context-unavailable']), { code: 'required-context-unavailable' });
+          }
+          const acceptance = evaluateCaptureRequirements(runResult.normalized, spec.captureRequirements,
+            { protocolReady: runResult.captureProtocol.status === 'ready' });
+          runResult.captureAcceptance = acceptance;
+          runResult.normalized.captureAcceptance = acceptance;
+          runResult.coverage.captureRequirements = acceptance.status;
+          if (acceptance.checks.some(check => check.id.startsWith('context:') && check.status === 'failed'))
+            throw Object.assign(new Error(SAFE_ERROR_TEXT['required-context-unavailable']), { code: 'required-context-unavailable' });
+        }
         const nativeCompleted = runResult.normalized.outcome?.nativeTurnStatus === 'completed';
         const taskStatus = captured?.process?.status === 'exited' && captured?.process?.exitCode === 0 && nativeCompleted
           ? 'passed' : 'failed';
@@ -719,7 +753,10 @@ export async function runAuditExperiment(store, input, context = {}) {
   // the unfinished record available to exact-owner recovery.
   for (const [runId, report] of pendingFinalReports) {
     if (!releasedRunIds.has(runId)) continue;
-    try { await deps.finalize(store, runId, report); finalizedRuns.add(runId); }
+    try { await deps.finalize(store, runId, { ...report, comparisonConditions: buildAuditComparisonConditions({ spec,
+      baseline: preview.baseline, profile: spec.profiles.find(item => item.name === report.profile?.profileName),
+      profileOrder: context.profileOrder ?? spec.profiles.map(item => item.name), trialIndex: context.series?.trialIndex,
+      environment: context.comparisonEnvironment }) }); finalizedRuns.add(runId); }
     catch (error) { failures.push({ code: 'run-report-finalize-failed', runId, message: errorText(error) }); }
   }
   for (const reference of runReferences) {
@@ -757,7 +794,11 @@ export async function runAuditExperiment(store, input, context = {}) {
         baseline: reference.runRecord.record?.baseline, sourceWorkspace: run.sourceWorkspace,
         status: run.status, execution: run.execution ?? { status: run.status, exitCode: null, elapsedMs: 0 },
         outcome: run.outcome ?? { status: 'unverified', checks: [] }, coverage: run.coverage ?? capturedRun.coverage,
-        setup: run.setup ?? [], checks: run.checks ?? [], artifacts: run.artifacts ?? [], warnings: run.warnings ?? [] })
+        setup: run.setup ?? [], checks: run.checks ?? [], artifacts: run.artifacts ?? [], warnings: run.warnings ?? [],
+        comparisonConditions: buildAuditComparisonConditions({ spec, baseline: preview.baseline,
+          profile: spec.profiles.find(item => item.name === (run.profile?.profileName ?? run.profile?.name)),
+          profileOrder: context.profileOrder ?? spec.profiles.map(item => item.name), trialIndex: context.series?.trialIndex,
+          environment: context.comparisonEnvironment }) })
         .then(() => finalizedRuns.add(run.id)).catch(() => {});
     }
   }
@@ -769,11 +810,18 @@ export async function runAuditExperiment(store, input, context = {}) {
     return { ...(capturedRun ?? {}), ...execution,
       profile: { ...(capturedRun?.profile ?? {}), profileId: run.profile?.profileId ?? run.profile?.id ?? null,
         profileName: run.profile?.profileName ?? run.profile?.name ?? null, name: run.profile?.name ?? run.profile?.profileName ?? null,
-        home: run.profile?.home ?? null },
+        home: run.profile?.home ?? null,
+        version: run.profile?.version ?? null, versionSource: run.profile?.versionSource ?? 'unavailable',
+        ...(run.profile?.requestedVersion !== undefined ? { requestedVersion: run.profile.requestedVersion } : {}),
+        ...(run.profile?.nativeConfig !== undefined ? { nativeConfig: { ...run.profile.nativeConfig } } : {}) },
       status: run.status, execution: run.execution ?? { status: run.status, exitCode: null, elapsedMs: run.metrics?.totalMs ?? null },
       coverage: run.coverage ?? capturedRun?.coverage ?? {}, metrics: { ...(capturedRun?.metrics ?? {}), ...(run.metrics ?? {}) },
       outcome: run.outcome ?? capturedRun?.outcome ?? { status: 'unknown' },
-      workspace: run.workspace ?? { taskEnd: null, checkEnd: null } };
+      workspace: run.workspace ?? { taskEnd: null, checkEnd: null },
+      comparisonConditions: buildAuditComparisonConditions({ spec, baseline: preview.baseline,
+        profile: spec.profiles.find(item => item.name === (run.profile?.profileName ?? run.profile?.name)),
+        profileOrder: context.profileOrder ?? spec.profiles.map(item => item.name), trialIndex: context.series?.trialIndex,
+        environment: context.comparisonEnvironment }) };
   });
   const comparisons = reportRuns.length > 1 ? reportRuns.slice(1).map(run => compareAuditRuns(reportRuns[0], run)) : [];
   const complete = runs.length === spec.profiles.length && runs.every(run => run.status === 'complete') && !failures.length && !recoveryRequired;
@@ -794,6 +842,7 @@ export async function runAuditExperiment(store, input, context = {}) {
     execution: { status: reportStatus, exitCode: recoveryRequired ? 2 : timedOut ? 124 : cancelled ? 130 : complete ? 0 : reservationBlocked ? 1 : strictFailure ? 4 : 2,
       startedAt: experiment.record.createdAt, completedAt: now(), elapsedMs: duration(startedAt),
       order: spec.profiles.map(p => p.name), parallelism: 1, retries: 0, sandbox: spec.sandbox },
+    profileOrder: context.profileOrder ?? spec.profiles.map(item => item.name),
     runs: reportRuns, comparisons, coverage: { profiles: runs.length === spec.profiles.length && runs.every(run => run.phase !== 'not-started') ? 'complete' : 'partial',
       skills: runs.every(run => run.coverage?.skills === 'complete') ? 'complete' : 'partial',
       outcomes: runs.every(run => run.coverage?.outcome === 'complete') ? 'complete' : 'partial' },

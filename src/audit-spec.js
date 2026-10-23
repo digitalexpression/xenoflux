@@ -16,6 +16,30 @@ const integer = (value, fallback, min, max, label) => {
   return selected;
 };
 
+const NATIVE_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+
+/** Validate the narrow set of per-process native Codex config overrides accepted by audit recipes. */
+export function validateAuditNativeConfig(value) {
+  if (value === undefined) return undefined;
+  allowed(value, ['model', 'model_reasoning_effort', 'plan_mode_reasoning_effort', 'forced_login_method'], 'native config');
+  const result = {};
+  if (value.model !== undefined) {
+    if (!plain(value.model, 120)) throw new Error('Native config model must be a plain string');
+    result.model = value.model;
+  }
+  for (const key of ['model_reasoning_effort', 'plan_mode_reasoning_effort']) if (value[key] !== undefined) {
+    if (typeof value[key] !== 'string' || !NATIVE_REASONING_EFFORTS.has(value[key]))
+      throw new Error(`Native config ${key} must be a recognized reasoning effort`);
+    result[key] = value[key];
+  }
+  if (value.forced_login_method !== undefined) {
+    if (!['chatgpt', 'api'].includes(value.forced_login_method))
+      throw new Error('Native config forced_login_method must be chatgpt or api');
+    result.forced_login_method = value.forced_login_method;
+  }
+  return Object.keys(result).length ? Object.fromEntries(Object.entries(result).sort(([a], [b]) => a.localeCompare(b))) : {};
+}
+
 function commands(value = [], label) {
   if (!Array.isArray(value) || value.length > 20) throw new Error(`${label} must contain at most twenty commands`);
   const names = new Set();
@@ -30,9 +54,22 @@ function commands(value = [], label) {
   });
 }
 
+function taskContract(value) {
+  if (value === undefined) return undefined;
+  allowed(value, ['id', 'editableFiles'], 'task contract');
+  if (!plain(value.id, 120) || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value.id)
+    || !Array.isArray(value.editableFiles) || value.editableFiles.length > 100
+    || value.editableFiles.some(path => typeof path !== 'string' || !path || path.length > 500
+      || path.startsWith('/') || path.includes('\\') || path.split('/').some(part => !part || part === '.' || part === '..')
+      || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(path))
+    || new Set(value.editableFiles).size !== value.editableFiles.length)
+    throw new Error('Task contract requires a safe ID and distinct relative editable paths');
+  return { id: value.id, editableFiles: [...value.editableFiles] };
+}
+
 /** Freeze one task, committed baseline, selected setups and bounded execution recipe. */
 export function validateAuditSpec(value) {
-  allowed(value, ['schemaVersion', 'repository', 'revision', 'task', 'profiles', 'limits', 'setup', 'checks', 'sandbox', 'allowIncompleteCapture', 'captureRequirements', 'quality', 'trials', 'variables'], 'experiment specification');
+  allowed(value, ['schemaVersion', 'repository', 'revision', 'task', 'taskContract', 'profiles', 'limits', 'setup', 'checks', 'sandbox', 'allowIncompleteCapture', 'captureRequirements', 'quality', 'trials', 'variables'], 'experiment specification');
   if (value.schemaVersion !== 1 || !plain(value.repository) || !value.repository.startsWith('/')
     || resolve(value.repository) !== value.repository || !plain(value.revision, 200))
     throw new Error('Specify schemaVersion 1, an absolute repository and explicit Git revision');
@@ -43,17 +80,20 @@ export function validateAuditSpec(value) {
   const names = new Set();
   const profiles = value.profiles.map(selection => {
     const profile = typeof selection === 'string' ? { name: selection } : selection;
-    allowed(profile, ['name', 'executable', 'version', 'skills'], 'profile selection');
+    allowed(profile, ['name', 'executable', 'version', 'skills', 'nativeConfig'], 'profile selection');
     if (!plain(profile.name, 200) || names.has(profile.name.toLowerCase())) throw new Error('Select distinct plain profile names');
     names.add(profile.name.toLowerCase());
-    if ((profile.executable === undefined) !== (profile.version === undefined)
-      || (profile.executable !== undefined && (!plain(profile.executable) || !profile.executable.startsWith('/')
-        || resolve(profile.executable) !== profile.executable || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(profile.version))))
-      throw new Error('An explicit profile executable requires an absolute path and pinned version');
+    if ((profile.executable !== undefined && (!plain(profile.executable) || !profile.executable.startsWith('/')
+        || resolve(profile.executable) !== profile.executable))
+      || (profile.version !== undefined && !plain(profile.version, 100)))
+      throw new Error('An explicit profile executable requires an absolute path; optional version text is descriptive only');
     const skills = profile.skills ?? [];
     if (!Array.isArray(skills) || skills.length > 50 || skills.some(skill => !plain(skill, 160)) || new Set(skills).size !== skills.length)
       throw new Error('Selected skills must be distinct plain names');
-    return { name: profile.name, ...(profile.executable ? { executable: profile.executable, version: profile.version } : {}), skills: [...skills] };
+    const nativeConfig = validateAuditNativeConfig(profile.nativeConfig);
+    return { name: profile.name, ...(profile.executable ? { executable: profile.executable } : {}),
+      ...(profile.version !== undefined ? { version: profile.version } : {}), skills: [...skills],
+      ...(nativeConfig !== undefined ? { nativeConfig } : {}) };
   });
   allowed(value.limits ?? {}, ['runMs', 'experimentMs', 'outputBytes', 'maxRuns'], 'experiment limits');
   const runMs = integer(value.limits?.runMs, 900000, 1, 86400000, 'runMs');
@@ -65,6 +105,7 @@ export function validateAuditSpec(value) {
   if (!['read-only', 'workspace-write'].includes(sandbox)) throw new Error('Audit sandbox must be read-only or workspace-write');
   if (value.allowIncompleteCapture !== undefined && typeof value.allowIncompleteCapture !== 'boolean') throw new Error('allowIncompleteCapture must be a boolean');
   const setup = commands(value.setup, 'setup'), checks = commands(value.checks, 'check');
+  const contract = taskContract(value.taskContract);
   const captureRequirements = validateCaptureRequirements(value.captureRequirements);
   const quality = validateAuditQuality(value.quality, checks);
   let trials;
@@ -82,6 +123,7 @@ export function validateAuditSpec(value) {
     throw new Error('Intended setup variables require a trial schedule and distinct plain labels');
   return { schemaVersion: 1, repository: value.repository, revision: value.revision, task: value.task, profiles, limits,
     setup, checks, sandbox, allowIncompleteCapture: value.allowIncompleteCapture ?? false,
+    ...(contract ? { taskContract: contract } : {}),
     ...(captureRequirements ? { captureRequirements } : {}),
     ...(quality ? { quality } : {}), ...(trials ? { trials, variables: value.variables ?? [] } : {}) };
 }

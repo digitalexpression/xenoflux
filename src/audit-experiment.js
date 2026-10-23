@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
-import { readAuditSpec } from './audit-spec.js';
+import { readAuditSpec, readAuditInput } from './audit-spec.js';
 import { previewAuditExperiment, runAuditExperiment } from './audit-runner.js';
 import { readAuditRecord, writeAuditState, finalizeAuditRecord, inspectAuditReservation,
   releaseAuditProfileReservation, recordAuditCleanup, recordAuditRecovery } from './audit-experiment-store.js';
@@ -14,6 +14,7 @@ import { auditNativeSession } from './audit-session.js';
 import { compareAuditRuns, auditExitCode } from './audit-report.js';
 import { readAuditSkillTelemetry } from './audit-telemetry.js';
 import { mergeAuditSkillTelemetry } from './audit-skill-usage.js';
+import { projectRetainedAuditRun } from './audit-replay.js';
 
 export const isAuditRecordId = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
 const profileSummary = profile => Object.fromEntries(['profileId', 'profileName', 'home', 'userHome', 'environmentId', 'executable', 'version']
@@ -31,15 +32,23 @@ function pendingRun(current) {
 
 export async function showAuditRecord(store, id) {
   const current = await readAuditRecord(store, id);
-  if (current.report) return current.report;
+  if (current.record.kind === 'audit-series' && current.record.spec?.kind === 'audit-cohort') {
+    if (!current.report) throw new Error('Selected-session cohort has no finalized report');
+    return current.report;
+  }
   if (current.record.kind === 'audit-series') return (await import('./audit-series.js')).buildAuditSeriesReport(store, id);
+  if (current.record.kind === 'audit-experiment-run' && current.report) return projectRetainedAuditRun(store, current);
+  if (current.record.kind === 'audit-evaluation' && current.report) return current.report;
   if (current.record.kind === 'audit-experiment-run') return pendingRun(current);
   const runs = [];
   for (const reference of current.state.runs ?? []) {
-    try { const run = await readAuditRecord(store, reference.id); runs.push(run.report ?? pendingRun(run)); }
+    try { const run = await readAuditRecord(store, reference.id); runs.push(run.report
+      ? await projectRetainedAuditRun(store, run) : pendingRun(run)); }
     catch { runs.push({ schemaVersion: 1, kind: 'audit-run', id: reference.id, status: 'unavailable',
       profile: {}, agents: [], events: [], turns: [], skills: [], metrics: {}, coverage: { source: 'unavailable' } }); }
   }
+  if (current.report) return { ...current.report, runs,
+    comparisons: runs.slice(1).map(run => compareAuditRuns(runs[0], run)) };
   return { schemaVersion: 1, kind: 'audit-experiment-report', id, status: 'partial',
     baseline: current.record.baseline, runs, comparisons: [], execution: { status: current.state.status },
     coverage: { execution: 'partial' }, warnings: ['The saved experiment is not finalized; no native task was resumed.'], exitCode: 2 };
@@ -58,6 +67,10 @@ async function observeStopped(value, observe) {
   if (identity.host && identity.host !== hostname()) return { status: 'unknown' };
   if (identity.started) return observe(identity);
   try { process.kill(identity.pid, 0); return { status: 'unknown' }; }
+  catch (error) { if (error.code !== 'ESRCH') return { status: 'unknown' }; }
+  // Legacy records can lack a start identity, but a vanished leader still
+  // cannot release a lease while its process group is observable.
+  try { process.kill(-identity.pid, 0); return { status: 'unknown' }; }
   catch (error) { return { status: error.code === 'ESRCH' ? 'stopped' : 'unknown' }; }
 }
 
@@ -187,6 +200,12 @@ export async function cleanAuditExperiment(store, id, { apply = false } = {}) {
 
 export async function auditExperimentCommand(store, params, flags, context = {}) {
   const [operation, ...args] = params;
+  if (operation === 'cohort') {
+    if (args.length || !flags['--spec'] || Object.keys(flags).some(key => !['--spec', '--store', 'json'].includes(key)))
+      throw new Error('Use audit cohort --spec COHORT.json');
+    const value = await (await import('./audit-cohort.js')).createAuditCohort(store, flags['--spec'], context);
+    return { value, exitCode: auditExitCode(value) };
+  }
   if (operation === 'run') {
     if (args.length || !flags['--spec'] || Object.keys(flags).some(key => !['--spec', '--dry-run', '--store', 'json'].includes(key)))
       throw new Error('Use audit run --spec EXPERIMENT.json [--dry-run]');
@@ -196,18 +215,35 @@ export async function auditExperimentCommand(store, params, flags, context = {})
       : flags['--dry-run'] ? await previewAuditExperiment(store, spec, context) : await runAuditExperiment(store, spec, context);
     return { value, exitCode: value.exitCode ?? auditExitCode(value) };
   }
-  if (['resume', 'evaluate'].includes(operation)) {
+  if (operation === 'evaluate') {
+    if (args.length !== 1 || Object.keys(flags).some(key => !['--store', 'json', '--spec'].includes(key)))
+      throw new Error('Use audit evaluate UUID|REPORT.json [--spec REVIEWS.json]');
+    // Keep the established series rubric input, while using the same immutable
+    // evaluation store for all frozen evidence and attributed review modes.
+    const selected = isAuditRecordId(args[0]) ? await readAuditRecord(store, args[0]) : null;
+    const input = flags['--spec'] ? await readAuditInput(flags['--spec']) : null;
+    const legacySeries = selected?.record.kind === 'audit-series' && selected.record.spec?.kind !== 'audit-cohort'
+      && input && input.kind === undefined;
+    const value = legacySeries
+      ? await (await import('./audit-series.js')).evaluateAuditSeries(store, args[0], flags['--spec'])
+      : await (await import('./audit-review-command.js')).evaluateAuditEvidence(store, args[0], flags['--spec']);
+    return { value, exitCode: auditExitCode(value) };
+  }
+  if (operation === 'resume') {
     if (args.length !== 1 || !isAuditRecordId(args[0]) || Object.keys(flags).some(key =>
-      !['--store', 'json', ...(operation === 'evaluate' ? ['--spec'] : [])].includes(key)))
-      throw new Error('Use audit resume SERIES_UUID or audit evaluate SERIES_UUID [--spec REVIEWS.json]');
+      !['--store', 'json'].includes(key)))
+      throw new Error('Use audit resume SERIES_UUID');
+    if ((await readAuditRecord(store, args[0])).record.spec?.kind === 'audit-cohort')
+      throw new Error('A selected-session cohort contains captured evidence only; it has no tasks to resume');
     const series = await import('./audit-series.js');
-    const value = operation === 'resume' ? await series.resumeAuditSeries(store, args[0], context)
-      : await series.evaluateAuditSeries(store, args[0], flags['--spec']);
+    const value = await series.resumeAuditSeries(store, args[0], context);
     return { value, exitCode: auditExitCode(value) };
   }
   if (!['recover', 'clean'].includes(operation) || args.length !== 1 || !isAuditRecordId(args[0])
     || Object.keys(flags).some(key => !['--apply', '--store', 'json'].includes(key))) throw new Error('Use audit recover|clean UUID [--apply]');
   const selected = await readAuditRecord(store, args[0]);
+  if (selected.record.spec?.kind === 'audit-cohort')
+    throw new Error('A selected-session cohort owns no processes or workspaces to recover or clean');
   if (selected.record.kind === 'audit-series') {
     const value = await (await import('./audit-series.js')).auditSeriesLifecycle(store, args[0], operation, { apply: flags['--apply'] === true, ...context });
     return { value, exitCode: auditExitCode(value) };

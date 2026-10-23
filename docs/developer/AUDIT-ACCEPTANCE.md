@@ -98,6 +98,134 @@ owned thread once after complete capture and continuity checks; `last` represent
 the latest response. This exact-version contract is not a billing claim or proof
 for historical/resumed threads or other native versions.
 
+## Historical development notes — not current acceptance
+
+The following candidate checks and blockers are dated development evidence,
+not the current delivery plan or acceptance of the clarified product goal.
+Use the [shared goal](AUDIT-GOAL.md), [active roadmap](ROADMAP.md) and
+[capability assessment](PROFILE-AUDIT-ASSESSMENT.md) for the Codex CLI/Desktop
+macOS release. Historical M1 completion, later pilot results and suite counts
+do not establish release readiness; UI and other providers follow that release.
+
+<details>
+<summary>Retained candidate observations and verification (original text)</summary>
+
+## Uncommitted comparison explanation candidate
+
+The current development checkout contains a deterministic, evidence-backed
+comparison explanation candidate in `src/audit-explanation.js` and the comparison
+renderer. It presents conditions, behavioral findings, paired action evidence,
+verification, time/tokens, and outcome/code changes in that order. The candidate
+can identify supported recorded file edits against a declared relative
+`editableFiles` boundary and same-owned-source read/edit order. It marks agent
+boundary-check activity and agent final-diff inspection unknown because the
+retained generic actions do not establish those behaviors. Similarity is scoped
+to an observed dimension and pair; missing or incompatible evidence remains
+inconclusive, and one pair leaves consistency unmeasured. Ineligible deltas are
+suppressed. Markdown export carries a normalized JSON sidecar that can be opened
+without native source sessions.
+
+The [synthetic booking-ledger report example](../examples/audit-booking-ledger-comparison.md)
+is illustrative only: it is not a measured effect, real booking-ledger baseline
+or workflow run, or human walkthrough. No result here establishes that the
+supplied task identity was followed by a native agent, that configured resources
+were loaded or followed, or that unobserved actions did not occur. This candidate
+is uncommitted and is not part of the published/installed 2.0.0 package. The offline checks
+complete M1 acceptance. Real paired execution, repetition, and
+ordinary-user acceptance remain separate milestones; the overall feature goal
+is not complete.
+
+Offline acceptance exercised 17 authored controls, including a substantive scope
+difference, similarity, inconclusive/partial evidence, missing runs, incompatible
+conditions and capped contradictory observations. Two retained unmatched native
+comparisons remained ineligible for same-task claims. Full/compact explanations,
+JSON, Markdown sidecars and source-free CLI reopen preserved claims, references
+and missingness. An independent automated report reader followed the paired
+references; no human walkthrough is claimed.
+
+The final suite passed 937 tests, with zero failures and one existing skip.
+`npm run check`, `npm run check:native` and `git diff --check` passed. These are
+software and evidence-preservation checks, not measurements of model quality,
+human review or behavioral consistency.
+
+## Native capability and startup repair candidate — 2026-10-21
+
+The local candidate validates bounded native instruction-source metadata rather
+than requiring a particular native version. Executable-only selections observe
+the version with profile definitions write-protected; the pair freezes that
+observation to detect drift. Missing or malformed evidence remains unavailable,
+and historical failed receipts are not upgraded from current capabilities.
+
+Offline OS fixtures verified saved auth/config/instruction/agent/skill/rule write
+protection, linked skill targets, guarded version discovery and before-turn
+rejection of an unavailable command sandbox. No saved permissions or real
+credentials were changed or copied. An installed-native smoke in a disposable
+synthetic home passed startup and root instruction context while preserving the
+synthetic files. Its ordinary workspace command failed to initialize the nested
+sandbox (exit 71). Native coding execution therefore remains blocked; no model
+turn was used to test it and no sandbox bypass is accepted.
+
+The final offline suite passed 940 tests with zero failures and one existing
+skip. Syntax/native-launcher checks and diff whitespace checks passed. The 17
+report/compaction/export/source-free-reopen controls passed. These establish
+software behavior and fail-closed preservation, not successful subscription
+authentication, a working native coding run or measured model quality. The next
+two-run packet remains blocked until preservation and ordinary command execution
+are demonstrated together; prior failed slots remain immutable.
+
+## Same-Mac native command sandbox repair — 2026-10-21
+
+The next local candidate retains saved-definition write protection while allowing
+only the selected native image to hand commands to the system sandbox launcher.
+Startup helpers cannot re-enter that image to obtain the transition. Native task
+commands receive their ordinary workspace/network policy independently. Random
+atomic auth/config siblings and profile-home rename are denied; exact identified
+native cache/runtime entries remain writable. Narrow invocation-only native
+configuration replaces the shell launcher for common model/reasoning/login
+controls, and survives recipe freezing, resume checks and compaction.
+
+Nineteen installed-native synthetic controls passed against the production
+policy/capture: workspace command and patch helper, outside-write and direct
+sandbox-escape denial, atomic-save/home-rename protection, unchanged saved
+synthetic bytes/metadata, root AGENTS acceptance, and zero-turn capture readiness.
+A matched localhost command succeeds with network access enabled and fails with
+it disabled; this isolates native task network enforcement from the additional
+offline-only outer network deny. The per-run no-op gate establishes launch only.
+
+Final regression verification: 947 tests, 946 passed, zero failures and one
+existing skip; syntax/native-launcher and diff checks passed. Seventeen authored
+report/compaction/export/source-free reopen controls passed. Read-only actual
+profile/binding/reservation and checker-service inspections were ready. No
+real-profile native startup or authentication was tested: automatic approval
+review rejected the proposed real-profile version probes, and the task used
+read-only metadata plus exact-binary disposable evidence instead. No evaluation,
+worker, service start, profile/settings change, commit or release occurred. This
+makes a new bounded two-run packet ready for explicit approval; it establishes no
+booking-ledger behavior, outcome advantage, human score or consistency result.
+
+## Retained report projection — development checkout
+
+Ordinary saved-run, experiment and series inspection now derives a read-only
+report projection from retained records. It joins the frozen series conditions
+and exact owned task-turn controls, and names supported literal action records.
+Original final reports and their recorded failures remain immutable; required
+human review remains pending until a human submits it.
+
+Offline acceptance uses an actual retained same-task pair in addition to
+authored controls. It verifies named source/test read invocations, matching
+visible-test execution, differing inline assertion-script constructs, and
+separate configured/startup/per-turn controls. Comparison support survives
+compaction, JSON/Markdown export, and source-free CLI inspection with the original
+controller store inaccessible. This replays recorded evidence; it is not a new
+model evaluation or a claim of consistent profile superiority.
+
+Regression controls reject changed parent conditions, foreign/duplicate turn
+contexts, cross-turn call/result collisions, duplicate outcomes, dynamic wrapper
+syntax, and outside-workspace attribution. Missing sources cannot supply model
+controls or negative action claims. The current source snapshot fingerprint
+does not independently prove original-capture bytes. Whole-invocation exit
+codes and literal script constructs retain their narrower meaning.
+
 ## Limits
 
 Verification covers the named candidate, checks, native version, retained records,
@@ -107,3 +235,5 @@ repeat observations; receiver IDs identify received records, not guaranteed
 unique executions. A passed bounded comparison does not prove causation, universal
 quality, exhaustive capture, or billing. Historical records retain their original
 coverage gaps and are not completed from today's inventory.
+
+</details>

@@ -105,6 +105,7 @@ test('accepts an unknown source line as null and clears impossible completion ti
     run: { ...envelope().run, status: 'completed', completedAt: 1_796_999_999, durationMs: 1000 } }));
   const result = capture.result();
   assert.equal(result.hookInvocations[0].sourceLine, null);
+  assert.equal(result.hookInvocations[0].status, null);
   assert.equal(result.hookInvocations[0].startedAtSeconds, null);
   assert.equal(result.hookInvocations[0].completedAtSeconds, null);
   assert.equal(result.hookInvocations[0].durationMs, null);
@@ -125,7 +126,7 @@ test('marks conflicting completion-only completedAt evidence uncertain without c
   assert.equal(result.hookInvocations[0].completedAtSeconds, null);
   assert.equal(result.hookInvocations[0].durationMs, null);
   assert.equal(result.coverage.hooks, 'partial');
-  assert.ok(result.warnings.some((warning) => warning.includes('completion-only')));
+  assert.ok(result.warnings.some((warning) => warning.includes('completion timing')));
 });
 
 test('marks conflicting completion-only duration evidence uncertain', () => {
@@ -221,5 +222,45 @@ test('deduplicates exact repeated event lines and marks overlapping indistinguis
   const result = capture.result();
   assert.equal(result.hookInvocations.length, 2);
   assert.ok(result.hookInvocations.every((row) => row.status === null));
+  assert.equal(result.coverage.hooks, 'partial');
+});
+
+test('conflicting completion timing invalidates a lifecycle that included a start', () => {
+  const capture = createAuditHookCapture();
+  capture.consume(envelope());
+  for (const [sourceLine, completedAt, durationMs] of [[5, 1_797_000_001, 1000], [6, 1_797_000_002, 2000]]) {
+    capture.consume(envelope({ phase: 'completed', sourceLine,
+      run: { ...envelope().run, status: 'completed', completedAt, durationMs } }));
+  }
+  const result = capture.result();
+  assert.equal(result.hookInvocations.length, 1);
+  assert.deepEqual(result.hookInvocations.map(row => [row.status, row.startedAtSeconds, row.completedAtSeconds, row.durationMs]), [[null, null, null, null]]);
+  assert.equal(result.coverage.hooks, 'partial');
+});
+
+test('three overlapping indistinguishable starts cannot make the last completion certain', () => {
+  const capture = createAuditHookCapture();
+  for (const sourceLine of [20, 21, 22]) capture.consume(envelope({ sourceLine }));
+  for (const sourceLine of [23, 24, 25]) capture.consume(envelope({ phase: 'completed', sourceLine,
+    run: { ...envelope().run, status: 'completed', completedAt: 1_797_000_001, durationMs: 1000 } }));
+  const result = capture.result();
+  assert.equal(result.hookInvocations.length, 3);
+  assert.ok(result.hookInvocations.every(row => row.status === null && row.startedAtSeconds === null && row.completedAtSeconds === null && row.durationMs === null));
+  assert.equal(result.coverage.hooks, 'partial');
+});
+
+test('ambiguity persists during interleaved overlap and ends only after all outstanding completions', () => {
+  const capture = createAuditHookCapture();
+  const emit = (phase, sourceLine) => capture.consume(envelope({ phase, sourceLine,
+    run: { ...envelope().run, status: phase === 'started' ? 'running' : 'completed',
+      completedAt: phase === 'completed' ? 1_797_000_001 : null, durationMs: phase === 'completed' ? 1000 : null } }));
+  emit('started', 20); emit('started', 21);
+  emit('completed', 22);
+  emit('started', 23);
+  emit('completed', 24); emit('completed', 25);
+  emit('started', 26); emit('completed', 27);
+  const result = capture.result();
+  assert.deepEqual(result.hookInvocations.map(row => row.status), [null, null, null, 'completed']);
+  assert.equal(result.hookInvocations[3].durationMs, 1000);
   assert.equal(result.coverage.hooks, 'partial');
 });

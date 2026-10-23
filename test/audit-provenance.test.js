@@ -272,6 +272,84 @@ test('compares verified plugin versions across cache paths and keeps multiple in
   assert.equal(ambiguous.changes[0].reason, 'ambiguous-or-missing');
 });
 
+test('binds native plugin@market provenance to its package path and compares verified versions', async t => {
+  const userHome = await mkdtemp(join(tmpdir(), 'xfx-native-plugin-provenance-'));
+  t.after(() => rm(userHome, { recursive: true, force: true }));
+
+  async function capture(version, provider = 'breadth-plugin@breadth-market', manifestName = 'breadth-plugin', manifestId, options = {}) {
+    const pkg = join(userHome, '.codex', 'plugins', 'cache', 'breadth-market', 'breadth-plugin', version);
+    await rm(pkg, { recursive: true, force: true });
+    const skillDir = join(pkg, 'skills', 'breadth-plugin');
+    await mkdir(skillDir, { recursive: true });
+    const path = join(skillDir, 'SKILL.md');
+    await writeFile(path, 'same native plugin definition');
+    if (options.canonical !== false) {
+      await mkdir(join(pkg, '.codex-plugin'), { recursive: true });
+      const manifest = options.manifest ?? { name: manifestName, version, ...(manifestId ? { id: manifestId } : {}) };
+      await writeFile(join(pkg, '.codex-plugin', 'plugin.json'), JSON.stringify(manifest));
+    }
+    if (options.fallback) await writeFile(join(pkg, 'plugin.json'), JSON.stringify(options.fallback));
+    const provenance = createResourceProvenance({ userHome });
+    await provenance.observeCatalog([{
+      id: '6123456789abcdef01234567', name: 'xfx-breadth-plugin:breadth-plugin',
+      path, origin: 'plugin', scope: 'plugin', provider, version
+    }]);
+    return provenance.snapshot();
+  }
+
+  const oldVersion = await capture('1.0.0');
+  const newVersion = await capture('2.0.0');
+  const resource = oldVersion.resources[0];
+  assert.equal(resource.snapshots[0].manifest.status, 'present');
+  assert.equal(resource.snapshots[0].manifest.version, '1.0.0');
+  assert.ok(resource.identity.providerRef.startsWith('opaque-'));
+  const changed = compareResourceProvenance(oldVersion, newVersion);
+  assert.equal(changed.changes.length, 1);
+  assert.equal(changed.changes[0].status, 'changed');
+  const matchingId = await capture('1.0.0', 'breadth-plugin@breadth-market', 'breadth-plugin', 'breadth-plugin@breadth-market');
+  assert.equal(matchingId.resources[0].snapshots[0].manifest.status, 'present');
+
+  const wrongProvider = await capture('1.0.0', 'wrong-plugin@breadth-market');
+  assert.equal(wrongProvider.resources[0].snapshots[0].manifest.status, 'missing');
+  const wrongMarket = await capture('1.0.0', 'breadth-plugin@wrong-market');
+  assert.equal(wrongMarket.resources[0].snapshots[0].manifest.status, 'missing');
+  const wrongName = await capture('1.0.0', 'breadth-plugin@breadth-market', 'other-plugin');
+  assert.equal(wrongName.resources[0].snapshots[0].manifest.status, 'missing');
+  const wrongId = await capture('1.0.0', 'breadth-plugin@breadth-market', 'breadth-plugin', 'other-plugin@breadth-market');
+  assert.equal(wrongId.resources[0].snapshots[0].manifest.status, 'missing');
+  const missingName = await capture('1.0.0', 'breadth-plugin@breadth-market', undefined, undefined, { manifest: { version: '1.0.0' } });
+  assert.equal(missingName.resources[0].snapshots[0].manifest.status, 'missing');
+  const malformedName = await capture('1.0.0', 'breadth-plugin@breadth-market', undefined, undefined, { manifest: { name: 12, version: '1.0.0' } });
+  assert.equal(malformedName.resources[0].snapshots[0].manifest.status, 'missing');
+  const malformedId = await capture('1.0.0', 'breadth-plugin@breadth-market', undefined, undefined, {
+    manifest: { name: 'breadth-plugin', version: '1.0.0', id: 12 }
+  });
+  assert.equal(malformedId.resources[0].snapshots[0].manifest.status, 'missing');
+  const conflictingFallback = await capture('1.0.0', 'breadth-plugin@breadth-market', undefined, undefined, {
+    manifest: { name: 'wrong-plugin', version: '1.0.0' }, fallback: { name: 'breadth-plugin', version: '1.0.0' }
+  });
+  assert.equal(conflictingFallback.resources[0].snapshots[0].manifest.status, 'missing');
+  const fallbackOnly = await capture('1.0.0', 'breadth-plugin@breadth-market', undefined, undefined, {
+    canonical: false, fallback: { name: 'breadth-plugin', version: '1.0.0' }
+  });
+  assert.equal(fallbackOnly.resources[0].snapshots[0].manifest.status, 'missing');
+  const wrongManifestVersion = await capture('1.0.0', 'breadth-plugin@breadth-market', undefined, undefined, {
+    manifest: { name: 'breadth-plugin', version: '2.0.0' }
+  });
+  assert.equal(wrongManifestVersion.resources[0].snapshots[0].manifest.status, 'missing');
+  const mismatchedVersion = await capture('1.0.0');
+  mismatchedVersion.resources[0].snapshots[0].manifest.version = '2.0.0';
+  assert.equal(compareResourceProvenance(mismatchedVersion, newVersion).changes[0].status, 'unknown');
+  const multipleVersions = await capture('2.0.0');
+  const duplicate = structuredClone(multipleVersions.resources[0]);
+  duplicate.identity.location = duplicate.identity.location.replace('/2.0.0/', '/1.0.0/');
+  duplicate.canonicalRef = duplicate.canonicalRef.replace('/2.0.0/', '/1.0.0/');
+  duplicate.version = '1.0.0';
+  duplicate.snapshots = duplicate.snapshots.map(snapshot => ({ ...snapshot, manifest: { ...snapshot.manifest, version: '1.0.0' } }));
+  multipleVersions.resources.push(duplicate);
+  assert.equal(compareResourceProvenance(multipleVersions, newVersion).changes[0].status, 'unknown');
+});
+
 test('rejects oversized, hardlinked, and world-writable definitions before opening them', async t => {
   const f = await fixture(t);
   const skillsRoot = join(f.workspace, '.agents', 'skills');

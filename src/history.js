@@ -178,12 +178,13 @@ function report(home) {
 }
 
 /** List thread metadata from explicitly bound homes only. */
-export async function listHistory(store, { profile, query, limit = 50, archived = false } = {}) {
+export async function listHistory(store, { profile, query, limit = 50, archived = false, defaultUserHome = homedir() } = {}) {
   const maximum = boundedLimit(limit), needle = boundedQuery(query);
   if (typeof archived !== 'boolean') throw new Error('History archived must be true or false');
   const data = await store.read();
-  const profiles = profile === undefined ? data.profiles : [find(data, profile)];
-  const homes = await Promise.all(profiles.map(item => oneHome(store, item, { limit: maximum, archived, query: needle })));
+  const profiles = profile === undefined ? data.profiles
+    : [typeof profile === 'string' && profile.toLowerCase() === 'default' ? { id: 'default', name: 'Default' } : find(data, profile)];
+  const homes = await Promise.all(profiles.map(item => oneHome(store, item, { limit: maximum, archived, query: needle }, defaultUserHome)));
   const grouped = await Promise.all(homes.map(async home => ({ home, entries: home.status === 'ready' ? await Promise.all(home.rows.map(row => entry(row, home))) : [] })));
   for (const group of grouped) {
     if (group.home.status === 'ready' && group.entries.some(item => item === null)) {

@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { manifestFor, parseArguments } from '../scripts/local-release.mjs';
+import { hasReadCorroboration, manifestFor, parseArguments, preservesFrozenAuditFields } from '../scripts/local-release.mjs';
 
 test('local release arguments and manifests retain only reviewable artifact facts', () => {
   assert.deepEqual(parseArguments(['--output', '/tmp/release', '--smoke']), {
@@ -23,13 +23,26 @@ test('local release arguments and manifests retain only reviewable artifact fact
   });
 });
 
+test('detached audit smoke accepts derived projections while preserving frozen input and corroboration', () => {
+  const frozen = { id: 'smoke', status: 'partial', skills: [{ id: 'skill', read: true }] };
+  const projection = { ...frozen, comparisonEvidence: { actions: [
+    { kind: 'resource-read', corroboration: 'native-unknown-absolute-cat' },
+  ] }, checks: [] };
+  assert.equal(preservesFrozenAuditFields(projection, frozen), true);
+  assert.equal(hasReadCorroboration(projection), true);
+  assert.equal(preservesFrozenAuditFields({ ...projection, skills: [] }, frozen), false);
+  assert.equal(hasReadCorroboration({ ...projection, comparisonEvidence: { actions: [] } }), false);
+});
+
 test('npm package includes reviewed docs and excludes private receipts and unreviewed documentation', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'xfx-package-boundary-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8'));
   await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'xfx-package-boundary-fixture', version: '1.0.0', files: manifest.files }));
   const paths = ['bin/xfx.js', 'src/fixture.js', 'README.md', 'LICENSE', 'docs/user/AUDIT.md',
-    'docs/developer/AUDIT-ACCEPTANCE.md', 'docs/developer/evidence/audit-2.0.0-summary.json',
+    'docs/developer/AUDIT-ACCEPTANCE.md',
+    'docs/developer/AUDIT-GOAL.md', 'docs/developer/ROADMAP.md', 'docs/developer/PROFILE-AUDIT-ASSESSMENT.md',
+    'docs/developer/evidence/audit-2.0.0-summary.json', 'docs/developer/evidence/profile-comparison-2026-10-14-summary.json',
     'docs/developer/evidence/audit-private-canary.json', 'docs/developer/HANDOVER-macos-audit-release.md',
     'docs/developer/UNREVIEWED.md', 'docs/user/PRIVATE-NOTES.md',
     'docs/examples/private-canary.json', 'release-artifacts/private-canary.json'];
@@ -40,8 +53,8 @@ test('npm package includes reviewed docs and excludes private receipts and unrev
   const result = await run('npm', ['pack', '--dry-run', '--offline', '--ignore-scripts', '--json', '--cache', join(directory, 'cache')], { cwd: directory });
   assert.equal(result.code, 0, result.stderr);
   const included = new Set(JSON.parse(result.stdout)[0].files.map(file => file.path));
-  for (const path of paths.slice(0, 7)) assert.ok(included.has(path), `Missing reviewed input: ${path}`);
-  for (const path of paths.slice(7)) assert.equal(included.has(path), false, `Private/unreviewed input packaged: ${path}`);
+  for (const path of paths.slice(0, 11)) assert.ok(included.has(path), `Missing reviewed input: ${path}`);
+  for (const path of paths.slice(11)) assert.equal(included.has(path), false, `Private/unreviewed input packaged: ${path}`);
 });
 
 function run(file, args, options = {}) {
@@ -119,9 +132,9 @@ test('standalone installer rejects archives whose entries are outside package', 
 
 test('standalone installer rejects an unsupported Node before loading the release manifest', async t => {
   const template = pathToFileURL(join(process.cwd(), 'scripts', 'install-template.mjs')).href;
-  for (const version of ['20.12.0', '22.12.0', '23.0.0', '23.3.0']) {
+  for (const version of ['20.12.0', '22.14.0', '23.0.0', '23.7.0']) {
     const result = await run(process.execPath, ['--input-type=module', '--eval', `Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(version)} }); await import(${JSON.stringify(template)});`]);
     assert.equal(result.code, 1);
-    assert.ok(result.stderr.includes(`Node 22.13.0+ (22.x) or 23.4.0+ is required; found v${version}`));
+    assert.ok(result.stderr.includes(`Node 22.15.0+ (22.x) or 23.8.0+ is required; found v${version}`));
   }
 });

@@ -289,13 +289,13 @@ test('live tracked executable changes remain explicit identity failures with fie
   assert.equal(result.identityChange.current.executable, changed.executable);
 });
 
-test('ps snapshot retains UTF-8 executable names, uses explicit UTC and excludes zombie command labels', async () => {
+test('ps snapshot retains UTF-8 executable names, uses explicit UTC, and excludes non-owned sentinels and zombies', async () => {
   const rt = createDesktopInstanceRuntime(opts({ execFile: async (file, args, options) => {
     assert.equal(file, '/bin/ps');
     assert.deepEqual(args, ['-axo', 'pid=,ppid=,uid=,lstart=,state=,comm=']);
     assert.equal(options.env.LC_ALL, 'en_US.UTF-8');
     assert.equal(options.env.TZ, 'UTC');
-    return { stdout: `10 1 501 Fri Oct  9 10:00:00 2026 S /usr/bin/node\n30 1 501 Fri Oct  9 10:00:02 2026 Z <defunct>\n60 1 501 Fri Oct  9 10:00:03 2026 S ${application.executable}\n` };
+    return { stdout: `10 1 501 Fri Oct  9 10:00:00 2026 S /usr/bin/node\n20 1 -2 Thu Oct 22 15:25:00 2026 Ss /usr/libexec/dhcp6d\n30 1 501 Fri Oct  9 10:00:02 2026 Z <defunct>\n60 1 501 Fri Oct  9 10:00:03 2026 S ${application.executable}\n` };
   } }));
   assert.deepEqual(await rt.snapshot(), [{ ...self, startedAt: `${self.startedAt} UTC` },
     { pid: 60, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:00:03 2026 UTC', executable: application.executable }]);

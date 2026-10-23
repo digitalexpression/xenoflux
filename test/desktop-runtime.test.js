@@ -287,6 +287,7 @@ test('snapshot includes the exact app tree and keeps an orphaned tracked child v
 test('parses executable paths with spaces and ignores unrelated non-path ps commands', async () => {
   const raw = [
     '  1 0 0 Sun Sep 14 08:00:00 2026 [kernel_task]',
+    '86638 1 -2 Thu Oct 22 15:25:08 2026 /usr/libexec/dhcp6d',
     '999 1 501 Sun Sep 14 09:00:00 2026 /usr/local/bin/node',
     '100 1 501 Sun Sep 14 10:00:00 2026 /Applications/Codex.app/Contents/MacOS/Codex',
     '101 100 501 Sun Sep 14 10:00:01 2026 /Applications/Codex.app/Contents/Frameworks/Codex Helper',

@@ -610,6 +610,8 @@ test('Default turn lookup uses an explicit disposable home without registering i
   const registryBefore = await readFile(f.store.file), databaseBefore = await readFile(database), rolloutBefore = await readFile(path);
   const endpoint = await resolveNativeSettingsHome(f.store, 'Default', { defaultUserHome });
   assert.equal(endpoint.home, defaultHome);
+  const listed = await listHistory(f.store, { profile: 'Default', defaultUserHome });
+  assert.deepEqual(listed.entries.map(row => [row.profileId, row.id]), [['default', task]]);
   const result = await findHistory(f.store, 'Default', task, { turns: true, defaultUserHome });
   assert.equal(result.entry?.profileName, 'Default', JSON.stringify(result));
   assert.equal(result.turnMetadata.status, 'ready');

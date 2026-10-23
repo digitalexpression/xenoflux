@@ -14,23 +14,25 @@ const MESSAGES = {
 const probeError = code => Object.assign(new Error(MESSAGES[code] ?? 'Version probe failed'), { code });
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-function validOptions({ executable, cwd, env, timeoutMs, maxBytes, signal }) {
+function validOptions({ executable, cwd, env, timeoutMs, maxBytes, signal, args }) {
   if (typeof executable !== 'string' || !executable.startsWith('/') || executable.includes('\0') ||
       typeof cwd !== 'string' || !cwd.startsWith('/') || cwd.includes('\0') ||
       !env || Object.getPrototypeOf(env) !== Object.prototype ||
       Object.entries(env).some(([key, value]) => !key || key.includes('=') || key.includes('\0') || typeof value !== 'string' || value.includes('\0')) ||
       !Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(maxBytes) || maxBytes <= 0 ||
+      !Array.isArray(args) || args.length > 100 || args.at(-1) !== '--version'
+        || args.some(arg => typeof arg !== 'string' || arg.includes('\0')) ||
       (signal !== undefined && (!signal || typeof signal.addEventListener !== 'function'))) throw probeError('INVALID_OPTIONS');
 }
 
 /** Run only a bounded native `--version` preflight in its own process group. */
-export async function probeVersion({ executable, cwd, env, signal, timeoutMs = 2000, maxBytes = 65536 } = {}) {
-  validOptions({ executable, cwd, env, timeoutMs, maxBytes, signal });
+export async function probeVersion({ executable, cwd, env, signal, timeoutMs = 2000, maxBytes = 65536, args = ['--version'] } = {}) {
+  validOptions({ executable, cwd, env, timeoutMs, maxBytes, signal, args });
   if (!['darwin', 'linux'].includes(process.platform)) throw probeError('UNSUPPORTED_PLATFORM');
   if (signal?.aborted) throw probeError('CANCELLED');
   let child;
   try {
-    child = spawn(executable, ['--version'], { cwd, env: { ...env }, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(executable, args, { cwd, env: { ...env }, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   } catch { throw probeError('PROTOCOL_ERROR'); }
 
   let bytes = 0;

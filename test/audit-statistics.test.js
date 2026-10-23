@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { compactAuditTrial, summarizeAuditSeries } from '../src/audit-statistics.js';
+import { auditMetricSamples, compactAuditTrial, summarizeAuditSeries } from '../src/audit-statistics.js';
 import { auditQualityFingerprint, validateAuditReview } from '../src/audit-quality.js';
 import { compareAuditRuns, renderAudit } from '../src/audit-report.js';
 import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
@@ -11,12 +11,20 @@ import { evaluateCaptureRequirements } from '../src/audit-evidence.js';
 import { nativeUsageAccounting } from '../src/audit-usage.js';
 
 const run = (id, name, elapsed, quality = 'passed') => ({ id, profileName: name, model: 'm',
-  profile: { profileId: name.toLowerCase(), profileName: name }, source: { threadId: `root-${id}`, version: 'v1', model: 'm', reasoningEffort: 'high' },
+  profile: { profileId: name.toLowerCase(), profileName: name }, source: { kind: 'native-app-server-v2', threadId: `root-${id}`, version: 'v1', clientVersion: 'test-client', model: 'm', reasoningEffort: 'high' },
+  sourceWorkspace: { sourceCommit: 'commit-1', sourceTree: 'tree-1' },
+  comparisonConditions: { schemaVersion: 1, taskFingerprint: 'a'.repeat(64), taskId: 'fixture-task',
+    checkRecipes: [{ name: 'build', fingerprint: 'b'.repeat(64) }], qualityFingerprint: auditQualityFingerprint(spec.quality, spec.checks),
+    setupFingerprint: 'd'.repeat(64), selectedSkills: [], variables: [], profileOrder: ['A', 'B'], trialIndex: null,
+    environment: { platform: 'darwin' }, baseline: { commit: 'commit-1', tree: 'tree-1' } },
+  agents: [{ id: `root-${id}`, parentId: null, depth: 0, role: 'root', source: { fingerprint: '1'.repeat(64) } },
+    { id: 'child', parentId: `root-${id}`, depth: 1, role: 'worker', source: { fingerprint: '2'.repeat(64) } }],
   execution: { status: 'exited', exitCode: quality === 'failed' ? 1 : 0 },
   outcome: { nativeTurnStatus: 'completed' }, processElapsedMs: elapsed,
   task: { nativeTurnStatus: 'completed' }, metrics: { processElapsedMs: elapsed, tokens: elapsed },
   usage: { [`root-${id}`]: { scope: 'per-agent-source-reported', total: { inputTokens: elapsed } }, child: { scope: 'per-agent-source-reported', total: { inputTokens: 999 } } },
-  turns: [{ agentId: `root-${id}`, turnId: `turn-${id}`, status: 'completed' }, { agentId: 'child', turnId: 'child-turn', status: 'failed' }],
+  turns: [{ agentId: `root-${id}`, turnId: `turn-${id}`, status: 'completed', model: 'm', reasoningEffort: 'high' },
+    { agentId: 'child', turnId: 'child-turn', status: 'failed', model: 'm', reasoningEffort: 'high' }],
   checks: [{ name: 'build', status: quality, exitCode: quality === 'failed' ? 1 : 0 }],
   task: 'PRIVATE_TASK_SENTINEL', argv: ['PRIVATE_ARG_SENTINEL'], env: { SECRET: 'PRIVATE_ENV_SENTINEL' },
   coverage: { tools: 'complete' }, toolInvocations: [], skillInvocations: [], mcp: { servers: [] } });
@@ -50,6 +58,48 @@ test('frozen trials and exports preserve distinct timestamp-free skill receipts 
   }
 });
 
+test('receiver delivery and journal health survive compact, frozen JSON export, and reopen as bounded private metadata', async t => {
+  const subject = run('delivery', 'A', 10);
+  subject.skillTelemetry = { status: 'observed', delivery: 'best-effort', diagnostics: {
+    deliveryAccounting: { schemaVersion: 1, scope: 'committed-prefix', classification: 'bounded',
+      requests: { received: 3, admitted: 2, rejected: 1, secret: 'PRIVATE_ACCOUNTING_SECRET' },
+      records: { examined: 8, relevant: 4, accepted: 3, durable: 3, invalidRelevant: 1, unclassified: 0,
+        ignored: 4, eventLimitDropped: 0, persistenceRejected: 0, unexamined: 7, path: '/private/evidence' },
+      upstreamLoss: 'false-claim', acknowledgements: 'confirmed' },
+    journal: { status: 'partial', mode: 'required', format: 2, commit: 'committed-prefix', bytes: 500,
+      eventCount: 3, committedBytes: 420, committedEvents: 3, uncertainBytes: 80, path: '/private/journal',
+      message: 'PRIVATE_JOURNAL_MESSAGE' },
+  } };
+  const compact = compactAuditTrial({ runs: [subject] });
+  const retained = compact.runs[0].skillTelemetry.diagnostics;
+  assert.deepEqual(retained.deliveryAccounting, { schemaVersion: 1, scope: 'committed-prefix', classification: 'bounded',
+    requests: { received: 3, admitted: 2, rejected: 1 }, records: { examined: 8, relevant: 4, accepted: 3, durable: 3,
+      invalidRelevant: 1, unclassified: 0, ignored: 4, eventLimitDropped: 0, persistenceRejected: 0, unexamined: null },
+    upstreamLoss: 'unknown', acknowledgements: 'unknown' });
+  assert.equal(retained.journal.committedBytes, 420);
+  assert.equal(retained.journal.uncertainBytes, 80);
+  assert.equal(JSON.stringify(compact).includes('PRIVATE_'), false);
+  const dir = await mkdtemp(join(tmpdir(), 'xfx-delivery-export-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const exported = await exportAuditReport({ ...retainedRun(compact), schemaVersion: 1, kind: 'audit-run' },
+    { format: 'json', output: join(dir, 'run.json') });
+  const reopened = await readAuditReport(exported.evidencePath);
+  assert.deepEqual(reopened.skillTelemetry.diagnostics.deliveryAccounting, retained.deliveryAccounting);
+  assert.deepEqual(reopened.skillTelemetry.diagnostics.journal, retained.journal);
+  assert.equal(JSON.stringify(reopened).includes('/private/'), false);
+  const fullExport = await exportAuditReport({ id: 'full-delivery', schemaVersion: 1, kind: 'audit-run',
+    skillTelemetry: subject.skillTelemetry, capture: { skillTelemetry: structuredClone(subject.skillTelemetry),
+      skillTelemetryJournal: { path: '/private/duplicate', secret: 'PRIVATE_CAPTURE_JOURNAL' } } },
+    { format: 'json', output: join(dir, 'full.json') });
+  const fullReopened = await readAuditReport(fullExport.evidencePath);
+  assert.equal(fullReopened.skillTelemetry.diagnostics.deliveryAccounting.requests.secret, undefined);
+  assert.equal(fullReopened.skillTelemetry.diagnostics.journal.message, undefined);
+  assert.equal(fullReopened.capture.skillTelemetryJournal, undefined);
+  assert.equal(fullReopened.capture.skillTelemetry, undefined);
+  assert.equal(JSON.stringify(fullReopened).includes('PRIVATE_'), false);
+});
+
+function retainedRun(compact) { return compact.runs[0]; }
+
 test('compact trial persists bounded run evidence without task, argv, or environment secrets', () => {
   const compact = compactAuditTrial({ runs: [run('r1', 'A', 12)],
     failures: [{ code: 'profile-reservation-failed', message: 'PRIVATE_FAILURE_BODY' }],
@@ -63,9 +113,37 @@ test('compact trial persists bounded run evidence without task, argv, or environ
   assert.equal(compact.runs[0].usage.scope, 'root-agent-source-reported');
   assert.equal(compact.runs[0].metrics['root.inputTokens'], 12);
   assert.equal(compact.runs[0].metrics['root.inputTokens'] === 999, false);
-  assert.deepEqual(compact.runs[0].turns, [{ agentId: 'root-r1', turnId: 'turn-r1', status: 'completed', sourceLine: null },
-    { agentId: 'child', turnId: 'child-turn', status: 'failed', sourceLine: null }]);
+  assert.deepEqual(compact.runs[0].turns, [{ agentId: 'root-r1', turnId: 'turn-r1', status: 'completed', model: 'm', reasoningEffort: 'high', sourceLine: null },
+    { agentId: 'child', turnId: 'child-turn', status: 'failed', model: 'm', reasoningEffort: 'high', sourceLine: null }]);
   assert.deepEqual(compactAuditTrial(compact).runs[0], compact.runs[0]);
+});
+
+test('compaction freezes safe actor-turn bindings and canonicalizes outcome checks before detail trimming', () => {
+  const subject = run('bound-checks', 'A', 12);
+  delete subject.checks;
+  subject.outcome.checks = [{ name: 'build', status: 'passed', exitCode: 0, sourceLine: 14 }];
+  subject.agents = [{ id: 'root-bound-checks', parentId: null, role: 'root', source: { fingerprint: 'e'.repeat(64) } }];
+  subject.toolInvocations = [{ agentId: 'root-bound-checks', turnId: 'turn-bound-checks', itemId: 'item-1',
+    kind: 'function', toolName: 'read', status: 'completed', sourceLine: 18 }];
+  subject.outcome.claim = { status: 'completed', success: true, agentId: 'root-bound-checks',
+    turnId: 'turn-bound-checks', sourceLine: 20, text: 'PRIVATE_CLAIM_TEXT' };
+  const compact = compactAuditTrial({ runs: [subject] });
+  const retained = compact.runs[0];
+  assert.equal(retained.checks[0].status, 'passed');
+  assert.ok(retained.checks[0].evidenceRefs.includes('check:build:line:14'));
+  assert.deepEqual(retained.comparisonConditions, subject.comparisonConditions);
+  assert.equal(retained.comparisonEvidence.status, 'recorded');
+  assert.equal(retained.comparisonEvidence.actors[0].id, 'root-bound-checks');
+  assert.equal(retained.comparisonEvidence.actions[0].agentId, 'root-bound-checks');
+  assert.equal(retained.comparisonEvidence.actions[0].turnId, 'turn-bound-checks');
+  assert.equal(retained.comparisonEvidence.actions[0].actorState, 'owned');
+  assert.equal(retained.comparisonEvidence.verification.agentClaim.agentId, 'root-bound-checks');
+  assert.equal(JSON.stringify(retained).includes('PRIVATE_CLAIM_TEXT'), false);
+
+  subject.checks = [{ name: 'build', status: 'failed', exitCode: 1 }];
+  const conflict = compactAuditTrial({ runs: [subject] }).runs[0];
+  assert.equal(conflict.checks[0].status, 'unknown');
+  assert.equal(conflict.checks[0].reason, 'conflicting-check-evidence');
 });
 
 test('frozen series retains canonical provenance and marks byte-budget detail loss', () => {
@@ -140,7 +218,7 @@ test('task-change counts survive frozen trial and export while raw snapshot coun
   const mismatchedMetric = mismatchedSeries.comparisons[0].metrics['workspace.changedFileCount'];
   assert.equal(mismatchedMetric.pairedN, 0);
   assert.equal(mismatchedMetric.delta, null, 'task-change metrics pair only on a verified shared baseline');
-  assert.equal(mismatchedMetric.scopeMismatchN, 1);
+  assert.equal(mismatchedMetric.excludedN, 1, 'baseline mismatches are excluded at the pair eligibility gate');
 
   const fallback = run('workspace-fallback', 'D', 16);
   fallback.sourceWorkspace = { sourceCommit: 'commit-1', sourceTree: 'tree-1' };
@@ -281,10 +359,12 @@ test('frozen agent roles preserve child-turn alignment across profiles', () => {
   const make = (id, childTokens) => {
     const value = run(id, id === 'role-left' ? 'A' : 'B', 10);
     value.source = { kind: 'native-app-server-v2', threadId: `root-${id}`, version: accounting.version,
+      clientVersion: accounting.version, model: 'm', reasoningEffort: 'high',
       historyMode: accounting.historyMode, freshThread: accounting.freshThread };
     value.agents = [{ id: `root-${id}`, parentId: null, depth: 0, role: 'root' },
       { id: `child-${id}`, parentId: `root-${id}`, depth: 1, role: 'review' }];
-    value.turns = [{ agentId: `root-${id}`, turnId: `root-turn-${id}` }, { agentId: `child-${id}`, turnId: `child-turn-${id}` }];
+    value.turns = [{ agentId: `root-${id}`, turnId: `root-turn-${id}`, model: 'm', reasoningEffort: 'high' },
+      { agentId: `child-${id}`, turnId: `child-turn-${id}`, model: 'm', reasoningEffort: 'high' }];
     value.usage = { accounting, turns: { status: 'complete', scope: 'captured-owned-thread-turns', contract: accounting,
       turns: value.turns.map((turn, index) => ({ ...turn, status: 'complete',
         values: { inputTokens: index === 0 ? 2 : childTokens }, fields: { inputTokens: { status: 'observed', reason: null } },
@@ -329,6 +409,58 @@ test('frozen trial byte limits count omitted hook and whole-turn rows and preser
   if (frozen.evidenceBounds.omitted.hookInvocations > 0) assert.equal(frozen.coverage.hooks, 'partial');
 });
 
+test('explicit profile IDs resolve plan rows even when display names are duplicated', () => {
+  const left = run('same-name-left', 'Default', 10), right = run('same-name-right', 'Default', 20);
+  left.profileId = 'left-id'; right.profileId = 'right-id';
+  left.profile.profileId = 'left-id'; right.profile.profileId = 'right-id';
+  const report = summarizeAuditSeries({ profiles: [
+    { profileId: 'left-id', profileName: 'Default' }, { profileId: 'right-id', profileName: 'Default' },
+  ], plan: [{ index: 1, experimentId: 'same-name', profileOrder: [
+    { profileId: 'left-id', profileName: 'Default' }, { profileId: 'right-id', profileName: 'Default' },
+  ] }], trials: [{ index: 1, status: 'complete', runs: [right, left] }] });
+  assert.deepEqual(report.trials[0].profiles.map(row => row.run.id), ['same-name-left', 'same-name-right']);
+  assert.deepEqual(report.trials[0].profileOrder.map(row => row.profileId), ['left-id', 'right-id']);
+});
+
+test('native rollout timestamps and scoped recorded tokens are sampled without execution evidence', () => {
+  const version = '0.163.0-alpha.10.2';
+  const native = { id: 'native-session', status: 'ready', source: { kind: 'native-rollout', clientVersion: version,
+    nativeSessionId: 'native-session', fingerprintScope: 'source-snapshot' },
+  metrics: { recordedSpanMs: 3200, recordedSpanKind: 'source-recorded-span' }, usage: { recorded: {
+    status: 'complete', scope: 'recorded-selected-thread-responses',
+    contract: { contract: 'codex-rollout-own-response-usage-v1', counterScope: 'thread-owned-responses' },
+    values: { inputTokens: 12 }, fields: { inputTokens: { status: 'observed' } },
+  } } };
+  const samples = auditMetricSamples(native);
+  assert.equal(samples.recordedSpanMs.value, 3200);
+  assert.equal(samples.recordedSpanMs.scope, 'source-recorded-span');
+  assert.equal(samples['recorded.inputTokens'].value, 12);
+  assert.match(samples['recorded.inputTokens'].scope, /thread-owned-responses/);
+  const frozen = compactAuditTrial({ runs: [native] }).runs[0];
+  assert.equal(frozen.metrics.recordedSpanMs, 3200);
+  assert.equal(frozen.metrics.recordedSpanKind, 'source-recorded-span');
+
+  const nativePair = ['left', 'right'].map((side, index) => ({ ...native, id: `${side}-native`,
+    profileId: `${side}-id`, profileName: side, profile: { profileId: `${side}-id`, profileName: side },
+    source: { ...native.source, nativeSessionId: `${side}-native` },
+    metrics: { recordedSpanMs: 2000 + index * 500, recordedSpanKind: 'source-recorded-span' },
+    turns: [{ agentId: `${side}-native`, turnId: `${side}-turn`, status: 'completed' }],
+    comparisonConditions: { schemaVersion: 1, taskFingerprint: null, taskId: null, editableFiles: [], checkRecipes: [],
+      qualityFingerprint: null, setupFingerprint: null, selectedSkills: [], variables: [], profileOrder: [], trialIndex: null,
+      environment: {}, baseline: {} },
+    task: { nativeTurnStatus: 'completed' },
+  }));
+  const summary = summarizeAuditSeries({ profiles: [
+    { profileId: 'left-id', profileName: 'left' }, { profileId: 'right-id', profileName: 'right' },
+  ], plan: [{ index: 1, experimentId: 'native-pair', profileOrder: [
+    { profileId: 'left-id', profileName: 'left' }, { profileId: 'right-id', profileName: 'right' },
+  ] }], trials: [{ index: 1, status: 'complete', runs: nativePair,
+    selection: { declaration: { status: 'user-declared', taskId: 'same-native-task' }, declaredVariables: [] } }] });
+  const pairedSpan = summary.comparisons[0].metrics.recordedSpanMs;
+  assert.equal(pairedSpan.pairedN, 1);
+  assert.equal(pairedSpan.eligibleN, 1);
+});
+
 test('all planned profile slots remain in the denominator and unavailable measurements stay null', () => {
   const trials = [{ index: 1, status: 'complete', runs: [run('a1', 'A', 10), run('b1', 'B', 8)] },
     { index: 2, status: 'failed', runs: [run('a2', 'A', 30, 'failed')] }];
@@ -358,11 +490,59 @@ test('known quantiles and IQR are deterministic, and comparisons do not declare 
   const insight = first.comparisons[0].insights[0];
   assert.deepEqual(insight.runIds, ['a1', 'a2', 'a3', 'a4', 'b1', 'b2', 'b3', 'b4']);
   assert.deepEqual(insight.models, { left: ['m'], right: ['m'] });
-  assert.deepEqual(insight.agentCounts, { left: [0, 0, 0, 0], right: [0, 0, 0, 0] });
+  assert.deepEqual(insight.agentCounts, { left: [2, 2, 2, 2], right: [2, 2, 2, 2] });
   assert.equal(insight.counts.left.tools[0].runId, 'a1');
   assert.equal(insight.counts.left.tools[0].count, 0);
   assert.equal(first.trials[0].profiles[0].run.coverage.instructions, 'unavailable');
   assert.equal(first.exitCode, 2);
+});
+
+test('series aggregate deltas include only eligible constituent profile pairs and bind quality definitions', async t => {
+  const slots = [1, 2].map(index => ({ index, experimentId: `conditions-${index}`, profileOrder: ['A', 'B'] }));
+  const matched = [run('ca1', 'A', 10), run('cb1', 'B', 8)];
+  const incompatibleRight = run('cb2', 'B', 8);
+  incompatibleRight.comparisonConditions.taskFingerprint = 'e'.repeat(64);
+  const report = summarizeAuditSeries({ profiles, spec, plan: slots, trials: [
+    { index: 1, status: 'complete', runs: matched },
+    { index: 2, status: 'complete', runs: [run('ca2', 'A', 10), incompatibleRight] },
+  ] });
+  const metric = report.comparisons[0].metrics.processElapsedMs;
+  assert.equal(metric.plannedN, 2);
+  assert.equal(metric.eligibleN, 1);
+  assert.equal(metric.excludedN, 1);
+  assert.equal(metric.pairedN, 1);
+  assert.equal(metric.delta, -2);
+  assert.equal(metric.reason, 'ineligible-comparison-conditions');
+  assert.equal(report.comparisons[0].qualityDelta, null,
+    'quality delta is suppressed when the eligible paired denominator is not exact');
+  assert.equal(report.comparisons[0].qualityDeltaEvidence.excludedN, 1);
+  assert.equal(report.trials[0].comparisons.length, 1);
+  assert.equal(report.trials[1].comparisons.length, 1);
+  assert.equal(report.trials[1].comparisons[0].leftRunId, 'ca2');
+  assert.equal(report.trials[1].comparisons[0].rightRunId, 'cb2');
+  assert.equal(report.trials[1].comparisons[0].explanation.conditions.eligible, false);
+
+  const qualityDefinitionLeft = run('quality-definition-a', 'A', 10);
+  const wrongDefinition = run('quality-definition-b', 'B', 8);
+  qualityDefinitionLeft.comparisonConditions.qualityFingerprint = 'f'.repeat(64);
+  wrongDefinition.comparisonConditions.qualityFingerprint = 'f'.repeat(64);
+  const qualityMismatch = summarizeAuditSeries({ profiles, spec, plan: slots.slice(0, 1), trials: [
+    { index: 1, status: 'complete', runs: [qualityDefinitionLeft, wrongDefinition] },
+  ] });
+  const qualityEvidence = qualityMismatch.comparisons[0].qualityDeltaEvidence;
+  assert.equal(qualityMismatch.comparisons[0].metrics.processElapsedMs.pairedN, 1,
+    'time metrics remain eligible when only the quality recipe fingerprint differs');
+  assert.equal(qualityMismatch.comparisons[0].qualityDelta, null);
+  assert.equal(qualityEvidence.eligibleN, 0);
+  assert.equal(qualityEvidence.excludedN, 1);
+  assert.equal(qualityEvidence.eligibilityReasons['quality-definition-fingerprint-mismatch'], 1);
+
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-quality-definition-binding-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const receipt = await exportAuditReport(qualityMismatch, { output: join(directory, 'series.json') });
+  const reopened = await readAuditReport(receipt.evidencePath);
+  assert.deepEqual(reopened.comparisons[0].qualityDeltaEvidence, qualityEvidence,
+    'frozen reopen retains the same quality-definition exclusions and denominator');
 });
 
 test('an empty or interrupted slot is partial, never a zero-valued run', () => {
@@ -414,13 +594,16 @@ test('metric comparisons expose per-metric paired denominators despite unequal m
   assert.equal(elapsed.rightObservedN, 3);
   assert.equal(elapsed.pairedN, 3);
   assert.equal(elapsed.missingPairN, 1);
+  assert.equal(elapsed.eligibleN, 3);
+  assert.equal(elapsed.excludedN, 1);
   assert.equal(elapsed.delta, -20);
-  assert.equal(elapsed.reason, 'incomplete-paired-measurements');
+  assert.equal(elapsed.reason, 'ineligible-comparison-conditions');
   const tokens = report.comparisons[0].metrics['root.inputTokens'];
   assert.equal(tokens.leftObservedN, 4);
   assert.equal(tokens.rightObservedN, 2);
   assert.equal(tokens.pairedN, 2);
-  assert.equal(tokens.reason, 'incomplete-paired-measurements');
+  assert.equal(tokens.excludedN, 1);
+  assert.equal(tokens.reason, 'ineligible-comparison-conditions');
 });
 
 test('optional human rubric scores aggregate without changing machine quality and compare only paired reviews', () => {
@@ -429,6 +612,7 @@ test('optional human rubric scores aggregate without changing machine quality an
   const slots = [1, 2].map(index => ({ index, experimentId: `r${index}`, profileOrder: ['A', 'B'] }));
   const subjects = [run('ra1', 'A', 10), run('rb1', 'B', 12), run('ra2', 'A', 11), run('rb2', 'B', 13)];
   const fingerprint = auditQualityFingerprint(rubricQuality, [{ name: 'build' }]);
+  for (const subject of subjects) subject.comparisonConditions.qualityFingerprint = fingerprint;
   const review = (subject, score) => ({ schemaVersion: 1, runId: subject.id, fingerprint, reviewer: 'reviewer', reviewedAt: '2026-10-16T00:00:00Z',
     ratings: [{ criterionId: 'correct', score, rationale: 'Scored from recorded evidence.', evidenceRefs: [`run:${subject.id}`] }] });
   const report = summarizeAuditSeries({ id: 'r', profiles, plan: slots, spec: { checks: [{ name: 'build' }], quality: rubricQuality },
@@ -441,9 +625,17 @@ test('optional human rubric scores aggregate without changing machine quality an
     missingN: alpha.review.missingN, median: alpha.review.median, iqr: alpha.review.iqr },
   { plannedN: 2, reviewedN: 1, scoredN: 1, missingN: 1, median: 80, iqr: 0 });
   assert.equal(report.comparisons[0].reviewDelta.pairedN, 1);
-  assert.equal(report.comparisons[0].reviewDelta.delta, -20);
+  assert.equal(report.comparisons[0].reviewDelta.delta, null,
+    'review delta requires a score in every eligible paired trial');
+  assert.equal(report.comparisons[0].reviewDelta.missingEligiblePairN, 1);
   assert.equal(report.comparisons[0].reviewDelta.reason, 'incomplete-paired-reviews');
   assert.equal(report.trials[1].profiles[0].quality.rubric.status, 'pending-review');
+  assert.equal(report.trials[0].comparisons[0].explanation.verification.left.human.status, 'reviewed');
+  assert.equal(report.trials[0].comparisons[0].explanation.verification.right.human.status, 'reviewed');
+  assert.equal(report.trials[1].comparisons[0].explanation.verification.left.human.status, 'pending-review');
+  assert.equal(report.trials[1].comparisons[0].explanation.verification.right.human.status, 'pending-review');
+  assert.equal(report.trials[1].comparisons[0].explanation.verification.left.human.scorePercent, null);
+  assert.equal(report.trials[1].comparisons[0].explanation.verification.right.human.scorePercent, null);
 });
 
 test('frozen series retains bounded attributed usage, skill, tool and MCP evidence without payloads', async t => {
@@ -634,7 +826,8 @@ test('compact trial byte budget trims detail while preserving every run identity
     }
     value.outcome = { status: 'claim-recorded', nativeTurnStatus: 'completed' };
     value.checks = [{ name: 'required-check', status: 'passed', exitCode: 0 }];
-    value.toolInvocations = Array.from({ length: 500 }, (_, item) => ({ agentId: `agent-${index}`, turnId: `turn-${item}`,
+    value.coverage.tools = 'partial'; value.coverage.mcp = 'partial';
+    value.toolInvocations = Array.from({ length: index === 0 ? 300 : 1 }, (_, item) => ({ agentId: `agent-${index}`, turnId: `turn-${item}`,
       kind: 'mcp', serverName: 'server'.repeat(20), toolName: 'tool'.repeat(20), status: 'completed', sourceLine: item + 1 }));
     return value;
   });
@@ -646,7 +839,10 @@ test('compact trial byte budget trims detail while preserving every run identity
     assert.equal(item.metrics.processElapsedMs > 0, true);
     assert.equal(item.outcome.status, 'claim-recorded');
     assert.equal(item.checks[0].status, 'passed');
-    assert.ok(item.evidenceBounds.omitted.toolInvocations > 0);
+    if (item.id === 'budget-0') assert.ok(item.evidenceBounds.omitted.toolInvocations > 0);
+    assert.equal(item.coverage.tools, 'partial');
+    assert.equal(item.coverage.mcp, 'partial');
+    assert.equal(compareAuditRuns(item, item).comparison.tools.status, 'partial-or-unknown');
   }
   const workflowRun = frozen.runs[0];
   assert.equal(workflowRun.metrics['workflow.inputTokens'], 400);
@@ -745,4 +941,45 @@ test('frozen byte budget trims nested instruction references and records the los
   assert.equal(compactAgain.evidenceBounds.omitted.instructionAgents, frozen.evidenceBounds.omitted.instructionAgents);
   assert.deepEqual(compactAgain.instructionSources.map(row => [row.status, row.omittedCount, row.reason]),
     frozen.instructionSources.map(row => [row.status, row.omittedCount, row.reason]));
+});
+
+test('compact MCP bounds keep counts partial and startup identity visible after repeated projection', () => {
+  const subject = run('mcp-bounds', 'A', 10);
+  subject.coverage = { tools: 'complete', mcp: 'complete', skillInvocationTelemetry: 'observed' };
+  subject.toolInvocations = Array.from({ length: 501 }, (_, index) => ({ agentId: 'root-mcp-bounds', turnId: 'turn-mcp-bounds',
+    itemId: `call-${index}`, kind: 'mcp', serverName: `server-${index}`, pluginId: 'example-plugin@local-market',
+    toolName: 'lookup', status: 'completed', failed: false }));
+  subject.mcp = { inventory: 'not-requested', servers: Array.from({ length: 161 }, (_, index) => ({
+    name: `server-${index}`, pluginId: null, status: index === 0 ? 'failed' : 'ready',
+    failureReason: index === 0 ? 'reauthenticationRequired' : null, source: 'app-server-process' })) };
+  const first = compactAuditTrial({ runs: [subject] }).runs[0];
+  for (const compact of [first, compactAuditTrial({ runs: [first] }).runs[0]]) {
+    assert.equal(compact.evidenceBounds.omitted.toolInvocations, 1);
+    assert.equal(compact.evidenceBounds.omitted.mcpServers, 1);
+    assert.equal(compact.coverage.tools, 'partial');
+    assert.equal(compact.coverage.mcp, 'partial');
+    assert.equal(compact.mcpInventory, 'not-requested');
+    // Older compact reports can carry complete coverage alongside omission
+    // metadata. Readers must still avoid presenting retained counts as complete.
+    const old = { ...compact, coverage: subject.coverage };
+    const comparison = compareAuditRuns(old, old);
+    assert.equal(comparison.comparison.tools.left.count, null);
+    assert.equal(comparison.comparison.tools.status, 'partial-or-unknown');
+    assert.equal(comparison.comparison.mcp.left.observedCount, 160);
+    assert.equal(comparison.comparison.mcp.left.count, null);
+    assert.equal(comparison.comparison.mcp.status, 'partial-or-unknown');
+    assert.equal(comparison.comparison.mcp.left.inventory, 'not-requested');
+    assert.equal(comparison.comparison.mcp.left.servers[0].failureReason, 'reauthenticationRequired');
+    assert.equal(comparison.comparison.plugins.left.status, 'partial-or-unknown');
+    assert.ok(comparison.comparison.tools.counts.every(row => row.delta === null));
+    assert.ok(comparison.comparison.mcp.counts.every(row => row.delta === null));
+  }
+  const serverOnly = compactAuditTrial({ runs: [{ ...subject, toolInvocations: subject.toolInvocations.slice(0, 1) }] }).runs[0];
+  assert.equal(serverOnly.coverage.tools, 'complete');
+  assert.equal(serverOnly.coverage.mcp, 'partial');
+  const compared = compareAuditRuns(serverOnly, serverOnly);
+  assert.equal(compared.comparison.tools.status, 'known');
+  assert.equal(compared.comparison.mcp.left.observedCount, 160);
+  assert.equal(compared.comparison.mcp.left.count, null);
+  assert.equal(compared.comparison.mcp.status, 'partial-or-unknown');
 });

@@ -127,6 +127,7 @@ native concurrency support. Retest native launch and activation after app update
 The user confirmed concurrent open and correct repeat-open focus on 2026-10-11.
 The 2026-10-12 follow-up verified the packaged launcher, opened two comparison profiles and repeated each open with unchanged process
 identity and start time. Final observations reported both running. Exact results, dated
-investigations and the 1.0.0 publication record live in the
-[concurrent profile handover](HANDOVER-macos-concurrent-profiles.md). This evidence does not establish current
-process state or the remaining native acceptance checks above.
+investigations and the 1.0.0 publication record remain in private operational
+records. See [audit acceptance](AUDIT-ACCEPTANCE.md) for reviewed public release
+evidence. This evidence does not establish current process state or the remaining
+native acceptance checks above.

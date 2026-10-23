@@ -2,6 +2,8 @@
 // They validate only positively attributed, allowlisted native evidence.
 import { safePluginScriptPath } from './audit-tools.js';
 import { summarizeTurnUsage } from './audit-usage.js';
+import { evaluateRequiredContext, validateRequiredContextRules } from './audit-context.js';
+export { evaluateRequiredContext } from './audit-context.js';
 const FIELDS = ['inputTokens', 'outputTokens', 'cachedInputTokens', 'reasoningOutputTokens', 'cacheWriteInputTokens', 'totalTokens'];
 const ORIGINS = ['profile', 'user', 'repository', 'system', 'admin', 'plugin'];
 const ACTORS = ['any', 'root', 'descendant'];
@@ -25,7 +27,7 @@ function bounded(value, fallback, max) {
 
 export function validateCaptureRequirements(value) {
   if (value === undefined) return undefined;
-  object(value, ['minAgents', 'usage', 'skills', 'tools', 'hooks']);
+  object(value, ['minAgents', 'usage', 'skills', 'tools', 'hooks', 'context']);
   if (!Object.keys(value).length) throw new Error('captureRequirements must request evidence');
   const result = { minAgents: bounded(value.minAgents, 1, 64) };
   if (value.usage !== undefined) {
@@ -64,6 +66,7 @@ export function validateCaptureRequirements(value) {
       return { ...item, agent, min: bounded(item.min, 1, 1000) };
     });
   }
+  if (value.context !== undefined) result.context = validateRequiredContextRules(value.context);
   return result;
 }
 
@@ -149,6 +152,10 @@ export function evaluateCaptureRequirements(run, requirements, { protocolReady =
       && Object.keys(HOOK_FIELDS).every(field => rule[field] === undefined || event[field] === rule[field]));
     add(`hooks:${index}`, matches.length >= rule.min, 'required-hook-not-observed',
       { required: rule.min, observed: matches.length, selector: rule });
+  }
+  if (requested.context) {
+    const context = evaluateRequiredContext(run, requested.context);
+    checks.push(...context.checks);
   }
   return { schemaVersion: 1, mode: 'declared-observations', status: checks.every(check => check.status === 'passed') ? 'passed' : 'failed',
     requirements: requested, checks, exhaustiveConsumption: false,
