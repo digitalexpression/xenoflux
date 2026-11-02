@@ -177,12 +177,13 @@ function TreeSession({ side, session, rootId, name, search, hasMatches, onAgent,
         if (!['message', 'session', 'turn'].includes(event.kind) && last && !['message', 'session', 'turn'].includes(last[0]!.kind)) last.push(event);
         else groups.push([event]);
       }
-      return <details key={turn} open={Boolean(search) || expandedTurns[turn] !== false} onToggle={event => {
-        if (search) return;
-        const open = event.currentTarget.open;
-        setExpandedTurns(previous => (previous[turn] !== false) === open ? previous : { ...previous, [turn]: open });
-      }} className="flex flex-col gap-3">
-        <summary className="cursor-pointer meta" title={turn}>Turn {index}{turn === 'unassigned' ? ' · identifier not recorded' : ''}</summary>
+      return <details key={turn} open={Boolean(search) || expandedTurns[turn] !== false} className="flex flex-col gap-3">
+        <summary className="cursor-pointer meta" title={turn} onClick={event => {
+          event.preventDefault();
+          if (search) return;
+          const open = !(event.currentTarget.parentElement as HTMLDetailsElement).open;
+          setExpandedTurns(previous => previous[turn] === open ? previous : { ...previous, [turn]: open });
+        }}>Turn {index}{turn === 'unassigned' ? ' · identifier not recorded' : ''}</summary>
         {groups.map(group => group[0] && ['message', 'session', 'turn'].includes(group[0].kind) ? eventRow(group[0]) : <Trace key={group[0]?.id}>{group.map(eventRow)}</Trace>)}
       </details>;
     })}
@@ -241,7 +242,10 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
       const target = document.querySelector<HTMLButtonElement>(`[data-replay-event="${CSS.escape(key)}"]`);
       let ancestor = target?.parentElement?.closest('details') ?? null;
       while (ancestor) {
-        ancestor.open = true;
+        if (!ancestor.open) {
+          ancestor.querySelector<HTMLElement>(':scope > summary')?.click();
+          ancestor.open = true;
+        }
         ancestor = ancestor.parentElement?.closest('details') ?? null;
       }
       if (inspector) document.getElementById(`${labelled}-inspector-title`)?.focus();

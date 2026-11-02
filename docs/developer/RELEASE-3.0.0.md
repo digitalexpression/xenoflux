@@ -33,15 +33,18 @@ artifact hashes belong to the generated release manifest.
 
 ## Candidate verification
 
-Candidate checks on 2026-11-02 passed: `npm run check`, `npm run check:native`,
+The initial candidate source checks on 2026-11-02 passed: `npm run check`, `npm run check:native`,
 `npm run check:docs` (25 packaged Markdown files), `npm test` (1,347 passed,
 one skipped), and `npm run check:ui` (47 browser journeys, including types,
 design tokens and bundled-build freshness). The sanitized export assertion's
-focused nine-test file also passed. No application behavior changed during
-candidate preparation.
+focused nine-test file also passed. The later replay correction below changes
+one UI component and its regression coverage; retained engine results are scoped
+to unchanged engine code.
 
-All 203 application, UI and build-input files match the integrated development
-source byte-for-byte. Core creation/copy modules also match the retained native
+Before the replay correction, all 203 application, UI and build-input files
+matched the integrated development source byte-for-byte. The correction changes
+the replay component and rebuilt script/entry assets only; engine source remains
+unchanged. Core creation/copy modules also match the retained native
 acceptance source; comparison workspace/setup/check behavior continues to use
 audit mode. Source applicability was reviewed separately from these checks.
 Existing installed build/test dependencies were reused; the package smoke
@@ -53,6 +56,31 @@ Inspect the generated manifest for the exact candidate revision, artifact
 hashes and detached offline smoke outcome. A passed source suite alone does
 not establish a passed package smoke or an installed application. No new live
 model run or real profile/client operation was performed for this candidate.
+
+## Replay verification correction
+
+The first [public PR CI run](https://github.com/digitalexpression/xenoflux/actions/runs/41520724361)
+failed browser verification on both Node versions. Both jobs reported a replay
+scroll assertion; Node 22 also reported a Turn disclosure remaining open after
+search was cleared. Engine tests and package smoke were not reached. Original
+failed artifacts remain retained; local passing results do not relabel this run.
+
+Turn disclosures now record the user's open/closed choice synchronously through
+the summary action. Programmatic event reveal uses that same controlled state,
+so a queued native toggle cannot overwrite the choice after search filtering.
+Keyboard toggling and reopening a closed Turn through a summary citation are
+covered by existing browser journeys with additional assertions.
+
+The independent-scroll test now waits for the delegated event's scheduled focus
+before manually resetting Left's scroll position, matching the earlier identical
+navigation sequence. Its viewport-preservation assertion remains unchanged; no
+production scrolling policy was changed. Focused verification against the rebuilt
+UI passed five repetitions each of search restoration, programmatic reveal and
+independent scrolling. The full corrected browser suite then passed all 47
+journeys, including types, design tokens and bundled-build freshness. Syntax,
+native-launcher and packaged-doc checks passed; unchanged engine source retains
+the earlier local engine result. Exact final source/package and CI identities
+are recorded in the generated manifest and the PR checks.
 
 ## Ordinary review live attempt
 
@@ -137,9 +165,9 @@ sequence; [local release procedure](LOCAL-RELEASE.md) defines package checks.
 | Evidence | Candidate result |
 | --- | --- |
 | Source revision, version and artifact hashes | Recorded in the generated release manifest. |
-| Evidence for profile creation, comparison and ordinary review | Retained/development evidence and source applicability are summarized above. Exact source parity and immutable receipt identities are retained separately against the candidate manifest. |
+| Evidence for profile creation, comparison and ordinary review | Retained/development evidence and source applicability are summarized above. Engine source equality and immutable receipt identities are retained separately against the candidate manifest; the replay UI correction has separate browser coverage. |
 | Required checks and affected regressions | Candidate source checks passed: 1,347 engine passes, one skip, 47 browser journeys, syntax/native/docs and focused export verification. |
-| Real review access, response and UI association | Passed on corrected development source; application-source parity binds applicability without claiming a fresh native candidate run. |
+| Real review access, response and UI association | Passed on corrected development source; unchanged engine source preserves applicability without claiming a fresh native candidate run. |
 | Bundled UI freshness and detached offline package smoke | Rebuilt bundled UI matches source. The generated manifest records the detached smoke outcome for its exact source and tarball. |
 | Breaking changes, fresh-start guidance and remaining limits | The checkout-only export-review runner, broker, isolated transport/probe and campaign stages were removed. Ordinary Reviews is the supported execution path; external review import remains supported. No report/store schema or copy journal was retired, and no migration was added. Unsupported old data remains untouched. |
 

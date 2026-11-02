@@ -206,6 +206,7 @@ test('replay presents independent trees, linked events and source gaps with keyb
     await expect(rightTranscript.getByRole('button', { name: /Worker one result/ })).toHaveAttribute('aria-current', 'true');
     await delegatedEvent.click();
     await inspector.getByRole('button', { name: 'Open delegated session 00000000-0000-4000-8000-000000000002', exact: true }).click();
+    await expect(leftTree.getByRole('button', { name: /Worker one result/ })).toBeFocused();
     await leftTranscript.evaluate((node, top) => { node.scrollTop = top; }, revealedLeftScroll);
     await rightTranscript.getByRole('button', { name: /Worker one result/ }).click();
     await inspector.getByRole('button', { name: 'Return to calling event', exact: true }).click();
@@ -351,7 +352,7 @@ test('real-style delegation is searchable, named and reachable from its assignme
     const search = page.getByRole('searchbox', { name: 'Search recorded events' });
     await expect(leftTree.getByRole('button', { name: /Worker two result/ })).toBeHidden();
     const firstTurn = leftTree.locator('summary').filter({ hasText: /^Turn 1$/ }).first().locator('..');
-    await firstTurn.locator(':scope > summary').click();
+    await firstTurn.locator(':scope > summary').press('Enter');
     await expect(firstTurn).not.toHaveAttribute('open');
     await search.fill('Worker two result');
     await expect(leftTree.getByRole('button', { name: /Worker two result/ })).toBeVisible();
@@ -359,7 +360,7 @@ test('real-style delegation is searchable, named and reachable from its assignme
     await expect(page.getByRole('status').filter({ hasText: 'baseline:' })).toContainText('baseline: 1 events match');
     await search.fill('');
     await expect(firstTurn).not.toHaveAttribute('open');
-    await firstTurn.locator(':scope > summary').click();
+    await firstTurn.locator(':scope > summary').press('Enter');
     await expect(leftTree.getByRole('button', { name: /Worker two result/ })).toBeHidden();
     await leftTree.getByRole('button', { name: /^spawn_agent ·/ }).click();
     const inspector = page.getByRole('dialog', { name: 'Event inspector' });
@@ -423,6 +424,10 @@ test('agent summaries link assignment, result and parent follow-up without searc
     await page.goto(server.launchUrl);
     await page.goto(`${server.origin}/reports/demo-run`);
     const search = page.getByRole('searchbox', { name: 'Search recorded events' });
+    const leftTree = page.getByRole('region', { name: 'baseline session tree', exact: true });
+    const firstTurn = leftTree.locator('summary').filter({ hasText: /^Turn 1$/ }).first().locator('..');
+    await firstTurn.locator(':scope > summary').click();
+    await expect(firstTurn).not.toHaveAttribute('open');
     await search.fill('no matching event');
     const trigger = page.getByRole('region', { name: 'Left timeline', exact: true }).getByRole('button', { name: 'View worker summary', exact: true });
     await trigger.click();
@@ -446,6 +451,10 @@ test('agent summaries link assignment, result and parent follow-up without searc
       await expect(inspector).toContainText(expected);
       await expect(inspector).toContainText(`baseline · ${actor}`);
       await expect(page.locator('[data-replay-side="a"] [aria-current="true"]:focus')).toHaveCount(1);
+      if (link === 'View assignment event') {
+        await expect(leftTree.getByRole('button', { name: /^spawn_agent ·/ })).toBeFocused();
+        await expect(firstTurn).toHaveAttribute('open', '');
+      }
       await expect(search).toHaveValue('no matching event');
       await expect(page.getByRole('region', { name: 'strict-review session tree', exact: true }).locator('[data-replay-event]')).toHaveCount(0);
       await inspector.getByRole('button', { name: 'Back to worker summary', exact: true }).click();
