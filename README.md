@@ -29,9 +29,24 @@ and a Codex CLI executable; desktop profiles also need Codex desktop. See
 managed/offline setup and updates, and [Profiles](docs/user/PROFILES.md) to continue an
 interrupted sign-in. Use `xfx --help` for all commands.
 
+## Open the app
+
+The local browser app targets the upcoming **3.0.0 major release**; it is not in
+the published 2.1.0 package. Development builds currently provide:
+
+```sh
+xfx ui
+```
+
+Create empty or from-source profiles, run a task comparison and read its report
+in a local browser app. The candidate also supports setup/session comparisons
+and external review import. From a report, start an ordinary AI review with a
+selected profile and read its captured response. See
+[The Xenoflux app](docs/user/APP.md).
+
 ## Documentation
 
-- **Users:** [Profiles](docs/user/PROFILES.md), [Desktop](docs/user/DESKTOP.md),
+- **Users:** [The app](docs/user/APP.md), [Profiles](docs/user/PROFILES.md), [Desktop](docs/user/DESKTOP.md),
   [Copy settings](docs/user/ADVANCED-COPY.md), [Recovery](docs/user/PROFILE-RECOVERY.md)
   and [RAM logs](docs/user/RAM-LOGS.md).
 - **Developers:** [Development](docs/developer/README.md),

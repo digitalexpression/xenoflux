@@ -298,8 +298,8 @@ export function createDesktopRuntime({
     try {
       // `-F pcu` returns only PID, command name, and UID records. We use only
       // PIDs and resolve their safe identity from our own `ps` observation;
-      // lsof never receives a directory or wildcard, only caller-approved
-      // exact resource paths.
+      // lsof receives only caller-approved exact resource paths, including
+      // directory handles; it never performs recursive or wildcard scans.
       result = await execFile('/usr/sbin/lsof', ['-nP', '-F', 'pcu', '-a', '--', ...presentPaths], {
         cwd: '/', env: safeSystemEnvironment(), encoding: 'utf8', maxBuffer: 65536, timeout: systemTimeoutMs,
       });

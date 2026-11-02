@@ -5,6 +5,7 @@ import { chmod, lstat, mkdir, open, readFile, readlink, realpath, rm, symlink, w
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { captureAuditWorkspacePatch } from './audit-workspace-patch.js';
 
 const PARENT_MARKER = '.xfx-audit-parent.json';
 const OWNER_MARKER = '.xfx-audit-owner.json';
@@ -374,7 +375,8 @@ async function ensureOutput(outputDirectory, workspace) {
 }
 
 /** Capture a point-in-time diff without changing the workspace index. */
-export async function snapshotAuditWorkspace({ directory, outputDirectory, label, owner } = {}) {
+export async function snapshotAuditWorkspace({ directory, outputDirectory, label, owner, retainPatchContent = false,
+  sourceBaselineCommit, sourceBaselineTree, baselineFingerprint } = {}) {
   const name = labelName(label), authorityInfo = await authority(directory, owner), workspace = await canonicalDirectory(authorityInfo.workspace, 'Audit workspace');
   const output = await ensureOutput(outputDirectory, workspace.canonical);
   const diff = await collectDiff(workspace.canonical, output, authorityInfo.baselineCommit);
@@ -387,7 +389,10 @@ export async function snapshotAuditWorkspace({ directory, outputDirectory, label
   let patchCreated = false;
   try { await writeExclusive(patchPath, diff.patch); patchCreated = true; await chmod(patchPath, 0o600); await writeExclusive(metadataPath, metadata); }
   catch { if (patchCreated) await rm(patchPath, { force: true }); throw new Error('Snapshot could not be written without overwriting existing files'); }
-  return { ...metadata, patchPath, metadataPath };
+  return { ...metadata, patchPath, metadataPath,
+    ...(retainPatchContent ? { patchContent: captureAuditWorkspacePatch(diff.patch, metadata, {
+      sourceBaselineCommit, sourceBaselineTree, baselineFingerprint, hasBinary: diff.records.some(record => record.binary === true),
+    }) } : {}) };
 }
 
 /** Mark the runner's lifecycle state for safe cleanup checks. */

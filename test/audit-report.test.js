@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { auditExitCode, compareAuditRuns, renderAudit } from '../src/audit-report.js';
@@ -35,6 +35,15 @@ const [eligibleA, eligibleB] = bookingLedgerPair();
 complete.comparisonConditions = structuredClone(eligibleA.comparisonConditions);
 complete.sourceWorkspace = { sourceCommit: eligibleA.comparisonConditions.baseline.commit,
   sourceTree: eligibleA.comparisonConditions.baseline.tree };
+
+test('renders captured receipt time separately when native event time is unavailable', () => {
+  const run = structuredClone(complete);
+  run.events = [{ agentId: 'root', turnId: 't1', kind: 'turn/completed', recordedAt: null,
+    observedAtMs: Date.parse('2026-10-28T12:30:00.000Z'), sourceLine: 19 }];
+  const report = renderAudit(run);
+  assert.match(report, /observed 2026-10-28T12:30:00\.000Z · turn\/completed/);
+  assert.doesNotMatch(report, /2026-10-28T12:30:00\.000Z.*recorded/);
+});
 
 test('compares skill identity and attributed evidence across all origins and agents', () => {
   const right = structuredClone(complete);
@@ -1095,4 +1104,15 @@ test('instruction comparison preserves reported order and duplicate-source count
   assert.equal(reordered.roles[0].status, 'different');
   const repeated = compareAuditRuns(runWith([id('1'), id('1')], 2), runWith([id('1')], 1)).comparison.instructionSources;
   assert.equal(repeated.roles[0].status, 'different');
+});
+
+test('frozen report opening verifies the exact bytes it parses against the saved hash', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-report-hash-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const receipt = await exportAuditReport(complete, { output: join(directory, 'report.json') });
+  const original = await readAuditReport(receipt.evidencePath, { expectedSha256: receipt.sha256 });
+  assert.equal(original.id, complete.id);
+  // Even equivalent JSON is changed evidence when bound by an exact byte hash.
+  await writeFile(receipt.evidencePath, JSON.stringify(JSON.parse(await readFile(receipt.evidencePath, 'utf8'))));
+  await assert.rejects(readAuditReport(receipt.evidencePath, { expectedSha256: receipt.sha256 }), /changed/);
 });

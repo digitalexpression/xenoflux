@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, chmod, symlink, lstat, writeFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, chmod, symlink, link, unlink, lstat, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
@@ -146,8 +146,43 @@ test('unsafe IDs, symlink record paths and hard-linked metadata are rejected', a
   await assert.rejects(readAuditRecord(f.store, experiment.id));
   await rm(original);
   const outside = join(f.store.directory, 'state-copy'); await writeFile(outside, saved, { mode: 0o600 });
-  const { link } = await import('node:fs/promises'); await link(outside, original);
+  await link(outside, original);
   await assert.rejects(readAuditRecord(f.store, experiment.id), /Unsafe/);
+});
+
+test('record reader tolerates the short duplicate-link window during exclusive publication', async t => {
+  const f = await fixture(t);
+  const experiment = await createExperiment(f.store, { spec: {}, task: 'publish window', profiles: [] });
+  const original = join(experiment.directory, 'state.json');
+  const transient = join(f.store.directory, 'transient-state-link');
+  await link(original, transient);
+  const removeTransient = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => unlink(transient).then(resolve, reject), 30);
+    t.after(() => clearTimeout(timer));
+  });
+  const reading = readAuditRecord(f.store, experiment.id);
+  await removeTransient;
+  const reopened = await reading;
+  assert.equal(reopened.state.status, 'prepared');
+
+  const persistent = join(f.store.directory, 'persistent-state-link');
+  await link(original, persistent);
+  await assert.rejects(readAuditRecord(f.store, experiment.id), /Unsafe/);
+});
+
+test('record reader reopens the newly renamed state when its old inode is unlinked mid-read', async t => {
+  const f = await fixture(t);
+  const experiment = await createExperiment(f.store, { spec: {}, task: 'rename window', profiles: [] });
+  const run = await createExperimentRun(f.store, { experimentId: experiment.id, profile: { id: 'p' } });
+  const writing = (async () => {
+    for (let index = 0; index < 24; index++) await writeAuditState(f.store, run.id, {
+      status: `revision-${index}`, detail: 'state replacement fixture '.repeat(24),
+    });
+  })();
+  const reads = Array.from({ length: 48 }, () => readAuditRecord(f.store, run.id));
+  const results = await Promise.allSettled([writing, ...reads]);
+  assert.deepEqual(results.filter(result => result.status === 'rejected'), []);
+  assert.equal(results.filter(result => result.status === 'fulfilled' && result.value?.state).length, reads.length);
 });
 
 test('audit-only home lease blocks a colliding audit owner and releases only its exact owner', async t => {

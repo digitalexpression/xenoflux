@@ -113,6 +113,34 @@ async function writeInstaller(directory) {
   return installer;
 }
 
+/** The packaged app serves its bundled assets on loopback and refuses unauthenticated API calls. */
+async function smokeLocalApp(installed, store, cwd) {
+  const child = spawn(installed, ['--store', store, 'ui', '--demo', '--no-open'], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    const launch = await new Promise((resolveUrl, reject) => {
+      let output = '';
+      const timer = setTimeout(() => reject(new Error('Installed xfx ui did not report its address')), 15000);
+      child.stdout.on('data', chunk => {
+        output += chunk;
+        const match = /Open this link in your browser: (http:\/\/127\.0\.0\.1:\d+)\/#launch=[\w-]+/.exec(output);
+        if (match) { clearTimeout(timer); resolveUrl(match[1]); }
+      });
+      child.once('exit', code => { clearTimeout(timer); reject(new Error(`Installed xfx ui exited early (${code})`)); });
+    });
+    const page = await fetch(`${launch}/`);
+    const html = await page.text();
+    if (page.status !== 200 || !/default-src 'self'/.test(page.headers.get('content-security-policy') ?? ''))
+      throw new Error('Installed local app did not serve its page with the expected policy');
+    const script = /src="(\/assets\/[^"]+\.js)"/.exec(html)?.[1];
+    if (!script || (await fetch(`${launch}${script}`)).status !== 200) throw new Error('Installed local app is missing its bundled script');
+    const api = await fetch(`${launch}/api/info`, { headers: { 'x-xenoflux-request': '1' } });
+    if (api.status !== 401) throw new Error('Installed local app answered an API call without a session');
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise(done => { if (child.exitCode !== null) done(); else child.once('exit', done); });
+  }
+}
+
 async function smokeInstall(tarball, dependencyTarball, cache) {
   const temporary = await realpath(await mkdtemp(join(tmpdir(), 'xfx-local-release-')));
   try {
@@ -129,6 +157,7 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
       throw new Error('Detached smoke resolved the installed package into the checkout');
     const result = await run(installed, ['--help'], { cwd: install });
     if (!result.stdout.startsWith('xfx — Xenoflux')) throw new Error('Installed xfx did not print its help header');
+    await smokeLocalApp(installed, join(temporary, 'ui store'), install);
     const store = join(temporary, 'smoke store');
     const preview = JSON.parse((await run(installed, ['--json', '--store', store, 'profile', 'create', 'smoke'])).stdout);
     if (preview.status !== 'preview' || await exists(store)) throw new Error('Installed profile preview changed its store');

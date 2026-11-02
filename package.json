@@ -1,6 +1,6 @@
 {
   "name": "xenoflux",
-  "version": "2.1.0",
+  "version": "3.0.0-rc.1",
   "description": "Codex profile manager for macOS",
   "type": "module",
   "bin": {
@@ -9,6 +9,7 @@
   "files": [
     "bin",
     "src",
+    "dist/ui",
     "LICENSE",
     "README.md",
     "docs/README.md",
@@ -16,6 +17,7 @@
     "docs/user/RAM-LOGS.md",
     "docs/user/INSTALLATION.md",
     "docs/user/ADVANCED-COPY.md",
+    "docs/user/APP.md",
     "docs/user/AUDIT.md",
     "docs/user/DESKTOP.md",
     "docs/user/PROFILES.md",
@@ -25,10 +27,12 @@
     "docs/developer/LOCAL-RELEASE.md",
     "docs/developer/AUDIT-GOAL.md",
     "docs/developer/ROADMAP.md",
+    "docs/developer/REVIEW-TASK-IMPLEMENTATION.md",
     "docs/developer/PROFILE-AUDIT-ASSESSMENT.md",
     "docs/developer/PROFILE-COPY-POLICY.md",
     "docs/developer/DESKTOP-IMPLEMENTATION.md",
     "docs/developer/AUDIT-ACCEPTANCE.md",
+    "docs/developer/RELEASE-3.0.0.md",
     "docs/developer/RELEASE-2.1.0.md",
     "docs/developer/AUDIT-ACCEPTANCE-2.0.0-HISTORY.md",
     "docs/developer/ROADMAP-2.1.0-HISTORY.md",
@@ -45,7 +49,10 @@
     "check:docs": "node scripts/check-docs.mjs",
     "build:native": "node scripts/build-profile-launcher.mjs",
     "check:native": "node scripts/build-profile-launcher.mjs --check",
-    "local-release": "node scripts/local-release.mjs"
+    "local-release": "node scripts/local-release.mjs",
+    "build:ui": "vite build --config web/vite.config.ts",
+    "check:ui": "node scripts/check-design-tokens.mjs && tsc -p web --noEmit && node scripts/check-ui-build.mjs && playwright test",
+    "test:ui": "npm run build:ui && playwright test"
   },
   "dependencies": {
     "smol-toml": "1.9.0"
@@ -67,5 +74,27 @@
     "access": "public",
     "tag": "latest",
     "registry": "https://registry.npmjs.org/"
+  },
+  "devDependencies": {
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "@playwright/test": "1.64.1",
+    "@radix-ui/react-dialog": "1.3.1",
+    "@radix-ui/react-dropdown-menu": "2.2.1",
+    "@radix-ui/react-slot": "1.5.0",
+    "@shadcn/react": "0.3.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.62.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-router": "8.5.0",
+    "tailwind-merge": "3.7.0",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.3.5"
   }
 }

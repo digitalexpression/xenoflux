@@ -145,7 +145,7 @@ test('audit show and diff retain exact-home evidence and report unknown historic
   await assert.rejects(stat(f.marker), { code: 'ENOENT' });
 
   const missing = audit(f, ['diff', '--left-profile', 'A', '--left-id', task, '--right-profile', 'B', '--right-id', id(399)]);
-  assert.equal(missing.status, 1);
+  assert.equal(missing.status, 1, JSON.stringify({ status: missing.value?.right?.status, reason: missing.value?.right?.reason }));
   assert.ok(['ready', 'partial'].includes(missing.value.left.status));
   assert.equal(missing.value.right.status, 'not-found');
 });
@@ -269,6 +269,8 @@ test('audit validates selectors and options, and retired comparison commands are
   const f = await fixture(t), task = id(321);
   for (const args of [
     ['show'], ['show', '--profile', 'A'], ['show', '--profile', 'A', '--id', 'bad'],
+    ['show', '--profile', 'A', '--id', task, '--include-replay-content'],
+    ['run', '--spec', 'missing.json', '--include-replay-content'],
     ['diff', '--left-profile', 'A', '--left-id', task, '--right-profile', 'B'],
     ['diff', '--left-profile', 'A', '--left-id', task, '--right-profile', 'B', '--right-id', task, '--turns'],
     ['export', '--profile', 'A', '--id', task, '--format', 'xml', '--output', join(f.root, 'bad.xml')],
@@ -293,6 +295,29 @@ test('audit validates selectors and options, and retired comparison commands are
   const result = audit(f, ['profiles', 'A', 'B', '--repo', 'relative/project', '--client', 'cli']);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
+});
+
+test('CLI replay export includes bodies only by explicit option and reopens without the native source', async t => {
+  const f = await fixture(t), task = id(601), turn = id(602);
+  const source = await seedRollout(f.homes[0], task, [
+    record('session_meta', { id: task, originator: 'codex_cli_rs' }), context(turn),
+    record('response_item', { type: 'function_call', name: 'exec_command', call_id: 'check', arguments: '{"command":"PRIVATE_REPLAY_COMMAND"}' }),
+    record('response_item', { type: 'function_call_output', call_id: 'check', output: 'PRIVATE_REPLAY_RESULT' }),
+  ]);
+  await seedIndex(f.homes[0], [{ id: task, rolloutPath: source }]);
+  const normal = join(f.root, 'normal.json'), included = join(f.root, 'included.md');
+  const selectors = ['--profile', 'A', '--id', task];
+  const omitted = audit(f, ['export', ...selectors, '--output', normal]);
+  assert.ok([0, 2].includes(omitted.status), omitted.stderr);
+  assert.doesNotMatch(await readFile(normal, 'utf8'), /PRIVATE_REPLAY_(COMMAND|RESULT)/);
+  const full = audit(f, ['export', ...selectors, '--include-replay-content', '--format', 'markdown', '--output', included]);
+  assert.ok([0, 2].includes(full.status), full.stderr);
+  assert.match(await readFile(included, 'utf8'), /PRIVATE\\?_REPLAY\\?_RESULT/);
+  await rm(source);
+  const reopened = audit(f, ['show', `${included}.audit.json`]);
+  assert.ok([0, 2].includes(reopened.status), reopened.stderr);
+  assert.ok(reopened.value.sessionReplay.sessions[0].events.some(event => event.body === 'PRIVATE_REPLAY_RESULT' && event.relatedEventId));
+  await assert.rejects(stat(f.marker), { code: 'ENOENT' });
 });
 
 test('direct CLI and Desktop comparisons retain user declarations through export and source-free reopen', async t => {

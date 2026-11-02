@@ -6,18 +6,33 @@ export const USAGE_FIELDS = Object.freeze([
   'cacheWriteInputTokens', 'totalTokens',
 ]);
 
-const NATIVE_USAGE_CONTRACT = Object.freeze({
-  contract: 'codex-thread-own-cumulative-v1',
-  version: '0.163.0-alpha.10.2',
-  historyMode: 'paginated',
-  freshThread: true,
-  childCountersStartAtZero: true,
-  sourceRevision: 'd9151c94a70013f176ff370fa93da02734662e41',
+const NATIVE_USAGE_EVIDENCE = Object.freeze({
+  '0.163.0-alpha.10.2': Object.freeze({
+    contract: 'codex-thread-own-cumulative-v1',
+    historyMode: 'paginated',
+    freshThread: true,
+    childCountersStartAtZero: true,
+    sourceRevision: 'd9151c94a70013f176ff370fa93da02734662e41',
+  }),
+  '0.164.0': Object.freeze({
+    contract: 'codex-thread-own-cumulative-v1',
+    historyMode: 'paginated',
+    freshThread: true,
+    childCountersStartAtZero: true,
+    sourceRevision: '6aaac694803004a63c6f393d153c96d22521a6b9',
+  }),
 });
 
-/** Return the verified source contract only for the exact inspected native version. */
+const VERSION = /^[A-Za-z0-9.+_-]{1,128}$/;
+
+/** Describe the accounting protocol; the observed client version is provenance, not eligibility. */
 export function nativeUsageAccounting(version) {
-  return version === NATIVE_USAGE_CONTRACT.version ? { ...NATIVE_USAGE_CONTRACT } : null;
+  if (typeof version !== 'string' || !VERSION.test(version)) return null;
+  const evidence = NATIVE_USAGE_EVIDENCE[version];
+  return { contract: 'codex-thread-own-cumulative-v1', version,
+    historyMode: 'paginated', freshThread: true,
+    ...(evidence ? { childCountersStartAtZero: evidence.childCountersStartAtZero,
+      sourceRevision: evidence.sourceRevision } : {}) };
 }
 
 const nullCounters = () => Object.fromEntries(USAGE_FIELDS.map(field => [field, null]));
@@ -26,8 +41,12 @@ const unavailableFields = () => Object.fromEntries(USAGE_FIELDS.map(field => [fi
 const safeCounter = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 
 function verifiedAccounting(value) {
-  return value && typeof value === 'object' && Object.entries(NATIVE_USAGE_CONTRACT)
-    .every(([key, expected]) => value[key] === expected);
+  if (!value || typeof value !== 'object') return null;
+  const expected = nativeUsageAccounting(value.version);
+  if (!expected || Object.entries(expected).some(([key, expectedValue]) => value[key] !== expectedValue)) return null;
+  const known = NATIVE_USAGE_EVIDENCE[value.version];
+  if (value.sourceRevision !== undefined && value.sourceRevision !== known?.sourceRevision) return null;
+  return expected;
 }
 
 function workflowUsageResult(status, reason, contract = null) {
@@ -121,10 +140,12 @@ function usageRows(run, agentIds) {
     }
   }
   const counters = new Map(agentIds.map(id => [id, nullCounters()]));
+  const unverifiedBaselines = new Set();
   const turnUsage = new Set();
   const sourceRows = [];
   for (const row of observations) {
     if (!row || typeof row.agentId !== 'string' || !counters.has(row.agentId)
+      || row.source !== 'thread/tokenUsage/updated' || row.mode !== 'snapshot'
       || typeof row.turnId !== 'string' || !row.turnId
       || !['accepted', 'duplicate'].includes(row.disposition)) return null;
     if (Array.isArray(row.invalidFields?.total) && row.invalidFields.total.length
@@ -136,7 +157,16 @@ function usageRows(run, agentIds) {
   }
   const reassessed = assessUsageSequence(sourceRows).observations;
   if (reassessed.some(row => !['accepted', 'duplicate'].includes(row.disposition))) return null;
+  const firstObservedAgent = new Set();
   for (const row of reassessed) {
+    if (!firstObservedAgent.has(row.agentId)) {
+      firstObservedAgent.add(row.agentId);
+      for (const field of USAGE_FIELDS) {
+        const total = safeCounter(row.total?.[field]), last = safeCounter(row.last?.[field]);
+        if (total === null || last === null) unverifiedBaselines.add(`${row.agentId}\0${field}`);
+        else if (total !== last) return { inconsistent: true };
+      }
+    }
     let usable = false;
     const final = counters.get(row.agentId);
     for (const field of USAGE_FIELDS) {
@@ -164,7 +194,7 @@ function usageRows(run, agentIds) {
       }
     }
   }
-  return { counters, turnUsage };
+  return { counters, turnUsage, unverifiedBaselines };
 }
 
 /**
@@ -173,10 +203,12 @@ function usageRows(run, agentIds) {
  */
 export function summarizeWorkflowUsage(run) {
   const accounting = run?.usage?.accounting;
-  if (!verifiedAccounting(accounting)) return workflowUsageResult('unavailable', 'accounting-contract-unverified');
-  const contract = { ...NATIVE_USAGE_CONTRACT };
-  const sourceVersion = run?.source?.version ?? run?.source?.accountingVersion;
+  const pinnedContract = verifiedAccounting(accounting);
+  if (!pinnedContract) return workflowUsageResult('unavailable', 'accounting-contract-unverified');
+  const contract = { ...pinnedContract };
+  const sourceVersion = run?.source?.version;
   if (run?.source?.kind !== 'native-app-server-v2' || sourceVersion !== contract.version
+    || (run?.source?.accountingVersion !== undefined && run.source.accountingVersion !== sourceVersion)
     || run?.source?.historyMode !== contract.historyMode || run?.source?.freshThread !== contract.freshThread)
     return workflowUsageResult('unavailable', 'accounting-contract-unverified', contract);
   if (run?.coverage?.usage !== 'complete' || run?.coverage?.timeline !== 'complete'
@@ -223,7 +255,9 @@ export function summarizeWorkflowUsage(run) {
   const values = nullCounters(), fields = {};
   let incomplete = false;
   for (const field of USAGE_FIELDS) {
-    const present = perAgent.map(row => row[field]).filter(value => value !== null);
+    const present = [...usage.counters.entries()]
+      .filter(([agentId]) => !usage.unverifiedBaselines.has(`${agentId}\0${field}`))
+      .map(([, row]) => row[field]).filter(value => value !== null);
     let sum = 0, overflow = false;
     for (const value of present) {
       sum += value;
@@ -253,6 +287,9 @@ export function summarizeTurnUsage(run) {
   const workflow = summarizeWorkflowUsage(run);
   if (workflow.status === 'unavailable') return unavailable(workflow.reason, workflow.contract);
   const contract = workflow.contract;
+  const agentIds = ownedAgentTree(run);
+  const validatedUsage = agentIds ? usageRows(run, agentIds) : null;
+  if (!validatedUsage || validatedUsage.inconsistent) return unavailable('turn-baseline-unverified', contract);
   const observations = run?.usage?.observations;
   if (!Array.isArray(observations) || observations.some(row => row.source !== 'thread/tokenUsage/updated'))
     return unavailable('native-turn-source-unverified', contract);
@@ -289,7 +326,9 @@ export function summarizeTurnUsage(run) {
   let anyPartial = false;
   for (const [agentId, agentTurns] of byAgentTurns) {
     let prior = Object.fromEntries(USAGE_FIELDS.map(field => [field, 0]));
-    let priorKnown = Object.fromEntries(USAGE_FIELDS.map(field => [field, true]));
+    let priorKnown = Object.fromEntries(USAGE_FIELDS.map(field => [field,
+      !validatedUsage.unverifiedBaselines.has(`${agentId}\0${field}`)]));
+    const initialBaselineVerified = USAGE_FIELDS.every(field => priorKnown[field]);
     for (let index = 0; index < agentTurns.length; index++) {
       const turn = agentTurns[index], key = `${agentId}\0${turn.turnId}`;
       const rows = boundaries.get(key) ?? [];
@@ -311,6 +350,10 @@ export function summarizeTurnUsage(run) {
         if (!priorKnown[field]) {
           complete = false;
           fields[field] = { status: 'unavailable', reason: 'prior-turn-boundary-missing' };
+          // This terminal boundary cannot recover the current turn's unknown
+          // delta, but it can anchor valid differences for later turns.
+          prior[field] = current;
+          priorKnown[field] = true;
           continue;
         }
         const delta = current - prior[field];
@@ -343,7 +386,9 @@ export function summarizeTurnUsage(run) {
       if (!complete) anyPartial = true;
       turns.push({ agentId, turnId: turn.turnId, status: complete ? 'complete' : 'partial',
         values, fields, baseline, derivation: { method: 'difference-cumulative-thread-boundaries',
-          initialBaseline: index === 0 ? 'verified-fresh-thread-zero' : 'prior-terminal-boundary',
+          initialBaseline: index === 0
+            ? (initialBaselineVerified ? 'verified-fresh-thread-zero' : 'unverified-source-baseline')
+            : 'prior-terminal-boundary',
           sourceObservations: source.sourceObservations } });
     }
   }

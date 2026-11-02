@@ -27,7 +27,7 @@ function wrapperCandidate(rootAgentId, threads) {
       contributingResponses: responses, responseCount: responses }])), threads };
 }
 function fixture({ parentId = null, childMode = false, agentId = thread,
-  baseline = [10, 2, 1, 1, 0], secret = false, source = null } = {}) {
+  baseline = [10, 2, 1, 1, 0], secret = false, source = null, version: sourceVersion = version } = {}) {
   const ids = childMode ? [turn1, turn2] : [turn1, turn2];
   const responseUsage = [counters(3, 2, 1, 1), counters(4, 1, 0, 0), counters(2, 3, 1, 1)];
   const turnIds = [ids[0], ids[0], ids[1]];
@@ -47,16 +47,20 @@ function fixture({ parentId = null, childMode = false, agentId = thread,
       ...(secret ? { input_text: 'PRIVATE PROMPT MUST NOT LEAK', raw_response: 'PRIVATE OUTPUT MUST NOT LEAK' } : {}) };
   });
   return { agentId, sessionId: session, parentId: childMode ? thread : parentId,
-    rootTurnIds: childMode ? [turn1] : [], version, sourceComplete: true, source, turns, records };
+    rootTurnIds: childMode ? [turn1] : [], version: sourceVersion, sourceComplete: true, source, turns, records };
 }
 
-test('returns only the exact recorded response accounting contract', () => {
+test('records provider version as provenance while exposing response accounting protocol', () => {
   assert.deepEqual(recordedUsageAccounting(version), {
     contract: 'codex-rollout-own-response-usage-v1', version,
     sourceRevision: 'd9151c94a70013f176ff370fa93da02734662e41',
     historyMode: 'recorded-response-sequence', counterScope: 'thread-owned-responses',
   });
-  assert.equal(recordedUsageAccounting('0.163.0-alpha.10.1'), null);
+  const next = recordedUsageAccounting('0.163.0-alpha.10.1');
+  assert.equal(next.contract, 'codex-rollout-own-response-usage-v1');
+  assert.equal(next.version, '0.163.0-alpha.10.1');
+  assert.equal(next.sourceRevision, undefined);
+  assert.equal(recordedUsageAccounting('not a version'), null);
 });
 
 test('constructs the canonical wrapper and binds it to its exact complete native run', () => {
@@ -89,7 +93,20 @@ test('constructs the canonical wrapper and binds it to its exact complete native
   run.turns[0].sourceLine++;
   assert.equal(projectRunRecordedUsage(run).reason, 'source-binding-unverified');
   assert.equal(projectRunRecordedUsage({ ...run, usage: {} }), null);
-  assert.equal(projectRunRecordedUsage({ ...run, source: { ...source, clientVersion: 'unknown' } }), null);
+  assert.equal(projectRunRecordedUsage({ ...run, source: { ...source, clientVersion: '0.163.0-alpha.10.1' } }).reason,
+    'source-binding-unverified');
+});
+
+test('derives and revalidates explicit response records for an unfamiliar observed version', () => {
+  const nextVersion = '0.164.9';
+  const source = { kind: 'native-rollout', nativeSessionId: thread, clientVersion: nextVersion,
+    fingerprintScope: 'source-snapshot', fingerprint: 'a'.repeat(64), bytes: 2048, fileBytes: 2048 };
+  const result = deriveRecordedThreadUsage(fixture({ source, version: nextVersion }));
+  assert.equal(result.status, 'complete');
+  assert.equal(result.version, nextVersion);
+  assert.equal(result.values.totalTokens, 15);
+  assert.equal(result.contract.sourceRevision, undefined);
+  assert.deepEqual(projectRecordedThreadUsage(structuredClone(result)), result);
 });
 
 test('derives summed response usage and nonzero resumed baseline, then revalidates the frozen projection', () => {
@@ -129,7 +146,7 @@ test('accepts child records only under a listed ancestor root turn', () => {
 test('rejects incomplete, malformed, duplicate, reordered, orphaned, and inconsistent records', () => {
   const cases = [
     [input => { input.sourceComplete = false; }, 'source-incomplete'],
-    [input => { input.version = 'unknown'; }, 'source-version-unsupported'],
+    [input => { input.version = 'not a version'; }, 'source-version-unsupported'],
     [input => { input.records[0].thread_id = session; }, 'response-record-invalid'],
     [input => { input.records[1].response_id = input.records[0].response_id; }, 'duplicate-response-id'],
     [input => { input.records[1].sourceLine = input.records[0].sourceLine; }, 'response-record-invalid'],

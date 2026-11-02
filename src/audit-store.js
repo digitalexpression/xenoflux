@@ -14,9 +14,17 @@ import { retainedAuditSelectionOptions } from './audit-selection.js';
 import { buildAuditReviewPacket, projectAuditReviewState } from './audit-review.js';
 import { buildAuditConsistency } from './audit-consistency.js';
 import { projectAuditSessionEvidence } from './audit-session-evidence.js';
+import { projectAuditFileInventory } from './audit-file-inventory.js';
+import { redactText } from './redact.js';
+import { normalizeSessionReplay } from './audit-session-replay.js';
+import { normalizeAuditCheckEvidence } from './audit-check-evidence.js';
+import { projectAuditWorkspacePatch } from './audit-workspace-patch.js';
 
 const KINDS = new Set(['audit-run', 'audit-comparison', 'audit-profile', 'audit-profile-comparison', 'audit-experiment-report', 'audit-series-report', 'audit-evaluation-report']);
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
+const MAX_REPLAY_BYTES = 32 * 1024 * 1024;
+const MAX_REPLAY_BODY_BYTES = 16 * 1024 * 1024;
+const MAX_REPLAY_EVENT_BODY_BYTES = 1024 * 1024;
 
 function validate(value) {
   if (!value || typeof value !== 'object' || value.schemaVersion !== 1 || !KINDS.has(value.kind))
@@ -44,6 +52,32 @@ function normalizeInvocationSummary(summary) {
 function normalizeRun(run, { comparison = false } = {}) {
   if (!run || typeof run !== 'object' || Array.isArray(run)) return run;
   let out = projectRunSkillSourceTimes(run);
+  if (run.workspace?.taskEnd?.patchContent !== undefined) {
+    const taskEnd = run.workspace.taskEnd;
+    const sourceBaseline = run.sourceWorkspace ?? run.source?.baseline ?? run.baseline ?? {};
+    const patchContent = projectAuditWorkspacePatch(taskEnd.patchContent, {
+      taskEndFingerprint: taskEnd.fingerprint, baselineFingerprint: taskEnd.baselineFingerprint, sourcePatchSha256: taskEnd.patchSha256,
+      ...(typeof (sourceBaseline.sourceCommit ?? sourceBaseline.commit) === 'string' ? { sourceBaselineCommit: sourceBaseline.sourceCommit ?? sourceBaseline.commit } : {}),
+      ...(typeof (sourceBaseline.sourceTree ?? sourceBaseline.tree) === 'string' ? { sourceBaselineTree: sourceBaseline.sourceTree ?? sourceBaseline.tree } : {}),
+    });
+    out = { ...out, workspace: { ...out.workspace, taskEnd: { ...out.workspace?.taskEnd, patchContent } } };
+  }
+  if (Object.hasOwn(run, 'checkEvidence')) {
+    const checkEvidence = normalizeAuditCheckEvidence(run, { includeContent: true });
+    out = { ...out };
+    if (checkEvidence) out.checkEvidence = checkEvidence;
+    else delete out.checkEvidence;
+  }
+  const inventoryRecords = [run.workspace?.taskEnd, run.taskEnd, run.outcome?.taskEndWorkspace].filter(record => record && Object.hasOwn(record, 'changeInventory'));
+  for (const record of inventoryRecords) {
+    const inventory = projectAuditFileInventory(record.changeInventory, {
+      ...(typeof record.baselineFingerprint === 'string' ? { postSetupFingerprint: record.baselineFingerprint } : {}),
+      ...(typeof record.fingerprint === 'string' ? { taskEndFingerprint: record.fingerprint } : {}),
+      ...(Number.isSafeInteger(record.changedFileCount) ? { changedFileCount: record.changedFileCount } : {}),
+    });
+    if (!inventory) throw new Error('Invalid or unbound workspace change inventory');
+  }
+  if (Object.hasOwn(run, 'sessionReplay')) out = { ...out, sessionReplay: validateSessionReplay(run.sessionReplay, { includeBodies: true }) };
   if (Object.hasOwn(run, 'sessionEvidence')) out = { ...out, sessionEvidence: projectAuditSessionEvidence(run) };
   if (comparison) {
     const comparisonEvidence = freezeAuditComparisonEvidence(out);
@@ -80,6 +114,167 @@ function normalizeRun(run, { comparison = false } = {}) {
     }
   }
   return out;
+}
+
+function safeReplayText(value) {
+  try { JSON.parse(value); return redactText(value, 'session-replay.json'); }
+  catch (error) {
+    if (error.message.startsWith('Unable to safely redact')) throw error;
+    return redactText(value);
+  }
+}
+
+function safeReplayMetadata(value) {
+  try { JSON.parse(value); return redactText(value, 'replay-metadata.json'); }
+  catch { return redactText(value); }
+}
+
+function validateSessionReplay(value, { includeBodies = false, redactBodies = false, redactMetadata = false } = {}) {
+  const replay = normalizeSessionReplay(value, { includeBodies: true });
+  if (Buffer.byteLength(JSON.stringify(replay)) > MAX_REPLAY_BYTES) throw new Error('Frozen session replay exceeds 32 MiB');
+  const eventIds = new Set(); let bodyBytes = 0;
+  if (redactMetadata) for (const session of replay.sessions) {
+    if (session.reason !== undefined) session.reason = safeReplayText(session.reason);
+    for (const limit of session.limits) if (limit.message !== undefined) limit.message = safeReplayText(limit.message);
+    for (const event of session.events) for (const key of ['label', 'status', 'bodyReason'])
+      if (typeof event[key] === 'string') event[key] = safeReplayText(event[key]);
+    for (const event of session.events) for (const key of ['callId', 'itemId'])
+      if (typeof event[key] === 'string') event[key] = safeReplayMetadata(event[key]);
+  }
+  for (const session of replay.sessions) for (const event of session.events) {
+    if (eventIds.has(event.id) || event.sessionId !== session.id || !Number.isSafeInteger(event.sourceLine) || event.sourceLine < 1)
+      throw new Error('Frozen session replay contains duplicate or invalid event references');
+    eventIds.add(event.id);
+    if (event.body !== undefined && event.body !== null) {
+      const bytes = Buffer.byteLength(event.body);
+      if (bytes > MAX_REPLAY_EVENT_BODY_BYTES) throw new Error('A frozen replay event body exceeds 1 MiB');
+      bodyBytes += bytes;
+      if (bodyBytes > MAX_REPLAY_BODY_BYTES) throw new Error('Frozen replay bodies exceed 16 MiB');
+      if (!['truncated', 'included'].includes(event.bodyStatus))
+        throw new Error('Frozen replay body has an invalid inclusion status');
+      if (redactBodies && event.bodyStatus === 'truncated') {
+        event.body = null;
+        event.bodyStatus = 'omitted';
+        event.bodyReason = 'truncated-content-not-safely-redactable';
+      } else if (redactBodies) {
+        const redacted = safeReplayText(event.body);
+        if (redacted !== event.body) {
+          event.body = redacted;
+          event.bodyBytes = Buffer.byteLength(redacted);
+          event.bodyReason = 'known-secret-patterns-redacted';
+        }
+      }
+      if (event.body !== null) {
+        const redactedBytes = Buffer.byteLength(event.body);
+        if (redactedBytes > MAX_REPLAY_EVENT_BODY_BYTES)
+          throw new Error('A redacted replay event body exceeds 1 MiB');
+      }
+    } else if (event.bodyStatus === 'included') throw new Error('Frozen replay event claims an included body that is missing');
+  }
+  let redactedBodyBytes = 0;
+  for (const session of replay.sessions) for (const event of session.events) {
+    if (event.body !== null) redactedBodyBytes += Buffer.byteLength(event.body);
+    if (event.relatedEventId && !eventIds.has(event.relatedEventId)) throw new Error('Frozen replay contains an unresolved event link');
+  }
+  if (redactedBodyBytes > MAX_REPLAY_BODY_BYTES) throw new Error('Redacted replay bodies exceed 16 MiB');
+  if (Buffer.byteLength(JSON.stringify(replay)) > MAX_REPLAY_BYTES) throw new Error('Redacted frozen session replay exceeds 32 MiB');
+  if (!includeBodies) for (const session of replay.sessions) for (const event of session.events) {
+    if (event.body !== undefined && event.body !== null) {
+      event.body = null;
+      event.bodyStatus = 'omitted';
+      event.bodyReason = 'Omitted from frozen export by choice.';
+    }
+  }
+  return normalizeSessionReplay(replay);
+}
+
+// Replay export follows only the documented frozen-report graph. Arbitrary
+// fields are never searched for report-shaped objects or replay-like payloads.
+function prepareReplayExport(value, includeReplayContent) {
+  let hasReplay = false, hasCheckEvidence = false, hasWorkspacePatch = false;
+  const projectRun = run => {
+    if (!run || typeof run !== 'object') return;
+    const patch = run.workspace?.taskEnd?.patchContent;
+    if (patch) {
+      if (patch.status === 'available') hasWorkspacePatch = true;
+      if (!includeReplayContent && patch.status === 'available') {
+        const { text, bytes, redacted, reason, ...metadata } = patch;
+        run.workspace = { ...run.workspace, taskEnd: { ...run.workspace.taskEnd,
+          patchContent: { ...metadata, status: 'omitted', reason: 'recorded-content-not-included' } } };
+      }
+    }
+    if (Object.hasOwn(run, 'sessionReplay')) {
+      hasReplay = true;
+      run.sessionReplay = validateSessionReplay(run.sessionReplay,
+        { includeBodies: includeReplayContent, redactBodies: includeReplayContent, redactMetadata: true });
+    }
+    if (Object.hasOwn(run, 'checkEvidence')) {
+      hasCheckEvidence = true;
+      const checkEvidence = normalizeAuditCheckEvidence(run, { includeContent: includeReplayContent });
+      if (checkEvidence) run.checkEvidence = checkEvidence;
+      else delete run.checkEvidence;
+    }
+  };
+  const projectComparison = comparison => {
+    if (comparison?.kind !== 'audit-comparison') return;
+    projectRun(comparison.left);
+    projectRun(comparison.right);
+    const taskEnd = comparison.comparison?.artifacts?.snapshots?.taskEnd;
+    for (const side of ['left', 'right']) {
+      const snapshot = taskEnd?.[side];
+      if (!snapshot?.patchContent) continue;
+      const run = comparison[side] ?? {};
+      const sourceBaseline = run.sourceWorkspace ?? run.source?.baseline ?? run.baseline ?? {};
+      const patch = projectAuditWorkspacePatch(snapshot.patchContent, {
+        taskEndFingerprint: snapshot.fingerprint, baselineFingerprint: snapshot.baselineFingerprint, sourcePatchSha256: snapshot.patchSha256,
+        ...(typeof (sourceBaseline.sourceCommit ?? sourceBaseline.commit) === 'string' ? { sourceBaselineCommit: sourceBaseline.sourceCommit ?? sourceBaseline.commit } : {}),
+        ...(typeof (sourceBaseline.sourceTree ?? sourceBaseline.tree) === 'string' ? { sourceBaselineTree: sourceBaseline.sourceTree ?? sourceBaseline.tree } : {}),
+      });
+      if (patch.status === 'available') hasWorkspacePatch = true;
+      if (!includeReplayContent && patch.status === 'available') {
+        const { text, bytes, redacted, reason, ...metadata } = patch;
+        snapshot.patchContent = { ...metadata, status: 'omitted', reason: 'recorded-content-not-included' };
+      } else snapshot.patchContent = patch;
+    }
+  };
+  const projectTrial = trial => {
+    for (const run of trial?.runs ?? []) projectRun(run);
+    for (const profile of trial?.profiles ?? []) projectRun(profile?.run);
+    for (const evaluation of trial?.reviewEvaluations ?? []) projectReport(evaluation?.report);
+  };
+  const projectReport = report => {
+    if (!report || typeof report !== 'object') return;
+    switch (report.kind) {
+      case 'audit-run': projectRun(report); break;
+      case 'audit-comparison': projectComparison(report); break;
+      case 'audit-experiment-report':
+        for (const run of report.runs ?? []) projectRun(run);
+        for (const comparison of report.comparisons ?? []) projectComparison(comparison);
+        break;
+      case 'audit-series-report':
+        for (const trial of report.trials ?? []) projectTrial(trial);
+        for (const comparison of report.comparisons ?? []) projectComparison(comparison);
+        break;
+      case 'audit-evaluation-report':
+        projectReport(report.subject);
+        projectReport(report.series);
+        if (report.subject && report.reviewPacket) {
+          const packet = buildAuditReviewPacket(report.subject);
+          const fingerprint = packet.evidenceFingerprint;
+          if (report.reviewPacket.evidenceFingerprint !== fingerprint
+            || report.source?.evidenceFingerprint !== fingerprint
+            || report.reviewHistory && report.reviewHistory.evidenceFingerprint !== fingerprint)
+            throw new Error('Recorded-content export would change reviewed evidence in this evaluation report. Keep recorded content only if it can be preserved unchanged, or review a sanitized exported packet. No files were written.');
+        }
+        break;
+    }
+  };
+  projectReport(value);
+  if (includeReplayContent && !hasReplay && !hasCheckEvidence && !hasWorkspacePatch)
+    throw new Error('--include-replay-content requires a captured session replay, check evidence, or task-end patch');
+  if (hasReplay || hasWorkspacePatch)
+    value.replayContentBoundary = includeReplayContent ? 'selected-redacted-replay-content' : 'replay-content-omitted';
+  return value;
 }
 function normalizeTrial(trial, depth = 0) {
   if (!trial || typeof trial !== 'object' || Array.isArray(trial)) return trial;
@@ -352,7 +547,7 @@ export function projectReportResourceProvenance(value, depth = 0) {
   return changed ? out : value;
 }
 
-export async function readAuditReport(path) {
+export async function readAuditReport(path, { expectedSha256 } = {}) {
   let handle;
   try {
     const requested = resolve(path);
@@ -372,6 +567,7 @@ export async function readAuditReport(path) {
     const bytes = buffer.subarray(0, offset);
     const after = await handle.stat();
     if (bytes.length !== stat.size || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw new Error('changed');
+    if (expectedSha256 !== undefined && createHash('sha256').update(bytes).digest('hex') !== expectedSha256) throw new Error('changed');
     return projectReportResourceProvenance(validate(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))));
   } catch (error) {
     if (error.message.startsWith('Unsupported frozen audit')) throw error;
@@ -387,12 +583,21 @@ async function removeOwned(path, identity) {
 }
 
 /** Create all output files exclusively; roll back only files created by this call. */
-export async function exportAuditReport(value, { output, format = 'json', includeContent = false } = {}) {
+export async function exportAuditReport(value, { output, format = 'json', includeContent = false, includeReplayContent = false } = {}) {
   validate(value);
   value = projectReportResourceProvenance(value);
   const setup = ['audit-profile', 'audit-profile-comparison'].includes(value.kind);
   if (includeContent && !setup) throw new Error('--include-content is supported only for profile setup exports');
+  if (includeReplayContent && setup) throw new Error('--include-replay-content is supported only for task replay exports');
+  if (!setup) value = projectReportResourceProvenance(value);
+  if (!setup) {
+    value = structuredClone(value);
+    value = prepareReplayExport(value, includeReplayContent);
+  }
   if (setup) {
+    const snapshots = value.kind === 'audit-profile' ? [value] : [value.left, value.right];
+    if (snapshots.some(snapshot => snapshot?.context?.includeSourceValues === true))
+      throw new Error('Export requires a sanitized setup snapshot; full source values are for local comparison.');
     value = structuredClone(value);
     const resource = row => {
       if (!row || typeof row !== 'object') return;
@@ -427,7 +632,8 @@ export async function exportAuditReport(value, { output, format = 'json', includ
   const json = JSON.stringify(value, null, 2) + '\n';
   if (Buffer.byteLength(json) > MAX_REPORT_BYTES) throw new Error('Frozen audit report exceeds the export size limit');
   const evidencePath = format === 'json' ? path : `${path}.audit.json`;
-  const writes = format === 'json' ? [[path, json]] : [[evidencePath, json], [path, renderAudit(value, { format: 'markdown' })]];
+  const keepTogether = `> Keep this file next to ${basename(evidencePath)}. Xenoflux reopens the saved report from that JSON file; this Markdown file is a readable copy.\n\n`;
+  const writes = format === 'json' ? [[path, json]] : [[evidencePath, json], [path, keepTogether + renderAudit(value, { format: 'markdown' })]];
   // Refuse collisions before creating anything; exclusive open also handles races.
   for (const [target] of writes) {
     try { await lstat(target); throw new Error('Audit export refuses to overwrite an existing file'); }

@@ -1,4 +1,5 @@
-import { mkdir, lstat, realpath, writeFile, rename, unlink, rmdir, stat } from 'node:fs/promises';
+import { mkdir, lstat, realpath, writeFile, rename, unlink, rmdir, stat, access } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
@@ -59,6 +60,21 @@ export async function launchPlan(store, name, terminalEnvironment = process.env,
     configurationChangedSinceRegistration: false,
     configurationSource: join(environment.home, 'config.toml'),
     desktopChanged: false };
+}
+
+/** Find the normal CLI command on PATH without running it. */
+export async function discoverCodexExecutable(environment = process.env) {
+  for (const directory of (typeof environment.PATH === 'string' ? environment.PATH : '').split(':').filter(path => path.startsWith('/'))) {
+    const candidate = join(directory, 'codex');
+    try {
+      const target = await realpath(candidate), info = await lstat(target);
+      if (info.isFile() && !info.isSymbolicLink()) {
+        await access(target, constants.X_OK);
+        return { executable: candidate, executableIdentity: JSON.stringify([info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]) };
+      }
+    } catch { /* continue through the existing PATH */ }
+  }
+  throw new Error('Codex executable is unavailable on PATH');
 }
 
 /** Launch only the explicitly bound native home. No profile materialization. */

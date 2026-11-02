@@ -29,6 +29,13 @@ function checkSource(value) {
 }
 
 async function resolveSource(store, argument) {
+  if (argument && typeof argument === 'object' && !Array.isArray(argument)) {
+    if (argument.kind === 'audit-evaluation-report')
+      return resolveEvaluation(argument, { kind: 'ui-evaluation', id: argument.id ?? null }, argument.id ?? null, null);
+    const report = checkSource(argument);
+    return { subject: report, sourceRef: { kind: 'ui-report', id: report.id ?? null, reportKind: report.kind },
+      previousState: null, legacyReviews: null, revision: 1, parentEvaluationId: null };
+  }
   if (isUUID(argument)) {
     const current = await readAuditRecord(store, argument);
     if (!current.finalized) throw new Error('Review source must have a finalized saved report');
@@ -72,13 +79,15 @@ function sourceExitCode(subject) {
   return auditExitCode(subject);
 }
 
-/** Create an immutable evaluation packet, or a new revision with a typed review submission. */
-export async function evaluateAuditEvidence(store, sourceArgument, reviewPath) {
+/** Validate a review submission against frozen evidence without writing an evaluation. */
+export async function previewAuditEvidence(store, sourceArgument, submission) {
   if (!store || typeof store.directory !== 'string') throw new Error('Audit experiment store is unavailable');
-  if (typeof sourceArgument !== 'string' || !sourceArgument.trim()) throw new Error('Review requires a source report path or stored audit UUID');
+  if (!(sourceArgument && typeof sourceArgument === 'object')
+    && (typeof sourceArgument !== 'string' || !sourceArgument.trim()))
+    throw new Error('Review requires a source report path, stored audit UUID, or frozen report');
   const resolved = await resolveSource(store, sourceArgument);
   let input;
-  if (reviewPath !== undefined) input = await readAuditInput(reviewPath);
+  if (submission !== undefined) input = typeof submission === 'string' ? await readAuditInput(submission) : submission;
   // Bind all attachments to the same canonical resource projection used by
   // the first review packet, including packets saved with `audit evaluate`.
   resolved.subject = projectReportResourceProvenance(resolved.subject);
@@ -96,7 +105,7 @@ export async function evaluateAuditEvidence(store, sourceArgument, reviewPath) {
   if (resolved.expectedFingerprint && resolved.expectedFingerprint !== packet.evidenceFingerprint)
     throw new Error('Saved review source fingerprint does not match its original evidence');
   let state = resolved.previousState;
-  if (reviewPath !== undefined) {
+  if (submission !== undefined) {
     if (input?.kind !== 'xfx-audit-session-evidence') state = applyAuditReviewSubmission(resolved.subject, state, input);
   }
   const projectedState = projectAuditReviewState(resolved.subject, state);
@@ -109,10 +118,19 @@ export async function evaluateAuditEvidence(store, sourceArgument, reviewPath) {
     exitCode: sourceExitCode(resolved.subject), reviewMethod: reviewMethod(projectedState),
     ...(resolved.legacyReviews ? { legacyReviews: resolved.legacyReviews } : {}),
   };
+  return { report, packet, reviewState: projectedState };
+}
+
+/** Create an immutable evaluation packet, or a new revision with a typed review submission. */
+export async function evaluateAuditEvidence(store, sourceArgument, reviewPath) {
+  const { report } = await previewAuditEvidence(store, sourceArgument, reviewPath);
+  const subject = report.subject;
+  const packet = report.reviewPacket;
+  const state = report.reviewHistory;
   const created = await createAuditEvaluation(store, {
-    source: { kind: 'xfx-audit-review-source', subject: resolved.subject,
-      evidenceFingerprint: packet.evidenceFingerprint, origin: resolved.sourceRef,
-      ...(resolved.legacyReviews ? { legacyReviews: resolved.legacyReviews } : {}) },
+    source: { kind: 'xfx-audit-review-source', subject,
+      evidenceFingerprint: packet.evidenceFingerprint, origin: report.source,
+      ...(report.legacyReviews ? { legacyReviews: report.legacyReviews } : {}) },
     reviews: state,
     report,
   });

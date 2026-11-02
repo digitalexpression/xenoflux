@@ -87,7 +87,7 @@ async function rows(database, { limit, archived, query, threadId, turns = false 
     if (!requiredColumns.isSubsetOf(new Set(columns.map(item => item.name))))
       throw new Error('Native history database has an unsupported thread schema');
     const rollout = columns.some(item => item.name === 'rollout_path') ? ', substr(rollout_path, 1, 4097) AS rollout_path' : '';
-    const lineage = turns && threadId && columns.some(item => item.name === 'source')
+    const nativeSource = columns.some(item => item.name === 'source')
       ? ', substr(source, 1, 8193) AS native_source' : '';
     const clauses = threadId ? ['id = ?'] : archived ? [] : ['archived = 0'];
     const params = threadId ? [threadId] : [];
@@ -99,8 +99,8 @@ async function rows(database, { limit, archived, query, threadId, turns = false 
       clauses.push('instr(xfx_fold(title), ?) > 0');
       params.push(fold(query));
     }
-    const result = db.prepare(`SELECT substr(id, 1, 37) AS id, substr(cwd, 1, 4097) AS cwd, substr(title, 1, 501) AS title, created_at, updated_at, archived${rollout}${lineage} FROM threads${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT ?`).all(...params, threadId ? 1 : limit + 1);
-    if (lineage) for (const row of result) {
+    const result = db.prepare(`SELECT substr(id, 1, 37) AS id, substr(cwd, 1, 4097) AS cwd, substr(title, 1, 501) AS title, created_at, updated_at, archived${rollout}${nativeSource} FROM threads${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT ?`).all(...params, threadId ? 1 : limit + 1);
+    if (turns && threadId && nativeSource) for (const row of result) {
       const parent = nativeChildParent(row.native_source, row.id);
       if (parent && !parent.error && !db.prepare('SELECT id FROM threads WHERE id = ? LIMIT 1').get(parent.id))
         parent.error = 'The native child parent is absent from the selected index.';
@@ -167,9 +167,10 @@ async function entry(row, source) {
     || !Number.isSafeInteger(row.created_at) || row.created_at < 0 || !Number.isSafeInteger(row.updated_at) || row.updated_at < 0 || ![0,1].includes(row.archived)) return null;
   const title = cleanTitle(row.title);
   const rolloutPath = await safeRolloutPath(source.home, row.rollout_path);
+  const indexSource = ['cli', 'vscode', 'exec'].includes(row.native_source) ? row.native_source : undefined;
   return { id: row.id, profileId: source.profileId, profileName: source.profileName, environmentId: source.environmentId,
     home: source.home, cwd: row.cwd, ...title, createdAt: timestamp(row.created_at), updatedAt: timestamp(row.updated_at),
-    archived: row.archived === 1, ...(rolloutPath ? { rolloutPath } : {}), source: 'native-codex-state_5' };
+    archived: row.archived === 1, ...(rolloutPath ? { rolloutPath } : {}), ...(indexSource ? { indexSource } : {}), source: 'native-codex-state_5' };
 }
 
 function report(home) {

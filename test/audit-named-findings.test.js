@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bookingLedgerPair } from '../test-support/audit-explanation/booking-ledger.js';
 import { buildAuditExplanation, freezeAuditComparisonEvidence } from '../src/audit-explanation.js';
+import { presentEvidence } from '../src/audit-presentation.js';
 import { compareAuditRuns, renderAudit } from '../src/audit-report.js';
 import { compactAuditTrial } from '../src/audit-statistics.js';
 import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
@@ -14,6 +15,27 @@ function action(run, kind, targets, sourceLine, { subjects = [], exitCode = 0, c
     targets, subjects, agentId: run.agents[0].id, turnId: run.turns[0].turnId, callId, sourceLine, resultSourceLine: sourceLine + 1, resultIndex: null,
     resultScope: 'action', invocationIndex: 0, exitCode, sourceFingerprint: run.agents[0].source.fingerprint };
 }
+
+test('paired evidence reports omitted steps and unresolved action references', () => {
+  const pair = bookingLedgerPair();
+  pair[0].actions = Array.from({ length: 81 }, (_, index) => action(pair[0], 'visible-test', ['test/math.test.js'], 10 + index,
+    { callId: `visible-test-${index}` }));
+  pair[1].actions = [];
+  const explanation = buildAuditExplanation(...pair);
+  const finding = explanation.findings.find(row => row.rule === 'named-visible-test-execution');
+  const rendered = presentEvidence({ left: pair[0], right: pair[1], comparison: { explanation } })
+    .findings.find(row => row.id === finding.id);
+  assert.equal(rendered.counts.a, 81);
+  assert.equal(rendered.columns[0].steps.length, 80);
+  assert.equal(rendered.columns[0].meta, 'Showing first 80 of 81 referenced steps; 1 step not shown');
+  assert.equal(rendered.columns[1].meta, 'No action steps referenced');
+
+  finding.left.evidenceRefs = ['unavailable-action-reference'];
+  const unknown = presentEvidence({ left: pair[0], right: pair[1], comparison: { explanation } })
+    .findings.find(row => row.id === finding.id);
+  assert.equal(unknown.counts.a, 0);
+  assert.equal(unknown.columns[0].meta, 'No steps shown; cited action references are unavailable · 1 cited action reference unavailable');
+});
 
 test('named action findings are turn-scoped, line-backed, status-bound, and survive compaction/export', async () => {
   const pair = bookingLedgerPair();
@@ -58,16 +80,15 @@ test('named action findings are turn-scoped, line-backed, status-bound, and surv
     assert.match(text, /configured nativeConfig/);
     assert.match(text, /native startup/);
     assert.match(text, /observed per-turn controls/);
-    assert.match(text, /maximum-safe-integer/);
-    assert.match(text, /result line/);
-    assert.match(text, /Named visible-test execution/);
+    assert.match(text, /Session replay/);
+    assert.doesNotMatch(text, /Behavioral findings|Paired action evidence|Named visible-test execution/);
   }
   const directory = await mkdtemp(join(tmpdir(), 'xfx-named-actions-'));
   try {
     const receipt = await exportAuditReport(report, { output: join(directory, 'comparison.json') });
     const reopened = await readAuditReport(receipt.evidencePath);
     assert.deepEqual(reopened.comparison.explanation, report.comparison.explanation);
-    assert.match(renderAudit(reopened, { format: 'markdown' }).replaceAll('\\-', '-'), /maximum-safe-integer/);
+    assert.doesNotMatch(renderAudit(reopened, { format: 'markdown' }), /Behavioral findings|Paired action evidence/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

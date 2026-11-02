@@ -1,8 +1,9 @@
 # Profile creation and copy policy
 
 Accepted: 2026-10-02. Scope: profile creation, comparison, copy, and their user flows.
-Audience: developers and reviewers. This is the development and review contract
-for the released 1.0.0 behavior. See the [user copy guide](../user/ADVANCED-COPY.md)
+Audience: developers and reviewers. This is the current development and review
+contract, originally established for 1.0.0. The 2026-11-02 major-release policy
+removes the requirement to keep older recovery readers or provide migrations. See the [user copy guide](../user/ADVANCED-COPY.md)
 for commands and the evidence boundary below for historical verification.
 
 ## Purpose
@@ -80,8 +81,11 @@ bounded evidence and limitations.
 7. **Keep the flow and recovery small.** Reuse the existing preview, transaction,
    conflict, journal, undo, and recovery mechanisms. Revalidate reviewed inputs before
    applying. Undo must restore replaced and removed package files and relevant modes,
-   and refuse to overwrite subsequent user edits. Preserve existing recovery records
-   and compatibility with their readers. Manual setup is outside copy undo. End with
+   and refuse to overwrite subsequent user edits. Preserve original recovery records.
+   Recovery and Undo must work for supported current-format operations; older journal
+   readers and migration are not required under the [major-release policy](AUDIT-GOAL.md#evolution-and-provider-version-policy).
+   Refuse unsupported old records clearly without changing them or guessing recovery.
+   Manual setup is outside copy undo. End with
    a concise result and conditional setup guide, not a persistent todo database.
    Preparation, copying, sign-in, and activation remain distinct outcomes; a later
    setup failure must not silently discard a completed copy.

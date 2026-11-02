@@ -10,6 +10,8 @@ const onlyKeys = (value, keys, label) => {
 };
 const hash = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 const sourceDigest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export const auditReplayEvidenceRef = (runId, sessionId, eventId) =>
+  `replay:${encodeURIComponent(JSON.stringify([runId, sessionId, eventId]))}`;
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (object(value)) return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
@@ -56,6 +58,12 @@ function evidenceFor(subject) {
       const id = action?.id ?? action?.callId;
       if (typeof id === 'string') add(`action:${run.id}:${id}`, run.id);
       for (const ref of list(action?.evidenceRefs)) addRunRef(ref, run.id);
+    }
+    for (const session of list(run.sessionReplay?.sessions)) {
+      for (const event of list(session?.events)) {
+        if (typeof session.id === 'string' && typeof event?.id === 'string')
+          add(auditReplayEvidenceRef(run.id, session.id, event.id), run.id);
+      }
     }
     for (const check of [...list(run.checks), ...list(run.outcome?.checks)]) {
       if (typeof check?.name === 'string') add(`check:${run.id}:${check.name}`, run.id);

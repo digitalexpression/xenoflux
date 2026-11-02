@@ -15,6 +15,7 @@ import { buildAdvancedCopy, selectAdvancedComponents, validateAdvancedSelection,
   writeAdvanced, matchesAdvanced, snapshotAdvanced, cleanupAdvancedDirectories, matchesAdvancedPackages,
   applyAdvancedPackageDirectories } from './advanced-copy.js';
 export { validateAdvancedSelection };
+export { fingerprintAdvancedSelection as fingerprintCopySource } from './advanced-copy.js';
 
 
 export const COPY_COMPONENTS = Object.freeze(['config', 'instructions', 'agents']);
@@ -37,6 +38,19 @@ const bytes = value => Buffer.byteLength(value ?? '');
 function overlap(a, b) {
   const inside = (x, y) => { const r = relative(x, y); return !r || (!r.startsWith('../') && r !== '..' && !isAbsolute(r)); };
   return inside(a, b) || inside(b, a);
+}
+function targetResourcePaths(home, paths = []) {
+  return [...new Set(paths.filter(value => typeof value === 'string').map(path => join(home, path)))];
+}
+function packageResourcePaths(packages = []) {
+  return packages.flatMap(pkg => [pkg.path, ...[...(pkg.before?.directories ?? []), ...(pkg.after?.directories ?? [])]
+    .map(directory => directory.path)]);
+}
+function clientScope(journal, targetOnly = false) {
+  const homes = targetOnly ? [journal.target?.home] : [journal.source?.home, journal.target?.home];
+  const relativePaths = [...(journal.files ?? []).map(file => file.path), ...packageResourcePaths(journal.packages)];
+  return { resourcePaths: [...new Set(homes.filter(value => typeof value === 'string')
+    .flatMap(home => targetResourcePaths(home, relativePaths)))] };
 }
 function selection(include) {
   const list = include === undefined ? [...COPY_COMPONENTS] : typeof include === 'string' ? include.split(',').map(s => s.trim()) : include;
@@ -153,7 +167,7 @@ async function build(store, sourceName, targetName, { include, selection: select
     if (overlap(source.home, target.home) || overlap(store.directory, target.home) || overlap(store.directory, source.home))
       throw new Error('Source, destination and backup storage must be separate');
     const built = await buildAdvancedCopy(store, sourceName, targetName, selectedItems, { defaultUserHome });
-    return { report: built.report, plan: { source, target, components: ['advanced'], selection: selectedItems,
+    return { report: built.report, plan: { source, target, components: ['advanced'], selection: selectedItems, sourceFingerprints: built.plan.sourceFingerprints,
       files: built.plan.files.filter(f => f.before === null || f.after === null || !f.before.equals(f.after) || f.beforeMode !== f.afterMode),
       packages:built.plan.packages??[], createdDirectories: built.plan.createdDirectories ?? [], defaultUserHome } };
   }
@@ -179,7 +193,7 @@ export async function planCopy(store, source, target, options = {}) { return (aw
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
 }
-async function locks(store, journal, preflight, action, { runtime = createDesktopRuntime(), lockPath = globalLock(), isAlive = alive, signal } = {}, recovering = false) {
+async function locks(store, journal, preflight, action, { runtime = createDesktopRuntime(), lockPath = globalLock(), isAlive = alive, signal } = {}, recovering = false, targetOnly = false) {
   const owner = { kind: 'native-copy', host: hostname(), pid: process.pid, runId: journal.id, storePath: store.directory };
   const paths = [lockPath + '.operation', lockPath, ...new Set([journal.source.root, journal.target.root].filter(Boolean).map(p => join(p, '.run-lock')))];
   const acquired = [];
@@ -199,8 +213,9 @@ async function locks(store, journal, preflight, action, { runtime = createDeskto
     if (signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
     if (needsClients !== false) {
       const cliExecutables = [...new Set([journal.source.executable, journal.target.executable].filter(Boolean))];
+      const scope = clientScope(journal, targetOnly);
       await runtime.prepareClients?.({ cliExecutables, includeDesktop: true });
-      await runtime.assertIdle({ cliExecutables });
+      await runtime.assertIdle({ cliExecutables, ...scope });
     }
     if (signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
     return await action(runtime);
@@ -273,14 +288,18 @@ async function restoreFiles(store, j, path, { allowBoth = false, runtime, checkp
   await matchesAdvancedPackages(j.target.home,j.packages,'after',allowBoth);
   for (const f of j.files) await matchesFile(j.target.home, f, payloadDirectory, 'after', allowBoth);
   for (const f of [...j.files].reverse()) {
-    await runtime.assertIdle({ cliExecutables: [j.target.executable] });
+    await runtime.assertIdle({ cliExecutables: [j.target.executable], resourcePaths: targetResourcePaths(j.target.home, [f.path]) });
     await validateTarget(store, j);
     await matchesFile(j.target.home, f, payloadDirectory, 'after', allowBoth);
     await writeSetting(j.target.home, f, payloadDirectory, true);
     await checkpoint('undo-file', f.path);
   }
+  if (j.packages?.length) await runtime.assertIdle({ cliExecutables: [j.target.executable],
+    resourcePaths: targetResourcePaths(j.target.home, packageResourcePaths(j.packages)) });
   await applyAdvancedPackageDirectories(j.target.home,j.packages,true);
   await matchesAdvancedPackages(j.target.home,j.packages,'before');
+  if (j.createdDirectories?.length) await runtime.assertIdle({ cliExecutables: [j.target.executable],
+    resourcePaths: targetResourcePaths(j.target.home, j.createdDirectories) });
   await cleanupAdvancedDirectories(j.target.home, j.createdDirectories);
   j.phase = 'undone'; j.undoneAt = new Date().toISOString(); await record(path, j);
 }
@@ -293,6 +312,10 @@ async function clearPending(store, id) {
 export async function applyCopy(store, source, target, options = {}) {
   const initial = await build(store, source, target, options);
   if (options.expectedHash && initial.report.hash !== options.expectedHash) throw new Error('Copy preview changed; preview again');
+  if (options.expectedSourceFingerprints) {
+    const current = initial.plan.sourceFingerprints ?? {};
+    if (options.selection.some(id => current[id] !== options.expectedSourceFingerprints[id])) throw new Error('Copy source changed; preview again');
+  }
   const packageChanges=(initial.plan.packages??[]).some(p=>JSON.stringify(p.before)!==JSON.stringify(p.after));
   if (!initial.plan.files.length&&!packageChanges) return { ...initial.report, status: 'unchanged' };
   const j = { schemaVersion: 3, kind: 'native-settings-copy', id: randomUUID(), storePath: store.directory,
@@ -302,6 +325,10 @@ export async function applyCopy(store, source, target, options = {}) {
     if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
     const current = await build(store, source, target, options);
     if (current.report.hash !== initial.report.hash) throw new Error('Copy inputs changed; preview again');
+    if (options.expectedSourceFingerprints) {
+      const fingerprints = current.plan.sourceFingerprints ?? {};
+      if (options.selection.some(id => fingerprints[id] !== options.expectedSourceFingerprints[id])) throw new Error('Copy source changed; preview again');
+    }
   };
   return locks(store, j, verifyInputs, async runtime => {
     await verifyInputs();
@@ -318,12 +345,15 @@ export async function applyCopy(store, source, target, options = {}) {
       await matchesAdvancedPackages(j.target.home,j.packages,'before');
       for (const f of j.files) {
         if (options.signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
-        await runtime.assertIdle({ cliExecutables: [j.target.executable] });
+        await runtime.assertIdle({ cliExecutables: [j.target.executable],
+          resourcePaths: targetResourcePaths(j.target.home, [f.path]) });
         await validateTarget(store, j);
         await matchesFile(j.target.home, f, payloadDirectory, 'before');
         await writeSetting(j.target.home, f, payloadDirectory, false);
         await options.checkpoint?.('copy-file', f.path);
       }
+      if (j.packages?.length) await runtime.assertIdle({ cliExecutables: [j.target.executable],
+        resourcePaths: targetResourcePaths(j.target.home, packageResourcePaths(j.packages)) });
       await applyAdvancedPackageDirectories(j.target.home,j.packages,false);
       await matchesAdvancedPackages(j.target.home,j.packages,'after');
       j.phase = 'applied'; j.appliedAt = new Date().toISOString(); await record(path, j);
@@ -387,5 +417,5 @@ export async function undoCopy(store, id, options = {}) {
     }
     await clearPending(store, j.id);
     return { status: 'undone', id: j.id, target: preview.target, historyChanged: false };
-  }, options, true);
+  }, options, true, true);
 }

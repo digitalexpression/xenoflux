@@ -27,8 +27,52 @@ for public sharing. Setup exports omit source text by default. Use
 to explicitly retain the selected redacted text and readable diffs. Both modes use
 private file permissions and may retain paths/metadata; review them before sharing.
 Neither is an automatic public-publication sanitizer.
-Run reports continue to omit raw prompts, tool arguments/results and transcripts.
+Local session inspection can show recorded replay messages and tool content.
+Exports omit replay bodies by default; `--include-replay-content` explicitly
+includes available bodies with known secret patterns redacted.
 No copying, installation, activation or memory-content migration occurs.
+
+### Session replay in the current source build
+
+New xfx runs save a bounded replay at their completion boundary. Reopening uses
+that snapshot, including an explicit unavailable result when capture failed;
+later native activity is not silently added. Older run records and direct-session
+inspection reconstruct replay in memory, with a read-time derivation notice for
+older runs. Export freezes that selected evidence without rewriting its sources.
+The local report provides independent session trees, a timeline on an elapsed
+scale rooted separately on each side, and an event inspector with fingerprint
+and source-line references. Recorded child ownership is required; unavailable
+children and incomplete discovery remain visible. These spans are not active
+working time, and concurrent child durations are never summed into a total.
+
+Replay exports preserve event IDs, call/result links, session relationships and
+omissions without access to native histories. To retain available message and
+tool bodies as well:
+
+```sh
+xfx audit export --profile Default --id NATIVE_UUID \
+  --include-replay-content --format markdown --output replay.md
+```
+
+The existing native reader bounds each source at 32 MiB and each record at 1 MiB.
+Replay retains at most 1 MiB per event body, 16 MiB of bodies per workflow and
+10,000 events across that workflow; clipping and skipped records are disclosed.
+New run reports target 12 MiB including replay and omit additional bodies with
+explicit reasons when needed. Child discovery admits at most 100 children through
+depth 4, with an index scan budget of 250,000 rows or 2.5 seconds. When an xfx
+run's temporary index has been removed, retained native actor observations identify
+candidates; same-home child headers and owned turns must still corroborate them.
+That fallback remains partial because it cannot rule out additional children.
+Frozen JSON is limited to 64 MiB. Content may still contain private prompts,
+code, outputs and paths after known-secret redaction. Private internal reasoning
+is never replay content. Truncated bodies are omitted from exports because a
+partial structured value cannot be reliably redacted. Older exports open with their original evidence and
+explicitly lack replay if it was not captured.
+
+Existing reviews remain bound to their original evidence. Export refuses a
+body-omission or redaction change that would invalidate a reviewed replay's
+fingerprint, before writing any files. Review a sanitized exported packet when
+you need a shareable reviewed artifact; fingerprints are never silently rebound.
 
 Audit discovery is independent of profile creation and copying. A resource can appear in the audit even when Xenoflux cannot copy, create, enable, or launch it. Discovery covers relevant profile/native-home and user roots, project roots, system/admin resources, bundled resources, and plugin resources where supported. A filesystem or manifest entry proves presence only, not advertisement, loading, invocation, or use.
 
@@ -340,7 +384,7 @@ Comparisons show observations and deltas, not causal proof that one setting prod
 
 ## Exit status
 
-Successful inspection with complete requested evidence exits 0. Invalid input or a missing selection exits 1; partial or unavailable evidence exits 2; a recorded-control expectation mismatch exits 3 when the required evidence is complete. An incomplete side takes precedence over a missing other side. Historical skill, agent, outcome, and usage gaps commonly produce exit 2 even when useful observations are present. Export can succeed in creating its files while retaining that evidence exit status. `--json` selects structured stdout; export `--format` selects `json` or `markdown`.
+Successful inspection with complete requested evidence exits 0. Invalid input or a missing selection exits 1; partial or unavailable evidence exits 2; a recorded-control expectation mismatch exits 3 when the required evidence is complete. An invalid or missing selection takes precedence over partial evidence on the other side. Historical skill, agent, outcome, and usage gaps commonly produce exit 2 even when useful observations are present. Export can succeed in creating its files while retaining that evidence exit status. `--json` selects structured stdout; export `--format` selects `json` or `markdown`.
 
 ## Run a controlled experiment
 
@@ -435,7 +479,9 @@ a source you trust. A profile entry can also be a string name, or an object with
 
 `nativeConfig` applies a narrow set of native `-c` overrides to this invocation
 without changing the saved profile: `model`, `model_reasoning_effort`,
-`plan_mode_reasoning_effort`, and `forced_login_method`. For example:
+`plan_mode_reasoning_effort`, `forced_login_method`, and `agents.max_depth` (1–4).
+The depth override applies only to the selected run; actual child availability
+and settings remain separately observed. For example:
 
 ```json
 {
@@ -608,22 +654,34 @@ coverage remains visible; a complete observed stream does not establish a
 whole-workflow token total by itself. Parent and child counters remain visible
 separately, and cache/reasoning subsets are not added to other token categories.
 
-New fresh paginated captures on the tested native version can also report a
-`usage.workflow` total under a verified, version-pinned accounting contract.
-The [public acceptance summary](../developer/AUDIT-ACCEPTANCE.md) describes the
-bounded source evidence for these threads accumulating their own response usage
-and paginated children starting independent counters. `last` on the tested version is the
-latest response's usage; `total` is cumulative thread usage. The audit sums each
-owned thread's final cumulative field once only after complete tree/turn/usage
-capture and clean continuity. Missing fields remain null with contributing-agent
-counts; overflow, inconsistent/context-saturated counters and unknown ownership
-block the affected total. Reports, side-by-side comparisons and repeated-trial
-statistics retain this scope and field missingness through frozen exports.
+Fresh paginated captures can report a `usage.workflow` total when the retained
+protocol evidence establishes ownership, counter baselines and complete captured
+usage. The observed provider version is provenance, not an eligibility list.
+Supported `thread/tokenUsage/updated` snapshots must have consistent, ordered
+cumulative counters. Each actor's first total must match its first response
+(`last`) counter before a zero starting baseline can be used. Missing baseline
+fields stay unknown; inherited or inconsistent counters cannot become a workflow
+sum. A new child session alone does not prove its counters started at zero.
+The [public acceptance summary](../developer/AUDIT-ACCEPTANCE.md) records historical
+source evidence; it does not certify every future provider behavior.
+
+The audit counts each owned thread's final cumulative field once, subject to
+complete tree/turn/usage evidence and clean continuity. Missing fields remain
+null with contributing-agent counts. Overflow, context-saturated counters and
+unknown ownership block affected totals. These are captured-session totals,
+not billed cost. Exhaustive actor discovery is a separate claim: new xfx captures
+retain a bounded child-index manifest after the owned process group stops and
+before temporary state is removed. Only matching captured actors, indexed links
+and verified replay sessions establish completeness within that capture boundary.
+Missing indexes, unknown lineage metadata, read limits and inaccessible children
+remain partial. Frozen export/reopen retains that scope; older reports never gain
+missing discovery proof merely by being reopened.
 
 The same verified captures also report `usage.turns`: a whole-turn field is the
 terminal cumulative counter minus the previous turn's terminal counter for that
-owned thread. The first turn uses a zero baseline only under the verified fresh
-thread contract. This includes multiple responses in one turn without adding
+owned thread. The first turn uses a zero baseline only when the first source counters
+establish it. If that baseline is unknown, later turns may still use verified
+prior terminal counters. This includes multiple responses in one turn without adding
 cumulative snapshots or treating `last` as the turn total. Missing boundaries,
 out-of-order turns, resets, incomplete capture and invalid subsets leave affected
 fields unavailable. Reports retain the baseline, derivation and source references.
@@ -631,8 +689,8 @@ Comparisons pair only unique agent roles and recorded turn ordinals; ambiguous
 agent mappings stay unpaired. Frozen summaries disclose omitted detail and keep
 their precomputed values rather than deriving new totals from truncated evidence.
 
-Development source also supports `usage.recorded` for historical native
-`0.163.0-alpha.10.2` rollouts containing explicit response-usage records. It
+Development source also supports `usage.recorded` for native rollouts containing
+the supported explicit response-usage record format, regardless of provider version. It
 validates response, thread, session and turn identities, terminal markers,
 per-turn response sums and cumulative thread continuity. Response identifiers
 are retained as hashes; prompts, outputs and instruction bodies are excluded.
@@ -643,14 +701,14 @@ and does not resume a client.
 
 Recorded totals cover the validated response records in the selected threads;
 they do not establish exhaustive workflow usage or provider billing. Unsupported
-versions, missing fields, duplicate response identities, inconsistent counters,
+record semantics, missing fields, duplicate response identities, inconsistent counters,
 incomplete source files or missing terminal evidence leave them unavailable.
 Reports and comparisons show this scope separately from fresh-thread accounting.
 Frozen JSON/Markdown and bounded trial evidence retain revalidation inputs;
 omitting required record detail makes affected recorded totals unavailable.
 
 Legacy child forks can inherit a parent usage baseline. Historical imports,
-unsupported versions, truncated evidence, incomplete trees and unverified fresh
+unsupported accounting semantics, truncated evidence, incomplete trees and unverified fresh
 history therefore do not acquire a workflow total. Existing immutable receipts
 are not upgraded automatically. The scope is captured workflow agents, excluding
 opaque external processes, model calls inside MCP servers/plugins and provider
@@ -1125,11 +1183,15 @@ when that detailed evidence needs to be available offline.
 ### Compare consistency across repeated runs
 
 Scheduled xfx series now include a consistency summary before the detailed trial
-evidence. It follows the same reading order as a single comparison: conditions,
-behavioral findings, paired action evidence, verification, time/tokens, then
-outcomes and code changes. The summary shows which ordered left/right behaviors
-recurred, which contradicted earlier observations, how many pairs support each
-finding, and which compatible named-check outcomes accompanied those behaviors.
+evidence. The current CLI series renderer retains a findings-based consistency
+summary and paired outcomes; it has not been converted to the local app's session
+replay. Its summary shows which ordered left/right findings recur, which
+contradict earlier observations, how many pairs support each finding, and which
+compatible named-check outcomes accompanied those findings. The app's task
+comparison instead prioritizes recorded session replay, with actual checks,
+responses, measurements and coverage limits shown as separate evidence. Do not
+read the CLI series presentation as a product-wide requirement for generic
+behavioral findings.
 
 For tasks started directly in Codex CLI or Desktop, select explicit pairs in a
 cohort file. Left and right must refer to the same two profile identities across
@@ -1209,6 +1271,22 @@ The association between a behavior pattern and an outcome is descriptive. It doe
 not prove that the profile change caused that outcome, establish statistical
 significance, or make elapsed time/token counts measures of quality. Supplemental
 checks and reviewer judgments remain distinguishable from original check failures.
+
+### Captured task-end patch content
+
+New xfx workspace captures can retain a redacted text patch, limited to 256 KiB
+per side, bound to the source baseline, post-setup fingerprint and task-end
+snapshot. The patch compares the source baseline to the captured workspace and
+may include setup changes. It does not capture ignored file contents or unchanged
+source files. Binary/oversized content and after-process fallback timing remain
+explicit; earlier reports retain unavailable patch states.
+
+The normal export omits patch text. `--include-replay-content` selects retained
+redacted patch text as well as replay and check content, in both Markdown and JSON.
+No imported report path is followed to fetch missing code. Source-free review can
+cite the task-end workspace fingerprint and inspect included text. Reviews stay
+bound to the exact exported projection; exports that would strip reviewed text
+are refused. See the [app guide](APP.md#inspect-captured-code-changes) for the UI.
 
 ### Review either audit entry path
 

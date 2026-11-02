@@ -9,6 +9,21 @@ The stable npm tag is `latest`. Publication and changes to installed user state
 require the applicable explicit request; building a bundle or passing checks
 does not authorize either action.
 
+## UI major release
+
+The next UI release targets **3.0.0**, superseding the proposed 2.2.0 release.
+Use 3.0 prerelease versions for newly prepared candidates; update package and
+lockfile versions together. Retained 2.2.0 candidate branches/bundles keep their
+identities as historical development evidence; do not rename or relabel them as
+3.0 verification. The [3.0 draft](RELEASE-3.0.0.md) tracks readiness.
+
+Breaking changes, legacy removal and cleanup are allowed. Release notes must
+state removed commands/features/formats and any fresh-start requirement.
+Migration tools, compatibility layers and support for previous formats are not
+release gates. Preserve original user data and historical artifacts, and verify
+safe behavior for the new contract. The [goal](AUDIT-GOAL.md#evolution-and-provider-version-policy)
+owns this policy; this procedure does not reintroduce compatibility obligations.
+
 ## Acceptance and documentation ownership
 
 The [shared product goal](AUDIT-GOAL.md) owns stable outcomes and acceptance.

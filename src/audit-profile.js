@@ -8,12 +8,13 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse } from 'smol-toml';
-import { launchPlan } from './launcher.js';
+import { launchPlan, discoverCodexExecutable } from './launcher.js';
 import { resolveHome } from './homes.js';
 import { nativePath } from './node-runtime.js';
 import { privateDirectory, readJSON } from './metadata.js';
 import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
 import { hostname } from 'node:os';
+import { profileOwners } from './profile-reservations.js';
 import { probeAuditVersion } from './audit-native-version.js';
 import { validateAuditNativeConfig } from './audit-spec.js';
 
@@ -163,6 +164,83 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
     ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}),
     ...(selection.skills ? { skills: [...selection.skills] } : {}) };
   return result;
+}
+
+/** Resolve ordinary native execution without probing the executable or changing profile settings. */
+export async function resolveProfileExecutionProfile(store, input, {
+  repository, defaultUserHome = homedir(), terminalEnvironment = process.env,
+} = {}) {
+  const selection = typeof input === 'string' ? { name: input } : input;
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection)
+    || typeof selection.name !== 'string' || !selection.name.trim()
+    || Object.keys(selection).some(key => key !== 'name'))
+    throw new Error('Select a profile without execution overrides');
+  const isDefault = selection.name.trim().toLowerCase() === 'default';
+  let profile;
+  if (isDefault) {
+    profile = await defaultProfile(selection.name, { repository, defaultUserHome });
+    const binary = await discoverCodexExecutable(terminalEnvironment);
+    profile.executable = binary.executable;
+    profile.executableIdentity = binary.executableIdentity;
+    profile.version = null;
+    profile.executableSource = 'path';
+    profile.versionSource = 'unavailable';
+    profile.cwd = profile.bindingRepository;
+    profile.env = { PATH: nativePath(terminalEnvironment), HOME: profile.userHome, CODEX_HOME: profile.home };
+  } else {
+    let plan;
+    try { plan = await launchPlan(store, selection.name, terminalEnvironment, { repository }); }
+    catch (error) {
+      if (error.message === 'Bind this repository to the profile before launching it')
+        throw Object.assign(new Error('The selected repository is not already bound to this profile'), { code: 'profile-repository-unbound' });
+      throw error;
+    }
+    profile = { profileId: plan.profileId, profileName: plan.name, home: plan.home,
+      userHome: plan.env.HOME, nativeRoot: plan.nativeRoot, reservationRoot: plan.nativeRoot,
+      environmentId: plan.environmentId, executable: plan.executable,
+      executableIdentity: plan.executableIdentity, version: plan.version,
+      executableSource: 'registered', versionSource: 'registered',
+      env: plan.env, cwd: plan.cwd, bindingRepository: repository === undefined ? null : plan.cwd };
+  }
+  profile.executionMode = 'profile';
+  if (!isDefault) profile.launchArgs = ['-c', `sqlite_home=${JSON.stringify(profile.home)}`];
+  profile.settingsSnapshot = await snapshotAuditProfileSettings(profile);
+  if (profile.settingsSnapshot.status !== 'ready') {
+    const workspaceUnavailable = profile.settingsSnapshot.reason === 'workspace-unavailable';
+    throw Object.assign(new Error(workspaceUnavailable ? 'Selected workspace is unavailable or unsafe'
+      : 'Selected profile settings could not be safely inspected'),
+    { code: workspaceUnavailable ? 'profile-workspace-unavailable' : 'profile-settings-unavailable' });
+  }
+  profile.settingsIdentity = auditSettingsIdentity(profile.settingsSnapshot);
+  return profile;
+}
+
+/** Recheck the preview immediately before Start; no task or version probe is run. */
+export async function recheckProfileExecutionProfile(store, preview, options = {}) {
+  const fresh = await resolveProfileExecutionProfile(store, preview?.profileName, options);
+  const fields = ['profileId', 'home', 'userHome', 'nativeRoot', 'reservationRoot', 'environmentId',
+    'executable', 'executableIdentity', 'cwd', 'bindingRepository'];
+  if (!preview || fields.some(key => preview[key] !== fresh[key])
+    || !isDeepStrictEqual(preview.env, fresh.env) || !isDeepStrictEqual(preview.launchArgs, fresh.launchArgs))
+    throw Object.assign(new Error('Selected profile or launch environment changed after preview'), { code: 'profile-preview-changed' });
+  let settings = compareAuditProfileSettings(preview.settingsSnapshot, fresh.settingsSnapshot);
+  if (settings.status === 'unavailable' && preview?.settingsIdentity && fresh.settingsIdentity) {
+    settings = { status: isDeepStrictEqual(preview.settingsIdentity, fresh.settingsIdentity) ? 'unchanged' : 'changed' };
+  }
+  if (settings.status !== 'unchanged')
+    throw Object.assign(new Error(settings.status === 'changed'
+      ? 'Selected profile settings changed after preview' : 'Selected profile settings could not be rechecked'),
+    { code: settings.status === 'changed' ? 'profile-settings-changed' : 'profile-settings-unavailable' });
+  const access = await observeAuditProfileAccess(fresh, { store, ...(options.accessOptions ?? {}) });
+  if (access.status !== 'ready') {
+    const unavailable = access.status === 'unavailable';
+    throw Object.assign(new Error(unavailable
+      ? 'Selected profile access could not be verified; review the profile and try again'
+      : `Selected profile access is blocked (${access.reason}). Observed client PIDs: ${access.clients.map(row => row.pid).join(', ') || 'none'}`),
+    { code: unavailable ? 'profile-access-unavailable' : 'profile-access-blocked', accessReason: access.reason });
+  }
+  fresh.desktopOwner = access.desktopOwner ?? null;
+  return fresh;
 }
 
 function safeResourceEnvironment() { return { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' }; }
@@ -347,7 +425,10 @@ export async function observeAuditProfileAccess(profile, { store, expectedClient
         await privateDirectory(lockPath);
         const ownerPath = join(lockPath, 'owner.json');
         if (await realpath(ownerPath) !== ownerPath) throw new Error('unsafe');
-        owner = await readJSON(ownerPath);
+        const owners = profileOwners(await readJSON(ownerPath));
+        if (owners.length > 1 || owners[0]?.kind === 'review-task')
+          return { status: 'blocked', reason: 'profile-review-active', clients: [], sourceReservation: null };
+        owner = owners[0];
       } catch {
         return { status: 'blocked', reason: 'profile-reservation-untrusted', clients: [], sourceReservation: { status: 'untrusted' } };
       }
@@ -422,21 +503,51 @@ export async function observeAuditProfileAccess(profile, { store, expectedClient
           return { status: 'blocked', reason: 'desktop-main-not-live', clients: uniqueClients, sourceReservation };
         return { status: 'ready', clients: [], sourceReservation: { ...sourceReservation, phase: 'stopped-owner-observed' } };
       }
-      const owned = new Set(journalProcesses.map(row => `${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`));
+      const runtime = createDesktopInstanceRuntime({ processSnapshot: async () => rows });
+      const current = await runtime.observe(state.main, { trackedProcesses: state.processes });
+      if (current.status !== 'running' || current.orphaned)
+        return { status: 'blocked', reason: 'desktop-process-identity-changed', clients: uniqueClients, sourceReservation };
+      const owned = new Set(current.processes.map(row => `${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`));
       if (holders.some(row => !owned.has(`${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`)))
         return { status: 'blocked', reason: 'unattributed-native-client', clients: uniqueClients, sourceReservation };
     }
-    return { status: 'ready', clients: uniqueClients, sourceReservation };
+    return { status: 'ready', clients: uniqueClients, sourceReservation, ...(trustedOwner ? { desktopOwner: trustedOwner } : {}) };
   } catch {
     return { status: 'unavailable', reason: 'profile-access-inspection-failed', clients: [], sourceReservation: null };
   }
 }
 
-function selectedSettingRoots(profile) {
-  return [
-    { root: profile.home, label: '$CODEX_HOME' },
-    ...(profile.userHome !== profile.home ? [{ root: profile.userHome, label: '$HOME' }] : []),
+async function selectedSettingRoots(profile) {
+  const roots = [
+    { root: profile.home, label: '$CODEX_HOME', ...(profile.executionMode === 'profile' ? { identity: true } : {}) },
+    ...(profile.userHome !== profile.home ? [{ root: profile.userHome, label: '$HOME',
+      ...(profile.executionMode === 'profile' ? { identity: true } : {}) }] : []),
   ];
+  if (profile.executionMode !== 'profile' || typeof profile.cwd !== 'string') return roots;
+  let current = profile.cwd, depth = 0;
+  while (true) {
+    let info;
+    try {
+      info = await lstat(current);
+      if (!info.isDirectory() || info.isSymbolicLink() || await realpath(current) !== current
+        || info.uid !== process.getuid() || (info.mode & 0o022)) {
+        if (depth === 0) throw Object.assign(new Error('Selected workspace is unavailable or unsafe'), { auditReason: 'workspace-unavailable' });
+        break;
+      }
+    } catch (error) {
+      if (depth === 0) throw Object.assign(new Error('Selected workspace is unavailable or unsafe'),
+        { cause: error, auditReason: 'workspace-unavailable' });
+      break;
+    }
+    roots.push({ root: current, label: depth === 0 ? '$WORKSPACE' : `$WORKSPACE_PARENT_${depth}`,
+      identity: true, workspace: depth === 0, workspaceAncestor: depth > 0 });
+    if (current === sep) break;
+    const parent = resolve(current, '..');
+    if (parent === current) break;
+    current = parent;
+    depth += 1;
+  }
+  return roots;
 }
 
 function insideRoot(path, root) {
@@ -515,8 +626,21 @@ async function collectSettingMetadata(roots, profile) {
     for (const name of entries) await walk(root, join(absolute, name), `${logical}/${name}`, depth + 1, nextAncestors,
       { observational, skillSource, packageBoundary });
   };
-  for (const { root, label } of roots) {
-    await canonicalDirectory(root, 'Settings root');
+  for (const descriptor of roots) {
+    const { root, label } = descriptor;
+    const rootInfo = await canonicalDirectory(root, 'Settings root');
+    if (descriptor.identity)
+      records.set(`${label}/@directory`, JSON.stringify([rootInfo.dev, rootInfo.ino, rootInfo.mode & 0o777]));
+    if (descriptor?.workspace || descriptor?.workspaceAncestor) {
+      for (const name of ['AGENTS.md', 'AGENTS.override.md']) await walk(root, join(root, name), `${label}/${name}`);
+      const codex = join(root, '.codex');
+      for (const name of ['config.toml', 'AGENTS.md', 'AGENTS.override.md'])
+        await walk(root, join(codex, name), `${label}/.codex/${name}`);
+      for (const name of ['agents', 'skills', 'rules'])
+        await walk(root, join(codex, name), `${label}/.codex/${name}`, 0, new Set(), { skillSource: name === 'skills' });
+      await walk(root, join(root, '.agents', 'skills'), `${label}/.agents/skills`, 0, new Set(), { skillSource: true });
+      continue;
+    }
     for (const name of ['config.toml', 'AGENTS.md', 'AGENTS.override.md', ...(label === '$CODEX_HOME' ? ['auth.json'] : [])]) await walk(root, join(root, name), `${label}/${name}`);
     for (const name of ['agents', 'skills', 'rules']) await walk(root, join(root, name), `${label}/${name}`, 0, new Set(), { skillSource: name === 'skills' });
     if (label === '$HOME') await walk(root, join(root, '.agents', 'skills'), `${label}/.agents/skills`, 0, new Set(), { skillSource: true });
@@ -529,7 +653,7 @@ export async function snapshotAuditProfileSettings(profile) {
   // Detailed records remain process-local. A series may persist the explicit
   // metadata-only continuity token below; ordinary run recovery has no such token.
   const snapshot = { status: 'ready', persistence: 'process-local', capturedAt: new Date().toISOString() };
-  try { settingsBySnapshot.set(snapshot, { status: 'ready', records: await collectSettingMetadata(selectedSettingRoots(profile), profile) }); }
+  try { settingsBySnapshot.set(snapshot, { status: 'ready', records: await collectSettingMetadata(await selectedSettingRoots(profile), profile) }); }
   catch (error) {
     snapshot.status = 'unavailable';
     snapshot.reason = error.auditReason ?? 'settings-source-unavailable';

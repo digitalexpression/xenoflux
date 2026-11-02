@@ -41,9 +41,9 @@ test('npm package includes reviewed docs and excludes private receipts and unrev
   await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'xfx-package-boundary-fixture', version: '1.0.0', files: manifest.files }));
   const publicPaths = ['bin/xfx.js', 'src/fixture.js', 'README.md', 'LICENSE', 'docs/user/AUDIT.md',
     'docs/developer/AUDIT-ACCEPTANCE.md',
-    'docs/developer/AUDIT-GOAL.md', 'docs/developer/ROADMAP.md', 'docs/developer/PROFILE-AUDIT-ASSESSMENT.md',
+    'docs/developer/AUDIT-GOAL.md', 'docs/developer/ROADMAP.md', 'docs/developer/REVIEW-TASK-IMPLEMENTATION.md', 'docs/developer/PROFILE-AUDIT-ASSESSMENT.md',
     'docs/developer/evidence/audit-2.0.0-summary.json', 'docs/developer/evidence/profile-comparison-2026-10-14-summary.json',
-    'docs/developer/RELEASE-2.1.0.md', 'docs/developer/AUDIT-ACCEPTANCE-2.0.0-HISTORY.md',
+    'docs/developer/RELEASE-2.1.0.md', 'docs/developer/RELEASE-3.0.0.md', 'docs/developer/AUDIT-ACCEPTANCE-2.0.0-HISTORY.md',
     'docs/developer/ROADMAP-2.1.0-HISTORY.md', 'docs/developer/PROFILE-AUDIT-ASSESSMENT-2.1.0-HISTORY.md'];
   const privatePaths = [
     'docs/developer/evidence/audit-private-canary.json', 'docs/developer/HANDOVER-macos-audit-release.md',
