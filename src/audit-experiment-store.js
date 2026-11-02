@@ -1,7 +1,7 @@
 // Durable, private records for controlled audit experiments. Native transcripts
 // remain in their owning Codex homes; this store contains only scoped evidence.
-import { constants } from 'node:fs';
-import { mkdir, open, lstat, realpath, rename, unlink, link } from 'node:fs/promises';
+import { constants, linkSync, unlinkSync } from 'node:fs';
+import { mkdir, open, lstat, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { hostname } from 'node:os';
@@ -53,15 +53,15 @@ async function atomicWrite(directory, name, value, { exclusive = false } = {}) {
           throw new Error('Unsafe audit state file; preserving it');
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
-    // link() provides an atomic no-replace publish; remove the temporary link
-    // immediately so the durable record has link count one.
+    // Preserve atomic no-replace publication without yielding to the UI event
+    // loop between linking the record and removing its temporary name.
     if (exclusive) {
-      try { await link(temp, path); }
+      try { linkSync(temp, path); }
       catch (error) {
         if (error.code === 'EEXIST') throw new Error('Audit final report is immutable and already exists');
         throw error;
       }
-      await unlink(temp);
+      unlinkSync(temp);
     } else await rename(temp, path);
     await syncDirectory(directory);
     return path;

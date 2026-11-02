@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { lstatSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, chmod, symlink, link, unlink, lstat, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -168,6 +169,20 @@ test('record reader tolerates the short duplicate-link window during exclusive p
   const persistent = join(f.store.directory, 'persistent-state-link');
   await link(original, persistent);
   await assert.rejects(readAuditRecord(f.store, experiment.id), /Unsafe/);
+});
+
+test('exclusive report publication does not yield while the temporary link remains', async t => {
+  const f = await fixture(t), experiment = await createExperiment(f.store, { spec: {}, task: 'publish visibility', profiles: [] });
+  const path = join(experiment.directory, 'report.json');
+  let done = false, sawTwo = false;
+  const publication = finalizeAuditRecord(f.store, experiment.id, { status: 'complete' }).finally(() => { done = true; });
+  while (!done) {
+    await new Promise(resolve => setImmediate(resolve));
+    try { if (lstatSync(path).nlink === 2) sawTwo = true; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  await publication;
+  assert.equal(sawTwo, false);
 });
 
 test('record reader reopens the newly renamed state when its old inode is unlinked mid-read', async t => {

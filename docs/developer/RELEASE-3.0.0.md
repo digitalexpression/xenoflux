@@ -43,8 +43,9 @@ to unchanged engine code.
 
 Before the replay correction, all 203 application, UI and build-input files
 matched the integrated development source byte-for-byte. The correction changes
-the replay component and rebuilt script/entry assets only; engine source remains
-unchanged. Core creation/copy modules also match the retained native
+the replay component and rebuilt script/entry assets. The later publication
+handoff correction changes one engine store module, with its own regression
+and source checks; native execution/capture code and record formats are unchanged. Core creation/copy modules also match the retained native
 acceptance source; comparison workspace/setup/check behavior continues to use
 audit mode. Source applicability was reviewed separately from these checks.
 Existing installed build/test dependencies were reused; the package smoke
@@ -81,6 +82,37 @@ journeys, including types, design tokens and bundled-build freshness. Syntax,
 native-launcher and packaged-doc checks passed; unchanged engine source retains
 the earlier local engine result. Exact final source/package and CI identities
 are recorded in the generated manifest and the PR checks.
+
+## Record publication handoff
+
+The [next CI run](https://github.com/digitalexpression/xenoflux/actions/runs/41524087624)
+passed the replay cases on Node 22, then failed while preparing a review browser
+fixture: the safe record reader rejected a file at its hardlink-count check. That
+job reached 46 browser passes; engine tests and package smoke did not run. The
+error did not identify the exact record path, so the specific publication is
+unknown. This remains a failed outcome, independently of local passing checks.
+
+Exclusive record publication retains atomic no-replace linking and now removes
+the temporary name before yielding to the UI event loop. Previously the awaited
+link/unlink pair allowed an event-loop observer to see a record with two names.
+A bounded direct experiment observed that state on the old writer and not on the
+new pair; the one-publication regression fails on old source and passes with the
+change. Existing transient-link handling and permanent-hardlink rejection still
+pass. A nondiscriminating concurrency test was discarded.
+
+Reader permissions, path, size and hardlink checks are unchanged, as are record
+formats, fsync/directory sync and immutability rules. The filesystem still has a
+brief interval between the two syscalls; cross-process/native-thread observers
+and a crash can encounter it. Existing bounded fail-closed reader handling stays
+in effect. This is a demonstrated event-loop scheduling fix, not proof of which
+record failed in CI or a guarantee against every publication race. Fresh CI must
+verify the integrated source.
+
+After this correction, full local verification passed: 1,348 engine tests and
+one skip, all 47 browser journeys, syntax, native launcher, packaged documentation,
+UI types/tokens and bundled-build freshness. Independent review found no material
+correctness or safety issue in the bounded publication change. These local
+results remain separate from the required fresh public CI result.
 
 ## Ordinary review live attempt
 
@@ -166,8 +198,8 @@ sequence; [local release procedure](LOCAL-RELEASE.md) defines package checks.
 | --- | --- |
 | Source revision, version and artifact hashes | Recorded in the generated release manifest. |
 | Evidence for profile creation, comparison and ordinary review | Retained/development evidence and source applicability are summarized above. Engine source equality and immutable receipt identities are retained separately against the candidate manifest; the replay UI correction has separate browser coverage. |
-| Required checks and affected regressions | Candidate source checks passed: 1,347 engine passes, one skip, 47 browser journeys, syntax/native/docs and focused export verification. |
-| Real review access, response and UI association | Passed on corrected development source; unchanged engine source preserves applicability without claiming a fresh native candidate run. |
+| Required checks and affected regressions | Corrected local source checks passed: 1,348 engine passes, one skip, 47 browser journeys, syntax/native/docs, UI types/tokens/build freshness and the publication regression. Fresh public CI is separate. |
+| Real review access, response and UI association | Passed on corrected development source; unchanged native execution/capture and record formats preserve scoped applicability without claiming a fresh native candidate run. |
 | Bundled UI freshness and detached offline package smoke | Rebuilt bundled UI matches source. The generated manifest records the detached smoke outcome for its exact source and tarball. |
 | Breaking changes, fresh-start guidance and remaining limits | The checkout-only export-review runner, broker, isolated transport/probe and campaign stages were removed. Ordinary Reviews is the supported execution path; external review import remains supported. No report/store schema or copy journal was retired, and no migration was added. Unsupported old data remains untouched. |
 

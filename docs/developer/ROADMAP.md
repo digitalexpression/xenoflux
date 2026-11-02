@@ -17,16 +17,23 @@ and [coexistence evidence](RELEASE-3.0.0.md#reviewerdesktop-coexistence-correcti
 | --- | --- | --- |
 | Empty and selected-parts profile creation | Retained native creation/copy acceptance; current fixture and browser checks. | Core creation/copy source is unchanged; exact package identity belongs to the manifest. |
 | Task comparison and report | Retained native CLI/report evidence plus current fixture and browser checks; known scope limits are preserved. | Source applicability reviewed; candidate checks pass within the recorded limits. |
-| Ordinary AI review | Fixture and browser coverage; one corrected live review completed and reopened with its response associated to the task. | Unchanged engine source and candidate checks supplement the scoped native evidence. |
+| Ordinary AI review | Fixture and browser coverage; one corrected live review completed and reopened with its response associated to the task. | Unchanged native execution/capture and scoped publication/browser checks supplement retained native evidence. |
 
 Initial candidate source checks passed: syntax, native launcher, packaged documentation
 links, 1,347 engine tests (one skipped) and all 47 browser journeys. The 203
 application, UI and build-input files matched the initial development source
 byte-for-byte. A later replay correction updates disclosure state handling and
-its browser focus precondition; engine source is unchanged. The [candidate record](RELEASE-3.0.0.md#candidate-verification)
+its browser focus precondition. The following record publication correction
+removes an event-loop scheduling window in one store module, while keeping
+native execution/capture and record formats unchanged. The [candidate record](RELEASE-3.0.0.md#candidate-verification)
 separates these results from inherited native evidence. The generated release
 manifest identifies the packaged revision, artifact hashes and detached smoke
 outcome; only a passed smoke result completes the package gate.
+
+After the replay and publication corrections, full local verification passed
+1,348 engine tests (one skipped) and all 47 browser journeys, plus syntax,
+native launcher, packaged docs and UI types/tokens/build freshness. The initial
+failed CI outcomes remain retained; the corrected head must pass fresh CI.
 
 ### Delivery order
 
