@@ -435,6 +435,7 @@ test('agent summaries link assignment, result and parent follow-up without searc
     await expect(summary).toContainText('Left assignment: implement return navigation.');
     await expect(summary).toContainText('Left worker produced the navigation changes.');
     await expect(summary).toContainText('I reviewed and integrated /root/worker');
+    await expect(summary.getByRole('heading', { name: 'Agent summary', exact: true })).toBeFocused();
     await page.keyboard.press('F6');
     await expect(trigger).toBeFocused();
     await expect(summary).toBeVisible();
