@@ -1632,26 +1632,23 @@ async function discoverChildren(home, options = {}, rootId = null) {
     const inspectLimit = Math.min(cap, MAX_CHILDREN);
     const byParent = new Map();
     if (!uuid(rootId)) return { byParent, partial: true, reason: 'Selected session ID is invalid for child discovery.' };
-    // Resolve one lineage level at a time. The bounded SQLite callback parses
-    // only capped source metadata and enforces a whole-discovery scan/time
-    // budget, so unrelated rows do not crowd out linked sessions.
+    // Resolve one lineage level at a time, bounding the iterator itself so
+    // unrelated rows do not crowd out linked sessions or evade scan limits.
     const frontier = [rootId], visited = new Set([rootId]);
     let partial = false, reason = null, inspected = 0, scanned = 0, depth = 0;
     const started = Date.now(), parents = new Set();
-    let callbackPartial = false;
-    db.function('audit_parent_for', (source, sourceLength) => {
-      if (++scanned > MAX_CHILD_INDEX_ROWS || Date.now() - started > MAX_CHILD_INDEX_MS)
-        throw new Error('Child index scan budget exceeded');
-      if (sourceLength == null || sourceLength > 8192) { callbackPartial = true; return null; }
-      if (typeof source !== 'string') { callbackPartial = true; return null; }
+    let metadataPartial = false;
+    const parentFor = (source, sourceLength) => {
+      if (sourceLength == null || sourceLength > 8192) { metadataPartial = true; return null; }
+      if (typeof source !== 'string') { metadataPartial = true; return null; }
       let value;
       try { value = JSON.parse(source); } catch {
-        if ([...parents].some(parent => source.includes(parent))) callbackPartial = true;
+        if ([...parents].some(parent => source.includes(parent))) metadataPartial = true;
         return null;
       }
       const linked = value?.subagent?.thread_spawn?.parent_thread_id;
       if (linked !== undefined) {
-        if (!uuid(linked)) { callbackPartial = true; return null; }
+        if (!uuid(linked)) { metadataPartial = true; return null; }
         return parents.has(linked) ? linked : null;
       }
       if (typeof value === 'string') return null;
@@ -1664,25 +1661,27 @@ async function discoverChildren(home, options = {}, rootId = null) {
       // Only unfamiliar metadata that can plausibly describe this workflow's
       // lineage prevents completeness. Ordinary empty/source metadata is irrelevant.
       if (value && typeof value === 'object' && (Object.hasOwn(value, 'subagent')
-        || Object.hasOwn(value, 'thread_spawn') || mentionsParent)) callbackPartial = true;
+        || Object.hasOwn(value, 'thread_spawn') || mentionsParent)) metadataPartial = true;
       return null;
-    });
+    };
     const candidateQuery = db.prepare(`SELECT CASE WHEN typeof(id)='text' AND octet_length(id)=36 THEN id END AS id,
       CASE WHEN typeof(source)='text' AND octet_length(source)<=8192 THEN source END AS source,
       CASE WHEN typeof(rollout_path)='text' AND octet_length(rollout_path)<=4096 THEN rollout_path END AS rollout_path,
       octet_length(source) AS source_length
-      FROM threads
-      WHERE audit_parent_for(CASE WHEN typeof(source)='text' AND octet_length(source) <= 8192 THEN source END, octet_length(source)) IS NOT NULL
-      LIMIT ?`);
+      FROM threads`);
     // Include one edge beyond the supported traversal depth so callers can
     // emit an explicit depth-limit state for linked rows there.
     while (frontier.length && depth <= MAX_DEPTH && inspected < inspectLimit) {
       parents.clear();
       for (const parentId of frontier) parents.add(parentId);
       const next = [];
-      const remaining = inspectLimit - inspected;
       try {
-        for (const row of candidateQuery.iterate(remaining + 1)) {
+        for (const row of candidateQuery.iterate()) {
+          if (++scanned > MAX_CHILD_INDEX_ROWS || Date.now() - started > MAX_CHILD_INDEX_MS) {
+            partial = true; reason ??= 'Child index scan or time limit reached.';
+            break;
+          }
+          if (!parentFor(row.source, row.source_length)) continue;
           if (inspected >= inspectLimit) {
             partial = true; reason ??= inspectLimit === MAX_CHILDREN ? 'Child session limit reached.' : 'Child candidate scan limit reached.';
             break;
@@ -1709,7 +1708,7 @@ async function discoverChildren(home, options = {}, rootId = null) {
       } catch {
         partial = true; reason ??= 'Child index scan or time limit reached.';
       }
-      if (callbackPartial) { partial = true; reason ??= 'Malformed or oversized child lineage metadata was omitted.'; }
+      if (metadataPartial) { partial = true; reason ??= 'Malformed or oversized child lineage metadata was omitted.'; }
       frontier.splice(0, frontier.length, ...next);
       depth++;
     }

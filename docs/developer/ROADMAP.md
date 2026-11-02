@@ -34,6 +34,10 @@ After the replay and publication corrections, full local verification passed
 1,348 engine tests (one skipped) and all 47 browser journeys, plus syntax,
 native launcher, packaged docs and UI types/tokens/build freshness. The initial
 failed CI outcomes remain retained; the corrected head must pass fresh CI.
+Exact-runtime boundary verification additionally passed complete engine suites
+on Node 22.15.0 and Node 24.22.1 (1,348 passes / one skip each), and all 47
+browser journeys under Node 24 after enforcing child-discovery bounds in the
+calling iterator and correcting compressed/shutdown fixture assumptions.
 
 ### Delivery order
 

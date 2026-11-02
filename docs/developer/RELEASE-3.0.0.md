@@ -45,7 +45,9 @@ Before the replay correction, all 203 application, UI and build-input files
 matched the integrated development source byte-for-byte. The correction changes
 the replay component and rebuilt script/entry assets. The later publication
 handoff correction changes one engine store module, with its own regression
-and source checks; native execution/capture code and record formats are unchanged. Core creation/copy modules also match the retained native
+and source checks; native execution/capture transport and record formats are unchanged; the
+later supported-runtime correction enforces child-discovery bounds in the
+calling iterator. Core creation/copy modules also match the retained native
 acceptance source; comparison workspace/setup/check behavior continues to use
 audit mode. Source applicability was reviewed separately from these checks.
 Existing installed build/test dependencies were reused; the package smoke
@@ -113,6 +115,39 @@ one skip, all 47 browser journeys, syntax, native launcher, packaged documentati
 UI types/tokens and bundled-build freshness. Independent review found no material
 correctness or safety issue in the bounded publication change. These local
 results remain separate from the required fresh public CI result.
+
+## Supported-runtime boundary verification
+
+A later [matrix run](https://github.com/digitalexpression/xenoflux/actions/runs/41528993178)
+passed all browser journeys on both runtimes but failed engine boundaries:
+Node 22 reported a scan-limited history as ready; Node 24 rejected two fixture
+expectations involving compressed frames and group shutdown. Those failed
+outcomes remain retained; package smoke was not reached in that run.
+
+A minimal exact-runtime probe showed Node 22.15.0 continuing SQLite iteration
+after the JavaScript callback threw at its scan budget. Child discovery now
+checks global row/time bounds directly in the calling iterator and stops there.
+Parent matching, metadata limits, child/depth caps and rollout ownership checks
+remain. Large unrelated histories still do not consume the matching-child quota.
+The old boundary test fails on Node 22; the corrected session-reader file passes
+38 tests on both exact runtimes.
+
+The compressed trailing-data fixture now appends undecodable bytes. Its former
+two valid Zstandard frames are fully decoded on newer Node 24 and therefore do
+not demonstrate ignored trailing data. Production decoding, stored/decoded/window
+bounds and unsafe-path rejection are unchanged; no single-frame-only format rule
+or runtime version allowlist was added.
+
+The disposable group test now waits through inconclusive EPERM probes after
+SIGKILL, requiring definite ESRCH before its existing three-second deadline.
+It fails closed on timeout and does not repeat the group signal after the explicit
+attempt. Production recovery's treatment of uncertainty is unchanged.
+
+Complete local suites passed on exact Node 22.15.0 and Node 24.22.1: 1,348 engine
+passes and one skip each. All 47 browser journeys passed under Node 24. The final
+fixture teardown guard also passed its focused case under both runtimes. These
+results supplement prior scoped native evidence; they are not fresh native model
+or client operations. Fresh public CI must verify the integrated head.
 
 ## Ordinary review live attempt
 
@@ -198,7 +233,7 @@ sequence; [local release procedure](LOCAL-RELEASE.md) defines package checks.
 | --- | --- |
 | Source revision, version and artifact hashes | Recorded in the generated release manifest. |
 | Evidence for profile creation, comparison and ordinary review | Retained/development evidence and source applicability are summarized above. Engine source equality and immutable receipt identities are retained separately against the candidate manifest; the replay UI correction has separate browser coverage. |
-| Required checks and affected regressions | Corrected local source checks passed: 1,348 engine passes, one skip, 47 browser journeys, syntax/native/docs, UI types/tokens/build freshness and the publication regression. Fresh public CI is separate. |
+| Required checks and affected regressions | Latest local suites passed on both exact CI runtimes: 1,348 engine passes / one skip each, 47 browser journeys under Node 24, syntax/native/docs/UI freshness and focused boundary checks. Fresh public CI is separate. |
 | Real review access, response and UI association | Passed on corrected development source; unchanged native execution/capture and record formats preserve scoped applicability without claiming a fresh native candidate run. |
 | Bundled UI freshness and detached offline package smoke | Rebuilt bundled UI matches source. The generated manifest records the detached smoke outcome for its exact source and tarball. |
 | Breaking changes, fresh-start guidance and remaining limits | The checkout-only export-review runner, broker, isolated transport/probe and campaign stages were removed. Ordinary Reviews is the supported execution path; external review import remains supported. No report/store schema or copy journal was retired, and no migration was added. Unsupported old data remains untouched. |

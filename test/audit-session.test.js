@@ -596,7 +596,7 @@ test('bounds malformed, oversized, and unsafe compressed rollout handling', asyn
   await writeCompressedRollout(`${bombPlain}.zst`, [meta(bomb), context(id(128)), rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'diagnostic', value: 'x'.repeat(32 * 1024 * 1024) })]);
   await writeCompressedRollout(join(sessions, `${unsafe}.jsonl.zst`), [meta(unsafe), context(id(129))]);
   const firstFrame = zlib.zstdCompressSync(Buffer.from(JSON.stringify(meta(trailing)) + '\n'));
-  await writeFile(`${trailingPlain}.zst`, Buffer.concat([firstFrame, zlib.zstdCompressSync(Buffer.from(JSON.stringify(context(id(131))) + '\n'))]), { mode: 0o600 });
+  await writeFile(`${trailingPlain}.zst`, Buffer.concat([firstFrame, Buffer.from('undecodable trailing bytes')]), { mode: 0o600 });
   await symlink(join(sessions, 'absent-target.jsonl'), unsafePlain);
   const hardlinkSource = join(f.root, 'hardlink-source');
   await writeFile(hardlinkSource, 'not a rollout', { mode: 0o600 });
