@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fsPromises from 'node:fs/promises';
 import { chmod, rm, readFile, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { createUiRunsFixture } from '../test-support/ui-runs-fixture.js';
+import { record } from '../src/metadata.js';
 
 const input = app => ({ task: 'Disposable paired review fixture', files: '', a: 'baseline', b: 'strict-review',
   repository: app.repository, commit: 'HEAD', checks: [] });
@@ -141,6 +144,32 @@ async function previewTask(app, ref) {
   return preview;
 }
 
+async function staleTaskSnapshot(app, id, { unsafeReplacement = false } = {}) {
+  const path = join(app.store.directory, 'review-tasks', id, 'task.json'), originalLstat = fsPromises.lstat;
+  let injected = false, before, stale, current;
+  fsPromises.lstat = async (...args) => {
+    if (injected || args[0] !== path) return originalLstat(...args);
+    before = await originalLstat(...args);
+    injected = true;
+    const value = JSON.parse(await readFile(path, 'utf8'));
+    await record(path, value);
+    if (unsafeReplacement) await chmod(path, 0o644);
+    current = await originalLstat(path);
+    stale = Object.assign(Object.create(Object.getPrototypeOf(before)), before, { nlink: 0 });
+    return stale;
+  };
+  syncBuiltinESMExports();
+  let returned;
+  try { returned = await app.provider.reviewTask({ id }); }
+  finally { fsPromises.lstat = originalLstat; syncBuiltinESMExports(); }
+  if (unsafeReplacement) await chmod(path, 0o600);
+  const fresh = await app.provider.reviewTask({ id });
+  return { returned, fresh, injected,
+    before: { dev: before.dev, ino: before.ino, mode: before.mode, nlink: before.nlink },
+    stale: { dev: stale.dev, ino: stale.ino, mode: stale.mode, nlink: stale.nlink },
+    current: { dev: current.dev, ino: current.ino, mode: current.mode, nlink: current.nlink } };
+}
+
 test('review response and frozen citations reopen after the originating comparison record disappears', async t => {
   const app = await fixture(t);
   const ref = await seedComparison(app);
@@ -184,6 +213,32 @@ test('native approval waits on the review connection, records waiting state, and
     task => task.status !== 'running' && task.status !== 'waiting-for-user', 'review did not finish after approval');
   assert.equal(completed.status, 'completed');
   await assert.rejects(app.provider.respondReviewTask({ id: waiting.id, requestId: waiting.pendingRequests[0].requestId, response: { decision: 'decline' } }), /no longer waiting/);
+});
+
+test('review task reads retry only safe atomic task-record replacements after a stale link-count snapshot', async t => {
+  const app = await fixture(t, 'approval');
+  const ref = await seedComparison(app), preview = await previewTask(app, ref);
+  await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
+  const waiting = await until(() => app.provider.reviewTask({ id: preview.previewToken }), task => task.status === 'waiting-for-user', 'approval was not made visible');
+  const safe = await staleTaskSnapshot(app, waiting.id);
+  const unsafe = await staleTaskSnapshot(app, waiting.id, { unsafeReplacement: true });
+  assert.equal(safe.injected, true);
+  assert.equal(safe.before.nlink, 1);
+  assert.deepEqual([safe.stale.dev, safe.stale.ino, safe.stale.mode], [safe.before.dev, safe.before.ino, safe.before.mode]);
+  assert.equal(safe.stale.nlink, 0);
+  assert.notDeepEqual([safe.current.dev, safe.current.ino], [safe.before.dev, safe.before.ino]);
+  assert.equal(safe.current.nlink, 1);
+  assert.equal(safe.returned.status, 'waiting-for-user');
+  assert.equal(safe.fresh.status, 'waiting-for-user');
+  assert.equal(unsafe.injected, true);
+  assert.equal(unsafe.current.mode & 0o077, 0o044);
+  assert.equal(unsafe.returned.status, 'uncertain');
+  assert.equal(unsafe.returned.error, 'durable-task-record-incomplete');
+  assert.equal(unsafe.fresh.status, 'waiting-for-user');
+  assert.equal(app.reviewCalls.captures, 1);
+  await app.provider.respondReviewTask({ id: waiting.id, requestId: waiting.pendingRequests[0].requestId, response: { decision: 'decline' } });
+  const completed = await until(() => app.provider.reviewTask({ id: waiting.id }), task => task.status === 'completed', 'review did not finish after approval');
+  assert.equal(completed.status, 'completed');
 });
 
 test('review preview leaves no durable task or profile reservation', async t => {

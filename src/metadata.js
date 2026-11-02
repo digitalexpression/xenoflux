@@ -4,6 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const safeMetadataStat = stat => stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1
+  && stat.uid === process.getuid() && !(stat.mode & 0o077) && stat.size <= 1024 * 1024;
+const staleRemovedMetadataStat = stat => stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 0
+  && stat.uid === process.getuid() && !(stat.mode & 0o077) && stat.size <= 1024 * 1024;
 
 export const globalLock = () => `/private/tmp/xenoflux-desktop-${process.getuid()}.lock`;
 
@@ -19,10 +23,18 @@ export async function privateDirectory(path, create = false) {
 }
 
 export async function readJSON(path) {
-  const s = await lstat(path);
-  if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1 || s.uid !== process.getuid() || (s.mode & 0o077) || s.size > 1024 * 1024)
-    throw new Error('Unsafe desktop metadata file');
-  return JSON.parse(await readFile(path, 'utf8'));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const stat = await lstat(path);
+    if (!safeMetadataStat(stat)) {
+      if (attempt < 2 && staleRemovedMetadataStat(stat)) {
+        const current = await lstat(path);
+        if (safeMetadataStat(current) && (current.dev !== stat.dev || current.ino !== stat.ino)) continue;
+      }
+      throw new Error('Unsafe desktop metadata file');
+    }
+    return JSON.parse(await readFile(path, 'utf8'));
+  }
+  throw new Error('Unsafe desktop metadata file');
 }
 
 export async function record(path, value) {

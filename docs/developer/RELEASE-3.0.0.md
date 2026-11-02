@@ -176,14 +176,31 @@ UI type/token/build-freshness checks pass.
 
 ## Stable source preparation
 
-The `3.0.0` source changes package-version roots and current-release documentation
-from the verified `3.0.0-rc.1` source (`1f1ccb7`). All application, UI and native
-build inputs remain byte-identical. The RC matrix passed on Node 22.15.0 and
-24.22.1: 1,349 engine cases / one skip, 47 browser journeys and detached offline
-smoke on each runtime. Stable package verification separately checks the actual
-packed bytes, documentation links, version agreement and detached installation.
-Publication uses a tested bundle built from merged source, as specified in the
-release procedure; retained RC checks do not imply a stable publication.
+Stable preparation aligns version roots to `3.0.0` and updates current-release
+documentation. A metadata-only proposal's full engine run reported one approval
+fixture as `uncertain` after its answer; its exact cause was not captured. Four
+focused runs and one full diagnostic suite then passed. These later passes do
+not explain or relabel the original failure.
+
+A controlled probe on Node 22.15.0 and 24.22.1 reproduced a concrete false-
+incomplete path: an old zero-link `lstat` snapshot after atomic replacement made
+the task unavailable, although the current record was valid and private. A fresh
+read returned its waiting state; Start and capture each remained one. This
+establishes that mechanism, not its occurrence in the original failed run.
+
+The shared metadata reader now permits at most three stat attempts, retrying
+only after a fresh, different inode satisfies its existing regular-file,
+current-user, private-mode, one-link and 1 MiB limits. Other unsafe metadata,
+read errors and invalid JSON are not retried. The new regression fails the prior
+reader and passes on both runtimes; a non-private replacement stays uncertain.
+Independent read-only review found no material correctness/safety issue.
+
+Only the metadata reader changes application code from verified RC1; UI/native
+capture, formats and conservative recovery policy are unchanged. The RC matrix
+passed on both runtimes: 1,349 engine cases / one skip, 47 browser journeys and
+offline smoke each. Stable verification separately binds its affected checks,
+actual package bytes/links and detached smoke. Publication uses a tested bundle
+from merged source; retained RC results do not imply stable publication.
 
 ## Ordinary review live attempt
 

@@ -53,10 +53,12 @@ journeys pass under Node 24. Syntax, native launcher, packaged documentation and
 UI type/token/build-freshness checks pass.
 
 Stable source preparation aligns the package and lockfile roots to `3.0.0` and
-updates current-release documentation. Application, UI and native-build inputs
-are unchanged from the verified `3.0.0-rc.1` source. Earlier candidate receipts
-retain their original identities; the final manifest and public release metadata
-identify the exact stable source and artifacts.
+updates current-release documentation. A controlled probe also reproduced a
+false `uncertain` task status when a stale zero-link metadata snapshot hid a
+valid atomic replacement. The shared reader retries only a validated different
+private inode, with a three-attempt bound. Unsafe replacements remain rejected;
+UI/native capture and record formats are unchanged. Earlier candidate receipts
+retain their identities; the final manifest identifies stable source/artifacts.
 
 ### Delivery order
 
