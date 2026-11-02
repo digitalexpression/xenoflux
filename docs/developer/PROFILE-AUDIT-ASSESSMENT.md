@@ -14,13 +14,13 @@ required; the [shared goal](AUDIT-GOAL.md#evolution-and-provider-version-policy)
 owns the preference for beneficial breaking changes and recorded, unpinned
 provider/client versions. Earlier unmet acceptance proposals below are not gates.
 
-## Current local candidate
+## Xenoflux 3.0.0 implementation context
 
-The unpublished [3.0.0 candidate record](RELEASE-3.0.0.md) describes the new local
+The [3.0.0 release record](RELEASE-3.0.0.md) describes the new local
 UI, replay and ordinary AI review and their acceptance limits. Empty/from-source
 profile creation, task comparison/report, and in-app review launch/result display
-are implemented. The candidate record distinguishes retained native evidence,
-development live review results and candidate verification. The three-outcome
+are implemented. The record distinguishes retained native evidence,
+development live review results and source verification. The three-outcome
 goal and roadmap supersede all broader proposed release gates below. This record
 does not replace the released 2.1.0 observations or turn older profile acceptance
 into proof of the review flow.

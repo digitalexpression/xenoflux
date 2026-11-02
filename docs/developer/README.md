@@ -69,7 +69,7 @@ Ordinary review uses the [implementation contract](REVIEW-TASK-IMPLEMENTATION.md
 not the retired export-review campaign. Its [removal list](REVIEW-TASK-IMPLEMENTATION.md#legacy-removal)
 preserves meaningful product coverage; the [roadmap](ROADMAP.md#delivery-order)
 orders implementation and verification. Retained native results belong in the
-[candidate record](RELEASE-3.0.0.md#retained-verification-and-limits), not a new
+[3.0.0 record](RELEASE-3.0.0.md#retained-verification-and-limits), not a new
 acceptance campaign. Current authorization governs any real execution.
 
 For an explicitly uncapped **non-series** experiment, set both `limits.runMs`
@@ -103,7 +103,7 @@ active work. Follow only the references needed for that slice:
 - [Review implementation](REVIEW-TASK-IMPLEMENTATION.md): ordinary execution,
   durable task/API/recovery and selected legacy removal.
 - [Profile copy policy](PROFILE-COPY-POLICY.md): transfer behavior and eligibility.
-- [3.0 candidate record](RELEASE-3.0.0.md): source-bound results, performance limits
+- [3.0.0 record](RELEASE-3.0.0.md): source-bound results, performance limits
   and remaining evidence. [Release process](LOCAL-RELEASE.md): packaging/publication.
 - [Audit acceptance](AUDIT-ACCEPTANCE.md): immutable release records, including
   [2.1.0](RELEASE-2.1.0.md) and [2.0.0](AUDIT-ACCEPTANCE-2.0.0-HISTORY.md).

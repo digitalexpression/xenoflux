@@ -1,11 +1,10 @@
 # The Xenoflux app
 
-This guide describes the development UI for the upcoming **3.0.0 major release**.
-The published 2.1.0 release
-does not include this browser UI. This development UI supports ordinary AI review
-from a comparison report, alongside optional external review import. Version 3.0 may remove older commands, workflows or
-saved formats without migration or backward compatibility. Final release notes
-will state the supported formats and any fresh-start requirements.
+This guide describes the local browser app in **Xenoflux 3.0.0**. It supports
+ordinary AI review from a comparison report, alongside optional external review
+import. Consult the versioned release record and package manifest for the exact
+source and supported formats; older commands, workflows or saved formats may not
+be compatible.
 
 `xfx ui` opens a local web app for comparing Codex profiles and sessions. It runs
 on this Mac only: the server listens on `127.0.0.1`, opens your default browser,

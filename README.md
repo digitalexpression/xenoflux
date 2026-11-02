@@ -31,18 +31,21 @@ interrupted sign-in. Use `xfx --help` for all commands.
 
 ## Open the app
 
-The local browser app targets the upcoming **3.0.0 major release**; it is not in
-the published 2.1.0 package. Development builds currently provide:
+The **3.0.0** local browser app supports:
 
 ```sh
 xfx ui
 ```
 
 Create empty or from-source profiles, run a task comparison and read its report
-in a local browser app. The candidate also supports setup/session comparisons
+in a local browser app. It also supports setup/session comparisons
 and external review import. From a report, start an ordinary AI review with a
 selected profile and read its captured response. See
 [The Xenoflux app](docs/user/APP.md).
+
+For version and distribution identity, see the [package manifest](package.json),
+[GitHub releases](https://github.com/digitalexpression/xenoflux/releases) and
+[npm package](https://www.npmjs.com/package/xenoflux).
 
 ## Documentation
 

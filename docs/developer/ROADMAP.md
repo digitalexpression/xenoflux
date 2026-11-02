@@ -1,6 +1,6 @@
 # Xenoflux 3.0 roadmap
 
-This roadmap tracks the **3.0.0-rc.1** candidate. The [goal](AUDIT-GOAL.md#current-release-boundary)
+This roadmap tracks the **3.0.0** release. The [goal](AUDIT-GOAL.md#current-release-boundary)
 owns product scope and [acceptance](AUDIT-GOAL.md#observable-acceptance); the
 [review specification](REVIEW-TASK-IMPLEMENTATION.md) owns execution details.
 
@@ -51,6 +51,12 @@ After the state snapshot correction, complete local engine suites pass on exact
 Node 22.15.0 and 24.22.1 (1,349 passes / one skip each), and all 47 browser
 journeys pass under Node 24. Syntax, native launcher, packaged documentation and
 UI type/token/build-freshness checks pass.
+
+Stable source preparation aligns the package and lockfile roots to `3.0.0` and
+updates current-release documentation. Application, UI and native-build inputs
+are unchanged from the verified `3.0.0-rc.1` source. Earlier candidate receipts
+retain their original identities; the final manifest and public release metadata
+identify the exact stable source and artifacts.
 
 ### Delivery order
 

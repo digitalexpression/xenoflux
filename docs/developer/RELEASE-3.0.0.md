@@ -1,11 +1,12 @@
-# Xenoflux 3.0.0-rc.1 candidate record
+# Xenoflux 3.0.0 release record
 
-This record tracks the **unpublished 3.0.0-rc.1 candidate**. It does not assert
-publication or installation. The [goal](AUDIT-GOAL.md#observable-acceptance)
-owns product acceptance; the [roadmap](ROADMAP.md#current-work-and-stop-condition)
-owns delivery status; [local release procedure](LOCAL-RELEASE.md) owns package
-preparation. Candidate source and artifact identities are recorded in the
-release manifest after packaging.
+This record describes **Xenoflux 3.0.0** source and acceptance evidence. The
+[goal](AUDIT-GOAL.md#observable-acceptance) owns product acceptance; the
+[roadmap](ROADMAP.md#current-work-and-stop-condition) owns delivery status;
+[local release procedure](LOCAL-RELEASE.md) owns package preparation. The
+generated release manifest binds exact source and artifact hashes. npm version/
+tag, GitHub release/assets and installed verification are separate identities;
+source checks alone do not establish publication or installation.
 
 ## Integrated development verification
 
@@ -27,9 +28,10 @@ Retained native profile creation and selected-copy acceptance remains applicable
 to the unchanged creation paths. Retained native comparison evidence is limited
 to its recorded CLI/report scope. Neither is a fresh native run on this candidate.
 
-The package, lockfile and lockfile-root versions are aligned to
-`3.0.0-rc.1` for this candidate. Exact source revision, package version and
-artifact hashes belong to the generated release manifest.
+The final package, lockfile and lockfile-root versions are aligned to `3.0.0`.
+Earlier `3.0.0-rc.1` source, bundles and receipts retain their original identities.
+Exact stable source revision, package version and artifact hashes belong to the
+generated release manifest.
 
 ## Candidate verification
 
@@ -171,6 +173,17 @@ After the state snapshot correction, complete local engine suites pass on exact
 Node 22.15.0 and 24.22.1 (1,349 passes / one skip each), and all 47 browser
 journeys pass under Node 24. Syntax, native launcher, packaged documentation and
 UI type/token/build-freshness checks pass.
+
+## Stable source preparation
+
+The `3.0.0` source changes package-version roots and current-release documentation
+from the verified `3.0.0-rc.1` source (`1f1ccb7`). All application, UI and native
+build inputs remain byte-identical. The RC matrix passed on Node 22.15.0 and
+24.22.1: 1,349 engine cases / one skip, 47 browser journeys and detached offline
+smoke on each runtime. Stable package verification separately checks the actual
+packed bytes, documentation links, version agreement and detached installation.
+Publication uses a tested bundle built from merged source, as specified in the
+release procedure; retained RC checks do not imply a stable publication.
 
 ## Ordinary review live attempt
 
