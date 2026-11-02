@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { lstatSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdtemp, mkdir, readFile, chmod, symlink, link, unlink, lstat, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -198,6 +200,35 @@ test('record reader reopens the newly renamed state when its old inode is unlink
   const results = await Promise.allSettled([writing, ...reads]);
   assert.deepEqual(results.filter(result => result.status === 'rejected'), []);
   assert.equal(results.filter(result => result.status === 'fulfilled' && result.value?.state).length, reads.length);
+});
+
+test('record reader retries safe replacements and rejects unsafe replacements behind stale pre-open metadata', async t => {
+  for (const unsafe of [false, true]) {
+    const f = await fixture(t);
+    const experiment = await createExperiment(f.store, { spec: {}, task: 'stale lstat snapshot', profiles: [] });
+    const run = await createExperimentRun(f.store, { experimentId: experiment.id, profile: { id: 'p' } });
+    const path = join(run.directory, 'state.json'), originalLstat = fsPromises.lstat;
+    let injected = false;
+    fsPromises.lstat = async (...args) => {
+      if (injected || args[0] !== path) return originalLstat(...args);
+      const stale = await originalLstat(...args);
+      injected = true;
+      await writeAuditState(f.store, run.id, { status: 'new-revision' });
+      if (unsafe) await chmod(path, 0o644);
+      const replacement = await originalLstat(path);
+      assert.notDeepEqual([replacement.dev, replacement.ino], [stale.dev, stale.ino]);
+      return Object.assign(Object.create(Object.getPrototypeOf(stale)), stale, { nlink: 0 });
+    };
+    syncBuiltinESMExports();
+    try {
+      if (unsafe) await assert.rejects(readAuditRecord(f.store, run.id), /Unsafe|changed/);
+      else assert.equal((await readAuditRecord(f.store, run.id)).state.status, 'new-revision');
+      assert.equal(injected, true);
+    } finally {
+      fsPromises.lstat = originalLstat;
+      syncBuiltinESMExports();
+    }
+  }
 });
 
 test('audit-only home lease blocks a colliding audit owner and releases only its exact owner', async t => {

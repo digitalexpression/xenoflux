@@ -89,6 +89,15 @@ async function readSafeJSON(path, { optional = false } = {}) {
     if (!before.isFile() || before.isSymbolicLink() || before.uid !== process.getuid()
       || (before.mode & 0o077) || before.size > MAX_BYTES || await realpath(path) !== path)
       throw new Error('Unsafe or oversized audit record; preserving it');
+    // lstat can finish with a snapshot of the old inode after atomic rename
+    // has already removed its last directory entry. Retry only when the path
+    // now names a different, independently validated safe inode.
+    if (before.nlink === 0) {
+      if (!await safeReplacementAtPath(before) || attempt === TRANSIENT_LINK_RETRIES)
+        throw new Error('Audit record changed while reading');
+      await new Promise(resolve => setTimeout(resolve, TRANSIENT_LINK_DELAY_MS));
+      continue;
+    }
     if (before.nlink !== 1) {
       if (before.nlink !== 2 || attempt === TRANSIENT_LINK_RETRIES)
         throw new Error('Unsafe or oversized audit record; preserving it');

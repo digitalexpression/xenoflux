@@ -39,6 +39,19 @@ on Node 22.15.0 and Node 24.22.1 (1,348 passes / one skip each), and all 47
 browser journeys under Node 24 after enforcing child-discovery bounds in the
 calling iterator and correcting compressed/shutdown fixture assumptions.
 
+A subsequent Node 22 fixture failure narrowed the remaining record handoff to
+mutable state. An exact-runtime probe demonstrated a stale pre-open snapshot
+of an already-unlinked inode while the path held a different safe replacement.
+The reader now retries only after independently validating that replacement,
+within its existing bound. A deterministic regression passes on both runtimes
+and rejects an unsafe replacement; see the
+[state snapshot correction](RELEASE-3.0.0.md#state-snapshot-handoff).
+
+After the state snapshot correction, complete local engine suites pass on exact
+Node 22.15.0 and 24.22.1 (1,349 passes / one skip each), and all 47 browser
+journeys pass under Node 24. Syntax, native launcher, packaged documentation and
+UI type/token/build-freshness checks pass.
+
 ### Delivery order
 
 Slices A–D are complete: selected-profile execution, durable review tasks and

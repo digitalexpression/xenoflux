@@ -149,6 +149,29 @@ fixture teardown guard also passed its focused case under both runtimes. These
 results supplement prior scoped native evidence; they are not fresh native model
 or client operations. Fresh public CI must verify the integrated head.
 
+## State snapshot handoff
+
+The [following matrix run](https://github.com/digitalexpression/xenoflux/actions/runs/41533829094)
+passed the full Node 24 job, including package smoke. Node 22 passed all browser
+journeys but failed engine fixture setup while reading mutable `state.json` at
+the pre-open link-count guard. The CI output did not record the link count.
+A bounded probe on both exact runtimes captured `lstat` returning an old inode
+with zero links after atomic rename, while the path held a different safe inode.
+
+The reader now retries that stale snapshot only after the existing replacement
+check independently validates the current inode and confirms a different file
+identity. It uses the existing retry bound; unsafe files are never accepted.
+A deterministic regression fails on the prior source and passes on both runtimes;
+it also rejects a real non-private replacement. The complete focused store file
+passes 18 cases on each runtime. Independent read-only review found no material
+correctness or safety issue in the two-file change. Original failed CI outcomes
+remain failed; the integrated head requires fresh CI and source-bound packaging.
+
+After the state snapshot correction, complete local engine suites pass on exact
+Node 22.15.0 and 24.22.1 (1,349 passes / one skip each), and all 47 browser
+journeys pass under Node 24. Syntax, native launcher, packaged documentation and
+UI type/token/build-freshness checks pass.
+
 ## Ordinary review live attempt
 
 ### Initial attempt and local correction
