@@ -3,10 +3,10 @@
 This index points to version-specific release records. Published records are
 immutable; each record states its evidence scope and limits.
 
-- [Xenoflux 3.0.1 candidate](RELEASE-3.0.1.md): unpublished managed-installer
-  correction and installed-UI regression/release checks.
-- [Xenoflux 3.0.0](RELEASE-3.0.0.md): local review acceptance, scoped evidence
-  limits and source-bound verification.
+- [Xenoflux 3.0.1](RELEASE-3.0.1.md): published managed-installer and replay-focus
+  corrections, installed-UI regressions and public/disposable-install checks.
+- [Xenoflux 3.0.0](RELEASE-3.0.0.md): publication, local review acceptance,
+  scoped evidence limits and separate installed verification.
 - [Xenoflux 2.1.0](RELEASE-2.1.0.md): publication, verified installation and
   bounded product acceptance.
 - [Xenoflux 2.0.0](AUDIT-ACCEPTANCE-2.0.0-HISTORY.md): preserved historical

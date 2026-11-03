@@ -51,5 +51,5 @@ records; the versioned release pages contain reviewed public summaries.
 
 [Back to Xenoflux](../README.md).
 
-The [3.0.1 installer hotfix candidate](developer/RELEASE-3.0.1.md) records the
-managed-UI correction and its release checks.
+The [3.0.1 installer hotfix](developer/RELEASE-3.0.1.md) records the published
+managed-UI and replay-focus corrections and their verification.

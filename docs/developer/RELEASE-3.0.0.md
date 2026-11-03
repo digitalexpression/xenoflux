@@ -8,6 +8,50 @@ generated release manifest binds exact source and artifact hashes. npm version/
 tag, GitHub release/assets and installed verification are separate identities;
 source checks alone do not establish publication or installation.
 
+## Published identity and verification
+
+**Stable 3.0.0 was published and verified on 2026-11-03.** This closeout records
+the final results; the preparation evidence below retains its original scope.
+The subsequent [3.0.1 hotfix](RELEASE-3.0.1.md) supersedes 3.0.0 for distribution.
+
+| Item | Recorded result |
+| --- | --- |
+| Merged source / tree | `0f56b6d4163e49cd2d0407d5c1115621ea73b1a0` / `07d429a4bd27acb2ef89b50ca94fca7817b61991`; [PR #8](https://github.com/digitalexpression/xenoflux/pull/8) |
+| npm | [xenoflux 3.0.0](https://www.npmjs.com/package/xenoflux/v/3.0.0), published with `latest=3.0.0`; downloaded public tarball matches the final tested bytes |
+| GitHub | [v3.0.0](https://github.com/digitalexpression/xenoflux/releases/tag/v3.0.0); tag targets merged source and all four downloaded assets match the final bundle |
+| Main tarball SHA-256 | `e42ea4995e088835aeb0b62f05783bf6985ad4096e9221a99b3d02208d1c38b7` |
+| Public CI | [Run 41591712757](https://github.com/digitalexpression/xenoflux/actions/runs/41591712757): Node 22.15.0 and 24.22.1 each passed 1,350 engine cases / one skip, 47 browser journeys and detached offline smoke; tested and merged trees match |
+| Final package | All 170 packed files match merged source; package boundary, packed links, checksums and installer template pass. The merged-source tarball matches the approved proposal bytes. |
+| Published installation | Disposable global npm installation on Node 23.11.0 matched all 170 package files; CLI lookup/help, empty explicit controller, uninstall and temporary-prefix cleanup passed |
+
+Private release receipts bind prepared source `997971e`, merged source, CI,
+artifact hashes and public/disposable-install verification. RC PR #7 closed as
+merged through stable integration. Earlier candidates, failures and artifacts
+retain their original identities. Initial npm propagation returned 404 after
+publication was accepted; later public version/tag and exact bytes were verified
+without republishing or replacing the release.
+
+The release batch used a disposable prefix, home and controller. It performed
+no managed installation, existing installed-app update or real profile/client/
+model operation. Native cancellation, active-review Desktop quit and crash
+recovery retain the fixture-only limits below. The original local approval
+fixture failure remains unattributed despite the separately proven reader fix.
+
+### Separate managed-installation verification
+
+A separately authorized existing-app update to **3.0.0** completed on
+2026-11-03. All 161 installed runtime/dependency/UI files matched the published
+package, with no extra runtime files. Registered profiles, protected
+configuration and authentication-file metadata were preserved. Read-only browser
+verification covered the installed app's home, profiles and an existing saved
+comparison report; no new model task ran.
+
+The updater supplemented the exact published `dist/ui` assets omitted by the
+stock 3.0.0 managed copier. The first failed attempt, successful receipt,
+verification and rollback copy remain preserved privately. Published source and
+artifacts were unchanged; [3.0.1](RELEASE-3.0.1.md) fixes the managed copier.
+This installed-app observation establishes version 3.0.0, not an update to 3.0.1.
+
 ## Integrated development verification
 
 Slices A–D and the slice E parser and reviewer/Desktop corrections are present
@@ -279,6 +323,9 @@ navigation paths when candidate changes or unresolved risks warrant it.
 
 ## Final candidate evidence to record
 
+This table retains preparation results from before publication. Final merged
+source, public CI, artifacts and installed verification are recorded above.
+
 The [roadmap gates](ROADMAP.md#verification-and-release-gates) define the
 sequence; [local release procedure](LOCAL-RELEASE.md) defines package checks.
 
@@ -292,6 +339,6 @@ sequence; [local release procedure](LOCAL-RELEASE.md) defines package checks.
 | Breaking changes, fresh-start guidance and remaining limits | The checkout-only export-review runner, broker, isolated transport/probe and campaign stages were removed. Ordinary Reviews is the supported execution path; external review import remains supported. No report/store schema or copy journal was retired, and no migration was added. Unsupported old data remains untouched. |
 
 Review the actual packed file list and content, including packaged Markdown
-links. Keep private operational receipts outside the candidate. No result here
-asserts CI on merged source, a published npm/GitHub artifact, or an installed
-application update.
+links. Keep private operational receipts outside the candidate. These preparation
+results alone do not establish merged-source CI, publication or an installed
+application update; the separate closeout above binds those observations.
