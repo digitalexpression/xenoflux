@@ -114,8 +114,8 @@ async function writeInstaller(directory) {
 }
 
 /** The packaged app serves its bundled assets on loopback and refuses unauthenticated API calls. */
-async function smokeLocalApp(installed, store, cwd) {
-  const child = spawn(installed, ['--store', store, 'ui', '--demo', '--no-open'], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+async function smokeLocalApp(installed, store, cwd, env = process.env) {
+  const child = spawn(installed, ['--store', store, 'ui', '--demo', '--no-open'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
   try {
     const launch = await new Promise((resolveUrl, reject) => {
       let output = '';
@@ -133,6 +133,8 @@ async function smokeLocalApp(installed, store, cwd) {
       throw new Error('Installed local app did not serve its page with the expected policy');
     const script = /src="(\/assets\/[^"]+\.js)"/.exec(html)?.[1];
     if (!script || (await fetch(`${launch}${script}`)).status !== 200) throw new Error('Installed local app is missing its bundled script');
+    const stylesheet = /href="(\/assets\/[^"]+\.css)"/.exec(html)?.[1];
+    if (!stylesheet || (await fetch(`${launch}${stylesheet}`)).status !== 200) throw new Error('Installed local app is missing its bundled stylesheet');
     const api = await fetch(`${launch}/api/info`, { headers: { 'x-xenoflux-request': '1' } });
     if (api.status !== 401) throw new Error('Installed local app answered an API call without a session');
   } finally {
@@ -299,10 +301,11 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
     const entry = join(userHome, '.local', 'bin', 'xfx');
     const entryResult = await run(entry, ['--help'], { cwd: install, env: { ...process.env, HOME: userHome } });
     if (!entryResult.stdout.startsWith('xfx — Xenoflux')) throw new Error('Installed shell entry did not run the staged application');
+    await smokeLocalApp(entry, join(temporary, 'managed ui store'), temporary, { ...process.env, HOME: userHome });
     await manager.uninstall({ env: { HOME: userHome, PATH: process.env.PATH } });
     if (restoredLogs < 1 || (await readFile(join(controller, 'preserved.json'), 'utf8')) !== '{}\n')
       throw new Error('Detached uninstall did not preserve controller state');
-    return { status: 'passed', mode: 'detached-offline-installed-package-fixtures-and-installation-lifecycle' };
+    return { status: 'passed', mode: 'detached-offline-npm-and-managed-ui-fixtures-and-installation-lifecycle' };
   } finally { await rm(temporary, { force: true, recursive: true }); }
 }
 

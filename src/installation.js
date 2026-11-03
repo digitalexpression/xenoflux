@@ -118,7 +118,7 @@ export function createInstallation({ home, source = new URL('..', import.meta.ur
     let launcherInstalled = false;
     try {
       await mkdir(stage, { mode: 0o700 });
-      for (const name of ['bin', 'src', 'LICENSE', 'package.json']) {
+      for (const name of ['bin', 'src', 'dist/ui', 'LICENSE', 'package.json']) {
         await cp(join(sourceRoot, name), join(stage, name), { recursive: true, force: false, errorOnExist: true });
       }
       await mkdir(join(stage, 'node_modules'), { mode: 0o700 });
