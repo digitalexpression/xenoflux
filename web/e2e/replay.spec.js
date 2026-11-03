@@ -255,6 +255,20 @@ test('replay presents independent trees, linked events and source gaps with keyb
     await expect(inspector).toHaveCount(0);
     await expect(delegatedEvent).toBeFocused();
     await expect(inspector).toHaveCount(0);
+    await page.evaluate(() => {
+      const original = window.requestAnimationFrame.bind(window);
+      window.__replayRafControl = { restore: () => { window.requestAnimationFrame = original; } };
+      window.requestAnimationFrame = () => 1;
+    });
+    try {
+      await page.keyboard.press('F6');
+      await expect(inspector.getByRole('heading', { name: 'Event inspector' })).toBeFocused();
+    } finally {
+      await page.evaluate(() => window.__replayRafControl.restore());
+    }
+    await page.keyboard.press('F6');
+    await expect(delegatedEvent).toBeFocused();
+    await expect(inspector).toBeVisible();
 
     await delegatedEvent.click();
     await expect(inspector).toBeInViewport();

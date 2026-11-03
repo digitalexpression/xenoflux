@@ -18,6 +18,11 @@ existing managed copy. A source package missing the UI fails during staging,
 preserving the prior app and launcher. No data migration is required. Desktop
 reservation, client shutdown, external-terminal and ownership safeguards remain.
 
+Public CI also exposed an existing keyboard-focus failure when F6 reopened the
+replay inspector. Keyboard-open focus now follows the dialog's mount lifecycle
+instead of a single animation-frame callback; pointer-open focus behavior stays
+unchanged. A delayed-frame regression keeps the strict heading-focus assertion.
+
 ## Regression and release checks
 
 - Install into a disposable home and serve HTML, JavaScript and CSS from the

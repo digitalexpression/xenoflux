@@ -202,6 +202,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
   const [sideSelections, setSideSelections] = useState<Record<Side, string>>({ a: '', b: '' });
   const [query, setQuery] = useState('');
   const [inspecting, setInspecting] = useState(false);
+  const focusInspectorOnOpen = useRef(false);
   const [agentView, setAgentView] = useState<{ side: Side; sessionId: string } | null>(null);
   const [agentOrigin, setAgentOrigin] = useState<{ side: Side; sessionId: string } | null>(null);
   const agentTrigger = useRef<HTMLButtonElement | null>(null);
@@ -355,8 +356,12 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
     });
   }
   function focusInspector() {
+    if (inspecting) {
+      document.getElementById(`${labelled}-inspector-title`)?.focus();
+      return;
+    }
+    focusInspectorOnOpen.current = true;
     setInspecting(true);
-    requestAnimationFrame(() => document.getElementById(`${labelled}-inspector-title`)?.focus());
   }
   function move(delta: number, focus = false) {
     if (!filtered.length) return;
@@ -487,7 +492,13 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
       </div> : null}
       <Sheet modal={false} open={inspecting && Boolean(selected || agentView)} onOpenChange={setInspecting}>
         <SheetContent aria-labelledby={`${labelled}-inspector-title`} aria-describedby={`${labelled}-inspector-description`}
-          onOpenAutoFocus={event => event.preventDefault()}
+          onOpenAutoFocus={event => {
+            event.preventDefault();
+            if (focusInspectorOnOpen.current) {
+              focusInspectorOnOpen.current = false;
+              document.getElementById(`${labelled}-inspector-title`)?.focus();
+            }
+          }}
           onInteractOutside={event => event.preventDefault()}
           onCloseAutoFocus={event => { event.preventDefault(); if (reportOrigin?.isConnected) { reportOrigin.focus(); setReportOrigin(null); } else if (agentView && agentTrigger.current?.isConnected) agentTrigger.current.focus(); else if (selected) focusEvent(selected.key); }}>
           <SheetHeader><SheetTitle id={`${labelled}-inspector-title`} tabIndex={-1}>{agentView ? 'Agent summary' : 'Event inspector'}</SheetTitle>
