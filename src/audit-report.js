@@ -1,3 +1,4 @@
+import { assertionText, comparisonSummaryLines, presentComparison } from './audit-presentation.js';
 import path from 'node:path';
 import { buildAuditExplanation, freezeAuditComparisonEvidence, canonicalAuditChecks, gateAuditComparisonDeltas } from './audit-explanation.js';
 import { auditSelectionOptions, buildAuditSelection, retainedAuditSelectionOptions } from './audit-selection.js';
@@ -11,6 +12,8 @@ import { projectSkillSourceTime, nsToSourceIso, projectRunSkillSourceTimes } fro
 import { projectAuditReviewState } from './audit-review.js';
 import { buildAuditConsistency } from './audit-consistency.js';
 import { projectAuditSessionEvidence } from './audit-session-evidence.js';
+import { projectAuditFileInventory } from './audit-file-inventory.js';
+import { projectAuditWorkspacePatch } from './audit-workspace-patch.js';
 
 const EVENT_LIMIT = 50;
 const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
@@ -22,6 +25,13 @@ function clean(value, { markdown = markdownRendering } = {}) {
   return text;
 }
 const shown = value => clean(value);
+/** Plain-language summary lines stay readable as text: only inline markup and
+ * block starts are escaped; our own list marker or indent is kept. */
+function prose(line) {
+  if (!markdownRendering) return String(line).replace(CONTROL, ' ');
+  const [, lead, rest] = /^((?:- |  )?)(.*)$/s.exec(String(line).replace(CONTROL, ' '));
+  return lead + rest.replace(/[\\`*_[\]<>|~]/g, '\\$&').replace(/^([#+-]|\d+[.)])/, '\\$1');
+}
 const list = value => Array.isArray(value) ? value : [];
 const coverageStatus = value => value ?? 'unknown';
 const TASK_CHANGE_BASIS = 'post-setup-snapshot-delta-v1';
@@ -615,13 +625,25 @@ function compareArtifacts(left, right) {
     const comparable = sameBaseline && l?.fingerprint != null && r?.fingerprint != null &&
       Number.isFinite(l?.fileCount) && Number.isFinite(r?.fileCount) && exactTaskEnd &&
       l?.captureComplete !== false && r?.captureComplete !== false;
-    const side = value => value ? { fingerprint: value.fingerprint ?? null, fileCount: value.fileCount ?? null,
+    const side = (value, run) => value ? { fingerprint: value.fingerprint ?? null, fileCount: value.fileCount ?? null,
       baselineFingerprint: stage === 'taskEnd' ? value.baselineFingerprint ?? null : null,
+      patchSha256: stage === 'taskEnd' ? value.patchSha256 ?? null : null,
       changedFileCount: stage === 'taskEnd' ? value.changedFileCount ?? null : null,
       changeCountStatus: stage === 'taskEnd' ? value.changeCountStatus ?? 'unknown' : null,
       changeCountBasis: stage === 'taskEnd' && value.changeCountBasis === TASK_CHANGE_BASIS ? value.changeCountBasis : null,
       changeCountReason: stage === 'taskEnd' && TASK_CHANGE_REASONS.has(value.changeCountReason) ? value.changeCountReason : null,
-      captureComplete: value.captureComplete ?? null, timing: value.timing ?? null, status: value.status ?? null } : null;
+      captureComplete: value.captureComplete ?? null, timing: value.timing ?? null, status: value.status ?? null,
+      ...(stage === 'taskEnd' && value.patchContent ? { patchContent: projectAuditWorkspacePatch(value.patchContent, {
+        taskEndFingerprint: value.fingerprint, baselineFingerprint: value.baselineFingerprint, sourcePatchSha256: value.patchSha256,
+        ...(typeof (run?.sourceWorkspace?.sourceCommit ?? run?.source?.baseline?.sourceCommit ?? run?.source?.baseline?.commit) === 'string'
+          ? { sourceBaselineCommit: run.sourceWorkspace?.sourceCommit ?? run.source?.baseline?.sourceCommit ?? run.source?.baseline?.commit } : {}),
+        ...(typeof (run?.sourceWorkspace?.sourceTree ?? run?.source?.baseline?.sourceTree ?? run?.source?.baseline?.tree) === 'string'
+          ? { sourceBaselineTree: run.sourceWorkspace?.sourceTree ?? run.source?.baseline?.sourceTree ?? run.source?.baseline?.tree } : {}),
+      }) } : {}),
+      ...(stage === 'taskEnd' && value.changeInventory ? { changeInventory: projectAuditFileInventory(value.changeInventory, {
+        postSetupFingerprint: value.baselineFingerprint, taskEndFingerprint: value.fingerprint,
+        ...(value.changeCountStatus === 'known' ? { changedFileCount: value.changedFileCount } : {}),
+      }) } : {}) } : null;
     const changeCountKnown = stage === 'taskEnd' && sameBaseline && exactTaskEnd && l?.changeCountStatus === 'known' && r?.changeCountStatus === 'known' &&
       Number.isSafeInteger(l.changedFileCount) && l.changedFileCount >= 0 && Number.isSafeInteger(r.changedFileCount) && r.changedFileCount >= 0 &&
       l.changeCountBasis === TASK_CHANGE_BASIS && r.changeCountBasis === TASK_CHANGE_BASIS;
@@ -630,7 +652,7 @@ function compareArtifacts(left, right) {
       basis: changeCountKnown ? l.changeCountBasis : null,
       reason: changeCountKnown ? null : (!exactTaskEnd && (l || r) ? 'task-end-boundary-unverified' :
         !sameBaseline ? 'runs-do-not-share-verified-baseline' : l?.changeCountReason ?? r?.changeCountReason ?? 'task-change-count-unavailable') } : null;
-    return [stage, { left: side(l), right: side(r), ...(changes ? { changes } : {}),
+    return [stage, { left: side(l, left), right: side(r, right), ...(changes ? { changes } : {}),
       status: comparable ? (l.fingerprint === r.fingerprint && l.fileCount === r.fileCount ? 'equal' : 'different') : 'unknown',
       reason: comparable ? null : !sameBaseline ? 'Runs do not share a verified commit and tree.' : !exactTaskEnd ? 'Task-end capture timing or completeness is unverified.' : 'Snapshot fingerprints, file counts, or capture completeness are unavailable.' }];
   }));
@@ -742,7 +764,9 @@ function validatedRecordedUsage(run) {
 function compareRecordedResponseUsage(left, right) {
   const a = validatedRecordedUsage(left), b = validatedRecordedUsage(right);
   const compatible = Boolean(a && b && a.status === 'complete' && b.status === 'complete'
-    && JSON.stringify(a.contract) === JSON.stringify(b.contract));
+    && a.contract?.contract === b.contract?.contract
+    && a.contract?.historyMode === b.contract?.historyMode
+    && a.contract?.counterScope === b.contract?.counterScope);
   const fields = Object.fromEntries(USAGE_FIELDS.map(field => [field, []]));
   const align = (run, usage) => {
     const roles = stableAgentRoles(run), ordinals = turnOrdinals(run), rows = new Map(), duplicates = new Set();
@@ -1072,7 +1096,11 @@ function renderEvents(events) {
       .filter(key => (metadata[key] ?? event[key]) != null).map(key => `${key}=${shown(metadata[key] ?? event[key])}`);
     for (const key of ['operations', 'types', 'resourcePaths']) if (Array.isArray(metadata[key]) && metadata[key].length)
       safeMetadata.push(`${key}=[${metadata[key].slice(0, 10).map(shown).join(', ')}${metadata[key].length > 10 ? ', …' : ''}]`);
-    return `  ${shown(event.recordedAt)} · ${shown(event.kind)} · agent ${shown(event.agentId)} · turn ${shown(event.turnId)}${event.sourceLine == null ? '' : ` · line ${event.sourceLine}`}${detail ? ` · ${detail}` : ''}${safeMetadata.length ? ` · ${safeMetadata.join(', ')}` : ''}`;
+    const observed = Number.isSafeInteger(event.observedAtMs) && event.observedAtMs >= 0 && event.observedAtMs <= 8640000000000000
+      ? new Date(event.observedAtMs).toISOString() : null;
+    const time = event.recordedAt != null ? shown(event.recordedAt)
+      : observed ? `observed ${observed}` : shown(null);
+    return `  ${time} · ${shown(event.kind)} · agent ${shown(event.agentId)} · turn ${shown(event.turnId)}${event.sourceLine == null ? '' : ` · line ${event.sourceLine}`}${detail ? ` · ${detail}` : ''}${safeMetadata.length ? ` · ${safeMetadata.join(', ')}` : ''}`;
   });
   if (sortedEvents.length > EVENT_LIMIT) shownEvents.push(`  … ${sortedEvents.length - EVENT_LIMIT} additional events omitted (of ${sortedEvents.length} total).`);
   return shownEvents.length ? shownEvents.join('\n') : '  No recorded events.';
@@ -1115,26 +1143,35 @@ function renderNativeStorage(source = {}, capture = {}) {
   const runtime = observer.runtime ?? {};
   return [`Native storage: session ${shown(source.persistence ?? runtime.threadPersistence)} · rollouts ${shown(observer.nativeSessionStorage)} · SQLite ${shown(runtime.sqlite)} · logs ${shown(runtime.logs)} · temporary files ${shown(runtime.temporaryFiles)} · workspace ${shown(runtime.workspace)} · saved settings changed ${shown(observer.savedSettingsChanged)}`];
 }
-function renderWorkspace(workspace) {
+function renderWorkspacePatch(patch, { includeBody = false, indent = '  ' } = {}) {
+  if (!patch) return `${indent}Task-end patch content: unavailable`;
+  const lines = [`${indent}Task-end patch content: ${shown(patch.status)} · basis ${shown(patch.basis)} · source patch ${shown(patch.sourcePatchSha256)} · redacted text ${shown(patch.textSha256 ?? 'unavailable')}${patch.reason ? ` · ${shown(patch.reason)}` : ''}`];
+  if (patch.status === 'available' && includeBody && typeof patch.text === 'string')
+    lines.push(...patch.text.split('\n').map(line => `${indent}  ${shown(line)}`));
+  return lines.join('\n');
+}
+function renderWorkspace(workspace, { includePatchBody = false } = {}) {
   if (!workspace || typeof workspace !== 'object') return 'Workspace snapshots: unavailable';
   const project = snapshot => {
     if (!snapshot || typeof snapshot !== 'object') return shown(snapshot);
     return ['status', 'path', 'commit', 'tree', 'fingerprint', 'fileCount', 'changedFileCount', 'changeCountStatus', 'changeCountBasis', 'changeCountReason', 'dirty', 'captureComplete', 'timing', 'recordedAt']
       .filter(key => snapshot[key] !== undefined).map(key => `${key}=${shown(snapshot[key])}`).join(', ') || safeJson(snapshot);
   };
-  return [`Workspace snapshots:`, `  Task end: ${project(workspace.taskEnd)}`, `  Check end: ${project(workspace.checkEnd)}`].join('\n');
+  return [`Workspace snapshots:`, `  Task end: ${project(workspace.taskEnd)}`, renderWorkspacePatch(workspace.taskEnd?.patchContent, { includeBody: includePatchBody }), `  Check end: ${project(workspace.checkEnd)}`].join('\n');
 }
-function renderWorkspaceComparison(comparison) {
+function renderWorkspaceComparison(comparison, { includePatchBody = false } = {}) {
   if (!comparison?.snapshots) return 'Workspace snapshot comparison: unknown';
   return ['Workspace snapshot comparison (same verified source commit and tree required):',
-    ...['taskEnd', 'checkEnd'].map(stage => {
+    ...['taskEnd', 'checkEnd'].flatMap(stage => {
       const row = comparison.snapshots[stage];
       const describe = side => {
         const value = row?.[side];
         return value ? `fingerprint ${shown(value.fingerprint)} · snapshot files ${shown(value.fileCount)}${stage === 'taskEnd' ? ` · task-changed files ${shown(value.changedFileCount)} (${shown(value.changeCountStatus)})` : ''}${value.captureComplete != null ? ` · captureComplete ${shown(value.captureComplete)}` : ''}${value.timing ? ` · timing ${shown(value.timing)}` : ''}` : 'unavailable';
       };
       const changes = row?.changes ? ` · task-change delta ${shown(row.changes.status)} ${shown(row.changes.delta)}${row.changes.basis ? ` · basis ${shown(row.changes.basis)}` : ''}${row.changes.reason ? ` · ${shown(row.changes.reason)}` : ''}` : '';
-      return `  ${stage}: ${shown(row?.status)} · left ${describe('left')} · right ${describe('right')}${changes}${row?.reason ? ` · ${shown(row.reason)}` : ''}`;
+      const lines = [`  ${stage}: ${shown(row?.status)} · left ${describe('left')} · right ${describe('right')}${changes}${row?.reason ? ` · ${shown(row.reason)}` : ''}`];
+      if (stage === 'taskEnd') for (const side of ['left', 'right']) lines.push(renderWorkspacePatch(row?.[side]?.patchContent, { includeBody: includePatchBody, indent: `    ${side}: ` }));
+      return lines;
     })].join('\n');
 }
 function renderSetupSnapshot(snapshot) {
@@ -1255,19 +1292,20 @@ function renderExperimentPreview(preview) {
   lines.push(renderCapture(preview.capture));
   return lines.join('\n');
 }
-function renderExperimentReport(report, { markdown = false, reviews } = {}) {
+function renderExperimentReport(report, { markdown = false, reviews, includePatchBody = false } = {}) {
   const baseline = report.baseline ?? {};
   const execution = report.execution ?? {};
   const lines = [markdown ? '# Audit experiment' : 'Audit experiment', `Experiment: ${shown(report.id)} · status ${shown(report.status)}`,
     `Baseline: ${shown(baseline.repository)} · commit ${shown(baseline.commit)} · tree ${shown(baseline.tree)}`,
     `Execution: ${shown(execution.status)} · elapsed ${shown(execution.elapsedMs)} ms · exit ${shown(execution.exitCode)}`,
+    ...(report.limits ? [`Time limits: per run ${report.limits.runMs === null ? 'none' : `${shown(report.limits.runMs)} ms`}; overall ${report.limits.experimentMs === null ? 'none' : `${shown(report.limits.experimentMs)} ms`}.`] : []),
     `Coverage:\n${renderCoverage(report.coverage)}`];
-  for (const [index, comparison] of list(report.comparisons).entries()) lines.push(`\nComparison ${index + 1}:`, renderComparison(comparison, { markdown }));
+  for (const [index, comparison] of list(report.comparisons).entries()) lines.push(`\nComparison ${index + 1}:`, renderComparison(comparison, { markdown, includePatchBody }));
   for (const [index, run] of list(report.runs).entries()) {
     lines.push(`\nRun ${index + 1}: ${shown(run.profile?.profileName)} · ${shown(run.id)} · ${shown(run.status)}`,
       `Process: ${shown(run.execution?.status)} · exit ${shown(run.execution?.exitCode)} · elapsed ${shown(run.execution?.elapsedMs)} ms`,
       `Verification checks:\n${renderChecks(list(run.outcome?.checks ?? run.checks))}`,
-      renderCapture(run.capture), renderWorkspace(run.workspace), renderRun(run));
+      renderCapture(run.capture), renderWorkspace(run.workspace, { includePatchBody }), renderRun(run, { markdown, includePatchBody }));
   }
   if (reviews) lines.push('Verification — attached reviews and supplemental checks', ...renderReviewVerification(reviews),
     'Outcome — reviewer judgments', ...renderReviewOutcomes(reviews));
@@ -1419,7 +1457,7 @@ function renderConsistencyOverview(report, consistency, { markdown, reviews } = 
   lines.push(...list(consistency.limitations).map(item => `  ${shown(item)}`));
   return lines.join('\n');
 }
-function renderSeriesReport(report, { markdown = false, reviews } = {}) {
+function renderSeriesReport(report, { markdown = false, reviews, includePatchBody = false } = {}) {
   const baseline = report.baseline ?? {}, recipe = report.recipe ?? {};
   const lines = [markdown ? '# Audit series' : 'Audit series', `Series: ${shown(report.id)} · status ${shown(report.status)} · exit ${shown(report.exitCode)}`,
     renderConsistencyOverview(report, buildAuditConsistency(report, { reviews }), { markdown, reviews }),
@@ -1437,8 +1475,8 @@ function renderSeriesReport(report, { markdown = false, reviews } = {}) {
       const rightRow = list(trial.profiles).find(item => item.run?.id === pair.rightRunId);
       const left = leftRow?.run ? { ...leftRow.run, quality: leftRow.quality } : null;
       const right = rightRow?.run ? { ...rightRow.run, quality: rightRow.quality } : null;
-      lines.push(`\nTrial ${shown(trial.index)} · ${shown(pair.leftRunId)} vs ${shown(pair.rightRunId)}`, renderComparison(compareAuditRuns(left, right,
-        retainedAuditSelectionOptions(trial.selection)), { markdown }));
+    lines.push(`\nTrial ${shown(trial.index)} · ${shown(pair.leftRunId)} vs ${shown(pair.rightRunId)}`, renderComparison(compareAuditRuns(left, right,
+        retainedAuditSelectionOptions(trial.selection)), { markdown, includePatchBody }));
     }
   }
   for (const profile of list(report.profiles).slice(0, 160)) {
@@ -1500,7 +1538,8 @@ function renderEvaluationReport(report, { markdown = false } = {}) {
     lines.push(`Revision: ${shown(report.revision)} · parent ${shown(report.parentEvaluationId ?? 'none')}`,
       `Frozen evidence: ${shown(reviews.evidenceFingerprint)}`,
       'Review identities and supplemental results are supplied by the submitter; xfx validates evidence binding, not reviewer identity or external execution.');
-    const options = { markdown, reviews };
+    const includePatchBody = report.replayContentBoundary === 'selected-redacted-replay-content';
+    const options = { markdown, reviews, includePatchBody };
     if (report.subject.kind === 'audit-comparison') lines.push(renderComparison(report.subject, options));
     else if (report.subject.kind === 'audit-run') lines.push(renderRun(report.subject, options));
     else {
@@ -1510,7 +1549,7 @@ function renderEvaluationReport(report, { markdown = false } = {}) {
     lines.push(`Review packet scopes: ${list(report.reviewPacket?.claimScopes).map(shown).join(', ') || 'unknown'}`,
       'The JSON export contains the frozen subject, review packet references and complete revision history.');
   }
-  if (report.series) lines.push(renderSeriesReport(report.series, { markdown }));
+  if (report.series) lines.push(renderSeriesReport(report.series, { markdown, includePatchBody: report.replayContentBoundary === 'selected-redacted-replay-content' }));
   if (list(report.warnings).length) lines.push(`Warnings:\n${list(report.warnings).slice(0, 50).map(x => `  ${shown(typeof x === 'string' ? x : x.code ?? x.reason ?? x.message)}`).join('\n')}`);
   return lines.join('\n');
 }
@@ -1566,7 +1605,7 @@ function renderSessionEvidence(run) {
       ...evidence.taskEnd.files.map(file => `      ${shown(file.path)} · SHA-256 ${shown(file.sha256)}`)] : []),
     ...list(evidence.checkRecipes).map(recipe => `    Supplied recipe ${shown(recipe.name)} · ${shown(recipe.fingerprint)}`)];
 }
-function renderRun(run, { markdown = false, reviews } = {}) {
+function renderRun(run, { markdown = false, reviews, includePatchBody = false } = {}) {
   const p = run.profile ?? {};
   const agents = list(run.agents);
   const observedTurns = turns(run);
@@ -1580,6 +1619,7 @@ function renderRun(run, { markdown = false, reviews } = {}) {
     `Source file: ${shown(source.path)} · fingerprint ${shown(source.fingerprint)}`,
     ...renderSessionEvidence(run),
     ...renderNativeStorage(source, run.capture),
+    ...(run.sessionReplay ? [renderSessionReplay(run.sessionReplay, { markdown })] : []),
     ...(run.execution ? [`Process: ${shown(run.execution.status)} · exit ${shown(run.execution.exitCode)} · elapsed ${shown(run.execution.elapsedMs)} ms`] : []),
     'Evidence coverage:', renderCoverage(run.coverage),
     'Agents:', agents.length ? agents.map(agent => `${agentLabel(agent)}${agent.source ? ` · source ${shown(agent.source.path)} · fingerprint ${shown(agent.source.fingerprint)}` : ''}`).join('\n') : '  Agent tree unavailable.',
@@ -1596,7 +1636,7 @@ function renderRun(run, { markdown = false, reviews } = {}) {
     ...(run.outcome?.checks || run.checks ? [`Verification checks:\n${renderChecks(list(run.outcome?.checks ?? run.checks))}`] : []),
     ...(reviews ? renderReviewVerification(reviews) : []),
     ...(run.capture ? [renderCapture(run.capture)] : []),
-    ...(run.workspace ? [renderWorkspace(run.workspace)] : []),
+    ...(run.workspace ? [renderWorkspace(run.workspace, { includePatchBody })] : []),
     `Outcome: ${shown(run.outcome?.status ?? 'unknown')}${run.outcome?.reason ? ` · ${shown(run.outcome.reason)}` : ''}${run.outcome?.claim ? ` · recorded claim success=${shown(run.outcome.claim.success)} status=${shown(run.outcome.claim.status)} agent=${shown(run.outcome.claim.agentId)} turn=${shown(run.outcome.claim.turnId)} line=${shown(run.outcome.claim.sourceLine)}` : ''}`,
     ...(reviews ? renderReviewOutcomes(reviews) : []),
     `Artifacts: ${list(run.artifacts).length ? `${list(run.artifacts).slice(0, 50).map(item => shown(item.path ?? item.kind ?? item)).join(', ')}${run.artifacts.length > 50 ? `, … ${run.artifacts.length - 50} omitted` : ''}` : 'none recorded'}`,
@@ -1604,6 +1644,39 @@ function renderRun(run, { markdown = false, reviews } = {}) {
     list(run.warnings).length ? `Warnings:\n${list(run.warnings).map(warning => `  ${shown(typeof warning === 'string' ? warning : warning.message ?? warning.reason)}`).join('\n')}` : 'Warnings: none recorded',
     'A missing observation means unknown unless the report explicitly says otherwise. Resource availability does not establish runtime use.',
   ].join('\n');
+}
+
+function renderSessionReplay(replay, { markdown = false } = {}) {
+  const heading = markdown ? '## Session replay' : 'Session replay';
+  const sessions = list(replay?.sessions);
+  const byId = new Map(sessions.map(session => [session.id, session]));
+  const lines = [heading, 'Recorded events in source order; timestamps are shown where recorded. Concurrent child durations are not added to the root span.'];
+  for (const session of sessions) {
+    const parent = session.parentId ? ` · parent ${session.parentId}` : '';
+    const depth = Number.isSafeInteger(session.depth) ? session.depth : 0;
+    lines.push(`${'  '.repeat(Math.min(depth, 12))}Session ${shown(session.id)}${parent} · ${shown(session.status)}${session.reason ? ` · ${shown(session.reason)}` : ''}`);
+    if (session.source?.fingerprint) lines.push(`${'  '.repeat(Math.min(depth + 1, 12))}Source fingerprint ${shown(session.source.fingerprint)}`);
+    const events = [...list(session.events)].sort((a, b) => a.sourceLine - b.sourceLine);
+    if (!events.length) lines.push(`${'  '.repeat(Math.min(depth + 1, 12))}No replay events were captured.`);
+    for (const event of events) {
+      const timestamp = event.timestamp ? shown(event.timestamp) : 'time not recorded';
+      const turn = event.turnId ? ` · turn ${shown(event.turnId)}` : '';
+      const call = event.callId ? ` · call ${shown(event.callId)}` : '';
+      const related = event.relatedEventId ? ` · linked event ${shown(event.relatedEventId)}` : '';
+      const status = event.status ? ` · ${shown(event.status)}` : '';
+      const prefix = `${'  '.repeat(Math.min(depth + 1, 12))}`;
+      lines.push(`${prefix}${timestamp} · ${shown(event.label)}${turn}${status} · source line ${shown(event.sourceLine)}${call}${related}`);
+      if (event.body !== undefined && event.body !== null)
+        lines.push(...String(event.body).split('\n').map(row => `${prefix}  ${shown(row)}`));
+      else if (event.bodyStatus) lines.push(`${prefix}  Body ${shown(event.bodyStatus)}${event.bodyReason ? ` · ${shown(event.bodyReason)}` : ''}.`);
+      if (event.body !== undefined && event.body !== null && event.bodyStatus === 'truncated')
+        lines.push(`${prefix}  Body is truncated${event.bodyReason ? ` · ${shown(event.bodyReason)}` : ''}.`);
+    }
+    for (const limit of list(session.limits)) lines.push(`${'  '.repeat(Math.min(depth + 1, 12))}Limit ${shown(limit.kind ?? 'unknown')}${limit.message ? ` · ${shown(limit.message)}` : ''}${limit.omitted ? ` · ${shown(limit.omitted)} omitted` : ''}`);
+  }
+  for (const session of sessions) if (session.parentId && !byId.has(session.parentId))
+    lines.push(`Unavailable parent session ${shown(session.parentId)} was not included.`);
+  return lines.join('\n');
 }
 function renderResourceProvenance(value, indent = '') {
   const block = projectResourceProvenance(value);
@@ -1642,12 +1715,20 @@ function renderSkillDiff(skills, { markdown = false } = {}) {
     return `  ${shown(skill.name)} [${shown(skill.id)}]\n    Left: ${side(skill.left)}\n    Right: ${side(skill.right)}`;
   })].join('\n');
 }
-function renderComparison(value, { markdown = false, reviews } = {}) {
+function renderComparison(value, { markdown = false, reviews, includePatchBody = false } = {}) {
   const explanation = buildAuditExplanation(value.left, value.right, retainedAuditSelectionOptions(value.selection));
   const c = gateAuditComparisonDeltas(value.comparison ?? {}, explanation.conditions);
-  const heading = title => `${markdown ? '## ' : ''}${title}`;
-  const lines = [markdown ? '# Audit comparison' : 'Audit comparison'];
-  lines.push(heading('Comparison conditions'));
+  const lines = markdown ? [] : ['Audit comparison'];
+  const readable = [];
+  const summary = Object.fromEntries(Object.entries(comparisonSummaryLines(presentComparison(value, { reviews })))
+    .map(([key, rows]) => [key, rows.filter(row => !markdown || row !== 'Technical detail:').map(prose)]));
+  const section = (title, key) => {
+    if (markdown) {
+      readable.push(`## ${title}`, ...summary[key], '');
+      if (key !== 'limits') lines.push(`### ${title}`);
+    } else lines.push(title, ...summary[key]);
+  };
+  section('Comparison conditions', 'conditions');
   for (const side of ['left', 'right']) {
     const run = value[side] ?? {};
     lines.push(`${side === 'left' ? 'Left' : 'Right'}: ${shown(run.profile?.profileName ?? run.profile?.name ?? run.profileName)} · ${shown(run.id)} · ${shown(run.status)} · ${shown(explanation.conditions.evidenceKinds[side])}`);
@@ -1687,40 +1768,10 @@ function renderComparison(value, { markdown = false, reviews } = {}) {
     for (const item of list(c.expectation.unknowns)) lines.push(`  Unknown: ${item.side} · agent ${shown(item.agentId)} · turn ${shown(item.turnId)} · line ${shown(item.sourceLine)} · ${shown(item.field)}: ${shown(item.reason)}`);
   }
 
-  const assertionText = assertion => ({
-    'in-boundary-edit-observed': 'Recorded an edit within the declared file boundary',
-    'outside-boundary-edit-observed': 'Recorded an edit outside the declared file boundary',
-    'editable-boundary-unknown': 'The editable-file boundary was not recorded',
-    'edit-scope-unknown': 'No located edit establishes scope; other actions remain unknown',
-    'no-file-change-records': 'No file-change records in the complete captured scope; this does not assert no edits occurred',
-    'read-before-recorded-edit': 'A read operation is recorded before an edit in the same owned source',
-    'read-after-recorded-edit': 'A read operation is recorded after an edit in the same owned source',
-    'read-before-edit': 'A successful named read is recorded before an edit invocation in the same owned turn',
-    'read-after-edit': 'A successful named read is recorded after an edit invocation in the same owned turn',
-    'read-edit-order-unknown': 'Read/edit order cannot be established from the retained evidence',
-    'not-identifiable-from-retained-actions': 'This behavior cannot be identified from retained actions',
-  }[assertion] ?? assertion);
-  lines.push(heading('Behavioral findings'));
-  for (const finding of explanation.findings) {
-    lines.push(`  ${shown(finding.id)} · ${shown(finding.title)}: ${shown(finding.classification)} · ${shown(finding.scope)}`);
-    for (const side of ['left', 'right']) {
-      const item = finding[side];
-      lines.push(`    ${side}: ${shown(assertionText(item.assertion))} · evidence ${shown(item.state)}${item.coverage ? ` · coverage ${shown(item.coverage)}` : ''} · refs ${item.evidenceRefs.map(shown).join(', ') || 'none; unknown'}${item.omissions ? ` · omissions ${safeJson(item.omissions)}` : ''}`);
-      for (const action of list(item.actions)) lines.push(`      Named ${shown(action.name)} · targets ${action.targets.map(shown).join(', ') || 'none'} · subjects ${action.subjects.map(shown).join(', ') || 'none'} · status ${shown(action.status)} · scope ${shown(action.resultScope)} · invocation ${shown(action.invocationIndex)} · result index ${shown(action.resultIndex)} · actor ${shown(action.agentId)} · turn ${shown(action.turnId)} · call ${shown(action.callId)} · source line ${shown(action.sourceLine)} · result line ${shown(action.resultSourceLine)} · ref ${shown(action.id)}`);
-    }
-    lines.push(`    Pairs: planned ${finding.pairs.planned} · observed ${finding.pairs.observed} · eligible ${finding.pairs.eligible} · missing ${finding.pairs.missing} · unknown ${finding.pairs.unknown}`,
-      `    Limit: ${shown(finding.limitation)}`);
-  }
-  lines.push(`  Consistency: ${shown(explanation.consistency.status)}. ${shown(explanation.consistency.reason)}`);
-  lines.push(heading('Paired action evidence'), 'Grouping basis: the frozen task/file boundary or an owned same-source read/edit sequence. Groups do not imply one-to-one alignment or synchronized clocks.');
+  // Assertion wording is shared with the local app (audit-presentation.js).
+  section('What we could not see', 'limits');
+  section('Session replay', 'replay');
   for (const side of ['left', 'right']) {
-    const refs = new Set(explanation.findings.flatMap(finding => finding[side].evidenceRefs));
-    const actions = explanation.evidence[side].filter(action => refs.has(action.id));
-    lines.push(`  ${side}: ${actions.length ? 'supporting observations' : "No located supporting actions; consult each finding's capture state and limits."}`);
-    for (const action of actions) lines.push(`    ${shown(action.id)} · ${shown(action.kind)} · ${shown(action.path ?? action.resource?.name ?? 'target unknown')} · actor ${shown(action.agentId)} (${shown(action.role)}) · turn ${shown(action.turnId)} · item ${shown(action.itemId ?? action.observationId)} · source ${shown(action.sourceId)} · line ${shown(action.sourceLine)} · order ${shown(action.order.basis)} · status ${shown(action.status)} · exit ${shown(action.exitCode)}`);
-    const namedRefs = new Set(explanation.findings.flatMap(finding => list(finding[side].evidenceRefs)));
-    for (const action of list(explanation.evidence.namedActions[side]).filter(item => namedRefs.has(item.id)))
-      lines.push(`    ${shown(action.id)} · named ${shown(action.name)} · targets ${action.targets.map(shown).join(', ') || 'none'} · subjects ${action.subjects.map(shown).join(', ') || 'none'} · status ${shown(action.exitCode === 0 ? action.resultScope === 'action' ? 'passed' : 'invocation passed' : Number.isSafeInteger(action.exitCode) ? action.resultScope === 'action' ? 'failed' : 'invocation failed' : 'unknown')} · scope ${shown(action.resultScope)} · invocation ${shown(action.invocationIndex)} · result index ${shown(action.resultIndex)} · actor ${shown(action.agentId)} · turn ${shown(action.turnId)} · call ${shown(action.callId)} · source line ${shown(action.sourceLine)} · result line ${shown(action.resultSourceLine)} · source fingerprint ${shown(action.sourceFingerprint)}`);
     const run = value[side] ?? {}, agents = agentSummary(run), behavior = eventBehavior(run);
     lines.push(`  ${side} Agents: ${shown(agents.status)} · observed ${agents.observedAgentCount} · children ${agents.childCount} · max depth ${shown(agents.maxDepth)}`);
     lines.push(...agents.agents.map(agent => `    ${shown(agent.role ?? 'agent')} ${shown(agent.id)} · parent ${shown(agent.parentId)} · ${shown(agent.status)}${agent.source ? ` · source ${shown(agent.source.path)} · fingerprint ${shown(agent.source.fingerprint)}` : ''}`));
@@ -1757,7 +1808,7 @@ function renderComparison(value, { markdown = false, reviews } = {}) {
     for (const row of list(c.instructionSources.roles).slice(0, 50)) lines.push(`  ${shown(row.rolePath)}: ${shown(row.status)} · left ${shown(row.left?.status ?? 'unknown')} / right ${shown(row.right?.status ?? 'unknown')}${row.left && row.right ? ` · ${row.left.sources.length} / ${row.right.sources.length} sources` : ''}`);
   }
 
-  lines.push(heading('Verification'));
+  section('Verification', 'verification');
   for (const side of ['left', 'right']) {
     const verification = explanation.verification[side];
     lines.push(`  ${side} agent claim: ${shown(verification.agentClaim?.status)} · success ${shown(verification.agentClaim?.success)} · actor ${shown(verification.agentClaim?.agentId)} · line ${shown(verification.agentClaim?.sourceLine)}`,
@@ -1770,7 +1821,8 @@ function renderComparison(value, { markdown = false, reviews } = {}) {
   }
   lines.push('Agent verification activity, native completion, independent checking and human judgment are distinct; a command count is not a named check.');
   if (reviews) lines.push(...renderReviewVerification(reviews));
-  lines.push(heading('Time and tokens'), 'Metric deltas (right minus left):');
+  section('Time and tokens', 'time');
+  lines.push('Metric deltas (right minus left):');
   const metrics = Object.entries(c.metrics ?? {}).sort(([a], [b]) => a.localeCompare(b));
   lines.push(...(metrics.length ? metrics.map(([key, metric]) => `  ${shown(key)}: ${shown(metric.left)} → ${shown(metric.right)} · delta ${shown(metric.delta)} (${shown(metric.status)})${metric.reason ? ` · ${shown(metric.reason)}` : ''}`) : ['  No comparable metrics.']));
   for (const side of ['left', 'right']) lines.push(`  ${side} scoped measurements:\n${renderUsage(value[side] ?? {})}`);
@@ -1801,7 +1853,7 @@ function renderComparison(value, { markdown = false, reviews } = {}) {
   }
 
   lines.push('Time and tokens are scoped measurements, not billed cost, active/waiting time or automatic quality.');
-  lines.push(heading('Outcome and code changes'));
+  section('Outcome and code changes', 'outcome');
   if (reviews) lines.push(...renderReviewOutcomes(reviews));
   for (const criterion of explanation.outcomes.criteria) lines.push(`  ${shown(criterion.criterion)}: left ${shown(criterion.left)} · right ${shown(criterion.right)} · ${shown(criterion.status)} · better on this criterion ${shown(criterion.advantage)}. ${shown(criterion.association)}`);
   lines.push(`  Human rubric outcome: ${shown(explanation.outcomes.human.status)} · left ${shown(explanation.outcomes.human.left)} · right ${shown(explanation.outcomes.human.right)} · delta ${shown(explanation.outcomes.human.delta)}. ${shown(explanation.outcomes.human.limitation)}`);
@@ -1815,7 +1867,7 @@ function renderComparison(value, { markdown = false, reviews } = {}) {
     lines.push(`Artifact comparison: ${shown(c.artifacts.status)} · delta ${shown(c.artifacts.delta)}`);
     for (const item of list(c.artifacts.added)) lines.push(`  Added: ${shown(item.kind)} ${shown(item.path ?? item.patchPath ?? item.label ?? item.fingerprint)} · agent ${shown(item.agentId)} · turn ${shown(item.turnId)} · line ${shown(item.sourceLine)}`);
     for (const item of list(c.artifacts.removed)) lines.push(`  Removed: ${shown(item.kind)} ${shown(item.path ?? item.patchPath ?? item.label ?? item.fingerprint)} · agent ${shown(item.agentId)} · turn ${shown(item.turnId)} · line ${shown(item.sourceLine)}`);
-    lines.push(renderWorkspaceComparison(c.artifacts));
+    lines.push(renderWorkspaceComparison(c.artifacts, { includePatchBody }));
   }
   if (c.outcomes) {
     lines.push(`Recorded outcome evidence: ${shown(c.outcomes.status)} · claim comparison ${shown(c.outcomes.claimStatus)} · checks ${shown(c.outcomes.checks?.status)}`);
@@ -1829,7 +1881,10 @@ function renderComparison(value, { markdown = false, reviews } = {}) {
   }
 
   lines.push(explanation.outcomes.conclusion, c.conclusion ?? 'Observed differences do not establish causality or a winner.');
-  return lines.join('\n');
+  const replay = ['left', 'right'].flatMap(side => value[side]?.sessionReplay
+    ? [`${markdown ? '##' : ''} ${side === 'left' ? 'Left' : 'Right'} session replay`, renderSessionReplay(value[side].sessionReplay, { markdown })] : []);
+  return (markdown ? ['# Audit comparison', '', ...replay, ...readable, '## Technical details',
+    'Source identifiers, recorded controls and supporting observations for the report above.', '', ...lines] : lines).join('\n');
 }
 
 /** Render a run, comparison, or setup inventory comparison without raw private text. */
@@ -1840,11 +1895,12 @@ export function renderAudit(value, { format = 'terminal' } = {}) {
   markdownRendering = markdown;
   let result;
   try {
-  if (value?.kind === 'audit-comparison') result = renderComparison(value, { markdown });
+  const includePatchBody = value?.replayContentBoundary === 'selected-redacted-replay-content';
+  if (value?.kind === 'audit-comparison') result = renderComparison(value, { markdown, includePatchBody });
   else if (value?.kind === 'audit-experiment-preview') result = renderExperimentPreview(value);
   else if (value?.kind === 'audit-series-preview') result = renderSeriesPreview(value);
-  else if (value?.kind === 'audit-experiment-report') result = renderExperimentReport(value, { markdown });
-  else if (value?.kind === 'audit-series-report') result = renderSeriesReport(value, { markdown });
+  else if (value?.kind === 'audit-experiment-report') result = renderExperimentReport(value, { markdown, includePatchBody });
+  else if (value?.kind === 'audit-series-report') result = renderSeriesReport(value, { markdown, includePatchBody });
   else if (value?.kind === 'audit-evaluation-report') result = renderEvaluationReport(value, { markdown });
   else if (value?.kind === 'audit-experiment-recovery' || value?.kind === 'audit-experiment-cleanup') result = renderExperimentLifecycle(value);
   else if (value?.kind === 'audit-series-recovery' || value?.kind === 'audit-series-cleanup') result = renderSeriesLifecycle(value);
@@ -1897,7 +1953,7 @@ export function renderAudit(value, { format = 'terminal' } = {}) {
       'Discovered or available resources do not establish that a run loaded or used them.',
       'Setup details are a bounded local snapshot, not historical run configuration. Review content before sharing exported setup reports.',
     ].join('\n');
-  } else result = renderRun(value ?? {} , { markdown });
+  } else result = renderRun(value ?? {} , { markdown, includePatchBody });
   return markdown ? markdownEscapeReport(result) + '\n' : result + '\n';
   } finally {
     markdownRendering = previousMarkdownMode;
@@ -1962,8 +2018,8 @@ export function auditExitCode(value) {
     return 1;
   }
   if (value.kind === 'audit-comparison') {
-    if ([value.left, value.right].some(side => ['partial', 'unavailable'].includes(side?.status))) return 2;
     if ([value.left, value.right].some(side => ['not-found', 'invalid', 'error'].includes(side?.status))) return 1;
+    if ([value.left, value.right].some(side => ['partial', 'unavailable'].includes(side?.status))) return 2;
     if ([value.left, value.right].some(side => side?.status !== 'ready')) return 2;
     const coverage = [value.left?.coverage, value.right?.coverage].flatMap(item => Object.values(item ?? {}));
     if (coverage.some(status => ['partial', 'unavailable', 'unknown', 'not-found'].includes(status))) return 2;

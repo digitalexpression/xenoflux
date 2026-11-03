@@ -22,6 +22,7 @@ import { compareAuditRuns } from '../src/audit-report.js';
 import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
 import { evaluateAuditSeries, resumeAuditSeries, runAuditSeries } from '../src/audit-series.js';
 import { auditQualityFingerprint } from '../src/audit-quality.js';
+import { normalizeAuditCheckEvidence } from '../src/audit-check-evidence.js';
 import { createTelemetryJournal } from '../src/audit-telemetry-journal.js';
 
 const execFile = promisify(execFileCallback);
@@ -346,6 +347,37 @@ function repeatedSpec(f) {
     trials: { count: 3, order: 'balanced', budgetMs: 90000 }, variables: ['profile-model'] };
 }
 
+function defaultCheckContentExport(report) {
+  const projected = structuredClone(report);
+  const run = value => {
+    if (!value || typeof value !== 'object') return;
+    if (value.kind === 'audit-run' || Object.hasOwn(value, 'checkEvidence')) {
+      if (value.checkEvidence) {
+        const checkEvidence = normalizeAuditCheckEvidence(value, { includeContent: false });
+        if (checkEvidence) value.checkEvidence = checkEvidence;
+        else delete value.checkEvidence;
+      }
+      return;
+    }
+  };
+  const series = value => {
+    if (!value || typeof value !== 'object') return;
+    for (const trial of value.trials ?? []) for (const profile of trial.profiles ?? []) run(profile.run);
+  };
+  const visit = value => {
+    if (!value || typeof value !== 'object') return;
+    switch (value.kind) {
+      case 'audit-run': run(value); break;
+      case 'audit-comparison': run(value.left); run(value.right); break;
+      case 'audit-experiment-report': for (const item of value.runs ?? []) run(item); break;
+      case 'audit-series-report': series(value); break;
+      case 'audit-evaluation-report': visit(value.subject); visit(value.series); break;
+    }
+  };
+  visit(projected);
+  return projected;
+}
+
 function coordinatorWorkerSource() {
   const storeUrl = new URL('../src/profiles.js', import.meta.url).href;
   const runnerUrl = new URL('../src/audit-runner.js', import.meta.url).href;
@@ -406,6 +438,14 @@ test('experiment specifications reject ambiguous profiles, unsupported fields, a
   assert.throws(() => validateAuditSpec({ ...base, profiles: ['Alpha', 'alpha'] }), /distinct plain profile names/);
   assert.throws(() => validateAuditSpec({ ...base, checks: [{ name: 'empty', argv: [] }] }), /unique name and argv array/);
   assert.throws(() => validateAuditSpec({ ...base, limits: { outputBytes: 64 * 1024 * 1024 + 1 } }), /outputBytes must be an integer/);
+  assert.deepEqual(validateAuditSpec(base).limits, { runMs: 900000, experimentMs: 1920000, outputBytes: 8 * 1024 * 1024, maxRuns: 2 });
+  assert.deepEqual(validateAuditSpec({ ...base, limits: { runMs: null, experimentMs: null } }).limits,
+    { runMs: null, experimentMs: null, outputBytes: 8 * 1024 * 1024, maxRuns: 2 });
+  assert.throws(() => validateAuditSpec({ ...base, limits: { runMs: 0 } }), /runMs must be an integer/);
+  assert.throws(() => validateAuditSpec({ ...base, limits: { experimentMs: 'unlimited' } }), /experimentMs must be an integer/);
+  assert.deepEqual(validateAuditSpec({ ...base, profiles: [{ name: 'Alpha', nativeConfig: { 'features.multi_agent': false } }, 'Beta'] }).profiles[0].nativeConfig,
+    { 'features.multi_agent': false });
+  assert.throws(() => validateAuditSpec({ ...base, profiles: [{ name: 'Alpha', nativeConfig: { 'features.multi_agent': true } }, 'Beta'] }), /may only be false/);
 });
 
 test('CLI rejects malformed experiment JSON without reflecting private input', async t => {
@@ -499,6 +539,7 @@ test('runs a real bounded two-profile experiment, retains task-end evidence befo
   for (const run of [alphaReport, betaReport]) {
     assert.equal(run.outcome.task.status, 'passed');
     assert.equal(run.coverage.outcome, 'complete', 'passed and failed declared checks are both evaluated');
+    assert.equal(run.coverage.agents, 'partial', 'a missing finalized child-discovery manifest stays partial after outcome checks');
     assert.equal(run.coverage.skills, 'partial');
     assert.equal(run.warnings.includes('unknown-native-event'), false);
     assert.ok(run.events.some(event => event.kind === 'item/agentMessage/delta'));
@@ -833,7 +874,8 @@ test('executes three balanced quality trials and shows, exports, reopens, and ev
     const child = await readAuditRecord(f.store, slot.experimentId);
     assert.equal(child.record.baseline.repository.commit, original.record.baseline.commit, 'every child trial pins the same source baseline');
   }
-  assert.deepEqual(original.report, frozen, 'CLI show and both exports derive from the same immutable series report');
+  assert.deepEqual(defaultCheckContentExport(original.report), frozen,
+    'ordinary exports omit check command/output content while retaining all other immutable evidence');
   const provenanceRuns = frozen.trials.flatMap(trial => trial.profiles.map(profile => profile.run));
   assert.ok(provenanceRuns.length > 0);
   assert.ok(provenanceRuns.every(run => run.resourceProvenance?.schemaVersion === 1), 'All frozen trial runs retain explicit provenance or missingness');
@@ -869,7 +911,8 @@ test('executes three balanced quality trials and shows, exports, reopens, and ev
   assert.equal(evalExport.status, report.exitCode, evalExport.stderr);
   const frozenEvaluation = invokeCLI(join(f.root, 'empty-controller'), 'audit', 'show', `${evaluationPath}.audit.json`);
   assert.equal(frozenEvaluation.status, report.exitCode, frozenEvaluation.stderr);
-  assert.deepEqual(JSON.parse(frozenEvaluation.stdout), evaluated);
+  assert.deepEqual(JSON.parse(frozenEvaluation.stdout), defaultCheckContentExport(evaluated),
+    'ordinary evaluation exports omit check command/output content while retaining all other evidence');
   assert.deepEqual((await readAuditRecord(f.store, report.id)).report, original.report, 'human review creates a new revision without mutating the original');
   const packetCLI = invokeCLI(f.store.directory, 'audit', 'evaluate', report.id);
   assert.equal(packetCLI.status, report.exitCode, packetCLI.stderr);
@@ -889,7 +932,11 @@ test('executes three balanced quality trials and shows, exports, reopens, and ev
   const typed = JSON.parse(typedCLI.stdout);
   assert.equal(typed.reviewState.reviews[0].assessments[0].scorePercent, 80);
   const typedPath = join(f.root, 'typed-evaluation.md');
-  const typedExport = invokeCLI(f.store.directory, 'audit', 'export', typed.id, '--format', 'markdown', '--output', typedPath);
+  const omittedReviewedExport = invokeCLI(f.store.directory, 'audit', 'export', typed.id, '--format', 'markdown', '--output', typedPath);
+  assert.equal(omittedReviewedExport.status, 1, 'omitting reviewed check content cannot silently rebind an existing review');
+  assert.match(omittedReviewedExport.stderr, /change reviewed evidence/);
+  await assert.rejects(stat(typedPath), { code: 'ENOENT' });
+  const typedExport = invokeCLI(f.store.directory, 'audit', 'export', typed.id, '--format', 'markdown', '--include-replay-content', '--output', typedPath);
   assert.equal(typedExport.status, report.exitCode, typedExport.stderr);
   const typedText = await readFile(typedPath, 'utf8');
   assert.match(typedText, /Original series human scores/);
@@ -940,6 +987,36 @@ test('SIGKILL after the first finalized child report resumes only unstarted stab
   assert.deepEqual(await Promise.all(f.native.map(home => readFile(join(home.home, 'config.toml')))), f.savedConfigs);
   assert.deepEqual(await Promise.all(f.native.map(home => readFile(join(home.home, 'auth.json')))), f.savedAuth);
   for (const home of f.native) await assert.rejects(stat(join(home.root, '.run-lock')), { code: 'ENOENT' });
+});
+
+test('an uncapped native task remains cancellable through the runner signal', async t => {
+  const markerRoot = await realpath(await mkdtemp(join(tmpdir(), 'xfx-audit-uncapped-cancel-')));
+  t.after(() => rm(markerRoot, { recursive: true, force: true }));
+  const marker = join(markerRoot, 'native-task-started'), pidMarker = `${marker}.pid`;
+  const f = await fixture(t, { pauseOnTurnStartMarker: marker, pauseOnTurnStartPidMarker: pidMarker });
+  const input = { ...f.spec, limits: { ...f.spec.limits, runMs: null, experimentMs: null }, setup: [], checks: [] };
+  const controller = new AbortController();
+  const context = { baseDirectory: join(f.store.directory, 'audits'), signal: controller.signal,
+    observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store }) };
+  const running = runAuditExperiment(f.store, input, context);
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    try { await stat(marker); break; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  await stat(marker);
+  const pid = Number(await readFile(pidMarker, 'utf8'));
+  assert.ok(Number.isSafeInteger(pid) && pid > 0);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.doesNotThrow(() => process.kill(pid, 0), 'the model process remains active without a run or experiment deadline');
+  controller.abort('fixture-cancel');
+  const report = await running;
+  assert.equal(report.status, 'cancelled');
+  assert.equal(report.limits.runMs, null);
+  assert.equal(report.limits.experimentMs, null);
+  assert.equal(await launchCount(f.counter), 1, 'cancellation stops later profiles without retrying the started task');
+  await waitForPidExit(pid);
 });
 
 test('SIGTERM during an audit resume cancels the active native task and leaves started slots unreplayed', async t => {

@@ -23,6 +23,8 @@ import { profileCommand } from '../src/profile-command.js';
 import { createInstallation } from '../src/installation.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
 import { readLogSettings } from '../src/log-storage.js';
+import { runUi } from '../src/ui-command.js';
+import { createUiProvider } from '../src/ui-provider.js';
 import { desktopInstancePlan, openDesktopInstance, focusDesktopInstance, closeDesktopInstance,
   recoverDesktopInstance, listDesktopInstances, prepareDesktopInstance } from '../src/desktop-instances.js';
 
@@ -57,6 +59,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   audit export [UUID | REPORT.json | profiles LEFT RIGHT | native selection flags]
     --output FILE [--format json|markdown]  Freeze observed evidence without copying native transcripts
     [--include-content]                   Include redacted source text in a profile setup export
+    [--include-replay-content]            Include recorded messages and tool bodies in a session export
   copy SOURCE TARGET [--include config,instructions,agents] [--apply]
     [--advanced]                          Search and select individual items
   copy undo COPY_ID [--apply]             Preview or undo a settings copy
@@ -76,6 +79,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   ramlogs ensure | ramlogs status | ramlogs inspect NAME
   ramlogs recover [--background-path PATH]  (archive old RAM logs, then enable)
   ramlogs restore-home HOME --key KEY
+  ui [--demo] [--port PORT] [--no-open]  Open the local web app (--demo uses synthetic data only)
 
 Store: --store, XFX_HOME, or ~/.xfx/controller.
 Audit discovery is independent of copy support; availability and observed use remain separate.
@@ -94,11 +98,11 @@ try {
     const value = argv[i];
     if (value === '--json') { json = true; continue; }
     if (value === '--help' || value === '-h') { options.help = true; continue; }
-    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--advanced', '--turns', '--include-content'].includes(value)) { options[value] = true; continue; }
+    if (['--dry-run', '--archived', '--observe', '--apply', '--close-clients', '--advanced', '--turns', '--include-content', '--include-replay-content', '--demo', '--no-open'].includes(value)) { options[value] = true; continue; }
     if (value.startsWith('--')) {
       const equals = value.indexOf('=');
       const flag = equals < 0 ? value : value.slice(0, equals);
-      if (!['--store', '--description', '--repo', '--base', '--from', '--codex', '--codex-version', '--profile', '--id', '--search', '--limit', '--include', '--background-path', '--key', '--expect-model', '--expect-effort', '--same-task', '--variables', '--left-profile', '--left-id', '--right-profile', '--right-id', '--client', '--output', '--format', '--spec'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
+      if (!['--store', '--description', '--repo', '--base', '--from', '--codex', '--codex-version', '--profile', '--id', '--search', '--limit', '--include', '--background-path', '--key', '--expect-model', '--expect-effort', '--same-task', '--variables', '--left-profile', '--left-id', '--right-profile', '--right-id', '--client', '--output', '--format', '--spec', '--port'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
       if (options[flag] !== undefined) throw new Error(`Repeated option: ${flag}`);
       if (equals < 0 && (argv[i + 1] === undefined || argv[i + 1].startsWith('--'))) throw new Error(`Missing value for ${flag}`);
       const argument = equals < 0 ? argv[++i] : value.slice(equals + 1);
@@ -108,7 +112,7 @@ try {
   if (options.help || !args.length) { process.stdout.write(help); }
   else {
     const [command, ...params] = args;
-    const arity = { copy: 2, launch: 1, resume: 2, history: 0, pick: 0, install: 0, uninstall: 0 };
+    const arity = { copy: 2, launch: 1, resume: 2, history: 0, pick: 0, install: 0, uninstall: 0, ui: 0 };
     const grouped = ['profile', 'desktop', 'ramlogs', 'audit'].includes(command);
     if (!grouped && !Object.hasOwn(arity, command)) throw new Error(`Unknown command: ${command}`);
     if (!grouped && params.length !== arity[command]) throw new Error(`Invalid arguments for ${command}; run xfx --help`);
@@ -141,6 +145,7 @@ try {
       '--right-profile': command === 'audit', '--right-id': command === 'audit',
       '--client': command === 'audit', '--format': command === 'audit', '--output': command === 'audit',
       '--spec': command === 'audit' && ['run', 'cohort', 'evaluate'].includes(params[0]),
+      '--demo': command === 'ui', '--no-open': command === 'ui', '--port': command === 'ui',
     };
     for (const [flag, allowed] of Object.entries(allowedOptions)) {
       if (options[flag] !== undefined && !allowed) throw new Error(`${flag} is not supported by ${command}`);
@@ -150,7 +155,15 @@ try {
     const clientRuntime = signal => createDesktopRuntime({ closeClients: options['--close-clients'] ?? false,
       confirmCloseClients: apps => confirmClientShutdown(apps, { signal }), signal, onProgress: progress });
     let result;
-    if (installing) {
+    if (command === 'ui') {
+      if (json) throw new Error('The local app does not print JSON; use the other commands for --json output');
+      const port = options['--port'] === undefined ? 0 : Number(options['--port']);
+      if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('--port must be a port number from 0 to 65535');
+      const demo = options['--demo'] ?? false;
+      const ui = await runUi({ store, demo, port, openBrowser: !options['--no-open'], provider: await createUiProvider({ store, demo }) });
+      await ui.closed;
+      result = { status: ui.reused ? 'reused' : 'stopped' };
+    } else if (installing) {
       if (!process.stdin.isTTY || !process.stdout.isTTY || json) throw new Error('Installation and log-routing changes require an external interactive terminal');
       if (command === 'ramlogs' && params.length !== (params[0] === 'restore-home' ? 2 : 1)) throw new Error('Invalid ramlogs command; run xfx --help');
       if (params[0] === 'restore-home' && !options['--key']) throw new Error('--key is required for restore-home');
@@ -374,7 +387,7 @@ try {
         if (process.stdin.isTTY) process.stdin.setRawMode(false);
       }
     }
-    if (bootstrapReplied) { /* The controller records completion after the bootstrap exec. */ }
+    if (bootstrapReplied || command === 'ui') { /* Nothing further to print. */ }
     else if (!json && command === 'profile' && params[0] === 'list') process.stdout.write(result.length ? result.map(p => `${p.name.replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')}  [${p.state}]${p.home ? `  ${p.home}` : ''}`).join('\n') + '\n' : 'No profiles. Use xfx profile create NAME.\n');
     else if (!json && command === 'audit') process.stdout.write(result.kind === 'audit-export'
       ? `Audit exported to ${result.output}\nFrozen evidence: ${result.evidencePath}\n`

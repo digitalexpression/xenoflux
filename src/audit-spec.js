@@ -21,7 +21,7 @@ const NATIVE_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'h
 /** Validate the narrow set of per-process native Codex config overrides accepted by audit recipes. */
 export function validateAuditNativeConfig(value) {
   if (value === undefined) return undefined;
-  allowed(value, ['model', 'model_reasoning_effort', 'plan_mode_reasoning_effort', 'forced_login_method'], 'native config');
+  allowed(value, ['model', 'model_reasoning_effort', 'plan_mode_reasoning_effort', 'forced_login_method', 'agents.max_depth', 'features.multi_agent'], 'native config');
   const result = {};
   if (value.model !== undefined) {
     if (!plain(value.model, 120)) throw new Error('Native config model must be a plain string');
@@ -31,6 +31,12 @@ export function validateAuditNativeConfig(value) {
     if (typeof value[key] !== 'string' || !NATIVE_REASONING_EFFORTS.has(value[key]))
       throw new Error(`Native config ${key} must be a recognized reasoning effort`);
     result[key] = value[key];
+  }
+  if (value['agents.max_depth'] !== undefined)
+    result['agents.max_depth'] = integer(value['agents.max_depth'], 1, 1, 4, 'Native config agents.max_depth');
+  if (value['features.multi_agent'] !== undefined) {
+    if (value['features.multi_agent'] !== false) throw new Error('Native config features.multi_agent may only be false');
+    result['features.multi_agent'] = false;
   }
   if (value.forced_login_method !== undefined) {
     if (!['chatgpt', 'api'].includes(value.forced_login_method))
@@ -96,9 +102,11 @@ export function validateAuditSpec(value) {
       ...(nativeConfig !== undefined ? { nativeConfig } : {}) };
   });
   allowed(value.limits ?? {}, ['runMs', 'experimentMs', 'outputBytes', 'maxRuns'], 'experiment limits');
-  const runMs = integer(value.limits?.runMs, 900000, 1, 86400000, 'runMs');
+  const nullableInteger = (selected, fallback, label) => selected === null ? null : integer(selected, fallback, 1, 86400000, label);
+  const runMs = nullableInteger(value.limits?.runMs, 900000, 'runMs');
+  const defaultExperimentMs = runMs === null ? 900000 : Math.min(86400000, runMs * profiles.length + 120000);
   const limits = { runMs,
-    experimentMs: integer(value.limits?.experimentMs, Math.min(86400000, runMs * profiles.length + 120000), 1, 86400000, 'experimentMs'),
+    experimentMs: nullableInteger(value.limits?.experimentMs, defaultExperimentMs, 'experimentMs'),
     outputBytes: integer(value.limits?.outputBytes, 8 * 1024 * 1024, 1024, 64 * 1024 * 1024, 'outputBytes'),
     maxRuns: integer(value.limits?.maxRuns, profiles.length, profiles.length, 8, 'maxRuns') };
   const sandbox = value.sandbox ?? 'workspace-write';
@@ -116,7 +124,7 @@ export function validateAuditSpec(value) {
     const order = value.trials?.order ?? 'balanced';
     if (!['balanced', 'listed'].includes(order)) throw new Error('Trial order must be balanced or listed');
     trials = { count, order, budgetMs: integer(value.trials?.budgetMs,
-      Math.min(86400000, count * limits.experimentMs), count, 86400000, 'series budgetMs') };
+      Math.min(86400000, count * (limits.experimentMs ?? 86400000)), count, 86400000, 'series budgetMs') };
   }
   if (value.variables !== undefined && (!trials || !Array.isArray(value.variables) || value.variables.length > 20
     || value.variables.some(item => !plain(item, 160)) || new Set(value.variables).size !== value.variables.length))

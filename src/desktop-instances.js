@@ -13,6 +13,7 @@ import { reserveInstanceControl, releaseInstanceControl } from './desktop-instan
 import { createLogStorage } from './log-storage.js';
 import { ramLogTarget } from './ram-logs.js';
 import { acquire, exists, globalLock, privateDirectory, readJSON, record, release } from './metadata.js';
+import { readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -113,7 +114,10 @@ async function ownedReservation(state) {
   const lock = join(state.plan.nativeRoot, '.run-lock');
   if (!await exists(lock)) return false;
   await privateDirectory(lock);
-  if (!equal(await readJSON(join(lock, 'owner.json')), state.owner))
+  const owners = await readProfileOwners(state.plan.nativeRoot);
+  if (owners.length === 1 && owners[0]?.kind === 'review-task' && owners[0].profileId === state.profileId
+    && owners[0].storePath === state.owner.storePath) return false;
+  if (!owners.some(owner => equal(owner, state.owner)))
     throw new Error('Desktop profile reservation belongs to another operation; preserving it');
   return true;
 }
@@ -142,8 +146,28 @@ async function observation(state, runtime) {
 async function finishStopped(store, state, runtime, options) {
   const observed = await observation(state, runtime);
   if (observed.status !== 'stopped') throw new Error('Desktop instance still runs or its ownership is uncertain; preserving its reservation');
-  await runtime.assertResourcesIdle(resources(state.plan));
-  if (await ownedReservation(state)) await release(join(state.plan.nativeRoot, '.run-lock'), state.owner);
+  const reserved = await ownedReservation(state);
+  const review = await exists(join(state.plan.nativeRoot, '.run-lock'))
+    ? (await readProfileOwners(state.plan.nativeRoot)).find(owner => owner.kind === 'review-task') : null;
+  let allowedProcesses = [];
+  if (review) {
+    if (review.storePath !== store.directory || review.profileId !== state.profileId || !uuid.test(review.runId))
+      throw new Error('Review participant identity is unavailable; preserving reservation');
+    const taskRoot = join(store.directory, 'review-tasks', review.runId);
+    await privateDirectory(join(store.directory, 'review-tasks')); await privateDirectory(taskRoot);
+    const task = await readJSON(join(taskRoot, 'task.json'));
+    if (task.kind !== 'xfx-review-task' || task.id !== review.runId || !equal(task.reservation?.owner, review)
+      || task.profile?.reservationRoot !== state.plan.nativeRoot)
+      throw new Error('Review participant record changed; preserving reservation');
+    if (task.process?.nativeIdentity) {
+      const observedReview = await runtime.observe(task.process.nativeIdentity, { trackedProcesses: [task.process.nativeIdentity] });
+      if (!['running', 'stopped'].includes(observedReview.status) || observedReview.orphaned)
+        throw new Error('Review process ownership is uncertain; preserving reservation');
+      allowedProcesses = observedReview.processes;
+    } else if (task.captureIntent) throw new Error('Review process identity is unavailable; preserving reservation');
+  }
+  await runtime.assertResourcesIdle(resources(state.plan), { allowedProcesses });
+  if (reserved) await releaseProfileParticipant(state.plan.nativeRoot, state.owner);
   await save(store, state, 'closed');
   await releaseInstanceControl(state.owner, options);
   // A separate write-once receipt survives interruption without extending the
@@ -154,20 +178,51 @@ async function finishStopped(store, state, runtime, options) {
 
 // Serialize profile lifecycle and maintenance operations across controller stores.
 // The guard is released while an instance is running.
-async function withOperation(store, id, options, action) {
+export async function withProfileOperation(store, id, options, action) {
   const guardPath = `${options.lockPath ?? globalLock()}.operation`;
+  const deadline = Date.now() + (options.waitMs ?? 0);
   const owner = { kind: 'desktop-instance-operation', host: hostname(), pid: process.pid, runId: randomUUID(),
     storePath: store.directory, profileId: id, journalPath: paths(store, id).journal };
-  if (await exists(guardPath)) {
-    await privateDirectory(guardPath);
-    const old = await readJSON(join(guardPath, 'owner.json'));
-    if (!options.recovery || old.kind !== owner.kind || old.host !== owner.host || old.storePath !== owner.storePath || old.profileId !== id
-      || old.journalPath !== owner.journalPath || !uuid.test(old.runId ?? '') || !Number.isSafeInteger(old.pid) || old.pid < 1
-      || (options.isAlive ?? alive)(old.pid)) throw new Error('Another desktop operation is running or interrupted; preserve it and recover that profile');
-    await release(guardPath, old);
+  while (true) {
+    try {
+      if (await exists(guardPath)) {
+        await privateDirectory(guardPath);
+        const old = await readJSON(join(guardPath, 'owner.json'));
+        if (!options.recovery || old.kind !== owner.kind || old.host !== owner.host || old.storePath !== owner.storePath || old.profileId !== id
+          || old.journalPath !== owner.journalPath || !uuid.test(old.runId ?? '') || !Number.isSafeInteger(old.pid) || old.pid < 1
+          || (options.isAlive ?? alive)(old.pid)) {
+          if (Date.now() >= deadline) throw Object.assign(new Error('Another desktop operation is running or interrupted; preserve it and recover that profile'), { code: 'profile-operation-busy' });
+          await new Promise(resolve => setTimeout(resolve, 25)); continue;
+        }
+        await release(guardPath, old);
+      }
+      await acquire(guardPath, owner, true); break;
+    } catch (error) {
+      // A live operation can release between exists/read, or another waiter
+      // can acquire first. Only bounded waiters retry this short-lived gate.
+      if (Date.now() >= deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
   }
-  await acquire(guardPath, owner, true);
   try { return await action(); } finally { await release(guardPath, owner); }
+}
+const withOperation = withProfileOperation;
+
+/** Reconcile a normal application quit without signalling any process. */
+export async function reconcileDesktopInstance(store, id, { runtime = createDesktopInstanceRuntime(), guarded = false, ...options } = {}) {
+  const reconcile = async () => {
+    const state = await readState(store, id);
+    if (!state || state.phase === 'closed') return;
+    if (!['running', 'closing'].includes(state.phase)) throw new Error('Desktop launch is unfinished; preserve it for recovery');
+    await assertBinding(store, state);
+    const observed = await observation(state, runtime);
+    if (observed.status === 'stopped') await finishStopped(store, state, runtime, options);
+    else if (observed.status === 'running' && !observed.orphaned) {
+      if (!await ownedReservation(state)) throw new Error('Desktop reservation changed; preserving instance');
+      state.processes = observed.processes; await save(store, state);
+    } else throw new Error('Desktop process ownership is uncertain; preserving instance');
+  };
+  return guarded ? reconcile() : withOperation(store, id, options, reconcile);
 }
 
 export async function desktopInstancePlan(store, name, { runtime = createDesktopInstanceRuntime() } = {}) {
@@ -175,7 +230,7 @@ export async function desktopInstancePlan(store, name, { runtime = createDesktop
   return { profileId: profile.id, name: profile.name, environmentId: environment.id, nativeRoot: native.root,
     home: environment.home, desktopData: environment.desktopData, temporary: environment.launch.env.TMPDIR, userHome: environment.launch.env.HOME,
     app: await runtime.inspectApp(), displayName: `Codex · ${profile.name}`, liveHomeChanged: false,
-    sameProfileConcurrency: 'exclusive', nativeAcceptance: 'pending' };
+    sameProfileConcurrency: 'desktop-with-one-review', nativeAcceptance: 'pending' };
 }
 function result(state, status) {
   return { status, profileId: state.profileId, name: state.plan.name, main: state.main,
@@ -392,7 +447,7 @@ export async function recoverDesktopInstance(store, name, { runtime = createDesk
   });
 }
 
-export async function listDesktopInstances(store, { observe = false, runtime = createDesktopInstanceRuntime() } = {}) {
+export async function listDesktopInstances(store, { observe = false, runtime = createDesktopInstanceRuntime(), ...options } = {}) {
   const root = paths(store, '').root;
   if (!await exists(root)) return { instances: [], observation: observe ? 'processes' : 'last-recorded', liveHomeChanged: false };
   await privateDirectory(root);
@@ -408,6 +463,10 @@ export async function listDesktopInstances(store, { observe = false, runtime = c
     if (observe) {
       try { item.observed = await observation(state, runtime); }
       catch (error) { item.observed = { status: 'unavailable', code: error.code ?? 'OBSERVATION_FAILED' }; }
+      if (item.observed.status === 'stopped' && ['running', 'closing'].includes(state.phase)) {
+        try { await reconcileDesktopInstance(store, id, { ...options, runtime }); continue; }
+        catch (error) { item.observed = { status: 'unavailable', code: error.code ?? 'RECONCILIATION_FAILED' }; }
+      }
     }
     instances.push(item);
   }

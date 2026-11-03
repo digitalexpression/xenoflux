@@ -337,6 +337,24 @@ test('idle resource inspection ignores sibling profile handles and rejects targe
   await assert.rejects(rt.assertResourcesIdle([home]), { code: 'RESOURCE_BUSY' });
 });
 
+test('resource inspection allows only the exact live review participant identity', async () => {
+  const home = '/fixture/profiles/selected';
+  const holder = { pid: 90, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:10:00 2026 UTC', executable: '/fixture/review-worker' };
+  const makeRuntime = (process, lsofPid = process.pid) => createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, process],
+    lstat: async path => ({ isDirectory: () => path === home, isSymbolicLink: () => false }), realpath: async path => path,
+    execFile: async () => ({ stdout: `p${lsofPid}\nf12\ncCodex\nu501\nn${home}/config.toml\n`, stderr: '' }),
+  }));
+
+  const allowed = makeRuntime(holder);
+  assert.deepEqual(await allowed.assertResourcesIdle([home], { allowedProcesses: [holder] }), { idle: true, processes: [holder] });
+
+  const reused = makeRuntime({ ...holder, startedAt: 'Fri Oct  9 10:11:00 2026 UTC' });
+  await assert.rejects(reused.assertResourcesIdle([home], { allowedProcesses: [holder] }), { code: 'RESOURCE_BUSY' });
+
+  const unrelated = makeRuntime({ ...holder, pid: 91 }, 91);
+  await assert.rejects(unrelated.assertResourcesIdle([home], { allowedProcesses: [holder] }), { code: 'RESOURCE_BUSY' });
+});
+
 test('resource inspection treats absent paths as idle and incomplete lsof evidence as a refusal', async () => {
   const missing = createDesktopInstanceRuntime(opts({ lstat: async () => { throw Object.assign(new Error(), { code: 'ENOENT' }); } }));
   assert.deepEqual(await missing.assertResourcesIdle(['/fixture/missing']), { idle: true, processes: [] });

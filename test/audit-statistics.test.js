@@ -9,6 +9,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { evaluateCaptureRequirements } from '../src/audit-evidence.js';
 import { nativeUsageAccounting } from '../src/audit-usage.js';
+import { presentComparison } from '../src/audit-presentation.js';
+import { createHash } from 'node:crypto';
+import { buildAuditCheckEvidence } from '../src/audit-check-evidence.js';
 
 const run = (id, name, elapsed, quality = 'passed') => ({ id, profileName: name, model: 'm',
   profile: { profileId: name.toLowerCase(), profileName: name }, source: { kind: 'native-app-server-v2', threadId: `root-${id}`, version: 'v1', clientVersion: 'test-client', model: 'm', reasoningEffort: 'high' },
@@ -31,6 +34,25 @@ const run = (id, name, elapsed, quality = 'passed') => ({ id, profileName: name,
 const plan = [1, 2, 3, 4].map(index => ({ index, experimentId: `e${index}`, profileOrder: ['A', 'B'] }));
 const profiles = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }];
 const spec = { checks: [{ name: 'build' }], quality: { schemaVersion: 1, id: 'q', version: '1', checks: [{ name: 'build' }] } };
+
+test('compact failed runs retain the safe preflight cause through frozen comparison reopen', async t => {
+  const failed = ['A', 'B'].map(name => ({ ...run(`preflight-${name}`, name, 10), schemaVersion: 1, kind: 'audit-run',
+    status: 'failed', reason: 'pre-task-failure', turns: [], checks: [], task: { nativeTurnStatus: null },
+    outcome: { status: 'unverified', checks: [], task: { status: 'failed', nativeTurnStatus: null } },
+    capture: { status: 'unavailable', errors: [{ code: 'startup-command-sandbox-unavailable', message: 'PRIVATE_NATIVE_DETAIL' },
+      { code: 'PRIVATE_UNKNOWN_ERROR' }] } }));
+  const compact = compactAuditTrial({ runs: failed });
+  for (const value of compact.runs) assert.deepEqual(value.capture.errors, [{ code: 'startup-command-sandbox-unavailable' }]);
+  assert.equal(JSON.stringify(compact).includes('PRIVATE_'), false);
+  assert.deepEqual(compactAuditTrial(compact).runs.map(value => value.capture.errors), compact.runs.map(value => value.capture.errors));
+  const dir = await mkdtemp(join(tmpdir(), 'xfx-preflight-export-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const exported = await exportAuditReport(compareAuditRuns(...compact.runs), { format: 'json', output: join(dir, 'comparison.json') });
+  const reopened = presentComparison(await readAuditReport(exported.evidencePath));
+  for (const cell of reopened.verification.cells) {
+    assert.deepEqual(cell.executionFailures, ['The native command sandbox could not be verified, so the model task did not start.']);
+    assert.ok(cell.checks.some(check => /build.*skipped because the model task did not start/.test(check.text)));
+  }
+});
 
 test('frozen trials and exports preserve distinct timestamp-free skill receipts and plugin counts', async t => {
   const subject = run('receipts', 'A', 10);
@@ -893,6 +915,44 @@ test('byte budget trims dense coverage and acceptance evidence with explicit omi
 test('byte budget fails explicitly when irreducible run identity evidence exceeds the limit', () => {
   assert.throws(() => compactAuditTrial({ runs: [{ id: 'x'.repeat(400 * 1024), metrics: {}, checks: [], turns: [], agents: [] }] },
     { maxBytes: 320 * 1024 }), error => error.code === 'AUDIT_TRIAL_EVIDENCE_EXCEEDS_BYTE_BUDGET');
+});
+
+test('frozen trial byte budget drops oversized check command/output content but preserves check metadata', () => {
+  const recipe = { name: 'large-check', argv: ['node', 'verify.js'], timeoutMs: 60000 };
+  const fingerprint = createHash('sha256').update(JSON.stringify(recipe)).digest('hex');
+  const runs = Array.from({ length: 8 }, (_, index) => {
+    const value = run(`check-budget-${index}`, 'A', index + 1);
+    value.comparisonConditions.checkRecipes = [{ name: recipe.name, fingerprint }];
+    value.checks = [{ name: recipe.name, status: 'passed', exitCode: 0, origin: 'runner-check' }];
+    value.checkEvidence = buildAuditCheckEvidence({ checks: [recipe],
+      results: [{ name: recipe.name, status: 'passed', exitCode: 0,
+        startedAt: '2026-10-31T12:00:00.000Z', elapsedMs: 20 }],
+      workspaceFingerprint: 'c'.repeat(64), outputs: [{ stdout: 'o'.repeat(64 * 1024), stderr: 'e'.repeat(64 * 1024),
+        status: 'retained', truncated: true }] });
+    return value;
+  });
+  const maxBytes = 320 * 1024;
+  const frozen = compactAuditTrial({ runs }, { maxBytes });
+  assert.ok(new TextEncoder().encode(JSON.stringify(frozen)).byteLength <= maxBytes);
+  assert.equal(frozen.runs.length, runs.length);
+  assert.deepEqual(frozen.runs.map(item => item.id), runs.map(item => item.id));
+  const records = frozen.runs.map(item => item.checkEvidence.records[0]);
+  assert.equal(records.length, runs.length);
+  assert.ok(records.some(record => record.definition.command === null));
+  for (const [index, record] of records.entries()) {
+    assert.equal(record.name, recipe.name);
+    assert.equal(record.definitionFingerprint, fingerprint);
+    assert.equal(record.execution.status, 'passed');
+    assert.equal(record.execution.workspaceFingerprint, 'c'.repeat(64));
+    if (record.definition.command === null) {
+      assert.deepEqual(record.output, { stdout: null, stderr: null, status: 'omitted', truncated: true });
+      assert.ok(frozen.runs[index].evidenceBounds.omitted.checkEvidenceContent > 0);
+    }
+  }
+  const second = compactAuditTrial(frozen, { maxBytes });
+  assert.deepEqual(second.runs.map(item => item.checkEvidence), frozen.runs.map(item => item.checkEvidence));
+  assert.deepEqual(second.runs.map(item => item.evidenceBounds.omitted.checkEvidenceContent),
+    frozen.runs.map(item => item.evidenceBounds.omitted.checkEvidenceContent));
 });
 
 test('frozen trials preserve normalized instruction metadata, omissions, and partial coverage', () => {

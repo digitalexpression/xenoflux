@@ -85,7 +85,8 @@ test('a dead owned group leader with a live same-group child blocks recovery unt
     fs.writeFileSync(${JSON.stringify(childPidPath)},String(child.pid),{mode:0o600}); child.unref(); setTimeout(()=>process.exit(0),1500);`],
   { detached: true, stdio: 'ignore' });
   assert.ok(leader.pid);
-  t.after(() => { try { process.kill(-leader.pid, 'SIGKILL'); } catch {} });
+  let groupKillAttempted = false;
+  t.after(() => { if (!groupKillAttempted) { try { process.kill(-leader.pid, 'SIGKILL'); } catch {} } });
   await once(leader, 'close');
   const childPid = Number(await readFile(childPidPath, 'utf8'));
   assert.ok(Number.isSafeInteger(childPid) && childPid > 0);
@@ -105,12 +106,20 @@ test('a dead owned group leader with a live same-group child blocks recovery unt
   assert.equal((await readAuditRecord(f.store, member.run.id)).finalized, false);
   await stat(member.reservation.lock);
 
+  groupKillAttempted = true;
   try { process.kill(-leader.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
   const deadline = Date.now() + 3000;
+  let groupStopped = false;
   while (Date.now() < deadline) {
-    try { process.kill(-leader.pid, 0); } catch (error) { if (error.code === 'ESRCH') break; throw error; }
+    try { process.kill(-leader.pid, 0); } catch (error) {
+      if (error.code === 'ESRCH') { groupStopped = true; break; }
+      // EPERM is inconclusive: the group may still contain a process we cannot
+      // signal, so keep waiting for positive evidence that it is gone.
+      if (error.code !== 'EPERM') throw error;
+    }
     await new Promise(resolve => setTimeout(resolve, 20));
   }
+  assert.equal(groupStopped, true, 'owned process group did not reach ESRCH before the fixture deadline');
   const recovered = await recover(f);
   assert.equal(recovered.status, 'recovered');
   assert.equal((await readAuditRecord(f.store, member.run.id)).finalized, true);

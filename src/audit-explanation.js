@@ -345,7 +345,12 @@ export function freezeAuditComparisonEvidence(run) {
     const turnKnown = !turnId || list(run.turns).some(turn => turn?.agentId === agentId && turn.turnId === turnId);
     const owned = Boolean(agentId && ownedActor(agentId, actors, rootId) && turnKnown);
     const sourceId = owned && actor ? `source-${hash([sourceIdentity, agentId, actor.sourceFingerprint]).slice(0, 16)}` : null;
-    const sourceOrder = owned && sourceLine && (actor?.sourceFingerprint || run.source?.kind === 'native-rollout' && actor?.parentId === null);
+    // Native app-server v2 sourceLine is the sequential line number from its
+    // single stdout JSON-RPC stream. It can establish order for actions owned
+    // by that actor even when the privacy projection has no source fingerprint.
+    const sharedAppServerLine = run.source?.kind === 'native-app-server-v2';
+    const sourceOrder = owned && sourceLine && (actor?.sourceFingerprint
+      || sharedAppServerLine || run.source?.kind === 'native-rollout' && actor?.parentId === null);
     const itemId = id(row?.itemId ?? row?.metadata?.itemId ?? row?.metadata?.id ?? row?.metadata?.callId);
     const receiptId = row?.observationId ?? row?.metadata?.observationId;
     const observationId = typeof receiptId === 'string' && /^[a-f0-9]{32}:[1-9][0-9]{0,4}$/.test(receiptId) ? receiptId : null;
@@ -358,7 +363,8 @@ export function freezeAuditComparisonEvidence(run) {
     action.id = `action-${hash([binding(run).runId, action]).slice(0, 24)}`;
     if (!seen.has(action.id)) { seen.add(action.id); actions.push(action); }
   };
-  for (const row of list(run.artifacts)) if (row?.kind === 'recorded-file-change') add('file-change', row, { path: safePath(row.path, run) });
+  const fileChangeArtifacts = list(run.artifacts).filter(row => row?.kind === 'recorded-file-change');
+  for (const row of fileChangeArtifacts) add('file-change', row, { path: safePath(row.path, run) });
   for (const event of list(run.events)) if (event?.kind === 'command-execution' && String(event.metadata?.operation).toLowerCase() === 'read') add('read', event, { target: null });
   for (const skill of list(run.skills)) for (const observation of list(skill?.observations)) {
     if (['definition-read', 'resource-read', 'definition-read-observed', 'package-resource-read-observed', 'native-invocation-observed'].includes(observation?.kind)) {
@@ -368,7 +374,31 @@ export function freezeAuditComparisonEvidence(run) {
         { resource: { id: id(skill.id), origin: label(skill.origin ?? skill.scope), name: label(skill.name) }, corroboration: id(proof) });
     }
   }
-  for (const row of list(run.toolInvocations)) add('tool', row, { tool: { kind: id(row.kind), toolName: label(row.toolName), serverName: label(row.serverName), pluginId: id(row.pluginId) } });
+  for (const row of list(run.toolInvocations)) {
+    const tool = { kind: id(row.kind), toolName: label(row.toolName), serverName: label(row.serverName), pluginId: id(row.pluginId) };
+    if (row.kind === 'file-change') {
+      if (row.status !== 'completed') {
+        add('tool', row, { tool });
+        continue;
+      }
+      const sameActorTurn = fileChangeArtifacts.filter(artifact => artifact.agentId === row.agentId && artifact.turnId === row.turnId);
+      const linked = sameActorTurn.some(artifact => {
+        if (row.itemId && artifact.itemId === row.itemId) return true;
+        if (line(row.sourceLine) !== null && line(artifact.sourceLine) === line(row.sourceLine)) return true;
+        if (!row.itemId || line(artifact.sourceLine) === null) return false;
+        return list(run.events).some(event => event.agentId === row.agentId && event.turnId === row.turnId
+          && line(event.sourceLine) === line(artifact.sourceLine)
+          && id(event.itemId ?? event.metadata?.itemId ?? event.metadata?.id) === row.itemId);
+      });
+      // A pathless tool item records that a file-change event completed, but
+      // it cannot scope the edit. Suppress it only when an artifact is linked
+      // by its exact item/source reference; actor-turn presence alone is not
+      // evidence that another invocation is represented by those paths.
+      if (!linked) add('file-change', row, { tool });
+      continue;
+    }
+    add('tool', row, { tool });
+  }
   const namedActions = freezeNamedActions(run, actors, turns, rootId);
   const omissions = { actions: Math.max(0, actions.length - MAX_ACTIONS), actors: Math.max(0, list(run.agents).length - actors.length),
     turns: Math.max(0, list(run.turns).length - turns.length),
@@ -507,7 +537,9 @@ export function buildAuditExplanation(left, right, options = {}) {
     const edits = core.actions.filter(row => row.kind === 'file-change' && row.actorState === 'owned');
     const located = edits.filter(row => row.path);
     const outside = allowed?.length ? located.filter(row => !allowed.includes(row.path)) : [];
-    return { ...side, assertion: !allowed?.length ? 'editable-boundary-unknown' : outside.length ? 'outside-boundary-edit-observed' : located.length ? 'in-boundary-edit-observed' : side.state === 'none-recorded' ? 'no-file-change-records' : 'edit-scope-unknown',
+    return { ...side, assertion: !allowed?.length ? 'editable-boundary-unknown' : outside.length ? 'outside-boundary-edit-observed'
+      : located.length && located.length === edits.length ? 'in-boundary-edit-observed'
+        : side.state === 'none-recorded' ? 'no-file-change-records' : 'edit-scope-unknown',
       outsideRefs: outside.map(row => row.id), boundary: allowed ?? null,
       ...(supplied && !core.conditions.editableFiles ? { boundaryOrigin: 'supplied-session-evidence',
         evidenceRefs: [...side.evidenceRefs, `session-evidence:${run.id}`] } : {}) };

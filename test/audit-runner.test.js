@@ -1,15 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { compareAuditWorkspaceDelta, previewAuditExperiment, runAuditExperiment } from '../src/audit-runner.js';
+import { createHash } from 'node:crypto';
+import { compareAuditWorkspaceDelta, compareAuditWorkspaceInventory, previewAuditExperiment, runAuditExperiment } from '../src/audit-runner.js';
+import { projectAuditFileInventory } from '../src/audit-file-inventory.js';
 import { renderAudit, auditExitCode } from '../src/audit-report.js';
 import { runAuditProcess } from '../src/audit-process.js';
 
 const spec = repository => ({ schemaVersion: 1, repository, revision: 'deadbeef', task: 'Inspect the fixture.',
   profiles: [{ name: 'Alpha' }, { name: 'Beta' }], limits: { runMs: 5000, experimentMs: 15000, outputBytes: 4096 },
   setup: [], checks: [{ name: 'smoke', argv: ['true'], timeoutMs: 1000 }], sandbox: 'workspace-write' });
+const snapshotFingerprint = label => createHash('sha256').update(label).digest('hex');
 
 async function harness(t, overrides = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'xfx-audit-runner-'));
@@ -76,11 +79,13 @@ async function harness(t, overrides = {}) {
     },
     snapshotWorkspace: async ({ label }) => {
       calls.push(`snapshot:${label}`);
-      return { label, fingerprint: `fingerprint-${label}`, status: label === 'before-task' ? 'clean' : 'changed', files: [{ path: 'result.txt' }], patchPath: `/private/${label}.patch`, metadataPath: `/private/${label}.json` };
+      return { label, fingerprint: snapshotFingerprint(label), status: label === 'before-task' ? 'clean' : 'changed', files: [{ path: 'result.txt' }], patchPath: `/private/${label}.patch`, metadataPath: `/private/${label}.json` };
     },
     setWorkspaceActive: async ({ active }) => { calls.push(`active:${active}`); },
     process: async options => {
       if (options.args[0] === 'true') calls.push(`check:${options.cwd ?? 'workspace'}`);
+      await writeFile(options.stdoutPath, options.args[0] === 'true' ? 'check stdout\\n' : '', { mode: 0o600 });
+      await writeFile(options.stderrPath, '', { mode: 0o600 });
       await options.onSpawn?.({ pid: 100 + calls.length, processIdentity: { pid: 100, started: 'fixture', command: 'fixture', host: 'test' } });
       return { status: 'exited', exitCode: 0, elapsedMs: 5, processIdentity: { pid: 100, started: 'fixture', command: 'fixture', host: 'test' }, shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } };
     },
@@ -107,14 +112,55 @@ test('preview is read-only and blocks unsafe profile access without creating rec
   assert.deepEqual(h.probes, ['/private/codex-0']);
 });
 
+test('explicit null time limits reach model capture without creating a timeout', async t => {
+  const h = await harness(t), inputSpec = { ...spec(h.repository), limits: { ...spec(h.repository).limits, runMs: null, experimentMs: null } };
+  const seen = [];
+  h.context.capture = async input => { seen.push(input.processOptions.timeoutMs); return h.captureFixture(input); };
+  const report = await runAuditExperiment(h.store, inputSpec, h.context);
+  assert.deepEqual(seen, [null, null]);
+  assert.equal(report.limits.runMs, null);
+  assert.equal(report.limits.experimentMs, null);
+  assert.match(renderAudit(report), /Time limits: per run none; overall none\./);
+  assert.equal(report.status, 'complete');
+});
+
+test('aggregate reports omit duplicate replay payloads while finalized per-run records retain captures', async t => {
+  const h = await harness(t), fingerprint = 'c'.repeat(64);
+  const threadIds = ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000102'];
+  h.context.capture = async input => {
+    const captured = await h.captureFixture(input), index = input.profile.profileName === 'Alpha' ? 0 : 1, id = threadIds[index];
+    captured.run = { ...captured.run, agents: [{ id, parentId: null, depth: 0 }],
+      turns: [{ agentId: id, turnId: 'fixture-turn', model: 'fixture-model', reasoningEffort: 'high', status: 'completed' }],
+      source: { kind: 'native-app-server-v2', threadId: id, nativeSessionId: id, version: '1.2.3', workspace: input.workspace } };
+    return captured;
+  };
+  h.context.readReplay = async (_store, _profile, id) => ({ status: 'ready', source: {
+    nativeSessionId: id, clientVersion: '1.2.3', fingerprint }, sessionReplay: { schemaVersion: 1,
+      kind: 'session-replay', sessions: [{ id, parentId: null, depth: 0, status: 'ready',
+        source: { fingerprint }, events: [{ id: `${id}:event`, body: 'retained per-run replay' }], limits: [] }] } });
+  const report = await runAuditExperiment(h.store, spec(h.repository), h.context);
+  assert.equal(report.runs.length, 2);
+  for (const row of report.runs) {
+    assert.equal(row.sessionReplay, undefined);
+    assert.equal(row.replayCapture.boundary, 'finalized-native-history-snapshot');
+    const saved = h.finalized.get(row.id);
+    assert.equal(saved.sessionReplay.sessions[0].events[0].body, 'retained per-run replay');
+    assert.equal(saved.replayCapture.boundary, 'finalized-native-history-snapshot');
+  }
+  assert.equal(report.comparisons.length, 1);
+  assert.equal(report.comparisons[0].left.sessionReplay, undefined);
+  assert.equal(report.comparisons[0].right.sessionReplay, undefined);
+  assert.equal(JSON.stringify(report).includes('retained per-run replay'), false);
+});
+
 test('workspace quality delta excludes unchanged ignored dependencies and counts task files', () => {
   const ignored = index => ({ path: `node_modules/pkg-${index}.js`, status: 'I', oldMode: null, newMode: '100644',
     size: 10, sha256: index.toString(16).padStart(64, '0'), symlink: false, ignored: true, contentCaptured: false });
   const setupFiles = Array.from({ length: 40601 }, (_, index) => ignored(index + 1));
   const tracked = (path, status, oldOid, newOid) => ({ path, status, oldMode: status === 'A' ? '000000' : '100644',
     newMode: status === 'D' ? '000000' : '100644', oldOid, newOid, size: 12, symlink: false });
-  const before = { fingerprint: 'before', files: setupFiles };
-  const taskEnd = { fingerprint: 'task-end', files: [...setupFiles,
+  const before = { fingerprint: '1'.repeat(64), files: setupFiles };
+  const taskEnd = { fingerprint: '2'.repeat(64), files: [...setupFiles,
     tracked('apps/bot/changed.js', 'M', 'a'.repeat(40), 'b'.repeat(40)),
     tracked('apps/bot/new.js', 'A', '0'.repeat(40), 'c'.repeat(40))] };
   assert.deepEqual(compareAuditWorkspaceDelta(before, taskEnd), {
@@ -124,9 +170,90 @@ test('workspace quality delta excludes unchanged ignored dependencies and counts
 test('workspace quality delta counts ignored additions, removals and content changes', () => {
   const ignored = (path, digest) => ({ path, status: 'I', oldMode: null, newMode: '100644', size: 10,
     sha256: digest.repeat(64), symlink: false, ignored: true, contentCaptured: false });
-  const before = { fingerprint: 'before', files: [ignored('cache/changed', 'a'), ignored('cache/removed', 'b')] };
-  const taskEnd = { fingerprint: 'end', files: [ignored('cache/changed', 'c'), ignored('cache/added', 'd')] };
+  const before = { fingerprint: '1'.repeat(64), files: [ignored('cache/changed', 'a'), ignored('cache/removed', 'b')] };
+  const taskEnd = { fingerprint: '2'.repeat(64), files: [ignored('cache/changed', 'c'), ignored('cache/added', 'd')] };
   assert.equal(compareAuditWorkspaceDelta(before, taskEnd).changedFileCount, 3);
+});
+
+test('workspace inventory uses the same post-setup delta as its tracked and ignored counts', () => {
+  const tracked = (path, oid) => ({ path, status: 'M', oldMode: '100644', newMode: '100644',
+    oldOid: 'a'.repeat(40), newOid: oid.repeat(40), size: 10, symlink: false });
+  const ignored = (path, digest = 'b') => ({ path, status: 'I', size: 1, sha256: digest.repeat(64),
+    newMode: '100644', symlink: false, ignored: true, contentCaptured: false });
+  const postSetupFingerprint = '1'.repeat(64), taskEndFingerprint = '2'.repeat(64);
+  const before = { fingerprint: postSetupFingerprint, files: [tracked('src/kept.js', 'b'), ignored('cache/gone'),
+    ignored('cache/changed', 'a'), tracked('src/removed.js', 'c')] };
+  const taskEnd = { fingerprint: taskEndFingerprint, files: [tracked('src/kept.js', 'd'), ignored('cache/new'), ignored('cache/changed', 'c')] };
+  const inventory = compareAuditWorkspaceInventory(before, taskEnd);
+  assert.deepEqual(inventory.counts, { tracked: 2, ignored: 3, total: 5 });
+  assert.equal(inventory.entries.length, inventory.counts.total);
+  assert.deepEqual(inventory.entries.map(({ path, change, origin }) => [path, change, origin]), [
+    ['cache/changed', 'modified', 'ignored'], ['cache/gone', 'deleted', 'ignored'], ['cache/new', 'added', 'ignored'],
+    ['src/kept.js', 'modified', 'tracked'], ['src/removed.js', 'modified', 'tracked'],
+  ]);
+  assert.deepEqual(projectAuditFileInventory(inventory, { postSetupFingerprint, taskEndFingerprint, changedFileCount: 5 }), inventory);
+  assert.equal(projectAuditFileInventory({ ...inventory, counts: { tracked: 1, ignored: 3, total: 4 } }), null);
+  assert.equal(projectAuditFileInventory(inventory, { postSetupFingerprint: '3'.repeat(64) }), null);
+  assert.equal(projectAuditFileInventory({ ...inventory, entries: [...inventory.entries, inventory.entries[0]] }), null);
+  assert.equal(projectAuditFileInventory({ ...inventory, entries: [{ ...inventory.entries[0], origin: 'arbitrary' }] }), null);
+  const tooManyChanges = { fingerprint: '4'.repeat(64), files: Array.from({ length: 201 }, (_, index) => ({ path: `cache/${index}`,
+    status: 'I', size: 1, sha256: String(index).padStart(64, '0'), newMode: '100644', ignored: true })) };
+  const bounded = compareAuditWorkspaceInventory({ fingerprint: '5'.repeat(64), files: [] }, tooManyChanges);
+  assert.equal(bounded.status, 'unknown'); assert.equal(bounded.counts, null);
+  assert.equal(bounded.reason, 'workspace-file-inventory-limit-exceeded');
+});
+
+test('tracked inventory compares effective states against the committed baseline when diff rows disappear', () => {
+  const oid = value => value.repeat(40);
+  const tracked = (path, status, oldOid, newOid, oldMode = oldOid.startsWith('0') ? '000000' : '100644', newMode = newOid.startsWith('0') ? '000000' : '100644') => ({
+    path, status, oldOid, newOid, oldMode, newMode, size: 4, symlink: false,
+  });
+  const snapshot = (label, files) => ({ fingerprint: snapshotFingerprint(label), files });
+  const before = snapshot('baseline-before', [
+    tracked('reverted-modification.ts', 'M', oid('a'), oid('b')),
+    tracked('reverted-addition.ts', 'A', oid('0'), oid('c')),
+    tracked('retained-deletion.ts', 'D', oid('d'), oid('0')),
+  ]);
+  const taskEnd = snapshot('baseline-after', [
+  ]);
+  const inventory = compareAuditWorkspaceInventory(before, taskEnd);
+  assert.equal(inventory.status, 'recorded');
+  assert.deepEqual(inventory.entries, [
+    { path: 'retained-deletion.ts', change: 'added', origin: 'tracked' },
+    { path: 'reverted-addition.ts', change: 'deleted', origin: 'tracked' },
+    { path: 'reverted-modification.ts', change: 'modified', origin: 'tracked' },
+  ]);
+  assert.equal(compareAuditWorkspaceDelta(before, taskEnd).changedFileCount, 3);
+
+  const noChanges = compareAuditWorkspaceInventory(snapshot('deleted-before', [tracked('same-deletion.ts', 'D', oid('e'), oid('0'))]),
+    snapshot('deleted-after', []));
+  assert.deepEqual(noChanges.entries, [{ path: 'same-deletion.ts', change: 'added', origin: 'tracked' }]);
+  assert.equal(compareAuditWorkspaceDelta(snapshot('deleted-before-2', [tracked('same-deletion.ts', 'D', oid('e'), oid('0'))]),
+    snapshot('deleted-after-2', [])).changedFileCount, 1);
+});
+
+test('workspace inventory marks incomplete, ambiguous, and origin-changing snapshots unknown', () => {
+  const incomplete = compareAuditWorkspaceInventory(null, { fingerprint: 'b'.repeat(64), files: [] });
+  assert.equal(incomplete.status, 'unknown'); assert.equal(incomplete.counts, null); assert.equal(incomplete.reason, 'workspace-snapshots-incomplete');
+  const ambiguous = compareAuditWorkspaceInventory({ fingerprint: 'a'.repeat(64), files: [{ path: 'x' }, { path: 'x' }] }, { fingerprint: 'b'.repeat(64), files: [] });
+  assert.equal(ambiguous.status, 'unknown'); assert.equal(ambiguous.reason, 'workspace-file-records-ambiguous');
+  const before = { fingerprint: 'a'.repeat(64), files: [{ path: 'cache/x', ignored: true, sha256: 'a'.repeat(64), size: 1, newMode: '100644' }] };
+  const after = { fingerprint: 'b'.repeat(64), files: [{ path: 'cache/x', status: 'M', oldMode: '100644', newMode: '100644',
+    oldOid: 'a'.repeat(40), newOid: 'b'.repeat(40) }] };
+  const changedOrigin = compareAuditWorkspaceInventory(before, after);
+  assert.equal(changedOrigin.status, 'unknown'); assert.equal(changedOrigin.counts, null); assert.equal(changedOrigin.reason, 'workspace-file-origin-changed');
+  const malformedTracked = compareAuditWorkspaceInventory({ fingerprint: 'a'.repeat(64), files: [] },
+    { fingerprint: 'b'.repeat(64), files: [{ path: 'src/new.ts', status: 'A', oldMode: '000000', newMode: '100644',
+      oldOid: null, newOid: 'b'.repeat(40) }] });
+  assert.equal(malformedTracked.status, 'unknown'); assert.equal(malformedTracked.counts, null);
+  const malformedIgnored = compareAuditWorkspaceInventory({ fingerprint: 'a'.repeat(64), files: [] },
+    { fingerprint: 'b'.repeat(64), files: [{ path: 'cache/new', ignored: true, status: 'I', sha256: null, size: 2, newMode: '100644' }] });
+  assert.equal(malformedIgnored.status, 'unknown'); assert.equal(malformedIgnored.counts, null);
+});
+
+test('frozen inventory rejects a non-finite or unbound snapshot identity', () => {
+  assert.equal(projectAuditFileInventory({ schemaVersion: 1, status: 'unknown', basis: 'post-setup-snapshot-delta-v1',
+    fingerprints: { postSetup: null, taskEnd: 'x' }, entries: [], counts: null, reason: 'workspace-snapshots-incomplete' }), null);
 });
 
 test('workspace quality delta fails closed when legacy tracked records lack blob identities', () => {
@@ -136,13 +263,32 @@ test('workspace quality delta fails closed when legacy tracked records lack blob
   assert.equal(result.changeCountStatus, 'unknown');
   assert.equal(result.changedFileCount, null);
   assert.equal(result.changeCountReason, 'tracked-blob-identity-missing');
-  assert.equal(compareAuditWorkspaceDelta({ fingerprint: 'same', files: [oldRecord] },
-    { fingerprint: 'same', files: [oldRecord] }).changedFileCount, 0);
+  assert.equal(compareAuditWorkspaceDelta({ fingerprint: 'a'.repeat(64), files: [oldRecord] },
+    { fingerprint: 'a'.repeat(64), files: [oldRecord] }).changeCountStatus, 'unknown');
   const originChange = compareAuditWorkspaceDelta({ fingerprint: 'before', files: [
     { path: 'cache/file', status: 'I', ignored: true, sha256: 'a'.repeat(64), size: 20, newMode: '100644', symlink: false },
   ] }, { fingerprint: 'after', files: [{ ...oldRecord, path: 'cache/file', oldOid: 'a'.repeat(40), newOid: 'b'.repeat(40) }] });
   assert.equal(originChange.changeCountStatus, 'unknown', 'Git tracking/ignore reclassification does not prove content changed');
   assert.equal(originChange.changeCountReason, 'workspace-file-origin-changed');
+});
+
+test('equal snapshot fingerprints still require valid and consistent file evidence', () => {
+  const fingerprint = 'a'.repeat(64);
+  const empty = compareAuditWorkspaceInventory({ fingerprint, files: [] }, { fingerprint, files: [] });
+  assert.equal(empty.status, 'recorded');
+  assert.deepEqual(empty.counts, { tracked: 0, ignored: 0, total: 0 });
+
+  const added = { path: 'src/new.ts', status: 'A', oldOid: '0'.repeat(40), newOid: 'b'.repeat(40),
+    oldMode: '000000', newMode: '100644' };
+  const contradictory = compareAuditWorkspaceInventory({ fingerprint, files: [] }, { fingerprint, files: [added] });
+  assert.equal(contradictory.status, 'unknown');
+  assert.equal(contradictory.counts, null);
+  assert.equal(contradictory.reason, 'workspace-file-records-ambiguous');
+
+  const malformed = { path: 'src/file.ts', status: 'M', oldMode: null, newMode: '100644', oldOid: null, newOid: 'c'.repeat(40) };
+  const invalid = compareAuditWorkspaceInventory({ fingerprint, files: [malformed] }, { fingerprint, files: [{ ...malformed }] });
+  assert.equal(invalid.status, 'unknown');
+  assert.equal(invalid.counts, null);
 });
 
 test('strict declared capture can pass while exhaustive coverage remains partial; required evidence is never waived', async t => {
@@ -264,8 +410,8 @@ test('two profiles run sequentially with a task-end diff before checks and origi
   assert.ok(taskEndIndex < checkIndex);
   assert.ok(checkIndex < finalIndex);
   for (const run of report.runs) {
-    assert.match(run.taskEnd.fingerprint, /task-end/);
-    assert.match(run.finalWorkspace.fingerprint, /after-checks/);
+    assert.equal(run.taskEnd.fingerprint, snapshotFingerprint('task-end'));
+    assert.equal(run.finalWorkspace.fingerprint, snapshotFingerprint('after-checks'));
     assert.equal(run.skills[0].origin, 'plugin');
     assert.equal(run.agents[0].id, run.source.threadId);
     const stored = h.finalized.get(run.id);
@@ -274,6 +420,10 @@ test('two profiles run sequentially with a task-end diff before checks and origi
     assert.deepEqual(stored.baseline, { repository: h.repository, commit: 'a'.repeat(40), tree: 'b'.repeat(40), settingsStatus: 'ready' });
     assert.equal(stored.sourceWorkspace.sourceCommit, stored.baseline.commit);
     assert.equal(stored.sourceWorkspace.sourceTree, stored.baseline.tree);
+    assert.equal(stored.checkEvidence.schemaVersion, 1);
+    assert.equal(stored.checkEvidence.origin, 'runner-check');
+    assert.equal(stored.checkEvidence.records[0].execution.workspaceFingerprint, snapshotFingerprint('task-end'));
+    assert.equal(stored.checkEvidence.records[0].output.stdout, 'check stdout\\n');
     assert.ok(stored.workspace.taskEnd && stored.workspace.checkEnd);
     assert.equal(h.states.get(run.id).reservation, null);
     assert.equal(h.states.get(run.id).workspace.active, false);
@@ -283,8 +433,8 @@ test('two profiles run sequentially with a task-end diff before checks and origi
 
 test('retains exact task-end delta evidence when the later workspace snapshot fails', async t => {
   const h = await harness(t, { snapshotWorkspace: async ({ label }) => {
-    if (label === 'before-task') return { label, fingerprint: 'setup-fingerprint', status: 'clean', files: [], patchPath: '/private/before.patch', metadataPath: '/private/before.json' };
-    if (label === 'task-end') return { label, fingerprint: 'task-fingerprint', status: 'changed',
+    if (label === 'before-task') return { label, fingerprint: snapshotFingerprint('before-task'), status: 'clean', files: [], patchPath: '/private/before.patch', metadataPath: '/private/before.json' };
+    if (label === 'task-end') return { label, fingerprint: snapshotFingerprint('task-end'), status: 'changed',
       files: [{ path: 'src/changed.js', status: 'A', oldMode: '000000', newMode: '100644',
         oldOid: '0'.repeat(40), newOid: 'a'.repeat(40), size: 5, symlink: false }],
       patchPath: '/private/task-end.patch', metadataPath: '/private/task-end.json' };
@@ -295,11 +445,11 @@ test('retains exact task-end delta evidence when the later workspace snapshot fa
   const report = await runAuditExperiment(h.store, spec(h.repository), h.context);
   const run = report.runs[0], stored = h.finalized.get(run.id);
   assert.equal(run.status, 'failed');
-  assert.equal(run.workspace.taskEnd.fingerprint, 'task-fingerprint');
+  assert.equal(run.workspace.taskEnd.fingerprint, snapshotFingerprint('task-end'));
   assert.equal(run.workspace.taskEnd.changedFileCount, 1);
   assert.equal(run.workspace.taskEnd.changeCountStatus, 'known');
   assert.equal(stored.workspace.taskEnd.changedFileCount, 1);
-  assert.equal(stored.workspace.taskEnd.fingerprint, 'task-fingerprint');
+  assert.equal(stored.workspace.taskEnd.fingerprint, snapshotFingerprint('task-end'));
 });
 
 test('reservation race prevents every model task and releases only reservations already acquired', async t => {
@@ -373,9 +523,9 @@ test('setup failure snapshots the workspace before deactivation and preserves cl
   assert.equal(run.status, 'failed');
   assert.equal(run.taskEnd, undefined);
   assert.equal(run.finalWorkspace.timing, 'failure-finalization');
-  assert.equal(run.finalWorkspace.fingerprint, 'fingerprint-failure-finalization');
+  assert.equal(run.finalWorkspace.fingerprint, snapshotFingerprint('failure-finalization'));
   assert.ok(run.artifacts.some(item => item.label === 'failure-finalization'));
-  assert.equal(h.states.get(run.id).workspace.finalFingerprint, 'fingerprint-failure-finalization');
+  assert.equal(h.states.get(run.id).workspace.finalFingerprint, snapshotFingerprint('failure-finalization'));
   assert.equal(h.states.get(run.id).workspace.active, false);
   assert.equal(h.finalized.get(run.id).finalWorkspace.timing, 'failure-finalization');
 });
@@ -388,14 +538,14 @@ test('incomplete child shutdown retains the task snapshot but marks its timing a
   } });
   const report = await runAuditExperiment(h.store, spec(h.repository), h.context);
   const run = report.runs.find(item => item.profile.profileName === 'Alpha');
-  assert.equal(run.taskEnd.fingerprint, 'fingerprint-task-end');
+  assert.equal(run.taskEnd.fingerprint, snapshotFingerprint('task-end'));
   assert.equal(run.taskEnd.captureComplete, false);
   assert.equal(run.taskEnd.timing, 'unverified-task-end');
   assert.equal(run.coverage.workspaceDiff, 'partial');
-  assert.equal(run.workspace.taskEnd.fingerprint, 'fingerprint-task-end');
+  assert.equal(run.workspace.taskEnd.fingerprint, snapshotFingerprint('task-end'));
   assert.equal(run.workspace.taskEnd.captureComplete, false);
   assert.equal(run.workspace.taskEnd.timing, 'unverified-task-end');
-  assert.equal(run.workspace.checkEnd.fingerprint, 'fingerprint-after-checks');
+  assert.equal(run.workspace.checkEnd.fingerprint, snapshotFingerprint('after-checks'));
 });
 
 test('workspace creation failure preserves intent when an unverified directory remains', async t => {
@@ -554,7 +704,7 @@ test('cancellation across execution phases stops later profiles and finalizes on
             outcome: { status: 'unverified', nativeTurnStatus: 'unknown' }, source: { threadId: 'fixture-task' } } };
       } } : {}),
       snapshotWorkspace: async options => {
-        const snapshot = { label: options.label, fingerprint: `fingerprint-${options.label}`, status: 'changed',
+        const snapshot = { label: options.label, fingerprint: snapshotFingerprint(options.label), status: 'changed',
           files: [{ path: 'result.txt' }], patchPath: `/private/${options.label}.patch`, metadataPath: `/private/${options.label}.json` };
         h.calls.push(`snapshot:${options.label}`);
         if (phase === 'finalization' && options.label === 'after-checks') controller.abort('fixture-cancel-after-checks');

@@ -36,10 +36,13 @@ xfx desktop focus Research
 xfx desktop close Research
 ```
 
-In observed output, the top-level status is the saved record; `observed.status`
-and its process list show what the process check found. A saved `running` record
-can therefore refer to an instance already stopped. `open` can reconcile its
-stopped, idle reservation before reopening it.
+In observed output, `observed.status` and its process list show what the process
+check found. You may quit Codex normally. Observed listing and review Start
+reconcile a confirmed-stopped Desktop reservation automatically; `open` also
+reconciles it before reopening. Uncertain helpers or file holders preserve the
+reservation. A concurrent ordinary review keeps its own reservation when Desktop
+quits; review cancellation does not close Desktop. New Desktop launch while a
+review owns the profile remains blocked.
 
 `close` requests graceful quit of the verified target only. It refuses to control
 an instance hosting the invoking command. A failed or incomplete identity/resource

@@ -14,9 +14,10 @@ import { launchHome } from '../src/launcher.js';
 import { removeProfile, unbindNativeHome } from '../src/profile-removal.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
 import { assertNoConcurrentDesktops } from '../src/desktop-instance-guard.js';
+import { acquireReviewReservation, releaseProfileParticipant } from '../src/profile-reservations.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
 import { desktopInstancePlan, openDesktopInstance, prepareDesktopInstance, focusDesktopInstance, closeDesktopInstance,
-  recoverDesktopInstance, listDesktopInstances } from '../src/desktop-instances.js';
+  recoverDesktopInstance, listDesktopInstances, reconcileDesktopInstance, withProfileOperation } from '../src/desktop-instances.js';
 
 const app = { appPath: '/fixture/Codex.app', bundleId: 'com.openai.codex', executable: '/fixture/Codex.app/Contents/MacOS/Codex' };
 const startedAt = 'Fri Oct 09 12:00:00 2026';
@@ -43,7 +44,7 @@ async function fixture(t) {
   const runtime = {
     inspectApp: async () => app,
     snapshot: async () => structuredClone(rows),
-    assertResourcesIdle: async paths => { calls.push({ operation: 'idle', paths }); },
+    assertResourcesIdle: async (paths, { allowedProcesses = [] } = {}) => { calls.push({ operation: 'idle', paths, allowedProcesses }); },
     open: async (plan, { application, bootstrap, onBootstrapReady }) => {
       if (bootstrap) {
         const main = rows.find(entry => entry.pid === bootstrap.pid);
@@ -234,6 +235,91 @@ test('open reconciles stopped opening and running journals without manual recove
   assert.deepEqual(f.rows.find(row => row.pid === f.original.pid), f.original);
 });
 
+test('normal Desktop quit reconciliation releases only its stopped instance reservation and control', async t => {
+  const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options), b = await openDesktopInstance(f.store, 'B', f.options);
+  const aProcesses = JSON.parse(await readFile(statePath(f, a.profileId))).processes;
+  const bRunId = JSON.parse(await readFile(statePath(f, b.profileId))).runId;
+  f.rows.splice(0, f.rows.length, ...f.rows.filter(item => !aProcesses.some(process => process.pid === item.pid)));
+
+  await reconcileDesktopInstance(f.store, a.profileId, f.options);
+
+  assert.equal(JSON.parse(await readFile(statePath(f, a.profileId))).phase, 'closed');
+  await assert.rejects(access(lockPath(f, 'A')), { code: 'ENOENT' });
+  await assert.rejects(access(join(`${f.options.lockPath}.instances`, `${JSON.parse(await readFile(statePath(f, a.profileId))).runId}.json`)), { code: 'ENOENT' });
+  await access(lockPath(f, 'B'));
+  await access(join(`${f.options.lockPath}.instances`, `${bRunId}.json`));
+  assert.ok(f.rows.some(item => item.pid === b.main.pid));
+  assert.equal(f.calls.filter(call => call.operation === 'close').length, 0);
+});
+
+test('normal Desktop quit reconciliation preserves a shared review reservation and allows its live process', async t => {
+  const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options), b = await openDesktopInstance(f.store, 'B', f.options);
+  const aRunId = JSON.parse(await readFile(statePath(f, a.profileId))).runId;
+  const desktopOwner = JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json')));
+  const bRunId = JSON.parse(await readFile(statePath(f, b.profileId))).runId;
+  const runId = randomUUID(), reviewOwner = { kind: 'review-task', runId, storePath: f.store.directory,
+    profileId: a.profileId, host: hostname(), pid: process.pid };
+  const reviewProcess = row(700, '/fixture/review-native-process');
+  f.rows.push(reviewProcess);
+  await acquireReviewReservation(f.homes.A.root, reviewOwner, desktopOwner);
+  const taskRoot = join(f.store.directory, 'review-tasks', runId);
+  await mkdir(taskRoot, { recursive: true, mode: 0o700 });
+  await writeFile(join(taskRoot, 'task.json'), JSON.stringify({ kind: 'xfx-review-task', id: runId,
+    reservation: { owner: reviewOwner }, profile: { reservationRoot: f.homes.A.root },
+    process: { nativeIdentity: reviewProcess } }), { mode: 0o600 });
+  const aProcesses = JSON.parse(await readFile(statePath(f, a.profileId))).processes;
+  f.rows.splice(0, f.rows.length, ...f.rows.filter(item => !aProcesses.some(process => process.pid === item.pid)));
+  f.calls.length = 0;
+
+  await reconcileDesktopInstance(f.store, a.profileId, f.options);
+
+  assert.deepEqual(JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json'))), reviewOwner);
+  await assert.rejects(access(join(`${f.options.lockPath}.instances`, `${aRunId}.json`)), { code: 'ENOENT' });
+  await access(lockPath(f, 'B'));
+  await access(join(`${f.options.lockPath}.instances`, `${bRunId}.json`));
+  const idle = f.calls.findLast(call => call.operation === 'idle');
+  assert.deepEqual(idle.allowedProcesses, [reviewProcess]);
+  assert.ok(f.rows.some(item => item.pid === reviewProcess.pid));
+  assert.ok(f.rows.some(item => item.pid === b.main.pid));
+});
+
+test('quit reconciliation resumes after the Desktop participant was released before its journal closed', async t => {
+  const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options);
+  const state = JSON.parse(await readFile(statePath(f, a.profileId)));
+  const desktopOwner = JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json')));
+  const runId = randomUUID(), reviewOwner = { kind: 'review-task', runId, storePath: f.store.directory,
+    profileId: a.profileId, host: hostname(), pid: process.pid };
+  await acquireReviewReservation(f.homes.A.root, reviewOwner, desktopOwner);
+  const taskRoot = join(f.store.directory, 'review-tasks', runId);
+  await mkdir(taskRoot, { recursive: true, mode: 0o700 });
+  await writeFile(join(taskRoot, 'task.json'), JSON.stringify({ kind: 'xfx-review-task', id: runId,
+    reservation: { owner: reviewOwner }, profile: { reservationRoot: f.homes.A.root }, process: null }), { mode: 0o600 });
+  f.rows.splice(0, f.rows.length, ...f.rows.filter(item => !state.processes.some(process => process.pid === item.pid)));
+  await releaseProfileParticipant(f.homes.A.root, desktopOwner);
+
+  await reconcileDesktopInstance(f.store, a.profileId, f.options);
+
+  assert.equal(JSON.parse(await readFile(statePath(f, a.profileId))).phase, 'closed');
+  assert.deepEqual(JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json'))), reviewOwner);
+  await assert.rejects(access(join(`${f.options.lockPath}.instances`, `${state.runId}.json`)), { code: 'ENOENT' });
+});
+
+test('normal Desktop quit reconciliation refuses a reused helper identity and preserves ownership', async t => {
+  const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options);
+  const state = JSON.parse(await readFile(statePath(f, a.profileId)));
+  const helper = state.processes.find(item => item.pid !== state.main.pid);
+  f.rows.splice(0, f.rows.length, ...f.rows.filter(item => item.pid !== state.main.pid));
+  f.rows.find(item => item.pid === helper.pid).startedAt = 'Sat Oct 10 12:00:00 2026';
+  f.calls.length = 0;
+
+  await assert.rejects(reconcileDesktopInstance(f.store, a.profileId, f.options), /ownership is uncertain|still runs/i);
+
+  assert.deepEqual(JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json'))), state.owner);
+  await access(join(`${f.options.lockPath}.instances`, `${state.runId}.json`));
+  assert.equal(f.calls.filter(call => call.operation === 'idle').length, 0);
+  assert.equal(JSON.parse(await readFile(statePath(f, a.profileId))).phase, 'running');
+});
+
 test('open releases only a dead operation guard belonging to this store and profile', async t => {
   const f = await fixture(t), profile = (await f.store.read()).profiles.find(item => item.name === 'A');
   const guard = `${f.options.lockPath}.operation`;
@@ -255,6 +341,27 @@ test('open releases only a dead operation guard belonging to this store and prof
   await writeOwner(owner);
   assert.equal((await openDesktopInstance(f.store, 'A', { ...f.options, isAlive: () => false })).status, 'opened');
   await assert.rejects(access(guard), { code: 'ENOENT' });
+});
+
+test('profile operation wait serializes unrelated profile operations under the shared guard', async t => {
+  const f = await fixture(t);
+  let releaseFirst, firstEntered;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  const firstReady = new Promise(resolve => { firstEntered = resolve; });
+  const order = [];
+  const first = withProfileOperation(f.store, (await f.store.read()).profiles.find(profile => profile.name === 'A').id,
+    f.options, async () => { order.push('A:start'); firstEntered(); await firstGate; order.push('A:end'); });
+  await firstReady;
+  let secondEntered = false;
+  const secondProfileId = (await f.store.read()).profiles.find(profile => profile.name === 'B').id;
+  const second = withProfileOperation(f.store, secondProfileId, { ...f.options, waitMs: 1000 }, async () => {
+    secondEntered = true; order.push('B:start');
+  });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(secondEntered, false);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(order, ['A:start', 'A:end', 'B:start']);
 });
 
 test('desktop preparation respects CLI reservations and unfinished journals without replacing either', async t => {

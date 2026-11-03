@@ -305,7 +305,8 @@ export function createDesktopInstanceRuntime({
     for (const row of tree) owned.set(row.pid, row);
     return { status: 'running', ...(escaped.length ? { orphaned: true } : {}), processes };
   }
-  async function assertResourcesIdle(paths) {
+  async function assertResourcesIdle(paths, { allowedProcesses = [] } = {}) {
+    validateRows(allowedProcesses);
     if (!Array.isArray(paths) || paths.some(path => typeof path !== 'string' || !path.startsWith('/') || /[\x00-\x1f\x7f]/.test(path) || resolve(path) !== path))
       throw fail('INVALID_RESOURCE_PATHS');
     const present = [];
@@ -374,7 +375,9 @@ export function createDesktopInstanceRuntime({
     const processes = [...holders].map(pid => byPid.get(pid));
     const missingPid = [...holders].find(pid => !byPid.has(pid));
     if (missingPid !== undefined) throw resourceInspectionFailure('process snapshot', present.map(item => item.path).join(', '), `holder PID ${missingPid} was absent`);
-    throw fail('RESOURCE_BUSY', processes);
+    const unexpected = processes.filter(row => !allowedProcesses.some(expected => matchesProcessIdentity(row, expected)));
+    if (unexpected.length) throw fail('RESOURCE_BUSY', unexpected);
+    return { idle: true, processes };
   }
   async function control(flag, main, helperExecutable) {
     const rows = await snapshot(); validateTarget(rows, main);

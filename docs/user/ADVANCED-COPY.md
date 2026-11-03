@@ -101,5 +101,11 @@ New-profile setup consists of separate preparation, copy, sign-in and desktop in
 
 Before applying or undoing, ensure Codex clients that can access the affected homes are quiescent. The `--close-clients` option permits the existing graceful shutdown workflow; standalone terminal sessions must be closed manually when requested. Inspection and preview never close applications.
 
+Current limitation: Desktop home ownership is not always observable. A running
+Desktop can therefore block copying between otherwise idle profiles. Xenoflux
+keeps that case blocked and refuses to close an app that hosts its own invocation.
+The refusal can occur without evidence that the selected target is busy; positive
+copy/undo acceptance requires client conditions the guard can verify.
+
 After copying, check the skill or rule in a fresh Codex task through the interface
 you intend to use. Discovery alone does not establish that it executes or applies.

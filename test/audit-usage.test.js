@@ -42,11 +42,11 @@ const counters = (inputTokens, outputTokens, cachedInputTokens = 0, reasoningOut
   cacheWriteInputTokens = 0) => ({ inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens,
   cacheWriteInputTokens, totalTokens: inputTokens + outputTokens });
 function workflowRun({ root = counters(100, 20, 40, 5, 2), child = counters(50, 10, 15, 3, 1),
-  rootRows, childRows, accounting = contract } = {}) {
-  const rows = (agentId, turnId, samples) => samples.map((total, index) => ({ agentId, turnId, source: 'native',
-    mode: 'snapshot', total: { ...total }, last: {}, disposition: index === 1 && samples[0] === total ? 'duplicate' : 'accepted',
+  rootRows, childRows, accounting = contract, version = accounting?.version ?? contract.version } = {}) {
+  const rows = (agentId, turnId, samples) => samples.map((total, index) => ({ agentId, turnId, source: 'thread/tokenUsage/updated',
+    mode: 'snapshot', total: { ...total }, last: { ...total }, disposition: index === 1 && samples[0] === total ? 'duplicate' : 'accepted',
     invalidFields: { total: [], last: [] }, malformedFields: { total: [], last: [] } }));
-  return { source: { threadId: 'root', kind: 'native-app-server-v2', version: '0.163.0-alpha.10.2',
+  return { source: { threadId: 'root', kind: 'native-app-server-v2', version,
     historyMode: 'paginated', freshThread: true }, coverage: { agents: 'complete', usage: 'complete', timeline: 'complete' },
     usage: { accounting, observations: [
       ...rows('root', 'r1', rootRows ?? [root, root]),
@@ -79,7 +79,7 @@ test('returns independent validated fields with null for a missing field on one 
   const child = counters(50, 10, 15, 3, 1);
   delete child.cachedInputTokens;
   const summary = summarizeWorkflowUsage(workflowRun({ child, childRows: [child] }));
-  assert.equal(summary.status, 'partial');
+  assert.equal(summary.status, 'partial', summary.reason);
   assert.equal(summary.values.inputTokens, 150);
   assert.equal(summary.values.cachedInputTokens, null);
   assert.deepEqual(summary.fields.cachedInputTokens, { status: 'partial', contributingAgents: 1, agentCount: 2 });
@@ -142,17 +142,66 @@ test('rejects inconsistent native counters and aggregate overflow', () => {
   assert.equal(summary.fields.inputTokens.status, 'invalid');
 });
 
-test('pins the source accounting contract to one exact native version', () => {
+test('keeps observed versions as provenance and validates the cumulative accounting protocol', () => {
   const first = nativeUsageAccounting('0.163.0-alpha.10.2');
   assert.deepEqual(first, contract);
   assert.notEqual(first, contract);
-  assert.equal(nativeUsageAccounting('0.163.0-alpha.10.3'), null);
+  const unfamiliar = nativeUsageAccounting('0.163.0-alpha.10.3');
+  assert.equal(unfamiliar.contract, contract.contract);
+  assert.equal(unfamiliar.version, '0.163.0-alpha.10.3');
+  assert.equal(unfamiliar.sourceRevision, undefined);
+  assert.equal(unfamiliar.childCountersStartAtZero, undefined);
+  const next = nativeUsageAccounting('0.164.0');
+  assert.deepEqual(next, { ...contract, version: '0.164.0',
+    sourceRevision: '6aaac694803004a63c6f393d153c96d22521a6b9' });
+  assert.notEqual(next, nativeUsageAccounting('0.163.0-alpha.10.2'));
+  assert.equal(nativeUsageAccounting('not a version'), null);
+});
+
+test('validates protocol-shaped workflow and turn totals across observed versions', () => {
+  const accounting = nativeUsageAccounting('0.164.0');
+  const run = workflowRun({ accounting, version: '0.164.0' });
+  const summary = summarizeWorkflowUsage(run);
+  assert.equal(summary.status, 'complete');
+  assert.equal(summary.contract.version, '0.164.0');
+  assert.equal(summary.contract.sourceRevision, '6aaac694803004a63c6f393d153c96d22521a6b9');
+  assert.equal(summarizeTurnUsage(multiTurnRun({ version: '0.164.0' })).status, 'complete');
+
+  const unknown = workflowRun({ accounting: nativeUsageAccounting('0.164.1'), version: '0.164.1' });
+  assert.equal(summarizeWorkflowUsage(unknown).status, 'complete');
+  const forged = workflowRun({ accounting: { ...accounting, sourceRevision: contract.sourceRevision }, version: '0.164.0' });
+  assert.equal(summarizeWorkflowUsage(forged).reason, 'accounting-contract-unverified');
+  const mixed = workflowRun({ accounting: contract, version: '0.164.0' });
+  assert.equal(summarizeWorkflowUsage(mixed).reason, 'accounting-contract-unverified');
+  const conflictingSourcePins = workflowRun({ accounting, version: '0.164.0' });
+  conflictingSourcePins.source.accountingVersion = '0.163.0-alpha.10.2';
+  assert.equal(summarizeWorkflowUsage(conflictingSourcePins).reason, 'accounting-contract-unverified');
+});
+
+test('leaves unfamiliar child totals unavailable when the first snapshot includes an inherited baseline', () => {
+  const run = workflowRun({ version: '99.1.0', accounting: nativeUsageAccounting('99.1.0') });
+  const childFinal = counters(110, 0);
+  const childFirstResponse = counters(10, 0);
+  const childObservation = run.usage.observations.find(row => row.agentId === 'child');
+  childObservation.total = { ...childFinal };
+  childObservation.last = { ...childFirstResponse };
+  run.usage.child.total = { ...childFinal };
+  const summary = summarizeWorkflowUsage(run);
+  assert.equal(summary.status, 'unavailable');
+  assert.equal(summary.reason, 'source-counter-inconsistent');
+  assert.equal(summary.values.totalTokens, null);
 });
 
 test('rejects source metadata that does not match the verified accounting contract', () => {
   const run = workflowRun();
   run.source.historyMode = 'latest-only';
   assert.equal(summarizeWorkflowUsage(run).reason, 'accounting-contract-unverified');
+});
+
+test('requires native token-usage protocol events before deriving workflow totals', () => {
+  const run = workflowRun();
+  run.usage.observations[0].source = 'unrecognized-token-event';
+  assert.equal(summarizeWorkflowUsage(run).reason, 'usage-sequence-incomplete');
 });
 
 test('requires complete timeline and rejects event, item, agent, and capture truncation evidence', () => {
@@ -176,8 +225,8 @@ test('rejects an inconsistent earlier source snapshot even when the final counte
   assert.equal(summarizeWorkflowUsage(run).reason, 'source-counter-inconsistent');
 });
 
-function multiTurnRun() {
-  const run = workflowRun();
+function multiTurnRun({ version = contract.version } = {}) {
+  const run = workflowRun({ version, accounting: nativeUsageAccounting(version) });
   const samples = [
     ['root', 'r1', [counters(5, 2, 1, 0, 0), counters(10, 4, 2, 1, 0)]],
     ['root', 'r2', [counters(15, 6, 3, 1, 1), counters(20, 8, 4, 2, 1)]],
@@ -187,7 +236,7 @@ function multiTurnRun() {
   let sourceLine = 1;
   run.usage.observations = samples.flatMap(([agentId, turnId, values]) => values.map(total => ({
     agentId, turnId, source: 'thread/tokenUsage/updated', sourceLine: sourceLine++, mode: 'snapshot',
-    total: { ...total }, last: {}, disposition: 'accepted',
+    total: { ...total }, last: { ...total }, disposition: 'accepted',
     invalidFields: { total: [], last: [] }, malformedFields: { total: [], last: [] },
   })));
   run.usage.root.total = samples[1][2].at(-1);
@@ -225,9 +274,23 @@ test('does not invent turn totals when a terminal field or its baseline is missi
   assert.equal(first.turns[1].values.outputTokens, null);
   assert.equal(first.turns[1].fields.outputTokens.reason, 'prior-turn-boundary-missing');
 
-  const unsupported = multiTurnRun();
-  unsupported.source.version = '0.163.0-alpha.10.3';
-  assert.equal(summarizeTurnUsage(unsupported).status, 'unavailable');
+  const unfamiliar = multiTurnRun({ version: '0.163.0-alpha.10.3' });
+  assert.equal(summarizeTurnUsage(unfamiliar).status, 'complete');
+});
+
+test('keeps first-turn usage unknown when its initial source baseline is missing, then resumes at a later boundary', () => {
+  const run = multiTurnRun({ version: '99.1.0' });
+  const childFirst = run.usage.observations.find(row => row.agentId === 'child' && row.turnId === 'c1');
+  childFirst.last.inputTokens = null;
+  const summary = summarizeTurnUsage(run);
+  assert.equal(summary.status, 'partial');
+  const first = summary.turns.find(turn => turn.agentId === 'child' && turn.turnId === 'c1');
+  const second = summary.turns.find(turn => turn.agentId === 'child' && turn.turnId === 'c2');
+  assert.equal(first.values.inputTokens, null);
+  assert.equal(first.baseline.inputTokens, null);
+  assert.equal(first.derivation.initialBaseline, 'unverified-source-baseline');
+  assert.equal(second.values.inputTokens, 4);
+  assert.equal(second.baseline.inputTokens, 3);
 });
 
 test('rejects turn boundary resets, non-monotonic source order, and overflowed counters', () => {
@@ -252,13 +315,15 @@ test('invalidates turn deltas that violate cumulative subset relations', () => {
   const setRootTurn = (firstIndex, values) => {
     run.usage.observations[firstIndex].total = values[0];
     run.usage.observations[firstIndex + 1].total = values[1];
+    run.usage.observations[firstIndex].last = { ...values[0] };
+    run.usage.observations[firstIndex + 1].last = { ...values[1] };
   };
   setRootTurn(0, [counters(90, 18, 5, 4, 0), counters(100, 20, 10, 5, 0)]);
   setRootTurn(2, [counters(100, 20, 20, 10, 0), counters(101, 21, 50, 15, 0)]);
   run.usage.root.total = run.usage.observations[3].total;
   const summary = summarizeTurnUsage(run);
   const laterTurn = summary.turns.find(turn => turn.turnId === 'r2');
-  assert.equal(summary.status, 'partial');
+  assert.equal(summary.status, 'partial', `${summary.reason}: ${JSON.stringify(assessUsageSequence(run.usage.observations).observations.map(row => [row.agentId, row.turnId, row.disposition]))}`);
   assert.equal(laterTurn.values.inputTokens, 1);
   assert.equal(laterTurn.values.cachedInputTokens, null);
   assert.equal(laterTurn.fields.cachedInputTokens.reason, 'turn-counter-inconsistent');

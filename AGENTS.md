@@ -1,16 +1,36 @@
 # Xenoflux development
 
-For profile creation, comparison, copying, or related documentation, follow
-[Profile copy policy](docs/developer/PROFILE-COPY-POLICY.md). It defines the accepted target
-behavior and identifies current implementation gaps; those gaps are not exceptions
-to preserve in new work. Keep the rules in that document rather than duplicating them.
+## Start with the active work
 
-For profile management, setup comparison and audit work, read
-[the shared product goal](docs/developer/AUDIT-GOAL.md) as the goal and acceptance
-contract. Current user instructions determine task scope and operational
-authorization; the goal itself grants neither.
+For release work, read the [roadmap checkpoint](docs/developer/ROADMAP.md#current-work-and-stop-condition)
+and active delivery slice. Consult the [goal](docs/developer/AUDIT-GOAL.md#current-release-boundary)
+for scope, [acceptance](docs/developer/AUDIT-GOAL.md#observable-acceptance) for done,
+and [evolution policy](docs/developer/AUDIT-GOAL.md#evolution-and-provider-version-policy)
+for breaking changes. Read relevant sections, not every linked document.
+Once the outcome, affected code and verification are clear, begin authorized
+implementation; reopen settled decisions only for conflicting evidence or a
+scope change. Historical chats, handovers and campaign runbooks are not startup
+prerequisites. The goal and roadmap grant no operational authorization.
 
-Use [the active roadmap](docs/developer/ROADMAP.md) for current scope and delivery
-order. Codex CLI/Desktop on macOS 2.1.0 is released; stop after repository cleanup
-before assessing UI. Other providers remain deferred.
-Historical handovers and campaign runbooks are evidence, not active prerequisites.
+## References by task
+
+| Work | Read when relevant |
+| --- | --- |
+| Ordinary review execution, API/persistence or legacy removal | Corresponding section of the [review implementation contract](docs/developer/REVIEW-TASK-IMPLEMENTATION.md). |
+| UI composition | Relevant screen in [UI-HANDOFF.md](docs/developer/UI-HANDOFF.md), [DESIGN.md](DESIGN.md) for visual/interaction rules and the repository [shadcn skill](.agents/skills/shadcn/SKILL.md). The screen inventory does not add release requirements. |
+| Profile creation, copying or setup comparison | [Profile copy policy](docs/developer/PROFILE-COPY-POLICY.md); its implementation gaps are not exceptions to preserve. |
+| Checks/build/browser verification | [Developer guide](docs/developer/README.md#checkout-and-checks). |
+| Candidate evidence or packaging | [Candidate record](docs/developer/RELEASE-3.0.0.md) and relevant [release procedure](docs/developer/LOCAL-RELEASE.md) section. |
+
+## Keep context current
+
+The goal owns behavior/acceptance; the roadmap owns status/order; feature specs
+own implementation contracts; release records own source-bound results. Update
+the owning document and link from others instead of repeating the narrative.
+Replace stale checkpoint text rather than appending a turn log. A handover needs
+only recovery information and pointers not already in the roadmap.
+Search before loading whole files or chats. Filter bulky tool results to relevant
+decisions, source ranges or failures; inspect raw evidence only for a specific gap.
+Preserve original data/evidence and others' edits. Live profile/client operations,
+model runs, publication and installed updates need current authorization covering
+their effects; do not re-request steps already covered by an explicit grant.

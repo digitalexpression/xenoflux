@@ -1,5 +1,4 @@
-import { access, mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { createInterface } from 'node:readline/promises';
@@ -11,6 +10,7 @@ import { selectAdvancedCopy, reviewAdvancedConflicts } from './advanced-command.
 import { privateDirectory } from './metadata.js';
 import { probeVersion } from './version-probe.js';
 import { nativePath } from './node-runtime.js';
+import { discoverCodexExecutable } from './launcher.js';
 
 // Preserve JSON values while escaping terminal C1 controls in native metadata.
 const displayJSON = value => JSON.stringify(value, null, 2).replace(/[\x7f-\x9f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
@@ -26,7 +26,8 @@ async function question(prompt, { input, output, signal }) {
   finally { lines.close(); }
 }
 
-async function nativeClient(store, options, signal) {
+/** Resolve the Codex executable and its version for a new native home. */
+export async function nativeClient(store, options, signal) {
   let executable = options['--codex'];
   if (!executable) {
     for (const home of await listHomes(store)) {
@@ -35,11 +36,8 @@ async function nativeClient(store, options, signal) {
     }
   }
   if (!executable) {
-    for (const directory of (process.env.PATH ?? '').split(':').filter(isAbsolute)) {
-      const candidate = join(directory, 'codex');
-      try { await access(candidate, constants.X_OK); executable = candidate; break; }
-      catch { /* try the next explicit PATH directory */ }
-    }
+    try { executable = (await discoverCodexExecutable()).executable; }
+    catch { /* use the existing setup guidance below */ }
   }
   if (!executable || !isAbsolute(executable)) throw new Error('Provide --codex with an absolute Codex executable path');
   executable = await realpath(executable);

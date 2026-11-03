@@ -48,6 +48,44 @@ test('timeout and cancellation terminate the owned group', async t => {
   assert.equal(cancelled.shutdown.groupTerminated, true);
 });
 
+test('parses a large RPC response split across output chunks without losing framing', async t => {
+  const f = await fixture(t), events = [];
+  const script = `const line = JSON.stringify({id:5,result:{text:'x'.repeat(300*1024)}})+'\\n';
+    process.stdout.write(line.slice(0,270*1024), () => setTimeout(() =>
+      process.stdout.write(line.slice(270*1024)+'{"after":true}\\n'), 10));`;
+  const result = await f.run(script, { onEvent: e => events.push(e) });
+  assert.equal(result.status, 'exited');
+  assert.deepEqual(events.map(e => e.parseError || e.value), [
+    { id: 5, result: { text: 'x'.repeat(300 * 1024) } }, { after: true },
+  ]);
+  assert.deepEqual(events.map(e => e.lineNumber), [1, 2]);
+});
+
+test('a large JSON line still obeys the total output cap without parsing its unseen suffix', async t => {
+  const f = await fixture(t), events = [];
+  const result = await f.run(`process.stdout.write(JSON.stringify({text:'x'.repeat(600*1024)})+'\\n{"after":true}\\n')`,
+    { outputLimitBytes: 300 * 1024, onEvent: e => events.push(e) });
+  assert.equal(result.status, 'output-limit');
+  assert.equal(result.output.bytes, 300 * 1024);
+  assert.equal(result.output.truncated, true);
+  assert.equal(result.shutdown.groupTerminated, true);
+  assert.ok(events.every(e => e.parseError));
+});
+
+test('an explicitly uncapped process remains active past its former deadline and still cancels', async t => {
+  const f = await fixture(t);
+  const completed = await f.run('await new Promise(resolve => setTimeout(resolve, 80))', { timeoutMs: null });
+  assert.equal(completed.status, 'exited');
+  assert.ok(completed.elapsedMs >= 60);
+
+  const controller = new AbortController();
+  const running = f.run('setInterval(() => {}, 1000)', { timeoutMs: null, signal: controller.signal });
+  setTimeout(() => controller.abort(), 40);
+  const cancelled = await running;
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.shutdown.groupTerminated, true);
+});
+
 test('caps combined output and stops when an event consumer fails', async t => {
   const f = await fixture(t);
   const capped = await f.run("setInterval(() => process.stdout.write('0123456789'), 1)", { outputLimitBytes: 2048 });

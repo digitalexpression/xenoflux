@@ -101,6 +101,7 @@ test('copy and a fresh undo runtime both accept verified orphan reporters withou
       startedAt: 'fixture start', executable: fixtureCrashReporter })),
     execFile: async path => {
       calls.push(path);
+      if (path === '/usr/sbin/lsof') throw Object.assign(new Error('no handles'), { code: 1, stdout: '', stderr: '' });
       if (path === '/usr/bin/plutil') return { stdout: JSON.stringify({ CFBundleIdentifier: DESKTOP_APP.bundleId,
         CFBundleShortVersionString: fixtureVersion, CFBundleVersion: fixtureBuild, CFBundleExecutable: 'ChatGPT' }) };
       if (path === '/usr/bin/codesign') return { stdout: '' };
@@ -249,6 +250,27 @@ test('copy prepares clients before a strict idle check and does not write when p
   assert.equal(calls[0][1].cliExecutables.length, 1);
   assert.equal(await text(join(f.b.home, 'AGENTS.md')), before);
   await absent(join(f.store.directory, 'native-copies'));
+});
+
+test('copy passes exact affected resource paths to preflight and refuses an unattributed holder', async t => {
+  const f = await fixture(t), uid = process.getuid();
+  await put(f.a.home, 'AGENTS.md', 'Scoped source instructions.\n');
+  const self = { pid: 999, ppid: 1, uid, startedAt: 'Sun Sep 14 09:00:00 2026', executable: '/usr/local/bin/node' };
+  const unknown = { pid: 777, ppid: 1, uid, startedAt: 'Sun Sep 14 11:00:00 2026', executable: '/usr/local/bin/other' };
+  const runtime = createDesktopRuntime({ currentPid: self.pid, userInfo: () => ({ uid }),
+    concurrentLockPath: f.options.concurrentLockPath,
+    processSnapshot: async () => [self, unknown],
+    execFile: async (path, args) => {
+      assert.equal(path, '/usr/sbin/lsof');
+      assert.ok(args.includes(join(f.b.home, 'AGENTS.md')),'destination file is part of the resource guard');
+      return { stdout: `p${unknown.pid}\ncother\nu${uid}\n`, stderr: '' };
+    } });
+
+  const targetBefore = await text(join(f.b.home, 'AGENTS.md'));
+  await assert.rejects(applyCopy(f.store, 'A', 'B', { ...f.options, runtime }), error => {
+    assert.equal(error.code, 'RESOURCE_BUSY'); return true;
+  });
+  assert.equal(await text(join(f.b.home, 'AGENTS.md')), targetBefore);
 });
 
 test('deterministic copy and undo conflicts are refused before client preparation', async t => {

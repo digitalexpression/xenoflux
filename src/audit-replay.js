@@ -12,6 +12,23 @@ const digest = value => createHash('sha256').update(JSON.stringify(value)).diges
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const list = value => Array.isArray(value) ? value : [];
 
+function unavailableReplay(id, reason) {
+  return { schemaVersion: 1, kind: 'session-replay', sessions: [{ id, parentId: null, depth: 0,
+    status: 'unavailable', reason, source: { fingerprint: null }, events: [], limits: [{ kind: 'source-unavailable', message: reason }] }] };
+}
+
+function withCheckpointArtifacts(run, original, current, saved, rootId) {
+  const checkpoint = current.captureCheckpoint;
+  if (checkpoint?.threadId === rootId && checkpoint.profileHome === saved.home
+    && checkpoint.run?.source?.threadId === rootId) {
+    const additions = list(checkpoint.run.artifacts).filter(row => row.kind === 'recorded-file-change'
+      && original.agents.some(agent => agent.id === row.agentId)
+      && original.turns.some(turn => turn.agentId === row.agentId && turn.turnId === row.turnId));
+    run.artifacts = [...list(original.artifacts), ...additions];
+  }
+  return run;
+}
+
 async function retainedContext(store, current, read) {
   const parent = await read(store, current.record.experimentId);
   const saved = current.record.profile;
@@ -30,7 +47,7 @@ async function retainedContext(store, current, read) {
     const { quality, variables, trials, ...trial } = series.record.spec;
     const expected = { ...trial, revision: series.record.baseline.commit,
       profiles: slot.profileOrder.map(name => trial.profiles.find(row => row.name === name)),
-      limits: { ...trial.limits, runMs: Math.min(trial.limits.runMs, slot.budgetMs), experimentMs: slot.budgetMs } };
+      limits: { ...trial.limits, runMs: trial.limits.runMs === null ? null : Math.min(trial.limits.runMs, slot.budgetMs), experimentMs: slot.budgetMs } };
     if (!isDeepStrictEqual(expected, { ...parent.record.spec, task: parent.record.task })) throw Error('recipe-binding');
     spec = series.record.spec; order = slot.profileOrder; recipe = series.record.recipe;
     trialIndex = slot.trialIndex;
@@ -60,7 +77,7 @@ async function retainedContext(store, current, read) {
  * Tests may supply read/source adapters; the production path is filesystem-only.
  */
 export async function projectRetainedAuditRun(store, current, { read = readAuditRecord,
-  readNative = auditRetainedNativeSession } = {}) {
+  readNative = auditRetainedNativeSession, includeReplay = false } = {}) {
   const original = current.report;
   if (current.record.kind !== 'audit-experiment-run' || !original
     || original.source?.kind !== 'native-app-server-v2' || !UUID.test(original.source.threadId ?? '')) return original;
@@ -75,11 +92,29 @@ export async function projectRetainedAuditRun(store, current, { read = readAudit
     || saved.home !== original.profile?.home
     || !original.agents?.some(row => row.id === rootId && row.parentId == null))
     return { ...original, reportProjection: { ...projection, context: 'binding-mismatch' } };
+  // Finalized captures define one immutable evidence boundary. Once recipe and
+  // profile bindings are verified, reopening must not refresh any part of that
+  // report from a native source that may have grown, changed, or disappeared.
+  if (original.sessionReplay && original.replayCapture?.boundary === 'finalized-native-history-snapshot') {
+    const { comparisonEvidence, ...captured } = original;
+    let frozen = { ...captured, reportProjection: { ...projection, native: 'frozen',
+      sourceAttestation: 'finalized-native-history-snapshot' },
+    comparisonConditions: buildAuditComparisonConditions(context) };
+    if (!includeReplay) delete frozen.sessionReplay;
+    frozen = withCheckpointArtifacts(frozen, original, current, saved, rootId);
+    if (!Object.hasOwn(original, 'quality') && context.spec.quality) frozen.quality = evaluateAuditQuality(frozen, context.spec.quality,
+      { checks: context.spec.checks, review: null });
+    return frozen;
+  }
   // A new projection has a new support fingerprint. The frozen original's core
   // remains in its original file; it is never relabeled in place.
   const { comparisonEvidence, ...base } = original;
   let run = { ...base, reportProjection: projection,
     comparisonConditions: buildAuditComparisonConditions(context) };
+  // A completed run's saved replay is the capture boundary. Other retained
+  // evidence may still be enriched from native history, but replay never grows
+  // when the report is reopened after that snapshot.
+  if (includeReplay && original.sessionReplay) run.sessionReplay = structuredClone(original.sessionReplay);
   const configured = saved.nativeConfig ?? {};
   run.nativeControls = { schemaVersion: 1,
     configured: { model: configured.model ?? null, modelReasoningEffort: configured.model_reasoning_effort ?? null,
@@ -87,11 +122,13 @@ export async function projectRetainedAuditRun(store, current, { read = readAudit
     startup: { agentId: rootId, model: original.source.model ?? null,
       reasoningEffort: original.source.reasoningEffort ?? null, source: 'thread/start' }, turns: [] };
   let native;
-  try { native = await readNative(saved, rootId, { actionRepoRoot: original.source.workspace ?? join(current.directory, 'workspace') }); }
+  try { native = await readNative(saved, rootId, { actionRepoRoot: original.source.workspace ?? join(current.directory, 'workspace'), includeReplay,
+    ...(includeReplay && Array.isArray(original.agents) ? { recordedAgents: original.agents } : {}),
+    ...(includeReplay ? { childIndexHome: join(current.directory, 'runtime', 'sqlite') } : {}) }); }
   catch { /* Missing/unsafe retained sources remain explicitly unavailable. */ }
   const sameSource = native?.source?.nativeSessionId === rootId
-    && native.source.clientVersion === original.source.version
     && /^[a-f0-9]{64}$/.test(native.source.fingerprint ?? '')
+    && (original.source.fingerprint == null || original.source.fingerprint === native.source.fingerprint)
     && ['ready', 'partial'].includes(native.status);
   if (sameSource) {
     projection.native = native.status;
@@ -130,17 +167,14 @@ export async function projectRetainedAuditRun(store, current, { read = readAudit
       && !conflicts.has(`${row.agentId}:${row.turnId}`)
       && row.sourceFingerprint === native.source.fingerprint);
     run.actionCoverage = native.actionCoverage ?? 'partial';
-  } else projection.native = native?.status ?? 'unavailable';
+  } else {
+    projection.native = native?.status ?? 'unavailable';
+  }
+  if (includeReplay && !original.sessionReplay)
+    run.sessionReplay = unavailableReplay(rootId, 'This report has no frozen replay capture boundary. Current native history is not substituted for historical replay evidence.');
   // Capture retained file actions before the runner replaced its artifact list
   // with workspace snapshots. These keep their original RPC source references.
-  const checkpoint = current.captureCheckpoint;
-  if (checkpoint?.threadId === rootId && checkpoint.profileHome === saved.home
-    && checkpoint.run?.source?.threadId === rootId) {
-    const additions = list(checkpoint.run.artifacts).filter(row => row.kind === 'recorded-file-change'
-      && original.agents.some(agent => agent.id === row.agentId)
-      && original.turns.some(turn => turn.agentId === row.agentId && turn.turnId === row.turnId));
-    run.artifacts = [...list(original.artifacts), ...additions];
-  }
+  run = withCheckpointArtifacts(run, original, current, saved, rootId);
   if (context.spec.quality) run.quality = evaluateAuditQuality(run, context.spec.quality,
     { checks: context.spec.checks, review: original.quality?.review ?? null });
   return run;

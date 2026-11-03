@@ -10,7 +10,7 @@ import * as zlib from 'node:zlib';
 import { Store, create } from '../src/profiles.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome } from '../src/homes.js';
-import { auditNativeSession, auditRetainedNativeSession } from '../src/audit-session.js';
+import { auditNativeSession, auditRetainedNativeSession, captureAuditChildDiscovery } from '../src/audit-session.js';
 import { resolveAuditProfile } from '../src/audit-discovery.js';
 import { auditExitCode, compareAuditRuns, renderAudit } from '../src/audit-report.js';
 import { compactAuditTrial } from '../src/audit-statistics.js';
@@ -144,6 +144,47 @@ test('ingests a selected archived CLI session with whitelisted timeline, tool ev
   assert.deepEqual(await readFile(rollout), before);
 });
 
+test('captures an opt-in replay from the exact bounded rollout while excluding private reasoning', async t => {
+  const f = await fixture(t), task = id(71), turn = id(72), rollout = join(f.home, 'sessions', 'replay.jsonl');
+  await seedIndex(f.home, [{ id: task, path: rollout, archived: true, source: 'cli' }]);
+  await writeRollout(rollout, [meta(task), context(turn),
+    rec('2026-10-15T10:00:02.000Z', 'response_item', { type: 'message', role: 'user', turn_id: turn,
+      content: [{ type: 'input_text', text: 'Inspect this task.' }] }),
+    rec('2026-10-15T10:00:03.000Z', 'response_item', { type: 'custom_tool_call', name: 'exec_command', call_id: 'replay-call', turn_id: turn, input: 'npm test' }),
+    rec('2026-10-15T10:00:04.000Z', 'response_item', { type: 'custom_tool_call_output', call_id: 'replay-call', turn_id: turn, output: 'passed' }),
+    rec('2026-10-15T10:00:05.000Z', 'response_item', { type: 'message', role: 'assistant', phase: 'analysis', turn_id: turn,
+      content: [{ type: 'output_text', text: 'PRIVATE REASONING MUST NOT APPEAR' }] }),
+    rec('2026-10-15T10:00:06.000Z', 'event_msg', { type: 'item_completed', turn_id: turn, item: {
+      type: 'CommandExecution', id: 'native-command', command: 'npm test', aggregated_output: 'All tests passed',
+      status: 'completed', exit_code: 0 } }),
+    rec('2026-10-15T10:00:07.000Z', 'event_msg', { type: 'item_completed', turn_id: turn, item: {
+      type: 'FileChange', id: 'native-change', changes: { 'src/example.js': { type: 'update', diff: '+change' } },
+      status: 'completed' } }),
+  ]);
+  const before = await readFile(rollout);
+  const withoutReplay = await auditNativeSession(f.store, 'A', task);
+  assert.equal(withoutReplay.sessionReplay, undefined);
+  const report = await auditNativeSession(f.store, 'A', task, { includeReplay: true });
+  assert.equal(report.sessionReplay.schemaVersion, 1);
+  assert.equal(report.sessionReplay.sessions.length, 1);
+  const session = report.sessionReplay.sessions[0];
+  assert.equal(session.source.fingerprint, report.source.fingerprint);
+  assert.equal(session.events[0].sourceLine, 3);
+  assert.equal(session.events[0].body, 'Inspect this task.');
+  const result = session.events.find(event => event.kind === 'tool-result');
+  assert.equal(result.body, 'passed');
+  assert.equal(result.relatedEventId, session.events.find(event => event.kind === 'tool-call').id);
+  const command = session.events.find(event => event.itemId === 'native-command');
+  assert.deepEqual(JSON.parse(command.body), { command: 'npm test', output: 'All tests passed', exitCode: 0 });
+  assert.equal(session.events.find(event => event.itemId === 'native-change').kind, 'file-change');
+  assert.equal(JSON.stringify(report.sessionReplay).includes('PRIVATE REASONING MUST NOT APPEAR'), false);
+  assert.deepEqual(await readFile(rollout), before);
+  const missing = await auditNativeSession(f.store, 'A', id(73), { includeReplay: true });
+  assert.equal(missing.sessionReplay.sessions[0].status, 'not-found');
+  assert.equal(missing.sessionReplay.sessions[0].events.length, 0);
+  assert.ok(missing.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'source-unavailable'));
+});
+
 test('session provenance uses recorded client signals and leaves ambiguous clients unknown', async t => {
   const f = await fixture(t), desktop = id(901), unknown = id(902), conflict = id(903);
   const entries = [
@@ -254,8 +295,17 @@ test('projects typed historical tool lifecycles with native ownership, outcomes,
         source_path: '/private/path/to/hook', source: 'session_flags', display_order: 1, status: 'completed', started_at: 1792051200,
         completed_at: 1792051201, duration_ms: 250, status_message: 'PRIVATE STATUS', entries: [{ kind: 'context', text: 'PRIVATE HOOK OUTPUT' }] } }),
   ]);
-  const report = await auditNativeSession(f.store, 'A', task);
+  const report = await auditNativeSession(f.store, 'A', task, { includeReplay: true });
   assert.equal(report.coverage.tools, 'observed');
+  const replayEvents = report.sessionReplay.sessions[0].events;
+  const mcpStart = replayEvents.find(event => event.callId === 'mcp-ok' && event.kind === 'tool-call');
+  const mcpEnd = replayEvents.find(event => event.callId === 'mcp-ok' && event.kind === 'tool-result');
+  assert.equal(mcpEnd.relatedEventId, mcpStart.id);
+  assert.equal(mcpStart.relatedEventId, mcpEnd.id);
+  assert.ok(replayEvents.some(event => event.callId === 'legacy-call' && event.kind === 'tool-call'));
+  assert.ok(replayEvents.some(event => event.itemId === 'response-item' && event.kind === 'tool-call'));
+  assert.equal(replayEvents.filter(event => event.itemId === 'hook-1').length, 2);
+  assert.ok(replayEvents.some(event => event.itemId === 'hook-1' && event.relatedEventId));
   const byId = new Map(report.toolInvocations.map(row => [row.itemId, row]));
   assert.equal(byId.get('mcp-ok')?.status, 'completed');
   assert.equal(byId.get('mcp-ok')?.serverName, 'docs');
@@ -335,7 +385,13 @@ test('recursively corroborates agent identity and ownership, excludes inherited 
       session_id: rootSession, parent_thread_id: parent, source: { subagent: { thread_spawn: { parent_thread_id: child } } }, forked_from_id: child }),
     context(wrongParentTurn), rec('2026-10-15T10:00:13Z', 'token_usage_record', { thread_id: wrongParentChild, session_id: rootSession,
       turn_id: wrongParentTurn, root_turn_id: childTurn, total_token_usage: { input_tokens: 1 } })]);
-  const report = await auditNativeSession(f.store, 'A', parent);
+  const report = await auditNativeSession(f.store, 'A', parent, { includeReplay: true });
+  const replayById = new Map(report.sessionReplay.sessions.map(session => [session.id, session]));
+  assert.equal(replayById.get(parent).parentId, null);
+  assert.equal(replayById.get(child).parentId, parent);
+  assert.equal(replayById.get(grandchild).parentId, child);
+  assert.equal(replayById.get(missingChild).status, 'unavailable');
+  assert.ok(replayById.get(missingChild).limits.length > 0);
   assert.ok(report.agents.some(x => x.id === child && x.parentId === parent && x.depth === 1));
   assert.ok(report.agents.some(x => x.id === grandchild && x.parentId === child && x.depth === 2));
   assert.equal(report.agents.find(x => x.id === missingChild).status, 'unavailable');
@@ -357,6 +413,15 @@ test('recursively corroborates agent identity and ownership, excludes inherited 
   assert.ok(report.usage.observations.some(x => x.agentId === child && x.disposition === 'invalid'
     && x.malformedFields.total.includes('inputTokens') && x.malformedFields.total.includes('outputTokens')));
   assert.equal(report.usage.totals, null);
+  const retainedRootPath = join(f.home, 'sessions', '2026', '10', '15', `rollout-parent-${parent}.jsonl`);
+  await mkdir(join(f.home, 'sessions', '2026', '10', '15'), { recursive: true });
+  await writeFile(retainedRootPath, await readFile(parentPath), { mode: 0o600 });
+  const retained = await auditRetainedNativeSession({ profileId: 'A', profileName: 'A', home: f.home, userHome: f.home }, parent,
+    { includeReplay: true });
+  const retainedReplay = new Map(retained.sessionReplay.sessions.map(session => [session.id, session]));
+  assert.equal(retainedReplay.get(child).parentId, parent);
+  assert.equal(retainedReplay.get(grandchild).parentId, child);
+  assert.equal(retainedReplay.get(missingChild).status, 'unavailable');
 });
 
 test('uses the root thread as the grouping fallback only when root session_id is omitted', async t => {
@@ -531,7 +596,7 @@ test('bounds malformed, oversized, and unsafe compressed rollout handling', asyn
   await writeCompressedRollout(`${bombPlain}.zst`, [meta(bomb), context(id(128)), rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'diagnostic', value: 'x'.repeat(32 * 1024 * 1024) })]);
   await writeCompressedRollout(join(sessions, `${unsafe}.jsonl.zst`), [meta(unsafe), context(id(129))]);
   const firstFrame = zlib.zstdCompressSync(Buffer.from(JSON.stringify(meta(trailing)) + '\n'));
-  await writeFile(`${trailingPlain}.zst`, Buffer.concat([firstFrame, zlib.zstdCompressSync(Buffer.from(JSON.stringify(context(id(131))) + '\n'))]), { mode: 0o600 });
+  await writeFile(`${trailingPlain}.zst`, Buffer.concat([firstFrame, Buffer.from('undecodable trailing bytes')]), { mode: 0o600 });
   await symlink(join(sessions, 'absent-target.jsonl'), unsafePlain);
   const hardlinkSource = join(f.root, 'hardlink-source');
   await writeFile(hardlinkSource, 'not a rollout', { mode: 0o600 });
@@ -900,4 +965,257 @@ test('legacy MCP tool errors inside Ok stay failed through frozen export and sou
     assert.doesNotMatch(await readFile(output.output, 'utf8'), /PRIVATE_MCP_/);
     assert.doesNotMatch(JSON.stringify(reopened) + renderAudit(reopened, { format: 'markdown' }), /PRIVATE_MCP_/);
   }
+});
+
+test('discovers corroborated descendants beyond unrelated index rows with bounded lineage scans', async t => {
+  const f = await fixture(t), root = id(70000), child = id(70001), grandchild = id(70002), secondChild = id(70003),
+    rootTurn = id(70010), childTurn = id(70011), grandchildTurn = id(70012), secondTurn = id(70013);
+  const rootPath = join(f.home, 'sessions', 'large-root.jsonl'), childPath = join(f.home, 'sessions', 'large-child.jsonl'),
+    grandchildPath = join(f.home, 'sessions', 'large-grandchild.jsonl'), secondPath = join(f.home, 'sessions', 'large-second-child.jsonl');
+  const db = join(f.home, 'state_5.sqlite');
+  await exec('/usr/bin/sqlite3', [db, `CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, created_at INTEGER, updated_at INTEGER, archived INTEGER DEFAULT 0, rollout_path TEXT, source TEXT);
+    WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 10050)
+    INSERT INTO threads (id,cwd,title,created_at,updated_at,archived,rollout_path,source)
+    SELECT printf('00000000-0000-4000-8000-%012d',n),'/repo','unrelated',1,1,0,'/missing/unrelated.jsonl','{}' FROM seq;`]);
+  const esc = value => String(value).replaceAll("'", "''");
+  const rows = [
+    { id: root, path: rootPath, source: 'cli' },
+    { id: child, path: childPath, source: { subagent: { thread_spawn: { parent_thread_id: root } } } },
+    { id: grandchild, path: grandchildPath, source: { subagent: { thread_spawn: { parent_thread_id: child } } } },
+    { id: secondChild, path: secondPath, source: { subagent: { thread_spawn: { parent_thread_id: root } } } },
+    { id: id(70004), path: join(f.home, 'sessions', 'malformed.jsonl'), source: `{malformed-${root}` },
+    { id: id(70005), path: join(f.home, 'sessions', 'oversized-source.jsonl'), source: JSON.stringify({
+      padding: 'x'.repeat(9000), subagent: { thread_spawn: { parent_thread_id: root } },
+    }) },
+  ];
+  const inserts = rows.map(row => {
+    const source = typeof row.source === 'string' ? row.source : JSON.stringify(row.source);
+    return `INSERT INTO threads VALUES ('${esc(row.id)}','/repo','fixture',1,1,0,'${esc(row.path)}','${esc(source)}');`;
+  }).join('\n');
+  await exec('/usr/bin/sqlite3', [db, inserts]);
+  const ownership = (agent, session, parent, turn, rootOwnerTurn = turn) => [
+    rec('2026-10-15T10:00:00Z', 'session_meta', { id: agent, session_id: session, ...(parent ? { parent_thread_id: parent,
+      source: { subagent: { thread_spawn: { parent_thread_id: parent } } }, forked_from_id: parent } : {}) }),
+    context(turn),
+    rec('2026-10-15T10:00:02Z', 'token_usage_record', { thread_id: agent, session_id: session, turn_id: turn,
+      root_turn_id: rootOwnerTurn, total_token_usage: { input_tokens: 1 } }),
+  ];
+  await writeRollout(rootPath, ownership(root, root, null, rootTurn));
+  await writeRollout(childPath, [...ownership(child, root, root, childTurn).slice(0, 1), context(rootTurn), context(childTurn),
+    ...ownership(child, root, root, childTurn).slice(2)]);
+  await writeRollout(grandchildPath, ownership(grandchild, root, child, grandchildTurn, childTurn));
+  await writeRollout(secondPath, ownership(secondChild, root, root, secondTurn));
+
+  const report = await auditNativeSession(f.store, 'A', root, { includeReplay: true });
+  const replay = new Map(report.sessionReplay.sessions.map(session => [session.id, session]));
+  assert.equal(replay.get(child)?.parentId, root);
+  assert.equal(replay.get(grandchild)?.parentId, child);
+  assert.equal(replay.get(secondChild)?.parentId, root);
+  assert.equal(report.turns.length, 4, 'inherited context must not become another child turn');
+  assert.deepEqual(Object.fromEntries(report.turns.map(turn => [turn.agentId, turn.turnId])), {
+    [root]: rootTurn, [child]: childTurn, [grandchild]: grandchildTurn, [secondChild]: secondTurn,
+  });
+  assert.ok(report.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-partial'),
+    'malformed or oversized lineage metadata that mentions the root must be reported as incomplete');
+
+  const capped = await auditNativeSession(f.store, 'A', root, { includeReplay: true, maxChildCandidates: 1 });
+  assert.ok(capped.sessionReplay.sessions.some(session => session.id === child || session.id === secondChild));
+  assert.ok(capped.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-partial'),
+    JSON.stringify(capped.sessionReplay.sessions[0].limits));
+
+  const retainedRootPath = join(f.home, 'sessions', '2026', '10', '15', `rollout-large-${root}.jsonl`);
+  await mkdir(dirname(retainedRootPath), { recursive: true });
+  await writeFile(retainedRootPath, await readFile(rootPath), { mode: 0o600 });
+  const retained = await auditRetainedNativeSession({ profileId: 'A', profileName: 'A', home: f.home, userHome: f.home }, root, { includeReplay: true });
+  assert.ok(retained.sessionReplay.sessions.some(session => session.id === child && session.parentId === root));
+  assert.ok(retained.sessionReplay.sessions.some(session => session.id === grandchild && session.parentId === child));
+});
+
+test('caps large relevant child sets and reports children beyond the depth bound', async t => {
+  const f = await fixture(t), root = id(83000), rootTurn = id(83100), rootPath = join(f.home, 'sessions', 'cap-root.jsonl');
+  const db = join(f.home, 'state_5.sqlite');
+  await exec('/usr/bin/sqlite3', [db, 'CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, title TEXT, created_at INTEGER, updated_at INTEGER, archived INTEGER DEFAULT 0, rollout_path TEXT, source TEXT);']);
+  const esc = value => String(value).replaceAll("'", "''");
+  const rows = Array.from({ length: 101 }, (_, index) => {
+    const child = id(83001 + index), src = JSON.stringify({ subagent: { thread_spawn: { parent_thread_id: root } } });
+    return `INSERT INTO threads VALUES ('${child}','/repo','child',1,1,0,'${esc(join(f.home, 'sessions', `${child}.jsonl`))}','${esc(src)}');`;
+  }).join('\n');
+  const rootSource = 'cli';
+  await exec('/usr/bin/sqlite3', [db, `INSERT INTO threads VALUES ('${root}','/repo','root',1,1,0,'${esc(rootPath)}','${esc(rootSource)}');\n${rows}`]);
+  await writeRollout(rootPath, [meta(root), context(rootTurn)]);
+  const capturedLimit = await captureAuditChildDiscovery(f.home, f.home, root);
+  assert.equal(capturedLimit.complete, false);
+  assert.match(capturedLimit.reason, /limit reached/);
+  const direct = await auditNativeSession(f.store, 'A', root, { includeReplay: true });
+  assert.equal(direct.agents.length, 101);
+  assert.equal(direct.sessionReplay.sessions.length, 101);
+  assert.ok(direct.sessionReplay.sessions[0].limits.some(limit => ['child-count-limit', 'child-discovery-partial'].includes(limit.kind)));
+  const retainedRootPath = join(f.home, 'sessions', '2026', '10', '15', `rollout-cap-${root}.jsonl`);
+  await mkdir(dirname(retainedRootPath), { recursive: true });
+  await writeFile(retainedRootPath, await readFile(rootPath), { mode: 0o600 });
+  const retained = await auditRetainedNativeSession({ profileId: 'A', profileName: 'A', home: f.home, userHome: f.home }, root, { includeReplay: true });
+  assert.equal(retained.sessionReplay.sessions.length, 101);
+  assert.ok(retained.sessionReplay.sessions[0].limits.some(limit => ['child-count-limit', 'child-discovery-partial'].includes(limit.kind)));
+
+  const g = await fixture(t), chainRoot = id(84000), chainTurn = id(84100), chainPaths = [];
+  const chain = Array.from({ length: 5 }, (_, index) => ({ id: id(84001 + index), turn: id(84101 + index),
+    parent: index === 0 ? chainRoot : id(84000 + index) }));
+  const rootChainPath = join(g.home, 'sessions', 'depth-root.jsonl'); chainPaths.push(rootChainPath);
+  const indexed = [{ id: chainRoot, path: rootChainPath }];
+  for (const row of chain) {
+    const path = join(g.home, 'sessions', `${row.id}.jsonl`); chainPaths.push(path);
+    indexed.push({ id: row.id, path, source: { subagent: { thread_spawn: { parent_thread_id: row.parent } } } });
+  }
+  await seedIndex(g.home, indexed);
+  await writeRollout(rootChainPath, [meta(chainRoot), context(chainTurn)]);
+  let parentTurn = chainTurn;
+  for (const row of chain.slice(0, 4)) {
+    const header = rec('2026-10-15T10:00:00Z', 'session_meta', { id: row.id, session_id: chainRoot,
+      parent_thread_id: row.parent, source: { subagent: { thread_spawn: { parent_thread_id: row.parent } } }, forked_from_id: row.parent });
+    await writeRollout(join(g.home, 'sessions', `${row.id}.jsonl`), [header, context(row.turn),
+      rec('2026-10-15T10:00:02Z', 'token_usage_record', { thread_id: row.id, session_id: chainRoot, turn_id: row.turn,
+        root_turn_id: parentTurn, total_token_usage: { input_tokens: 1 } })]);
+    parentTurn = row.turn;
+  }
+  const deep = await auditNativeSession(g.store, 'A', chainRoot, { includeReplay: true });
+  const depthPlaceholder = deep.sessionReplay.sessions.find(session => session.id === chain[4].id);
+  assert.equal(depthPlaceholder?.status, 'unavailable');
+  assert.ok(deep.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-partial' || limit.kind === 'child-depth-limit'));
+});
+
+test('stops index scan work explicitly and terminates cyclic selected-child lineage', async t => {
+  const f = await fixture(t), root = id(85000), turn = id(85100), path = join(f.home, 'sessions', 'scan-root.jsonl');
+  await seedIndex(f.home, [{ id: root, path, source: 'cli' }]);
+  await writeRollout(path, [meta(root), context(turn)]);
+  await exec('/usr/bin/sqlite3', [join(f.home, 'state_5.sqlite'), `WITH RECURSIVE seq(n) AS
+    (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 250001)
+    INSERT INTO threads (id,source) SELECT printf('10000000-0000-4000-8000-%012d',n),'{}' FROM seq;`]);
+  const bounded = await auditNativeSession(f.store, 'A', root, { includeReplay: true });
+  assert.equal(bounded.status, 'partial');
+  assert.deepEqual(bounded.turns.map(row => row.turnId), [turn]);
+  assert.ok(bounded.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-partial'
+    && /scan or time limit/.test(limit.message)));
+
+  const g = await fixture(t), first = id(86000), second = id(86001), group = id(86002),
+    firstTurn = id(86100), secondTurn = id(86101);
+  const firstPath = join(g.home, 'sessions', 'cycle-first.jsonl'), secondPath = join(g.home, 'sessions', 'cycle-second.jsonl');
+  await seedIndex(g.home, [
+    { id: first, path: firstPath, source: { subagent: { thread_spawn: { parent_thread_id: second } } } },
+    { id: second, path: secondPath, source: { subagent: { thread_spawn: { parent_thread_id: first } } } },
+  ]);
+  const cyclicManifest = await captureAuditChildDiscovery(g.home, g.home, first);
+  assert.equal(cyclicManifest.complete, false);
+  assert.match(cyclicManifest.reason, /cycle/);
+  for (const [actor, parent, actorTurn, actorPath] of [
+    [first, second, firstTurn, firstPath], [second, first, secondTurn, secondPath],
+  ]) await writeRollout(actorPath, [
+    rec('2026-10-15T10:00:00Z', 'session_meta', { id: actor, session_id: group, parent_thread_id: parent,
+      source: { subagent: { thread_spawn: { parent_thread_id: parent } } }, forked_from_id: parent }),
+    context(actorTurn), rec('2026-10-15T10:00:02Z', 'token_usage_record', { thread_id: actor,
+      session_id: group, turn_id: actorTurn, root_turn_id: firstTurn, total_token_usage: { input_tokens: 1 } }),
+  ]);
+  const cyclic = await auditNativeSession(g.store, 'A', first, { includeReplay: true });
+  assert.equal(cyclic.status, 'partial');
+  assert.deepEqual(cyclic.agents.map(agent => agent.id), [first]);
+  assert.deepEqual(cyclic.turns.map(row => row.turnId), [firstTurn]);
+  assert.ok(cyclic.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-partial'
+    && /cycle/.test(limit.message)));
+});
+
+test('retained run lineage uses its private index without accepting UUID aliases or foreign rollouts', async t => {
+  const f = await fixture(t), root = id(91000), child = id(91001), alias = id(91002), foreign = id(91003), turn = id(91100);
+  const indexHome = join(dirname(f.home), 'run', 'runtime', 'sqlite'); await mkdir(indexHome, { recursive: true });
+  const rootPath = join(f.home, 'sessions', '2026', '10', '15', `rollout-root-${root}.jsonl`);
+  const childPath = join(dirname(rootPath), `rollout-child-${child}.jsonl`), aliasPath = join(f.home, 'sessions', 'alias.jsonl');
+  const foreignPath = join(f.root, 'foreign.jsonl');
+  const source = { subagent: { thread_spawn: { parent_thread_id: root } } };
+  await seedIndex(f.home, [{ id: root, path: rootPath }]);
+  await seedIndex(indexHome, [{ id: root, path: rootPath }, { id: child, path: childPath, source },
+    { id: alias, path: aliasPath, source }, { id: foreign, path: foreignPath, source }]);
+  await exec('/usr/bin/sqlite3', [join(indexHome, 'state_5.sqlite'), `UPDATE threads SET id=id||char(0)||'suffix' WHERE id='${alias}';`]);
+  await writeRollout(rootPath, [meta(root), context(turn)]);
+  for (const [actor, path, actorTurn] of [[child, childPath, id(91101)], [alias, aliasPath, id(91102)], [foreign, foreignPath, id(91103)]])
+    await writeRollout(path, [rec('2026-10-15T10:00:00Z', 'session_meta', { id: actor, session_id: root,
+      parent_thread_id: root, source, forked_from_id: root }), context(actorTurn),
+    rec('2026-10-15T10:00:02Z', 'token_usage_record', { thread_id: actor, session_id: root, turn_id: actorTurn,
+      root_turn_id: turn, total_token_usage: { input_tokens: 1 } })]);
+  const profile = { profileId: 'A', profileName: 'A', home: f.home, userHome: f.home };
+  const before = await auditRetainedNativeSession(profile, root, { includeReplay: true });
+  assert.equal(before.sessionReplay.sessions.length, 1);
+  const report = await auditRetainedNativeSession(profile, root, { includeReplay: true, childIndexHome: indexHome });
+  assert.equal(report.sessionReplay.sessions.find(s => s.id === child)?.status, 'ready');
+  assert.equal(report.sessionReplay.sessions.some(s => s.id === alias), false);
+  assert.equal(report.sessionReplay.sessions.find(s => s.id === foreign)?.status, 'unavailable');
+  const linkedIndex = join(f.root, 'index-link'); await symlink(indexHome, linkedIndex);
+  const unsafe = await auditRetainedNativeSession(profile, root, { includeReplay: true, childIndexHome: linkedIndex });
+  assert.equal(unsafe.sessionReplay.sessions.length, 1);
+  assert.ok(unsafe.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-unavailable'));
+  await rm(indexHome, { recursive: true });
+  const missingIndex = await captureAuditChildDiscovery(f.home, indexHome, root);
+  assert.equal(missingIndex.complete, false);
+  assert.match(missingIndex.reason, /unavailable/);
+  const recovered = await auditRetainedNativeSession(profile, root, { includeReplay: true, childIndexHome: indexHome,
+    recordedAgents: [{ id: root, parentId: null }, { id: child, parentId: root }, { id: alias, parentId: root }] });
+  assert.equal(recovered.sessionReplay.sessions.find(s => s.id === child)?.status, 'ready');
+  assert.equal(recovered.sessionReplay.sessions.find(s => s.id === alias)?.status, 'unavailable');
+  assert.equal(recovered.status, 'partial');
+  assert.ok(recovered.sessionReplay.sessions[0].limits.some(limit => /retained native actor observations/.test(limit.message)));
+});
+
+test('captured child-discovery manifest survives runtime index removal and proves verified actor coverage', async t => {
+  const f = await fixture(t), root = id(93000), child = id(93001), rootTurn = id(93002), childTurn = id(93003);
+  const indexHome = join(dirname(f.home), 'run', 'runtime', 'sqlite'); await mkdir(indexHome, { recursive: true });
+  const rootPath = join(f.home, 'sessions', '2026', '10', '15', `rollout-root-${root}.jsonl`);
+  const childPath = join(dirname(rootPath), `rollout-child-${child}.jsonl`);
+  const source = { subagent: { thread_spawn: { parent_thread_id: root } } };
+  await seedIndex(f.home, [{ id: root, path: rootPath }]);
+  await seedIndex(indexHome, [{ id: root, path: rootPath },
+    { id: id(93004), path: join(f.home, 'sessions', 'unrelated-other-one.jsonl'), source: { subagent: { other: 'worker' } } },
+    { id: id(93005), path: join(f.home, 'sessions', 'unrelated-other-two.jsonl'), source: { subagent: { other: 'background' } } },
+    { id: child, path: childPath, source }]);
+  await writeRollout(rootPath, [meta(root), context(rootTurn)]);
+  await writeRollout(childPath, [rec('2026-10-15T10:00:00Z', 'session_meta', { id: child, session_id: root,
+    parent_thread_id: root, source, forked_from_id: root }), context(childTurn),
+  rec('2026-10-15T10:00:02Z', 'token_usage_record', { thread_id: child, session_id: root, turn_id: childTurn,
+    root_turn_id: rootTurn, total_token_usage: { input_tokens: 1 } })]);
+  const discovery = await captureAuditChildDiscovery(f.home, indexHome, root);
+  assert.equal(discovery.complete, true, JSON.stringify(discovery));
+  assert.deepEqual(discovery.edges, [{ id: child, parentId: root }]);
+  await rm(indexHome, { recursive: true });
+  const profile = { profileId: 'A', profileName: 'A', home: f.home, userHome: f.home };
+  const report = await auditRetainedNativeSession(profile, root, { includeReplay: true, recordedDiscovery: discovery });
+  assert.equal(report.coverage.agents, 'complete', JSON.stringify({ coverage: report.coverage, status: report.status,
+    agents: report.agents, limits: report.sessionReplay.sessions[0].limits }));
+  assert.equal(report.sessionReplay.sessions.find(session => session.id === child)?.status, 'ready');
+  const tampered = structuredClone(discovery); tampered.edges = [];
+  const partial = await auditRetainedNativeSession(profile, root, { includeReplay: true, recordedDiscovery: tampered });
+  assert.equal(partial.coverage.agents, 'partial');
+  assert.ok(partial.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-partial'));
+});
+
+test('root-only replay stays partial when the child index cannot be read', async t => {
+  const f = await fixture(t), root = id(94000), turn = id(94001), path = join(f.home, 'sessions', '2026', '10', '15', `rollout-root-${root}.jsonl`);
+  await seedIndex(f.home, [{ id: root, path, source: 'cli' }]);
+  await writeRollout(path, [meta(root), context(turn)]);
+  const target = join(f.root, 'index-target'); await mkdir(target, { recursive: true });
+  const linked = join(f.root, 'index-link'); await symlink(target, linked);
+  const report = await auditRetainedNativeSession({ profileId: 'A', profileName: 'A', home: f.home, userHome: f.home }, root,
+    { includeReplay: true, childIndexHome: linked });
+  assert.equal(report.status, 'partial');
+  assert.equal(report.coverage.agents, 'partial');
+  assert.ok(report.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-unavailable'));
+});
+
+test('unrecognized native index source shapes prevent a complete child-discovery claim', async t => {
+  const f = await fixture(t), root = id(95000), candidate = id(95001), turn = id(95002);
+  const indexHome = join(dirname(f.home), 'unrecognized-index', 'sqlite'); await mkdir(indexHome, { recursive: true });
+  const rootPath = join(f.home, 'sessions', 'unrecognized-root.jsonl');
+  await seedIndex(f.home, [{ id: root, path: rootPath, source: 'cli' }]);
+  await seedIndex(indexHome, [{ id: root, path: rootPath, source: 'cli' },
+    { id: candidate, path: join(f.home, 'sessions', 'future-child.jsonl'), source: { child_session: { parent_id: root } } }]);
+  await writeRollout(rootPath, [meta(root), context(turn)]);
+  const discovery = await captureAuditChildDiscovery(f.home, indexHome, root);
+  assert.equal(discovery.complete, false);
+  assert.equal(discovery.edges.length, 0);
+  assert.match(discovery.reason, /lineage metadata/);
 });

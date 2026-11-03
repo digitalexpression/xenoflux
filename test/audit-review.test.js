@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyAuditReviewSubmission, buildAuditReviewPacket, projectAuditReviewState } from '../src/audit-review.js';
+import { applyAuditReviewSubmission, auditReplayEvidenceRef, buildAuditReviewPacket, projectAuditReviewState } from '../src/audit-review.js';
 import { summarizeAuditSeries } from '../src/audit-statistics.js';
 
 const run = (id, extra = {}) => ({ kind: 'audit-run', id, source: { kind: 'codex-cli', threadId: `thread-${id}` },
@@ -70,6 +70,27 @@ test('same check names are run-qualified and run-scoped reviews cannot cite the 
     recipeFingerprint: 'recipe-left', checkedAt: '2026-10-22T11:00:00.000Z', method: 'manual-command',
     status: 'passed', exitCode: 0, evidenceRefs: ['check:right:test'], attribution: { type: 'human', name: 'Human Reviewer' } };
   assert.throws(() => applyAuditReviewSubmission(source, null, submission(packet, [], [check])), /cannot cite another run/);
+});
+
+test('review packets expose stable replay event citations and enforce side ownership', () => {
+  const event = (sessionId, id) => ({ id, sessionId, kind: 'message' });
+  const source = subject();
+  source.left.sessionReplay = { sessions: [{ id: 'left-session', events: [event('left-session', 'left-event')] }] };
+  source.right.sessionReplay = { sessions: [{ id: 'right-session', events: [event('right-session', 'right-event')] }] };
+  const packet = buildAuditReviewPacket(source);
+  const left = auditReplayEvidenceRef('left', 'left-session', 'left-event');
+  const right = auditReplayEvidenceRef('right', 'right-session', 'right-event');
+  assert(packet.evidenceRefs.includes(left));
+  assert(packet.evidenceRefs.includes(right));
+  const row = human(packet, 'event-review', { evidenceRefs: [left, right] });
+  const state = applyAuditReviewSubmission(source, null, submission(packet, [row]));
+  assert.deepEqual(state.entries[0].evidenceRefs, [left, right]);
+  assert.throws(() => applyAuditReviewSubmission(source, null, submission(packet, [human(packet, 'wrong-side', {
+    scope: 'run:right', evidenceRefs: [left],
+  })])), /cannot cite another run/);
+  assert.throws(() => applyAuditReviewSubmission(source, null, submission(packet, [human(packet, 'missing-event', {
+    evidenceRefs: [auditReplayEvidenceRef('left', 'left-session', 'missing-event')],
+  })])), /unknown evidence reference/);
 });
 
 test('a revision supersedes the current review while preserving its original', () => {

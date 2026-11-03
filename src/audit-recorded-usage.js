@@ -1,10 +1,8 @@
 import { createHash } from 'node:crypto';
 
-const VERSION = '0.163.0-alpha.10.2';
-const SOURCE_REVISION = 'd9151c94a70013f176ff370fa93da02734662e41';
-const CONTRACT = Object.freeze({ contract: 'codex-rollout-own-response-usage-v1', version: VERSION,
-  sourceRevision: SOURCE_REVISION, historyMode: 'recorded-response-sequence',
-  counterScope: 'thread-owned-responses' });
+const SOURCE_REVISIONS = Object.freeze({ '0.163.0-alpha.10.2': 'd9151c94a70013f176ff370fa93da02734662e41' });
+const CONTRACT = Object.freeze({ contract: 'codex-rollout-own-response-usage-v1',
+  historyMode: 'recorded-response-sequence', counterScope: 'thread-owned-responses' });
 const FIELDS = Object.freeze(['inputTokens', 'outputTokens', 'cachedInputTokens',
   'reasoningOutputTokens', 'cacheWriteInputTokens', 'totalTokens']);
 const NATIVE_FIELDS = Object.freeze({ inputTokens: 'input_tokens', outputTokens: 'output_tokens',
@@ -28,7 +26,8 @@ const validVersion = value => typeof value === 'string' && value.length <= 128
   && /^[A-Za-z0-9.+_-]+$/.test(value);
 
 export function recordedUsageAccounting(version) {
-  return version === VERSION ? { ...CONTRACT } : null;
+  if (!validVersion(version)) return null;
+  return { ...CONTRACT, version, ...(SOURCE_REVISIONS[version] ? { sourceRevision: SOURCE_REVISIONS[version] } : {}) };
 }
 
 const blank = () => Object.fromEntries(FIELDS.map(field => [field, null]));
@@ -80,7 +79,7 @@ function difference(later, earlier) {
 }
 
 function unavailable(reason, input = {}) {
-  const version = recordedUsageAccounting(input.version) ? VERSION : null;
+  const version = recordedUsageAccounting(input.version) ? input.version : null;
   const contract = recordedUsageAccounting(version);
   return { status: 'unavailable', reason, contract,
     agentId: validUuid(input.agentId) ? input.agentId : null,
@@ -221,12 +220,13 @@ export function projectRecordedThreadUsage(value) {
     if (!identityOkay || !UNAVAILABLE_REASONS.has(value.reason)
       || !(value.sourceBinding === null || sourceBinding(value.sourceBinding, value.agentId)
         && JSON.stringify(value.sourceBinding) === JSON.stringify(sourceBinding(value.sourceBinding, value.agentId)))
-      || (value.contract !== null && (!contract || Object.keys(CONTRACT).some(key => value.contract?.[key] !== CONTRACT[key]))))
+      || (value.contract !== null && (!contract || Object.entries(contract).some(([key, expected]) => value.contract?.[key] !== expected))))
       return unavailable('projection-invalid', projectedThreadInput(value));
     return unavailable(value.reason, projectedThreadInput(value));
   }
-  if (value.status !== 'complete' || value.version !== VERSION || value.sourceComplete !== true
-    || !value.contract || Object.keys(CONTRACT).some(key => value.contract[key] !== CONTRACT[key])
+  const contract = recordedUsageAccounting(value.version);
+  if (value.status !== 'complete' || !contract || value.sourceComplete !== true
+    || !value.contract || Object.entries(contract).some(([key, expected]) => value.contract[key] !== expected)
     || !(value.sourceBinding === null || sourceBinding(value.sourceBinding, value.agentId)
       && JSON.stringify(value.sourceBinding) === JSON.stringify(sourceBinding(value.sourceBinding, value.agentId))))
     return unavailable('projection-invalid', projectedThreadInput(value));
@@ -244,7 +244,7 @@ export function projectRecordedThreadUsage(value) {
 
 function sourceBinding(source, rootAgentId) {
   if (!validUuid(rootAgentId) || !source || source.kind !== 'native-rollout' || source.nativeSessionId !== rootAgentId
-    || source.clientVersion !== VERSION || source.fingerprintScope !== 'source-snapshot'
+    || !validVersion(source.clientVersion) || source.fingerprintScope !== 'source-snapshot'
     || typeof source.fingerprint !== 'string' || !FINGERPRINT.test(source.fingerprint)
     || !Number.isSafeInteger(source.bytes) || source.bytes <= 0
     || !Number.isSafeInteger(source.fileBytes) || source.bytes !== source.fileBytes) return null;
@@ -253,8 +253,10 @@ function sourceBinding(source, rootAgentId) {
     fingerprint: source.fingerprint, bytes: source.bytes, fileBytes: source.fileBytes };
 }
 
-function wrapperBase(rootAgentId, threads, binding = null) {
-  return { schemaVersion: 1, scope: 'recorded-selected-thread-responses', contract: { ...CONTRACT },
+function wrapperBase(rootAgentId, threads, binding = null, version = null) {
+  const contract = recordedUsageAccounting(threads[0]?.version ?? version ?? binding?.clientVersion)
+    ?? { ...CONTRACT };
+  return { schemaVersion: 1, scope: 'recorded-selected-thread-responses', contract,
     rootAgentId: validUuid(rootAgentId) ? rootAgentId : null, sourceBinding: binding,
     status: 'unavailable', reason: 'selected-thread-incomplete', values: blank(), fields: unavailableFields(), threads };
 }
@@ -309,7 +311,7 @@ function aggregateThreads(rootAgentId, threads, binding = null) {
 export function deriveRecordedUsage({ rootAgentId, threads, source } = {}) {
   const binding = sourceBinding(source, rootAgentId);
   if (!Array.isArray(threads) || threads.length === 0 || threads.length > MAX_SELECTED_THREADS)
-    return wrapperBase(rootAgentId, [], binding);
+    return wrapperBase(rootAgentId, [], binding, source?.clientVersion);
   let recordCount = 0;
   for (const thread of threads) {
     recordCount += Array.isArray(thread?.records) ? thread.records.length : 0;
@@ -325,11 +327,12 @@ export function deriveRecordedUsage({ rootAgentId, threads, source } = {}) {
 
 /** Revalidate a canonical selected-thread wrapper and its native source binding. */
 export function projectRecordedUsage(value) {
-  const invalid = wrapperBase(value?.rootAgentId, []);
+  const invalid = wrapperBase(value?.rootAgentId, [], value?.sourceBinding, value?.contract?.version);
   invalid.reason = 'projection-invalid';
   if (!value || typeof value !== 'object' || value.schemaVersion !== 1
     || value.scope !== 'recorded-selected-thread-responses' || !value.contract
-    || Object.keys(CONTRACT).some(key => value.contract[key] !== CONTRACT[key])
+    || !recordedUsageAccounting(value.contract.version)
+    || Object.entries(recordedUsageAccounting(value.contract.version)).some(([key, expected]) => value.contract[key] !== expected)
     || !['complete', 'partial', 'unavailable'].includes(value.status)
     || !(value.reason === null || UNAVAILABLE_REASONS.has(value.reason))
     || !(value.sourceBinding === null || sourceBinding(value.sourceBinding, value.rootAgentId)

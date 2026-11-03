@@ -158,6 +158,25 @@ async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint)
   if(redactText(f.content,expected)!==f.content) throw new Error('Credential-like content in selected settings; copy refused: '+t.path);
   return { kind:'file', file:{ path:t.path, after:f.data, afterMode:f.mode, sha256:sha(f.data) } };
 }
+function fingerprintPayload(payload) {
+  const parts = payload.kind === 'tree' ? [
+    ...payload.files.map(f => ['file', f.path, f.afterMode, sha(f.after)]),
+    ...payload.directories.map(d => ['directory', d.path, d.mode]),
+  ].sort((a,b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
+    : payload.kind === 'file' ? [['file', payload.file.path, payload.file.afterMode, sha(payload.file.after)]]
+      : [['config.toml:' + payload.key, sha(Buffer.from(JSON.stringify(payload.value)))]];
+  return sha(Buffer.from(JSON.stringify(parts)));
+}
+export async function fingerprintAdvancedSelection(store, source, selection, { defaultUserHome = homedir(), skipUnsafe = false } = {}) {
+  const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome);
+  const endpoint = await resolveNativeSettingsHome(store, source, { defaultUserHome });
+  const result = Object.create(null);
+  for (const item of items) {
+    try { result[item.id] = fingerprintPayload(await sourcePayload(item, inventory.profile.home, defaultUserHome, endpoint)); }
+    catch (error) { if (!skipUnsafe) throw error; }
+  }
+  return result;
+}
 function getKey(object,key) { return key.split('.').reduce((v,k) => v?.[k],object); }
 function setKey(object,key,value) { const parts=key.split('.'); let node=object; for(const part of parts.slice(0,-1)) { node[part] ??=Object.create(null); node=node[part]; } node[parts.at(-1)]=value; }
 function preview(data,path) {
@@ -173,6 +192,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
   const targetEndpoint = await resolveNativeSettingsHome(store, target, { defaultUserHome });
   const destinationInventory=await inspectProfile(store,target,{defaultUserHome,includeProjects:false,copyOnly:true});
   const payloads = [];
+  const sourceFingerprints = Object.create(null);
   const configItems = items.filter(x => x.transfer.kind === 'config');
   if (configItems.length) {
     if(new Set(configItems.map(x=>x.transfer.key)).size!==configItems.length) throw new Error('Selected config keys collide at the destination');
@@ -183,7 +203,11 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     if((destinationConfig.model_provider??'openai')!=='openai'||Object.hasOwn(destinationConfig.model_providers??{},'openai'))
       throw new Error('Config copy does not support custom model providers in the destination');
     const sourceValues = new Map();
-    for(const item of configItems) sourceValues.set(item.id,(await sourcePayload(item,inventory.profile.home,defaultUserHome,sourceEndpoint)).value);
+    for(const item of configItems) {
+      const value = await sourcePayload(item,inventory.profile.home,defaultUserHome,sourceEndpoint);
+      sourceFingerprints[item.id] = fingerprintPayload(value);
+      sourceValues.set(item.id, value.value);
+    }
     const beforeObj = parse(current.content), afterObj = parse(current.content);
     for(const item of configItems) {
       const parts=item.transfer.key.split('.'); let node=beforeObj;
@@ -213,6 +237,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
   const packageRoots=new Set();
   for (const item of items.filter(x => x.transfer.kind !== 'config')) {
     const value = await sourcePayload(item,inventory.profile.home,defaultUserHome,sourceEndpoint);
+    sourceFingerprints[item.id] = fingerprintPayload(value);
     const files = value.kind === 'tree' ? value.files : [value.file];
     if(value.kind==='tree') {
       if(packageRoots.has(item.transfer.path)) throw new Error('Two selected skills target the same destination package');
@@ -288,7 +313,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
   }).map(item=>({id:item.id,label:item.label,category:item.category,origin:item.origin,scope:item.scope,
     destinationPath:item.transfer?.sourcePath??item.path,status:'kept',inventoryStatus:item.status,
     ...(item.reason?{reason:item.reason}:{})}));
-  const plan={source:sourceEndpoint,target:targetEndpoint,selection:items.map(x=>x.id),files:payloads,packages,createdDirectories:[...new Set(createdDirectories)]};
+  const plan={source:sourceEndpoint,target:targetEndpoint,selection:items.map(x=>x.id),sourceFingerprints,files:payloads,packages,createdDirectories:[...new Set(createdDirectories)]};
   const hash=createHash('sha256').update(JSON.stringify({source:plan.source,target:plan.target,selection:plan.selection,packages,createdDirectories:plan.createdDirectories,files:payloads.map(f=>({path:f.path,before:f.before&&sha(f.before),beforeMode:f.beforeMode,after:f.after&&sha(f.after),afterMode:f.afterMode}))})).digest('hex');
   return {plan,report:{status:'preview',hash,source:inventory.profile,target:{name:targetEndpoint.name,home:targetEndpoint.home},items:reports,kept,destinationLimitations:destinationInventory.limitations,changes:[
     ...payloads.filter(f=>f.before===null||f.after===null||!f.before.equals(f.after)||f.beforeMode!==f.afterMode).map(f=>({path:f.path,action:f.after===null?'remove':f.before===null?'add':'replace',beforeSha256:f.before&&sha(f.before),afterSha256:f.after&&sha(f.after),beforeMode:f.beforeMode,afterMode:f.afterMode})),

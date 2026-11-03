@@ -134,9 +134,31 @@ test('directory-only package change is applied and restored without treating ide
   const selected=await item(f.store,'Default','skill','empty-dir-change',f.defaultUserHome), options={...f.options,selection:[selected.id]};
   const preview=await planCopy(f.store,'Default','B',options);
   assert.ok(preview.changes.some(change=>change.path==='skills/empty-dir-change/empty'&&change.action==='directory-mode'));
+  let applyChecks=0;
+  await assert.rejects(applyCopy(f.store,'Default','B',{...options,expectedHash:preview.hash,
+    runtime:{assertIdle:async()=>{if(++applyChecks===2)throw new Error('before package directory apply');}}}),/prior settings were restored/);
+  assert.equal((await stat(join(dst,'empty'))).mode&0o777,0o750,'a failed pre-batch check leaves the directory untouched');
   const result=await applyCopy(f.store,'Default','B',{...options,expectedHash:preview.hash}); assert.equal(result.status,'applied');
   assert.equal((await stat(join(dst,'empty'))).mode&0o777,0o700);
-  await undoCopy(f.store,result.id,f.options); assert.equal((await stat(join(dst,'empty'))).mode&0o777,0o750);
+  let undoChecks=0;
+  await assert.rejects(undoCopy(f.store,result.id,{...f.options,runtime:{assertIdle:async()=>{if(++undoChecks===2)throw new Error('before package directory undo');}}}),/before package directory undo/);
+  assert.equal((await stat(join(dst,'empty'))).mode&0o777,0o700,'a failed undo pre-batch check leaves the directory untouched');
+  await undoCopy(f.store,'pending',f.options); assert.equal((await stat(join(dst,'empty'))).mode&0o777,0o750);
+});
+
+test('directory cleanup is rechecked after package directories are restored',async t=>{
+  const f=await fixture(t),src=join(f.source,'skills','cleanup-check'); await mkdir(src,{recursive:true,mode:0o700});
+  await writeFile(join(src,'SKILL.md'),'Cleanup guard.\n',{mode:0o600});
+  const selected=await item(f.store,'Default','skill','cleanup-check',f.defaultUserHome);
+  const result=await applyCopy(f.store,'Default','B',{...f.options,selection:[selected.id]});
+  let checks=0;
+  await assert.rejects(undoCopy(f.store,result.id,{...f.options,runtime:{assertIdle:async()=>{
+    if(++checks===4)throw new Error('before created directory cleanup');
+  }}}),/before created directory cleanup/);
+  await assert.rejects(stat(join(f.b.home,'skills','cleanup-check')),{code:'ENOENT'});
+  assert.ok((await stat(join(f.b.home,'skills'))).isDirectory(),'the top-level created directory remains until the cleanup check passes');
+  await undoCopy(f.store,'pending',f.options);
+  await assert.rejects(stat(join(f.b.home,'skills')),{code:'ENOENT'});
 });
 
 test('file to directory and directory to file skill transitions are refused during preview',async t=>{

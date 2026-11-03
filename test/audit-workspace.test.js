@@ -179,6 +179,25 @@ test('snapshot captures edits, deletion, executable mode, binary data and untrac
   assert.equal(snap.fingerprint, (await snapshotAuditWorkspace({ directory: f.workspace, outputDirectory: f.runDirectory, label: 'check', owner: f.owner })).fingerprint);
 });
 
+test('retains only a bounded redacted patch from the trusted in-memory snapshot when explicitly requested', async t => {
+  const f = await fixture(t), created = await createAuditWorkspace({ repository: f.repository, commit: f.commit, directory: f.workspace, owner: f.owner });
+  await writeFile(join(f.workspace, 'README.md'), 'task output\nTOKEN=sk-abcdefghijklmnopqrstuv\n');
+  const snapshot = await snapshotAuditWorkspace({ directory: f.workspace, outputDirectory: f.runDirectory, label: 'task-end-retained', owner: f.owner,
+    retainPatchContent: true, sourceBaselineCommit: created.sourceCommit, sourceBaselineTree: created.sourceTree, baselineFingerprint: 'b'.repeat(64) });
+  assert.equal(snapshot.patchContent.status, 'available');
+  assert.equal(snapshot.patchContent.basis, 'source-baseline-to-task-end');
+  assert.equal(snapshot.patchContent.sourcePatchSha256, snapshot.patchSha256);
+  assert.equal(snapshot.patchContent.taskEndFingerprint, snapshot.fingerprint);
+  assert.equal(snapshot.patchContent.baselineFingerprint, 'b'.repeat(64));
+  assert.equal(snapshot.patchContent.sourceBaseline.commit, created.sourceCommit);
+  assert.equal(snapshot.patchContent.sourceBaseline.tree, created.sourceTree);
+  assert.match(snapshot.patchContent.text, /\[REDACTED\]/);
+  assert.doesNotMatch(snapshot.patchContent.text, /sk-abcdefghijklmnopqrstuv/);
+  assert.equal(JSON.parse(await readFile(snapshot.metadataPath, 'utf8')).patchSha256, snapshot.patchSha256);
+  const defaultSnapshot = await snapshotAuditWorkspace({ directory: f.workspace, outputDirectory: f.runDirectory, label: 'task-end-default', owner: f.owner });
+  assert.equal(Object.hasOwn(defaultSnapshot, 'patchContent'), false);
+});
+
 test('compares real post-setup snapshots by tracked blob and ignored-file identity', async t => {
   const f = await fixture(t);
   await createAuditWorkspace({ repository: f.repository, commit: f.commit, directory: f.workspace, owner: f.owner });

@@ -79,6 +79,12 @@ test('historical accounting rejects incomplete or conflicting records and does n
  for(const [label,change] of changes)await t.test(label,async sub=>{const r=rows();change(r);const f=await fixture(sub,r);
   const report=await auditNativeSession(f.store,'Fixture',id(1));assert.notEqual(report.usage.recorded.status,'complete',label);
   assert.equal(report.usage.recorded.values.totalTokens,null);});
- const legacy=rows();legacy[0].payload.cli_version='0.157.1';const f=await fixture(t,legacy);
- assert.equal((await auditNativeSession(f.store,'Fixture',id(1))).usage.recorded,undefined);
+ const legacy=rows();legacy[0].payload.cli_version='0.157.1';
+ for(const index of [2,5]){const response=legacy[index].payload;
+  legacy[index]=rec('event_msg',{type:'token_count',turn_id:response.turn_id,info:{thread_id:response.thread_id,
+   total_token_usage:response.thread_token_usage,last_token_usage:response.usage}});}
+ const f=await fixture(t,legacy);
+ const legacyUsage=(await auditNativeSession(f.store,'Fixture',id(1))).usage.recorded;
+ assert.notEqual(legacyUsage?.status,'complete');
+ assert.equal(legacyUsage?.values.totalTokens,null);
 });

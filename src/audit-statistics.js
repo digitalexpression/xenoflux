@@ -10,6 +10,7 @@ import { projectDeliveryAccounting, projectTelemetryJournal } from './audit-deli
 import { projectSkillSourceTime } from './audit-source-time.js';
 import { canonicalAuditChecks, freezeAuditComparisonEvidence, compareAuditConditions, buildAuditExplanation } from './audit-explanation.js';
 import { buildAuditConsistency } from './audit-consistency.js';
+import { normalizeAuditCheckEvidence } from './audit-check-evidence.js';
 import { retainedAuditSelectionOptions } from './audit-selection.js';
 import { validateAuditNativeConfig } from './audit-spec.js';
 
@@ -441,6 +442,7 @@ function compactRun(run) {
     if (workflow) workflow.revalidation = 'detail-omitted-after-precomputation';
     if (turnsUsage) turnsUsage.revalidation = 'source-detail-omitted-after-precomputation';
   }
+  const checkEvidence = normalizeAuditCheckEvidence(run, { includeContent: true });
   if (hookInvalidOrOmitted > 0) coverage.hooks = 'partial';
   if (rawHooks.length > hookInvocations.length && rawHooks.length > 0) coverage.hooks = 'partial';
   const projectedRun = {
@@ -476,6 +478,7 @@ function compactRun(run) {
     task: pick(task, ['nativeTurnStatus', 'status', 'processStatus', 'exitCode', 'nativeThreadId']),
     turns,
     checks: canonicalAuditChecks(run),
+    ...(checkEvidence ? { checkEvidence } : {}),
     ...(run.sessionEvidence ? { sessionEvidence: projectAuditSessionEvidence(run) } : {}),
     ...(run.comparisonConditions && typeof run.comparisonConditions === 'object'
       ? { comparisonConditions: compactComparisonConditions(run.comparisonConditions) } : {}),
@@ -506,7 +509,10 @@ function compactRun(run) {
       diagnostics: compactSkillDiagnostics(skillTelemetry.diagnostics),
       diagnosticsLegacy: bounded(skillTelemetry.errors, 30).map(item => text(typeof item === 'string' ? item : item?.code ?? item?.kind, 120)) },
     captureAcceptance: compactAcceptance(run.captureAcceptance),
-    capture: run.capture && typeof run.capture === 'object' ? { status: text(run.capture.status, 80), observer: run.capture.observer && typeof run.capture.observer === 'object' ? {
+    capture: run.capture && typeof run.capture === 'object' ? { status: text(run.capture.status, 80),
+      ...(bounded(run.capture.errors, 40).some(error => error?.code === 'startup-command-sandbox-unavailable')
+        ? { errors: [{ code: 'startup-command-sandbox-unavailable' }] } : {}),
+      observer: run.capture.observer && typeof run.capture.observer === 'object' ? {
       savedSettingsChanged: typeof run.capture.observer.savedSettingsChanged === 'boolean' ? run.capture.observer.savedSettingsChanged : null,
       nativeSessionStorage: text(run.capture.observer.nativeSessionStorage, 100),
       transport: text(run.capture.observer.transport, 100),
@@ -527,6 +533,7 @@ function compactRun(run) {
         hookInvocations: hookInvalidOrOmitted,
         instructionAgents: Math.max(priorOmitted('instructionAgents'), unownedInstructionRows + instructionSources.omittedAgents),
         instructionSources: Math.max(priorOmitted('instructionSources'), instructionSources.omittedSources),
+        checkEvidenceContent: priorOmitted('checkEvidenceContent'),
         turnUsageRows: turnsUsage ? turnsUsage.turnsOmitted : Math.max(0, list(usage.turns?.turns).length) + priorOmitted('turnUsageRows'),
         recordedThreads: Math.max(0, list(recordedUsage?.threads).length - 160) + priorOmitted('recordedThreads'),
         recordedResponseRecords: Math.max(0, list(recordedUsage?.threads).reduce((sum, thread) => sum + list(thread.records).length, 0) - 2048) + priorOmitted('recordedResponseRecords'),
@@ -568,10 +575,18 @@ function boundFrozenTrialBytes(trial, maxBytes = 15 * 1024 * 1024) {
       slots.push([run, 'skillDiagnostics', run.skillTelemetry.diagnostics.missingness.byAgent]);
       slots.push([run, 'usageCoverageAgents', run.usageCoverage.byAgent, 'object']);
       if (run.captureAcceptance) slots.push([run, 'captureAcceptanceChecks', run.captureAcceptance.checks]);
+      for (const record of list(run.checkEvidence?.records)) {
+        const hasContent = record?.definition?.command !== null && record?.definition?.command !== undefined
+          || record?.output?.stdout !== null && record?.output?.stdout !== undefined
+          || record?.output?.stderr !== null && record?.output?.stderr !== undefined;
+        if (hasContent) slots.push([run, 'checkEvidenceContent', [record], 'check-evidence-content', record]);
+      }
     }
-    const largest = slots.map(([run, key, rows, kind]) => ({ run, key, rows, kind,
+    const largest = slots.map(([run, key, rows, kind, owner]) => ({ run, key, rows, kind, owner,
       entries: kind === 'object' ? Object.entries(rows ?? {}) : rows,
-      size: JSON.stringify(rows).length }))
+      size: kind === 'check-evidence-content'
+        ? JSON.stringify([owner.definition?.command, owner.output?.stdout, owner.output?.stderr]).length
+        : JSON.stringify(rows).length }))
       .filter(slot => slot.entries?.length > 0)
       .sort((a, b) => b.size - a.size)[0];
     if (largest) {
@@ -597,6 +612,12 @@ function boundFrozenTrialBytes(trial, maxBytes = 15 * 1024 * 1024) {
         omittedCount = largest.rows.length;
         largest.rows.splice(keep);
         largest.run.usage.recorded = projectRunRecordedUsage(largest.run);
+      } else if (largest.kind === 'check-evidence-content') {
+        largest.owner.definition.command = null;
+        largest.owner.output.stdout = null;
+        largest.owner.output.stderr = null;
+        if (largest.owner.output.status === 'retained') largest.owner.output.status = 'omitted';
+        largest.run.checkEvidence.contentBoundary = 'check-command-and-output-omitted-by-byte-budget';
       } else largest.rows.splice(keep);
       if (largest.kind === 'instruction-sources') {
         largest.owner.omittedCount += removed;

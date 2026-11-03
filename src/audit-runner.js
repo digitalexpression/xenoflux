@@ -16,6 +16,9 @@ import { compareAuditRuns, auditExitCode } from './audit-report.js';
 import { probeAuditVersion } from './audit-native-version.js';
 import { evaluateCaptureRequirements } from './audit-evidence.js';
 import { buildAuditComparisonConditions } from './audit-conditions.js';
+import { auditRetainedNativeSession } from './audit-session.js';
+import { deriveAuditFileInventory } from './audit-file-inventory.js';
+import { buildAuditCheckEvidence, readAuditCheckOutput } from './audit-check-evidence.js';
 
 const now = () => new Date().toISOString();
 const duration = (start, end = Date.now()) => Math.max(0, end - start);
@@ -49,47 +52,21 @@ const SAFE_ERROR_TEXT = {
 };
 
 const WORKSPACE_DELTA_BASIS = 'post-setup-snapshot-delta-v1';
-function validOid(value) { return typeof value === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value); }
-function workspaceRecordIdentity(record) {
-  if (record?.ignored === true) {
-    if (typeof record.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(record.sha256)) return null;
-    return JSON.stringify(['ignored', record.sha256, record.size, record.newMode, record.symlink]);
-  }
-  if (!validOid(record?.oldOid) || !validOid(record?.newOid)) return null;
-  return JSON.stringify(['git', record.status, record.oldMode, record.newMode, record.oldOid, record.newOid]);
-}
+
+export const compareAuditWorkspaceInventory = deriveAuditFileInventory;
 
 /** Compare complete snapshot identities while preserving the original snapshots for cleanup. */
 export function compareAuditWorkspaceDelta(before, taskEnd) {
-  if (!before || !taskEnd || !Array.isArray(before.files) || !Array.isArray(taskEnd.files)
-    || typeof before.fingerprint !== 'string' || typeof taskEnd.fingerprint !== 'string')
-    return { changeCountStatus: 'unknown', changedFileCount: null, changeCountBasis: WORKSPACE_DELTA_BASIS,
-      changeCountReason: 'workspace-snapshots-incomplete' };
-  if (before.fingerprint === taskEnd.fingerprint)
-    return { changeCountStatus: 'known', changedFileCount: 0, changeCountBasis: WORKSPACE_DELTA_BASIS };
-  const byPath = snapshot => {
-    const result = new Map();
-    for (const record of snapshot.files) {
-      if (!record || typeof record.path !== 'string' || !record.path || result.has(record.path)) return null;
-      result.set(record.path, record);
-    }
-    return result;
-  };
-  const left = byPath(before), right = byPath(taskEnd);
-  if (!left || !right) return { changeCountStatus: 'unknown', changedFileCount: null, changeCountBasis: WORKSPACE_DELTA_BASIS,
-    changeCountReason: 'workspace-file-records-ambiguous' };
-  let changedFileCount = 0;
-  for (const path of new Set([...left.keys(), ...right.keys()])) {
-    if (!left.has(path) || !right.has(path)) { changedFileCount++; continue; }
-    if ((left.get(path)?.ignored === true) !== (right.get(path)?.ignored === true))
-      return { changeCountStatus: 'unknown', changedFileCount: null, changeCountBasis: WORKSPACE_DELTA_BASIS,
-        changeCountReason: 'workspace-file-origin-changed' };
-    const a = workspaceRecordIdentity(left.get(path)), b = workspaceRecordIdentity(right.get(path));
-    if (a === null || b === null) return { changeCountStatus: 'unknown', changedFileCount: null, changeCountBasis: WORKSPACE_DELTA_BASIS,
-      changeCountReason: 'tracked-blob-identity-missing' };
-    if (a !== b) changedFileCount++;
-  }
-  return { changeCountStatus: 'known', changedFileCount, changeCountBasis: WORKSPACE_DELTA_BASIS };
+  const inventory = deriveAuditFileInventory(before, taskEnd);
+  if (inventory?.status === 'recorded') return { changeCountStatus: 'known', changedFileCount: inventory.entries.length,
+    changeCountBasis: WORKSPACE_DELTA_BASIS };
+  const reasons = { 'workspace-snapshots-incomplete': 'workspace-snapshots-incomplete',
+    'workspace-file-records-ambiguous': 'workspace-file-records-ambiguous',
+    'workspace-file-origin-changed': 'workspace-file-origin-changed',
+    'workspace-file-identity-missing': 'tracked-blob-identity-missing',
+    'workspace-file-inventory-limit-exceeded': 'workspace-file-inventory-limit-exceeded' };
+  return { changeCountStatus: 'unknown', changedFileCount: null, changeCountBasis: WORKSPACE_DELTA_BASIS,
+    changeCountReason: reasons[inventory?.reason] ?? 'workspace-snapshots-incomplete' };
 }
 const KNOWN_ERROR_CODES = new Set([...Object.keys(SAFE_ERROR_TEXT), 'profile-reservation-failed', 'profile-idle-unknown', 'profile-settings-unavailable', 'commit-changed']);
 const errorCode = error => typeof error?.code === 'string' && (KNOWN_ERROR_CODES.has(error.code) || /^[A-Z][A-Z0-9_]{0,79}$/.test(error.code))
@@ -110,6 +87,7 @@ function dependencies(context) {
     compareSettings: context.compareSettings ?? compareAuditProfileSettings,
     probeVersion: context.probeVersion ?? probeAuditVersion,
     capture: context.capture ?? runAuditCapture,
+    readReplay: context.readReplay ?? ((_store, profile, id, options) => auditRetainedNativeSession(profile, id, options)),
     process: context.process ?? runAuditProcess,
     createExperiment: context.createExperiment ?? createExperiment,
     createExperimentRun: context.createExperimentRun ?? createExperimentRun,
@@ -125,6 +103,96 @@ function dependencies(context) {
     baseDirectory: context.baseDirectory,
     signal: context.signal ?? null,
   };
+}
+
+/** Freeze a bounded native replay beside the finalized run report. */
+export async function captureFrozenSessionReplay(deps, store, profile, capturedRun, runDirectory, capturedAt = now()) {
+  const id = capturedRun?.source?.threadId;
+  const validId = typeof id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id);
+  const unavailable = reason => ({ sessionReplay: { schemaVersion: 1, kind: 'session-replay', sessions: [{
+    id, parentId: null, depth: 0, status: 'unavailable', reason, source: { fingerprint: null }, events: [],
+    limits: [{ kind: 'capture-boundary', message: `Replay capture attempted at ${capturedAt}; unavailable evidence is frozen for this run.` },
+      { kind: 'source-unavailable', message: reason }],
+  }] }, replayCapture: { status: 'unavailable', capturedAt, sourceFingerprint: null,
+    boundary: 'finalized-native-history-snapshot' }, coverage: { ...(capturedRun.coverage ?? {}), agents: 'partial' },
+  childDiscovery: undefined });
+  if (!validId) return { replayCapture: { status: 'unavailable', capturedAt, sourceFingerprint: null,
+    boundary: 'finalized-native-history-snapshot', reason: 'The completed run has no verifiable native session ID.' },
+  coverage: { ...(capturedRun.coverage ?? {}), agents: 'partial' }, childDiscovery: undefined };
+  try {
+    const native = await deps.readReplay(store, profile, id, { includeReplay: true,
+      actionRepoRoot: capturedRun.source.workspace ?? undefined,
+      ...(Array.isArray(capturedRun.agents) ? { recordedAgents: capturedRun.agents } : {}),
+      ...(capturedRun.childDiscovery ? { recordedDiscovery: capturedRun.childDiscovery } : {}),
+      ...(typeof runDirectory === 'string' ? { childIndexHome: join(runDirectory, 'runtime', 'sqlite') } : {}) });
+    const fingerprint = native?.source?.fingerprint;
+    const rootReplay = native?.sessionReplay?.sessions?.find(session => session.id === id && session.parentId === null);
+    if (native?.source?.nativeSessionId !== id
+      || !/^[a-f0-9]{64}$/.test(fingerprint ?? '')
+      || rootReplay?.source?.fingerprint !== fingerprint)
+      return unavailable('The selected native history could not be verified for this completed run.');
+    if (!native.sessionReplay?.sessions?.length) return unavailable('The selected native history did not provide replay evidence.');
+    if (!/^[a-f0-9]{64}$/.test(fingerprint ?? '')) {
+      if (native.sessionReplay.sessions.every(session => ['unavailable', 'not-found'].includes(session.status)
+        && session.events.length === 0)) {
+        const sessionReplay = structuredClone(native.sessionReplay);
+        for (const session of sessionReplay.sessions) session.limits.push({ kind: 'capture-boundary',
+          message: `Replay capture attempted at ${capturedAt}; unavailable evidence is frozen for this run.` });
+        return { sessionReplay, replayCapture: { status: 'unavailable', capturedAt, sourceFingerprint: null,
+          boundary: 'finalized-native-history-snapshot' }, coverage: { ...(capturedRun.coverage ?? {}), agents: 'partial' },
+        childDiscovery: undefined };
+      }
+      return unavailable('The selected native history has no verifiable source fingerprint.');
+    }
+    const sessionReplay = structuredClone(native.sessionReplay);
+    const orderedEdges = rows => rows.map(row => ({ id: row.id, parentId: row.parentId ?? null }))
+      .filter(row => row.id !== id).sort((a, b) => a.parentId.localeCompare(b.parentId) || a.id.localeCompare(b.id));
+    const discovery = capturedRun.childDiscovery;
+    const capturedAgents = Array.isArray(capturedRun.agents) ? capturedRun.agents : [];
+    const capturedRoot = capturedAgents.find(agent => agent?.id === id && agent.parentId == null);
+    const capturedEdges = orderedEdges(capturedAgents);
+    const replayEdges = orderedEdges(sessionReplay.sessions.map(session => ({ id: session.id, parentId: session.parentId })));
+    const replayRoot = sessionReplay.sessions.find(session => session.id === id && session.parentId === null);
+    const sameEdges = !!capturedRoot && !!replayRoot && discovery?.rootId === id
+      && JSON.stringify(capturedEdges) === JSON.stringify(replayEdges)
+      && JSON.stringify(capturedEdges) === JSON.stringify(orderedEdges(discovery?.edges ?? []));
+    const discoveryComplete = discovery?.complete === true && native.coverage?.agents === 'complete' && sameEdges;
+    const boundary = `Frozen from native history at ${capturedAt}; later activity is outside this replay.`;
+    for (const session of sessionReplay.sessions) session.limits.push({ kind: 'capture-boundary', message: boundary });
+    if (!discoveryComplete) {
+      sessionReplay.sessions[0]?.limits.push({ kind: 'child-discovery-partial',
+        message: sameEdges ? 'The native child index did not provide complete bounded discovery evidence.'
+          : 'Captured app-server actors, indexed child links, and replay sessions did not agree at the finalized boundary.' });
+    }
+    const replayCapture = { status: discoveryComplete ? native.status : 'partial', capturedAt,
+      sourceFingerprint: fingerprint, boundary: 'finalized-native-history-snapshot' };
+    if (discovery) replayCapture.childDiscovery = { status: discoveryComplete ? 'complete' : 'partial',
+      capturedAt: discovery.capturedAt, fingerprint: discovery.fingerprint, indexFingerprint: discovery.indexFingerprint,
+      actorCount: replayEdges.length + 1, boundary: 'owned-native-process-terminated' };
+    const coverage = { ...(capturedRun.coverage ?? {}), agents: discoveryComplete ? 'complete' : 'partial' };
+    // The durable run reader has a 16 MiB record cap. Leave 4 MiB for the
+    // remaining finalized run fields and keep replay within the same bound.
+    const maxCapturedRun = 12 * 1024 * 1024;
+    let bytes = Buffer.byteLength(JSON.stringify({ ...capturedRun, sessionReplay, replayCapture, coverage }));
+    if (bytes > maxCapturedRun) {
+      const omittedBySession = new Map();
+      for (const event of sessionReplay.sessions.slice().reverse().flatMap(session => session.events.slice().reverse())) {
+        if (event.body == null) continue;
+        bytes -= Math.max(0, Buffer.byteLength(JSON.stringify(event.body)) - Buffer.byteLength('null'));
+        event.body = null; event.bodyStatus = 'omitted'; event.bodyReason = 'frozen-report-size-limit';
+        omittedBySession.set(event.sessionId, (omittedBySession.get(event.sessionId) ?? 0) + 1);
+        if (bytes <= maxCapturedRun) break;
+      }
+      for (const session of sessionReplay.sessions) {
+        const omitted = omittedBySession.get(session.id) ?? 0;
+        if (omitted) session.limits.push({ kind: 'frozen-report-size-limit', omitted,
+          message: 'Some event bodies were omitted to keep the completed replay within the durable report size limit.' });
+      }
+    }
+    bytes = Buffer.byteLength(JSON.stringify({ ...capturedRun, sessionReplay, replayCapture, coverage }));
+    if (bytes > maxCapturedRun) return unavailable('Replay metadata exceeded the bounded finalized report size.');
+    return { sessionReplay, replayCapture, coverage, childDiscovery: undefined };
+  } catch { return unavailable('The selected native history could not be read at the finalized capture boundary.'); }
 }
 
 function selectionProfile(spec, profile) {
@@ -242,8 +310,9 @@ async function ensureDirs(directory) {
 
 async function runCommand(store, runId, deps, command, { profile, workspace, directory, phase, index, deadline, signal, outputBytes, owner }) {
   const started = Date.now(), stdoutPath = join(directory, `${phase}-${index}.stdout`), stderrPath = join(directory, `${phase}-${index}.stderr`);
-  const timeoutMs = Math.max(1, Math.min(command.timeoutMs, deadline - Date.now()));
-  if (timeoutMs <= 1 && Date.now() >= deadline) return { name: command.name, status: 'timeout', exitCode: null, elapsedMs: 0 };
+  const timeoutMs = deadline === null ? command.timeoutMs : Math.max(1, Math.min(command.timeoutMs, deadline - Date.now()));
+  if (deadline !== null && timeoutMs <= 1 && Date.now() >= deadline) return { name: command.name, status: 'timeout', exitCode: null,
+    startedAt: null, elapsedMs: 0 };
   const env = { PATH: profile.env.PATH ?? '/usr/bin:/bin:/usr/sbin:/sbin', HOME: join(directory, 'tmp'),
     TMPDIR: join(directory, 'tmp'), TMP: join(directory, 'tmp'), TEMP: join(directory, 'tmp'), LC_ALL: 'C' };
   const result = await deps.process({ executable: '/usr/bin/env', args: command.argv, cwd: workspace,
@@ -257,7 +326,7 @@ async function runCommand(store, runId, deps, command, { profile, workspace, dir
   await deps.writeState(store, runId, { phase, process: null });
   return { name: command.name, status: result.status === 'exited' && result.exitCode === 0 ? 'passed'
     : result.status === 'exited' ? 'failed' : result.status, exitCode: result.exitCode,
-    signal: result.signal, elapsedMs: result.elapsedMs ?? duration(started), output: result.output,
+    signal: result.signal, startedAt: new Date(started).toISOString(), elapsedMs: result.elapsedMs ?? duration(started), output: result.output,
     process: result.processIdentity ?? null, shutdown: result.shutdown ?? null };
 }
 
@@ -284,12 +353,12 @@ export async function runAuditExperiment(store, input, context = {}) {
       home: item.home, version: item.version })), baseline: { repository: preview.baseline, source: 'committed-snapshot' } });
   const runs = [], reservations = [], failures = [], warnings = [], runReferences = [], finalizedRuns = new Set(), releasedRunIds = new Set(), pendingFinalReports = new Map();
   let recoveryRequired = false;
-  const startedAt = Date.now(), experimentDeadline = startedAt + spec.limits.experimentMs;
+  const startedAt = Date.now(), experimentDeadline = spec.limits.experimentMs === null ? null : startedAt + spec.limits.experimentMs;
   let timer;
   const controller = new AbortController();
   const abortFromParent = () => controller.abort(deps.signal?.reason ?? 'cancelled');
   if (deps.signal?.aborted) abortFromParent(); else deps.signal?.addEventListener('abort', abortFromParent, { once: true });
-  timer = setTimeout(() => controller.abort('experiment-timeout'), spec.limits.experimentMs);
+  if (spec.limits.experimentMs !== null) timer = setTimeout(() => controller.abort('experiment-timeout'), spec.limits.experimentMs);
   const bySelection = new Map();
   try {
     await deps.writeState(store, experiment.id, { status: 'reserving', phase: 'reservation', coordinator: await coordinatorIdentity() });
@@ -351,12 +420,13 @@ export async function runAuditExperiment(store, input, context = {}) {
       coordinator: await coordinatorIdentity(), runs: runReferences.map(({ runRecord, profile }) => ({ id: runRecord.id, profileId: profile.profileId, status: 'prepared' })) });
     for (let index = 0; index < spec.profiles.length; index++) {
       const selection = spec.profiles[index], prepared = bySelection.get(selection.name);
-      if (controller.signal.aborted || Date.now() >= experimentDeadline) {
+      if (controller.signal.aborted || (experimentDeadline !== null && Date.now() >= experimentDeadline)) {
         runs.push({ id: prepared.runRecord.id, profile: safeProfile(prepared.profile), status: 'cancelled', phase: 'not-started', reason: controller.signal.reason === 'experiment-timeout' ? 'experiment-timeout' : 'cancelled' });
         continue;
       }
       const { profile, beforeSettings, beforeAccess, runRecord, owner } = prepared;
-      const phaseStart = Date.now(), runDeadline = Math.min(experimentDeadline, phaseStart + spec.limits.runMs);
+      const phaseStart = Date.now(), runDeadline = [experimentDeadline,
+        spec.limits.runMs === null ? null : phaseStart + spec.limits.runMs].filter(value => value !== null).reduce((a, b) => a === null ? b : Math.min(a, b), null);
       const dirs = await ensureDirs(runRecord.directory);
       const runResult = { id: runRecord.id, profile: safeProfile(profile), status: 'running', phase: 'workspace',
         timestamps: { startedAt: now() }, metrics: { setupMs: 0, taskMs: null, captureMs: null, checksMs: 0, totalMs: null },
@@ -393,7 +463,7 @@ export async function runAuditExperiment(store, input, context = {}) {
         const setupStart = Date.now();
         let setupFailed = false;
         for (let cmd = 0; cmd < spec.setup.length; cmd++) {
-          if (controller.signal.aborted || Date.now() >= runDeadline) { setupFailed = true; break; }
+          if (controller.signal.aborted || (runDeadline !== null && Date.now() >= runDeadline)) { setupFailed = true; break; }
           const result = await runCommand(store, runRecord.id, deps, spec.setup[cmd], { profile, workspace: workspace.directory,
             directory: runRecord.directory, phase: 'setup', index: cmd, deadline: runDeadline,
             signal: controller.signal, outputBytes: spec.limits.outputBytes, owner });
@@ -420,9 +490,11 @@ export async function runAuditExperiment(store, input, context = {}) {
         await deps.writeState(store, runRecord.id, { phase: 'task', process: null,
           workspace: { ...workspaceIntent, active: true } });
         const taskStart = Date.now();
-        const taskTimeout = Math.max(1, Math.min(spec.limits.runMs - duration(phaseStart), experimentDeadline - Date.now()));
+        const remainingLimits = [spec.limits.runMs === null ? null : spec.limits.runMs - duration(phaseStart),
+          experimentDeadline === null ? null : experimentDeadline - Date.now()].filter(value => value !== null);
+        const taskTimeout = remainingLimits.length ? Math.max(1, Math.min(...remainingLimits)) : null;
         const selectedSkills = selection.skills ?? [];
-        const captured = await deps.capture({ profile, workspace: workspace.directory, task: spec.task, selectedSkills,
+        const captured = await deps.capture({ executionMode: 'audit', profile, workspace: workspace.directory, task: spec.task, selectedSkills,
           requiredContext: spec.captureRequirements?.context,
           processOptions: { env: profile.env, timeoutMs: taskTimeout, outputLimitBytes: spec.limits.outputBytes,
             stdoutPath: join(runRecord.directory, 'codex.stdout'), stderrPath: join(runRecord.directory, 'codex.stderr'),
@@ -438,19 +510,23 @@ export async function runAuditExperiment(store, input, context = {}) {
             // Capture calls this only after owned process-group shutdown, before
             // checks. Missing native child evidence still makes the boundary partial.
             const snapshot = await deps.snapshotWorkspace({ directory: workspace.directory, owner: workspaceOwner,
-              outputDirectory: dirs.artifacts, label: 'task-end' });
+              outputDirectory: dirs.artifacts, label: 'task-end', retainPatchContent: true,
+              sourceBaselineCommit: workspace.sourceCommit, sourceBaselineTree: workspace.sourceTree,
+              baselineFingerprint: initialSnapshot?.fingerprint });
             taskEndSnapshot = snapshot;
             const changeCount = compareAuditWorkspaceDelta(initialSnapshot, snapshot);
+            const changeInventory = compareAuditWorkspaceInventory(initialSnapshot, snapshot);
             taskEndCaptureComplete = evidence?.complete === true;
             runResult.timestamps.taskEndedAt = evidence?.at ?? now();
             runResult.taskEnd = { status: snapshot.status, fingerprint: snapshot.fingerprint,
-              files: snapshot.files.length, patchPath: snapshot.patchPath, metadataPath: snapshot.metadataPath,
-              baselineFingerprint: initialSnapshot?.fingerprint ?? null, ...changeCount,
+              files: snapshot.files.length, patchPath: snapshot.patchPath, metadataPath: snapshot.metadataPath, patchSha256: snapshot.patchSha256,
+              baselineFingerprint: initialSnapshot?.fingerprint ?? null, ...changeCount, changeInventory,
               captureComplete: taskEndCaptureComplete, boundary: evidence?.boundary ?? null,
               nativeEndedAt: evidence?.nativeEndedAt ?? null, timing: taskEndCaptureComplete ? 'task-end' : 'unverified-task-end' };
             runResult.workspace = { ...runResult.workspace, taskEnd: { status: snapshot.status,
               path: snapshot.patchPath, fingerprint: snapshot.fingerprint, fileCount: snapshot.files.length,
-              baselineFingerprint: initialSnapshot?.fingerprint ?? null, ...changeCount,
+              patchSha256: snapshot.patchSha256, baselineFingerprint: initialSnapshot?.fingerprint ?? null, ...changeCount, changeInventory,
+              ...(snapshot.patchContent ? { patchContent: snapshot.patchContent } : {}),
               captureComplete: taskEndCaptureComplete, timing: runResult.taskEnd.timing } };
             runResult.artifacts.push({ kind: 'workspace-snapshot', label: snapshot.label, fingerprint: snapshot.fingerprint,
               status: snapshot.status, files: snapshot.files.length, patchPath: snapshot.patchPath, metadataPath: snapshot.metadataPath,
@@ -485,16 +561,22 @@ export async function runAuditExperiment(store, input, context = {}) {
         runResult.coverage = { ...(runResult.normalized.coverage ?? {}), ...runResult.coverage };
         if (!taskEndSnapshot) {
           const snapshot = await deps.snapshotWorkspace({ directory: workspace.directory, owner: workspaceOwner,
-            outputDirectory: dirs.artifacts, label: 'task-end-fallback' });
+            outputDirectory: dirs.artifacts, label: 'task-end-fallback', retainPatchContent: true,
+            sourceBaselineCommit: workspace.sourceCommit, sourceBaselineTree: workspace.sourceTree,
+            baselineFingerprint: initialSnapshot?.fingerprint });
           taskEndSnapshot = snapshot;
           const changeCount = compareAuditWorkspaceDelta(initialSnapshot, snapshot);
+          const changeInventory = compareAuditWorkspaceInventory(initialSnapshot, snapshot);
           runResult.taskEnd = { status: snapshot.status, fingerprint: snapshot.fingerprint, files: snapshot.files.length,
+            patchSha256: snapshot.patchSha256,
             baselineFingerprint: initialSnapshot?.fingerprint ?? null, ...changeCount,
+            changeInventory,
             patchPath: snapshot.patchPath, metadataPath: snapshot.metadataPath, captureComplete: false,
             timing: 'after-process-fallback' };
           runResult.workspace = { ...runResult.workspace, taskEnd: { status: snapshot.status,
             path: snapshot.patchPath, fingerprint: snapshot.fingerprint, fileCount: snapshot.files.length,
-            baselineFingerprint: initialSnapshot?.fingerprint ?? null, ...changeCount,
+            patchSha256: snapshot.patchSha256, baselineFingerprint: initialSnapshot?.fingerprint ?? null, ...changeCount, changeInventory,
+            ...(snapshot.patchContent ? { patchContent: snapshot.patchContent } : {}),
             captureComplete: false, timing: 'after-process-fallback' } };
           taskEndCaptureComplete = false;
           runResult.artifacts.push({ kind: 'workspace-snapshot', label: snapshot.label, fingerprint: snapshot.fingerprint,
@@ -545,7 +627,7 @@ export async function runAuditExperiment(store, input, context = {}) {
           code: captured?.process?.status === 'timeout' ? 'timeout' : captured?.process?.status === 'cancelled' ? 'cancelled' : 'task-failed' });
         const checkStart = Date.now();
         for (let cmd = 0; cmd < spec.checks.length; cmd++) {
-          if (controller.signal.aborted || Date.now() >= runDeadline) { runResult.checks.push({ name: spec.checks[cmd].name, status: controller.signal.aborted ? 'cancelled' : 'timeout', exitCode: null }); break; }
+          if (controller.signal.aborted || (runDeadline !== null && Date.now() >= runDeadline)) { runResult.checks.push({ name: spec.checks[cmd].name, status: controller.signal.aborted ? 'cancelled' : 'timeout', exitCode: null }); break; }
           const result = await runCommand(store, runRecord.id, deps, spec.checks[cmd], { profile, workspace: workspace.directory,
             directory: runRecord.directory, phase: 'check', index: cmd, deadline: runDeadline,
             signal: controller.signal, outputBytes: spec.limits.outputBytes, owner });
@@ -553,6 +635,9 @@ export async function runAuditExperiment(store, input, context = {}) {
           runResult.checks.push({ ...result, ...(context.checkRequired ? { required } : {}) });
           if (result.status === 'recovery-required' || (result.status !== 'passed' && required)) break;
         }
+        runResult.checkEvidence = buildAuditCheckEvidence({ checks: spec.checks, results: runResult.checks,
+          workspaceFingerprint: taskEndSnapshot?.fingerprint ?? null,
+          outputs: await Promise.all(spec.checks.map((_, index) => readAuditCheckOutput(runRecord.directory, index))) });
         runResult.metrics.checksMs = duration(checkStart);
         const finalSnapshot = await deps.snapshotWorkspace({ directory: workspace.directory, owner: workspaceOwner,
           outputDirectory: dirs.artifacts, label: 'after-checks' });
@@ -560,8 +645,11 @@ export async function runAuditExperiment(store, input, context = {}) {
           files: finalSnapshot.files.length, patchPath: finalSnapshot.patchPath, metadataPath: finalSnapshot.metadataPath };
         runResult.workspace = { taskEnd: { status: taskEndSnapshot.status, path: taskEndSnapshot.patchPath,
           fingerprint: taskEndSnapshot.fingerprint, fileCount: taskEndSnapshot.files.length,
+          patchSha256: taskEndSnapshot.patchSha256,
           baselineFingerprint: initialSnapshot?.fingerprint ?? null,
+          ...(taskEndSnapshot.patchContent ? { patchContent: taskEndSnapshot.patchContent } : {}),
           ...compareAuditWorkspaceDelta(initialSnapshot, taskEndSnapshot),
+          changeInventory: compareAuditWorkspaceInventory(initialSnapshot, taskEndSnapshot),
           captureComplete: taskEndCaptureComplete, timing: runResult.taskEnd?.timing ?? 'after-process-fallback' },
           checkEnd: { status: finalSnapshot.status, path: finalSnapshot.patchPath,
             fingerprint: finalSnapshot.fingerprint, fileCount: finalSnapshot.files.length } };
@@ -595,6 +683,10 @@ export async function runAuditExperiment(store, input, context = {}) {
             message: SAFE_ERROR_TEXT['profile-clients-changed'] });
           runResult.timestamps.completedAt = now(); runResult.metrics.totalMs = duration(phaseStart);
           runResult.id = runRecord.id;
+          Object.assign(runResult.normalized, await captureFrozenSessionReplay(deps, store,
+            runRecord.record?.profile ?? safeProfile(profile), runResult.normalized, runRecord.directory));
+          runResult.coverage = { ...runResult.normalized.coverage, ...runResult.coverage,
+            agents: runResult.normalized.coverage.agents };
           runs.push(runResult); await deps.writeState(store, runRecord.id, { status: runResult.status, phase: runResult.phase,
             completedAt: runResult.timestamps.completedAt, metrics: runResult.metrics, outcome: runResult.outcome,
             profileSettings: runResult.profileSettings, runningClients: runResult.runningClients, workspace: { ...workspaceIntent,
@@ -605,7 +697,7 @@ export async function runAuditExperiment(store, input, context = {}) {
             metrics: runResult.metrics, outcome: runResult.outcome, taskEnd: runResult.taskEnd,
             finalWorkspace: runResult.finalWorkspace, profileSettings: runResult.profileSettings, runningClients: runResult.runningClients,
             execution: runResult.execution, capture: runResult.capture, captureProtocol: runResult.captureProtocol, workspace: runResult.workspace,
-            artifacts: runResult.artifacts, setup: runResult.setup, checks: runResult.checks,
+            artifacts: runResult.artifacts, setup: runResult.setup, checks: runResult.checks, checkEvidence: runResult.checkEvidence,
             coverage: runResult.coverage, warnings: runResult.warnings });
           break;
         }
@@ -627,6 +719,10 @@ export async function runAuditExperiment(store, input, context = {}) {
         runResult.timestamps.completedAt = now(); runResult.metrics.totalMs = duration(phaseStart);
         runResult.normalized.status = runResult.status === 'complete' ? 'ready' : runResult.normalized.status;
         runResult.id = runRecord.id;
+        Object.assign(runResult.normalized, await captureFrozenSessionReplay(deps, store,
+          runRecord.record?.profile ?? safeProfile(profile), runResult.normalized, runRecord.directory));
+        runResult.coverage = { ...runResult.normalized.coverage, ...runResult.coverage,
+            agents: runResult.normalized.coverage.agents };
         await deps.writeState(store, runRecord.id, { status: runResult.status, phase: 'complete', completedAt: runResult.timestamps.completedAt,
           process: null, metrics: runResult.metrics, outcome: runResult.outcome, profileSettings: runResult.profileSettings, runningClients: runResult.runningClients,
           workspace: { ...workspaceIntent, active: false, finalFingerprint: finalSnapshot.fingerprint } });
@@ -635,10 +731,13 @@ export async function runAuditExperiment(store, input, context = {}) {
           sourceWorkspace: runResult.sourceWorkspace, status: runResult.status,
           metrics: runResult.metrics, outcome: runResult.outcome, taskEnd: runResult.taskEnd, finalWorkspace: runResult.finalWorkspace,
           execution: runResult.execution, capture: runResult.capture, captureProtocol: runResult.captureProtocol, workspace: runResult.workspace,
-          profileSettings: runResult.profileSettings, runningClients: runResult.runningClients, artifacts: runResult.artifacts, setup: runResult.setup, checks: runResult.checks,
+          profileSettings: runResult.profileSettings, runningClients: runResult.runningClients, artifacts: runResult.artifacts, setup: runResult.setup, checks: runResult.checks, checkEvidence: runResult.checkEvidence,
           coverage: runResult.coverage, warnings: runResult.warnings });
         runs.push(runResult);
       } catch (error) {
+        runResult.checkEvidence ??= buildAuditCheckEvidence({ checks: spec.checks, results: runResult.checks,
+          workspaceFingerprint: taskEndSnapshot?.fingerprint ?? null,
+          outputs: await Promise.all(spec.checks.map((_, index) => readAuditCheckOutput(runRecord.directory, index))) });
         const failed = error.code === 'timeout' || controller.signal.reason === 'experiment-timeout' ? 'timeout'
           : error.code === 'cancelled' || controller.signal.aborted ? 'cancelled' : 'failed';
         runResult.status = failed; runResult.phase = error.code ?? 'execution'; runResult.error = { code: error.code ?? errorCode(error), message: errorText(error) };
@@ -723,14 +822,19 @@ export async function runAuditExperiment(store, input, context = {}) {
           profile: safeProfile(profile), agents: [], events: [], turns: [], skills: [], usage: {}, metrics: runResult.metrics,
           coverage: { timeline: 'unavailable', agents: 'unavailable', skills: 'unavailable', workspaceDiff: runResult.finalWorkspace?.fingerprint ? 'complete' : 'unavailable', outcome: 'partial' },
           outcome: { status: 'unknown' }, artifacts: runResult.artifacts, warnings: [] };
+        if (!recoveryRequired) Object.assign(runResult.normalized, await captureFrozenSessionReplay(deps, store,
+          runRecord.record?.profile ?? safeProfile(profile), runResult.normalized, runRecord.directory));
+        if (!recoveryRequired) runResult.coverage = { ...runResult.normalized.coverage, ...runResult.coverage,
+            agents: runResult.normalized.coverage.agents };
         if (!recoveryRequired) pendingFinalReports.set(runRecord.id, { ...runResult.normalized, id: runRecord.id,
           experimentId: experiment.id, profile: safeProfile(profile), baseline: runRecord.record?.baseline,
           sourceWorkspace: runResult.sourceWorkspace, status: runResult.status,
           metrics: runResult.metrics, outcome: runResult.outcome ?? { status: 'unknown' }, taskEnd: runResult.taskEnd ?? null,
           finalWorkspace: runResult.finalWorkspace ?? null,
           execution: runResult.execution, capture: runResult.capture, captureProtocol: runResult.captureProtocol, workspace: runResult.workspace,
-          profileSettings: runResult.profileSettings, runningClients: runResult.runningClients, artifacts: runResult.artifacts, setup: runResult.setup, checks: runResult.checks,
-          coverage: { ...runResult.normalized.coverage, ...runResult.coverage }, warnings: runResult.warnings });
+          profileSettings: runResult.profileSettings, runningClients: runResult.runningClients, artifacts: runResult.artifacts, setup: runResult.setup, checks: runResult.checks, checkEvidence: runResult.checkEvidence,
+          coverage: { ...runResult.normalized.coverage, ...runResult.coverage }, warnings: runResult.warnings,
+          checkEvidence: runResult.checkEvidence });
         runs.push(runResult);
       }
       if (recoveryRequired || failures.some(f => ['profile-settings-changed', 'profile-clients-changed'].includes(f.code)) || controller.signal.aborted) break;
@@ -753,10 +857,12 @@ export async function runAuditExperiment(store, input, context = {}) {
   // the unfinished record available to exact-owner recovery.
   for (const [runId, report] of pendingFinalReports) {
     if (!releasedRunIds.has(runId)) continue;
-    try { await deps.finalize(store, runId, { ...report, comparisonConditions: buildAuditComparisonConditions({ spec,
+    try {
+      await deps.finalize(store, runId, { ...report, comparisonConditions: buildAuditComparisonConditions({ spec,
       baseline: preview.baseline, profile: spec.profiles.find(item => item.name === report.profile?.profileName),
       profileOrder: context.profileOrder ?? spec.profiles.map(item => item.name), trialIndex: context.series?.trialIndex,
-      environment: context.comparisonEnvironment }) }); finalizedRuns.add(runId); }
+      environment: context.comparisonEnvironment }) }); finalizedRuns.add(runId);
+    }
     catch (error) { failures.push({ code: 'run-report-finalize-failed', runId, message: errorText(error) }); }
   }
   for (const reference of runReferences) {
@@ -790,10 +896,14 @@ export async function runAuditExperiment(store, input, context = {}) {
       const capturedRun = run.normalized ?? { schemaVersion: 1, kind: 'audit-run', id: run.id, profile: run.profile,
         status: run.status, agents: [], events: [], turns: [], skills: [], usage: { totals: null }, metrics: {}, artifacts: [],
         outcome: run.outcome ?? { status: 'unverified', checks: [] }, coverage: run.coverage ?? { timeline: 'unavailable' } };
-      await deps.finalize(store, run.id, { ...capturedRun, id: run.id, experimentId: experiment.id, profile: run.profile,
+      const replay = await captureFrozenSessionReplay(deps, store,
+        reference.runRecord.record?.profile ?? run.profile, capturedRun, reference.runRecord.directory);
+      await deps.finalize(store, run.id, { ...capturedRun, ...(replay ?? {}), id: run.id, experimentId: experiment.id, profile: run.profile,
         baseline: reference.runRecord.record?.baseline, sourceWorkspace: run.sourceWorkspace,
         status: run.status, execution: run.execution ?? { status: run.status, exitCode: null, elapsedMs: 0 },
-        outcome: run.outcome ?? { status: 'unverified', checks: [] }, coverage: run.coverage ?? capturedRun.coverage,
+        outcome: run.outcome ?? { status: 'unverified', checks: [] },
+        coverage: { ...(replay?.coverage ?? capturedRun.coverage ?? {}), ...(run.coverage ?? {}),
+          agents: replay?.coverage?.agents ?? capturedRun.coverage?.agents ?? 'partial' },
         setup: run.setup ?? [], checks: run.checks ?? [], artifacts: run.artifacts ?? [], warnings: run.warnings ?? [],
         comparisonConditions: buildAuditComparisonConditions({ spec, baseline: preview.baseline,
           profile: spec.profiles.find(item => item.name === (run.profile?.profileName ?? run.profile?.name)),
@@ -807,7 +917,11 @@ export async function runAuditExperiment(store, input, context = {}) {
     - (profileOrder.get((right.profile?.profileName ?? right.profile?.name ?? '').toLowerCase()) ?? Number.MAX_SAFE_INTEGER));
   const reportRuns = runs.map(run => {
     const { normalized: capturedRun, ...execution } = run;
-    return { ...(capturedRun ?? {}), ...execution,
+    // Full replay is stored once in each immutable run report. Repeating it in
+    // every aggregate/comparison can exceed the experiment record's size bound;
+    // showAuditRecord reconstructs opted-in replay from those exact run records.
+    const { sessionReplay, ...capturedSummary } = capturedRun ?? {};
+    return { ...capturedSummary, ...execution,
       profile: { ...(capturedRun?.profile ?? {}), profileId: run.profile?.profileId ?? run.profile?.id ?? null,
         profileName: run.profile?.profileName ?? run.profile?.name ?? null, name: run.profile?.name ?? run.profile?.profileName ?? null,
         home: run.profile?.home ?? null,
@@ -835,6 +949,7 @@ export async function runAuditExperiment(store, input, context = {}) {
     : complete ? 'complete' : reservationBlocked ? 'blocked' : strictFailure ? 'failed' : partial || runs.length ? 'partial' : 'failed';
   const report = { schemaVersion: 1, kind: 'audit-experiment-report', id: experiment.id,
     status: reportStatus,
+    limits: { ...spec.limits, sandbox: spec.sandbox },
     baseline: { repository: preview.baseline?.repository ?? null, commit: preview.baseline?.commit ?? null,
       tree: preview.baseline?.tree ?? null, selectedRevision: preview.baseline?.selectedRevision ?? null,
       sourceHead: preview.baseline?.sourceHead ?? null, sourceDirty: preview.baseline?.sourceDirty ?? null,

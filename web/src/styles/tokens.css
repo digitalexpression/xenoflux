@@ -1,0 +1,200 @@
+/*
+ * The one Xenoflux token source (DESIGN.md › Quick Start). Tailwind reads the
+ * @theme block for utilities; components read the same custom properties.
+ * scripts/check-design-tokens.mjs keeps these values equal to DESIGN.md.
+ */
+@theme static {
+  --color-*: initial;
+  --color-canvas: #fcfdff;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f0f4ff;
+  --color-text: #18233b;
+  --color-text-muted: #4d5970;
+  --color-divider: #d2dcf0;
+  --color-control-border: #6b6d72;
+  --color-action: #2447c6;
+  --color-on-action: #dcfff1;
+  --color-action-border: #2447c6;
+  --color-accent: #9de7cc;
+  --color-link-focus: #2447c6;
+  --color-selected: #eaf0ff;
+  --color-on-selected: #2447c6;
+  --color-checked: #2447c6;
+  --color-on-checked: #ffffff;
+  --color-info-surface: #edf2ff;
+  --color-side-a: #6d28d9;
+  --color-side-b: #0e7490;
+  --color-success: #166534;
+  --color-warning: #854d0e;
+  --color-error: #991b1b;
+  --color-neutral: #4d5970;
+  --color-measure-input: #2f80ed;
+  --color-measure-cached: #087d92;
+  --color-measure-output: #635bff;
+  --color-measure-reasoning: #c94f00;
+  --color-action-hover: #1e3aaf;
+  --color-action-pressed: #1e328f;
+  --color-link-hover: #1e3aaf;
+  --color-destructive: #b91c1c;
+  --color-destructive-hover: #991b1b;
+  --color-destructive-pressed: #7f1d1d;
+
+  --font-*: initial;
+  --font-ui: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --text-*: initial;
+  --text-title: 2rem;
+  --text-title--line-height: 1.2;
+  --text-heading: 1.375rem;
+  --text-heading--line-height: 1.3;
+  --text-body: 1rem;
+  --text-body--line-height: 1.5;
+  --text-ui: 0.875rem;
+  --text-ui--line-height: 1.5;
+  --text-meta: 0.8125rem;
+  --text-meta--line-height: 1.5;
+  --text-code: 0.875rem;
+  --text-code--line-height: 1.5;
+  --text-count: 2.5rem;
+  --text-count--line-height: 1.1;
+  --text-count-secondary: 1.75rem;
+  --text-count-secondary--line-height: 1.1;
+
+  --radius-*: initial;
+  --radius-control: 8px;
+  --radius-panel: 12px;
+  --radius-pill: 9999px;
+
+  --breakpoint-*: initial;
+  --breakpoint-wide: 800px;
+}
+
+:root {
+  --surface-side-a: #f5f3ff;
+  --surface-side-b: #ecfeff;
+  --surface-success: #f0fdf4;
+  --surface-warning: #fffbeb;
+  --surface-error: #fef2f2;
+  --surface-neutral: #ffffff;
+  --border-warning: #e3c27a;
+  --border-error: #e8a3a3;
+
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-48: 48px;
+
+  --content-max: 1152px;
+  --reading-max: 920px;
+  --page-gutter: 24px;
+  --panel-padding: 24px;
+  --control-height: 40px;
+  color-scheme: light;
+}
+
+/* Surfaces with a utility name; aliases of the custom properties above. */
+@theme inline {
+  --color-surface-side-a: var(--surface-side-a);
+  --color-surface-side-b: var(--surface-side-b);
+  --color-surface-success: var(--surface-success);
+  --color-surface-warning: var(--surface-warning);
+  --color-surface-error: var(--surface-error);
+  --color-surface-neutral: var(--surface-neutral);
+  --color-border-warning: var(--border-warning);
+  --color-border-error: var(--border-error);
+}
+
+@media (max-width: 799.98px) {
+  :root {
+    --page-gutter: 16px;
+    --panel-padding: 16px;
+    --text-title: 1.75rem;
+  }
+}
+
+/* Dark theme: system preference unless Light is chosen, or an explicit Dark choice. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --color-canvas: #0a0d16;
+    --color-surface: #121a2c;
+    --color-surface-raised: #19243a;
+    --color-text: #f1f5ff;
+    --color-text-muted: #b0bdd3;
+    --color-divider: #34415c;
+    --color-control-border: #7d8ba7;
+    --color-action-border: #668cff;
+    --color-link-focus: #8cabff;
+    --color-selected: #1c3155;
+    --color-on-selected: #f1f5ff;
+    --color-checked: #8cabff;
+    --color-on-checked: #0a0d16;
+    --color-info-surface: #172241;
+    --color-side-a: #c4b5fd;
+    --color-side-b: #67e8f9;
+    --color-success: #86efac;
+    --color-warning: #fcd34d;
+    --color-error: #fca5a5;
+    --color-neutral: #b0bdd3;
+    --color-measure-input: #5aa2ff;
+    --color-measure-cached: #39c8dd;
+    --color-measure-output: #a29aff;
+    --color-measure-reasoning: #ff9857;
+    --color-link-hover: #b3c7ff;
+    --color-destructive: #991b1b;
+    --color-destructive-hover: #7f1d1d;
+    --color-destructive-pressed: #681717;
+    --surface-side-a: #262046;
+    --surface-side-b: #10323b;
+    --surface-success: #142b20;
+    --surface-warning: #302711;
+    --surface-error: #341c24;
+    --surface-neutral: #121a2c;
+    --border-warning: #6b5a22;
+    --border-error: #7a3a44;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --color-canvas: #0a0d16;
+  --color-surface: #121a2c;
+  --color-surface-raised: #19243a;
+  --color-text: #f1f5ff;
+  --color-text-muted: #b0bdd3;
+  --color-divider: #34415c;
+  --color-control-border: #7d8ba7;
+  --color-action-border: #668cff;
+  --color-link-focus: #8cabff;
+  --color-selected: #1c3155;
+  --color-on-selected: #f1f5ff;
+  --color-checked: #8cabff;
+  --color-on-checked: #0a0d16;
+  --color-info-surface: #172241;
+  --color-side-a: #c4b5fd;
+  --color-side-b: #67e8f9;
+  --color-success: #86efac;
+  --color-warning: #fcd34d;
+  --color-error: #fca5a5;
+  --color-neutral: #b0bdd3;
+  --color-measure-input: #5aa2ff;
+  --color-measure-cached: #39c8dd;
+  --color-measure-output: #a29aff;
+  --color-measure-reasoning: #ff9857;
+  --color-link-hover: #b3c7ff;
+  --color-destructive: #991b1b;
+  --color-destructive-hover: #7f1d1d;
+  --color-destructive-pressed: #681717;
+  --surface-side-a: #262046;
+  --surface-side-b: #10323b;
+  --surface-success: #142b20;
+  --surface-warning: #302711;
+  --surface-error: #341c24;
+  --surface-neutral: #121a2c;
+  --border-warning: #6b5a22;
+  --border-error: #7a3a44;
+  color-scheme: dark;
+}

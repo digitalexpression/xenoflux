@@ -1,10 +1,12 @@
 // Live, bounded capture through the native Codex app-server JSON-RPC protocol.
-// The adapter stores only allow-listed metadata; prompts, item payloads and
-// server error strings remain in the private process transcript, never report.
+// Audit reports receive projected metadata. Profile execution also returns the
+// exact assistant response to its private task owner, separate from audit reports.
 import { randomUUID, createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { realpathSync } from 'node:fs';
 import { mkdir, lstat, realpath, rm } from 'node:fs/promises';
 import { runAuditProcess } from './audit-process.js';
+import { validateNativeRequest, validateNativeResponse } from './native-requests.js';
 import { createAuditToolCapture } from './audit-tools.js';
 import { createAuditHookCapture } from './audit-hooks.js';
 import { startAuditTelemetry } from './audit-telemetry.js';
@@ -19,6 +21,7 @@ import { createResourceProvenance } from './audit-provenance.js';
 import { evaluateRequiredContext, validateRequiredContextRules } from './audit-context.js';
 import { prepareAuditStartup } from './audit-startup.js';
 import { validateAuditNativeConfig } from './audit-spec.js';
+import { captureAuditChildDiscovery } from './audit-session.js';
 
 const MAX_SKILLS = 5000;
 const MAX_EVENTS = 20000;
@@ -209,12 +212,27 @@ function linkedAgentCandidates(item) {
 }
 
 /**
- * Run one task through an isolated native app-server process and retain a
- * privacy-projected evidence record. processOptions are passed to the shared
- * bounded runner; profile must already contain executable/env selection.
+ * Run one task over the shared native app-server transport. The caller owns
+ * profile resolution/access rechecks and durable onSession checkpoints. Profile
+ * mode returns exact private response content; audit mode projects its evidence.
  */
-export async function runAuditCapture({ profile, workspace, task, selectedSkills = [], sandbox = 'workspace-write', processOptions = {},
-  onSession, onPhase, onTaskEnd, requiredContext, preflightOnly = false, limits = {}, telemetryFactory = startAuditTelemetry } = {}) {
+export async function runAuditCapture(options = {}) {
+  const { executionMode, profile, workspace, task, selectedSkills = [], sandbox = 'workspace-write', processOptions = {},
+    onSession, onPhase, onTaskEnd, onTurn, onNativeRequest, requiredContext, preflightOnly = false, limits = {},
+    telemetryFactory = startAuditTelemetry } = options;
+  if (!['audit', 'profile'].includes(executionMode)) throw new TypeError('Select an explicit capture executionMode');
+  const ordinary = executionMode === 'profile';
+  if (ordinary && (['sandbox', 'sandboxPolicy', 'approvalPolicy', 'model', 'effort', 'nativeConfig', 'selectedSkills', 'requiredContext', 'preflightOnly', 'telemetryFactory'].some(key => Object.hasOwn(options, key))
+    || profile?.nativeConfig !== undefined || profile?.skills !== undefined
+    || ['args', 'runtimeDirectory'].some(key => Object.hasOwn(processOptions, key))
+    || ['completionWaitMs', 'maxTelemetryBytes', 'maxTelemetryEvents'].some(key => Object.hasOwn(limits, key))
+    || (processOptions.outputLimitBytes !== undefined && processOptions.outputLimitBytes > 8 * 1024 * 1024)
+    || (profile?.launchArgs !== undefined && !isDeepStrictEqual(profile.launchArgs, ['-c', `sqlite_home=${JSON.stringify(profile.home)}`]))))
+    throw new TypeError('Profile execution does not accept audit policy overrides');
+  if (ordinary && (typeof onSession !== 'function' || workspace !== profile?.cwd
+    || !profile?.env || !isDeepStrictEqual(processOptions.env, profile.env)))
+    throw new TypeError('Profile execution requires the selected cwd/environment and a durable session checkpoint');
+  const timeoutMs = processOptions.timeoutMs === undefined ? (ordinary ? null : 300000) : processOptions.timeoutMs;
   if (!profile || typeof profile.executable !== 'string' || !profile.executable.startsWith('/')
     || typeof workspace !== 'string' || !workspace.startsWith('/') || typeof task !== 'string' || task.length === 0
     || !['read-only', 'workspace-write', 'danger-full-access'].includes(sandbox)
@@ -238,6 +256,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     coverage: { timeline: 'partial', agents: 'partial', instructions: 'unavailable', skills: 'partial', skillInventory: 'partial', skillUsage: 'partial', usage: 'partial', workspaceDiff: 'unavailable', outcome: 'partial' },
     outcome: { status: 'unknown' }, artifacts: [], warnings: [],
   };
+  let response = ordinary ? { status: 'unavailable', threadId: null, turnId: null, source: null, items: [], text: null } : null;
   const capture = { status: 'partial', capabilities: { appServerV2: 'unknown', skillsList: 'unknown', runtimeEvents: 'unknown', childHydration: 'unknown', skillUseObservability: 'partial' }, errors: [], byAgent: {}, byOrigin: {} };
   const provenance = createResourceProvenance({ workspace, profileHome: profile.home, userHome: profile.userHome });
   const updateProvenance = () => {
@@ -283,6 +302,13 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
   const notifications = [];
   const notificationWaiters = [];
   const rpcTimers = new Map();
+  const nativeRequests = new Map();
+  const approvalItems = new Map();
+  const approvalItemKey = p => JSON.stringify([p.threadId, p.turnId, p.itemId ?? p.item?.id]);
+  const assistantItems = new Map();
+  const requestController = new AbortController();
+  const captureSignal = AbortSignal.any([requestController.signal, ...(processOptions.signal ? [processOptions.signal] : [])]);
+  let requestFailure = null;
   let sequence = 0;
   let rpcClosed = false;
   let captureStopped = false;
@@ -296,7 +322,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       if (messageIndex < 0) { i++; continue; }
       const [message] = notifications.splice(messageIndex, 1);
       notificationWaiters.splice(i, 1);
-      clearTimeout(waiter.timer);
+      if (waiter.timer) clearTimeout(waiter.timer);
       waiter.resolve(message);
     }
   };
@@ -436,8 +462,12 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
         const path = typeof change?.path === 'string' ? safeText(change.path, 512) : undefined;
         const detail = change?.detail;
         const artifact = { kind: 'recorded-file-change', path: path ?? null, status: safeText(change?.kind ?? change?.type ?? detail?.kind ?? detail?.type ?? item.status, 48) ?? 'unknown',
-          agentId, turnId: validId(turnId) ? turnId : null, sourceLine };
-        const duplicate = run.artifacts.some(existing => existing.agentId === agentId && existing.turnId === artifact.turnId && existing.path === artifact.path && existing.status === artifact.status);
+          agentId, turnId: validId(turnId) ? turnId : null, sourceLine,
+          ...(validId(item.id) ? { itemId: item.id } : {}) };
+        const duplicate = run.artifacts.some(existing => existing.agentId === agentId && existing.turnId === artifact.turnId
+          && existing.path === artifact.path && existing.status === artifact.status
+          && (artifact.itemId ? existing.itemId === artifact.itemId
+            : existing.itemId ? false : existing.sourceLine === artifact.sourceLine));
         if (!duplicate && run.artifacts.length < Math.min(MAX_ARTIFACTS, limits.maxArtifacts ?? MAX_ARTIFACTS)) run.artifacts.push(artifact);
         else if (!duplicate) { capped = true; recordWarning('artifact-limit'); }
       }
@@ -503,7 +533,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
         status: safeText(params.turn.status, 60) ?? 'completed', observedCompletedAt: completedAt });
       if (tid === rootThreadId) rootTerminalTurn = params.turn;
       if (tid === rootThreadId && (!rootTurnId || params.turn.id === rootTurnId) && !endedTaskAt) {
-        endedTaskAt = Date.now();
+        endedTaskAt = Number.isSafeInteger(observedAtMs) ? observedAtMs : Date.now();
         run.outcome = { status: 'native-claim', nativeTurnStatus: safeText(params.turn.status, 60) ?? 'completed', acceptance: 'not-checked' };
       }
     }
@@ -542,6 +572,38 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     if (packet.parseError) { recordWarning('invalid-app-server-json'); return; }
     const message = packet.value;
     if (!message || typeof message !== 'object') return;
+    if (message.id !== undefined && typeof message.method === 'string') {
+      // Do not await human input in the stdout reader: cancellation and other
+      // server traffic must continue while a request is visible.
+      const key = `${typeof message.id}:${message.id}`;
+      const failRequest = error => {
+        if (captureSignal.aborted || captureStopped || rpcClosed) return;
+        requestFailure ??= { code: 'native-request-failed', method: message.method, message: error.message };
+        requestController.abort();
+      };
+      try {
+        const validated = validateNativeRequest(message);
+        if (nativeRequests.size >= MAX_ITEMS) throw new Error(`Native request limit exceeded: ${message.method}`);
+        if (nativeRequests.has(key)) throw new Error(`Duplicate native request: ${message.method}`);
+        if (typeof onNativeRequest !== 'function') throw new Error(`Native request requires user input: ${message.method}`);
+        const item = approvalItems.get(approvalItemKey(validated.params)) ?? null;
+        if (validated.method === 'item/fileChange/requestApproval'
+          && (item?.type !== 'fileChange' || !Array.isArray(item.changes) || !item.changes.length
+            || item.changes.some(change => typeof change?.path !== 'string' || !change.path
+              || typeof change.diff !== 'string' || !['add', 'delete', 'update'].includes(change.kind?.type))))
+          throw new Error(`Native request details unavailable: ${validated.method}`);
+        nativeRequests.set(key, validated);
+        Promise.resolve().then(() => onNativeRequest(structuredClone(validated), { signal: captureSignal,
+          item: item ? structuredClone(item) : null }))
+          .then(result => {
+            if (captureSignal.aborted || rpcClosed || captureStopped) return;
+            validateNativeResponse(validated, result);
+            pushOutgoing(JSON.stringify({ jsonrpc: '2.0', id: validated.id, result }) + '\n');
+            nativeRequests.delete(key);
+          }).catch(failRequest);
+      } catch (error) { failRequest(error); }
+      return;
+    }
     if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
       const waiter = pending.get(String(message.id));
       if (waiter) {
@@ -553,6 +615,12 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     }
     if (typeof message.method !== 'string' || !message.params || typeof message.params !== 'object') return;
     const p = message.params;
+    // Approval payloads can omit the action itself. Keep the bounded native
+    // lifecycle item on this connection, keyed by its exact actor/turn/item.
+    if (message.method === 'item/started' && validId(p.threadId) && validId(p.turnId)
+      && validId(p.item?.id) && ['commandExecution', 'fileChange'].includes(p.item.type)
+      && approvalItems.size < maxItems) approvalItems.set(approvalItemKey(p), p.item);
+    if (message.method === 'item/completed') approvalItems.delete(approvalItemKey(p));
     // A direct actor event proves the sole initialized audit connection has
     // that actor's listener. Keep it open across loaded-child snapshots so the
     // native zero-subscriber idle-unload timer cannot cold-reconstruct a child.
@@ -594,6 +662,12 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       if (notifications.length < MAX_EVENTS) { notifications.push(message); notify(); }
       return;
     }
+    if (ordinary && message.method === 'item/completed' && p.threadId === rootThreadId
+      && validId(p.turnId) && p.item?.type === 'agentMessage' && validId(p.item.id)
+      && typeof p.item.text === 'string' && (p.item.phase == null || p.item.phase === 'final_answer')
+      && assistantItems.size < maxItems) {
+      assistantItems.set(`${p.turnId}:${p.item.id}`, { turnId: p.turnId, id: p.item.id, text: p.item.text, phase: p.item.phase ?? null });
+    }
     addEvent(message.method, p, packet.lineNumber, observedAtMs);
     if (notifications.length < MAX_EVENTS) { notifications.push(message); notify(); }
     else { capped = true; recordWarning('notification-limit'); }
@@ -603,16 +677,16 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     const id = ++sequence;
     const key = String(id);
     const response = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { pending.delete(key); rpcTimers.delete(key); reject(new Error(`rpc-timeout:${method}`)); }, timeoutMs);
+      const timer = timeoutMs === null ? null : setTimeout(() => { pending.delete(key); rpcTimers.delete(key); reject(new Error(`rpc-timeout:${method}`)); }, timeoutMs);
       pending.set(key, message => {
-        clearTimeout(timer); rpcTimers.delete(key);
+        if (timer) clearTimeout(timer); rpcTimers.delete(key);
         if (message.error) {
           const error = new Error(`rpc-error:${method}`);
           if (Number.isSafeInteger(message.error.code)) error.rpcCode = message.error.code;
           reject(error);
         } else resolve(message.result);
       });
-      rpcTimers.set(key, timer);
+      if (timer) rpcTimers.set(key, timer);
     });
     pushOutgoing(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     return response;
@@ -623,7 +697,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     if (i >= 0) return Promise.resolve(notifications.splice(i, 1)[0]);
     return new Promise(resolve => {
       const waiter = { predicate, resolve, timer: null };
-      waiter.timer = setTimeout(() => {
+      waiter.timer = timeoutMs === null ? null : setTimeout(() => {
         const index = notificationWaiters.indexOf(waiter);
         if (index >= 0) notificationWaiters.splice(index, 1);
         resolve(null);
@@ -636,7 +710,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     try {
       // Paginated history and bounded child-item hydration require the native
       // experimental API opt-in; this is scoped to this connection.
-      const initialized = await request('initialize', { clientInfo: { name: 'xfx-audit', title: 'Xenoflux Audit', version: '1' }, capabilities: { experimentalApi: true } });
+      const initialized = await request('initialize', { clientInfo: { name: ordinary ? 'xfx-review' : 'xfx-audit', title: ordinary ? 'Xenoflux Review' : 'Xenoflux Audit', version: '1' }, capabilities: { experimentalApi: true } });
       capture.capabilities.appServerV2 = initialized ? 'available' : 'partial';
       pushOutgoing(JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} }) + '\n');
       await onPhase?.('discovery');
@@ -664,7 +738,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       // the saved profile. Inherit the process cwd instead, preserving native
       // trust/config/managed-policy decisions, and verify it before any task.
       const started = await request('thread/start', { ephemeral: false, experimentalRawEvents: false,
-        sandbox, approvalPolicy: 'never', historyMode: 'paginated' });
+        ...(ordinary ? { cwd: workspace } : { sandbox, approvalPolicy: 'never', historyMode: 'paginated' }) });
       const nativeCwds = [started?.cwd, started?.thread?.cwd].filter(cwd => cwd !== undefined);
       if (!nativeCwds.length || nativeCwds.some(cwd => nativePath(cwd) !== nativePath(workspace))) {
         recordWarning('native-workspace-mismatch');
@@ -674,6 +748,11 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       rootThreadId = started?.thread?.id;
       if (!validId(rootThreadId)) throw new Error('thread-start-missing-id');
       rootSessionId = validId(started?.thread?.sessionId) ? started.thread.sessionId : null;
+      if (ordinary) {
+        response.threadId = rootThreadId;
+        capture.effectiveSettings = Object.fromEntries(['model', 'modelProvider', 'reasoningEffort', 'approvalPolicy', 'sandbox']
+          .map(key => [key, started[key] ?? null]));
+      }
       agentFor(rootThreadId, null, 0, rootSessionId, workspace);
       for (const skill of run.skills) for (const catalog of skill.catalogs ?? []) if (!catalog.agentId) catalog.agentId = rootThreadId;
       await provenance.observeCatalog(capture.capabilities.skillsList === 'available' ? run.skills : null,
@@ -748,21 +827,23 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
         return;
       }
       const turnResponse = await request('turn/start', { threadId: rootThreadId, cwd: workspace,
-        sandboxPolicy,
-        approvalPolicy: 'never', input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, processOptions.timeoutMs ?? 300000);
+        ...(ordinary ? {} : { sandboxPolicy, approvalPolicy: 'never' }), input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, ordinary ? 30000 : timeoutMs);
       rootTurnId = turnResponse?.turn?.id;
       if (!validId(rootTurnId)) throw new Error('turn-start-missing-id');
+      if (ordinary) response.turnId = rootTurnId;
       if (rootTerminalTurn?.id !== rootTurnId) { endedTaskAt = null; run.outcome = { status: 'unknown', acceptance: 'not-checked' }; }
       threadMap.get(rootThreadId).currentTurnId = rootTurnId;
       for (const skill of structuredSelections) skill.observations.push({ kind: 'native-selection-accepted', agentId: rootThreadId, turnId: rootTurnId, evidence: 'structured turn/start skill input' });
       if (!run.turns.some(t => t.agentId === rootThreadId && t.turnId === rootTurnId)) run.turns.push({ agentId: rootThreadId, turnId: rootTurnId, status: 'in-progress', observedStartedAt: new Date().toISOString() });
+      await onTurn?.({ threadId: rootThreadId, turnId: rootTurnId });
       // Capture notifications until root terminal state, then boundedly hydrate
       // only child IDs positively linked by native collaboration metadata.
-      const completionWait = limits.completionWaitMs ?? processOptions.timeoutMs ?? 300000;
-      const deadline = Date.now() + completionWait;
+      const completionWait = limits.completionWaitMs === undefined
+        ? timeoutMs : limits.completionWaitMs;
+      const deadline = completionWait === null ? null : Date.now() + completionWait;
       let complete = false;
-      while (!complete && Date.now() < deadline && !capped && !captureStopped) {
-        const remaining = deadline - Date.now();
+      while (!complete && (deadline === null || Date.now() < deadline) && !capped && !captureStopped) {
+        const remaining = deadline === null ? 1000 : deadline - Date.now();
         const message = await takeNotification(m => m?.params?.threadId === rootThreadId && m.method === 'turn/completed'
           && m.params?.turn?.id === rootTurnId, Math.min(remaining, 1000));
         if (message) complete = true;
@@ -770,6 +851,32 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       if (captureStopped) return;
       if (!complete) { recordWarning('root-turn-completion-missing'); capture.capabilities.runtimeEvents = 'partial'; }
       await onPhase?.('capture');
+      if (ordinary) {
+        // Read the exact owned thread and turn; streamed commentary or another
+        // history entry can never substitute for its recorded assistant output.
+        const recorded = await request('thread/read', { threadId: rootThreadId, includeTurns: true });
+        if (recorded?.thread?.id !== rootThreadId || !Array.isArray(recorded.thread.turns))
+          throw new Error('response-thread-mismatch');
+        const turns = recorded.thread.turns.filter(turn => turn?.id === rootTurnId);
+        if (turns.length !== 1 || !Array.isArray(turns[0].items)) throw new Error('response-turn-unavailable');
+        const turn = turns[0];
+        if (turn.items.length > maxItems) throw new Error('response-item-limit');
+        if (turn.itemsView != null && turn.itemsView !== 'full') throw new Error('response-items-not-full');
+        const items = turn.items.filter(item => item?.type === 'agentMessage'
+          && (item.phase == null || item.phase === 'final_answer'));
+        if (new Set(items.map(item => item.id)).size !== items.length
+          || items.some(item => !validId(item.id) || typeof item.text !== 'string')) throw new Error('response-item-malformed');
+        response = { threadId: rootThreadId, turnId: rootTurnId, source: 'thread/read',
+          status: complete && rootTerminalTurn?.id === rootTurnId && rootTerminalTurn.status === 'completed'
+            && turn.status === 'completed' && items.some(item => item.text.trim()) ? 'complete' : 'partial',
+          items: items.map(item => ({ id: item.id, text: item.text, phase: item.phase ?? null })),
+          text: items.length ? items.map(item => item.text).join('\n\n') : null };
+        run.status = response.status === 'complete' ? 'ready' : 'partial';
+        run.reason = response.status === 'complete' ? null : 'Recorded assistant response is incomplete';
+        run.coverage.timeline = complete && !capped ? 'complete' : 'partial';
+        capture.status = run.status;
+        return;
+      }
       // Receiver IDs and thread/started metadata are candidates only. Admit a
       // child after thread/read corroborates exact ID, parent, and root session.
       const verifiedChildren = [];
@@ -1115,7 +1222,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       taskEndEvidence = { nativeEndedAt: new Date(endedTaskAt).toISOString(), complete: taskEndComplete,
         rootComplete: complete, childAgentsComplete: !childWaitIncomplete };
     } catch (error) {
-      run.status = 'partial'; run.reason = 'App-server capture failed';
+      run.status = 'partial'; run.reason = ordinary ? `App-server capture failed: ${error.message}` : 'App-server capture failed';
       capture.errors.push({ code: 'app-server-capture-failed' });
       recordWarning('app-server-capture-failed');
       capture.status = 'partial';
@@ -1147,7 +1254,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
     warnings: ['skill-telemetry-unavailable'] } };
   // Arbitrary process arguments are a test/embedding seam, not a Codex CLI.
   // An explicit factory can exercise the same merge without changing that process.
-  if (!processOptions.args || telemetryFactory !== startAuditTelemetry) {
+  if (!ordinary && (!processOptions.args || telemetryFactory !== startAuditTelemetry)) {
     if (!processOptions.args) {
       runtime = await privateRuntimeDirectory(processOptions.stdoutPath, processOptions.runtimeDirectory);
       const isolated = isolatedNativeOptions(processOptions.env, runtime);
@@ -1165,7 +1272,7 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
   }
   let process;
   try {
-    const args = [...(receiver?.args ?? []), ...nativeArgs, ...(processOptions.args ?? ['app-server'])];
+    const args = [...(receiver?.args ?? []), ...nativeArgs, ...(ordinary ? (profile.launchArgs ?? []) : []), ...(processOptions.args ?? ['app-server'])];
     const launch = runtime ? await prepareAuditStartup({ profile,
       directory: join(runtime.root, 'startup-protection'), args, commandSandbox: true }) : { executable: profile.executable, args };
     if (runtime) capture.observer.startupPreservation = { status: 'write-protected',
@@ -1174,23 +1281,27 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       commandSandboxTransition: 'native-image-only-with-reentry-denied' };
     process = await runAuditProcess({ executable: launch.executable,
       args: launch.args, cwd: workspace,
-      env: nativeEnv, timeoutMs: processOptions.timeoutMs ?? 300000, outputLimitBytes: processOptions.outputLimitBytes,
-      stdoutPath: processOptions.stdoutPath, stderrPath: processOptions.stderrPath, signal: processOptions.signal,
+      env: nativeEnv, timeoutMs, outputLimitBytes: processOptions.outputLimitBytes,
+      stdoutPath: processOptions.stdoutPath, stderrPath: processOptions.stderrPath, signal: captureSignal,
       onSpawn: processOptions.onSpawn, onEvent, input: drive });
   } finally {
     if (receiver) {
       try { telemetrySnapshot = await receiver.close() ?? receiver.snapshot(); }
       catch { recordWarning('skill-telemetry-close-failed'); }
     }
+    if (runtime && process?.shutdown?.groupTerminated === true && validId(rootThreadId)) {
+      run.childDiscovery = await captureAuditChildDiscovery(profile.home, runtime.sqlite, rootThreadId);
+    }
     if (runtime && (!process || process.shutdown?.groupTerminated !== false))
       await rm(runtime.root, { recursive: true, force: true }).catch(() => recordWarning('runtime-cleanup-failed'));
     else if (runtime) recordWarning('runtime-preserved-after-uncertain-shutdown');
   }
+  requestController.abort();
   // A server that exits or hits a runner limit may leave an RPC request open.
   // Cancel it explicitly, then let the orchestration coroutine settle before
   // returning so no late callback can mutate the persisted run snapshot.
-  if (process.status !== 'exited' || process.exitCode !== 0 || process.output?.truncated) captureStopped = true;
-  for (const waiter of notificationWaiters.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(null); }
+  captureStopped = true;
+  for (const waiter of notificationWaiters.splice(0)) { if (waiter.timer) clearTimeout(waiter.timer); waiter.resolve(null); }
   for (const [key, finish] of [...pending]) finish({ error: { code: -32000 } });
   for (const timer of rpcTimers.values()) clearTimeout(timer);
   rpcTimers.clear();
@@ -1217,8 +1328,14 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
   for (const warning of hooks.warnings) recordWarning(warning);
   mergeAuditSkillTelemetry(run, telemetrySnapshot);
   capture.capabilities.skillUseObservability = run.skillInvocations?.length ? 'native-runtime-detected' : receiver ? 'enabled-unverified' : 'unavailable';
-  if (!runtime) capture.observer = { transport: receiver ? 'loopback-otlp-http-json' : 'unavailable', savedSettingsChanged: false,
+  if (!runtime && !ordinary) capture.observer = { transport: receiver ? 'loopback-otlp-http-json' : 'unavailable', savedSettingsChanged: false,
     effects: receiver ? ['per-process native log exporter override', 'prompt logging disabled', 'non-skill telemetry discarded'] : [] };
+  if (ordinary) capture.observer = { transport: 'native-app-server', executionMode: 'profile',
+    effects: ['normal native profile history, authentication and runtime state writes'] };
+  if (requestFailure) {
+    capture.errors.push(requestFailure);
+    run.reason = requestFailure.message;
+  }
   run.metrics.wallMs = Date.now() - startedAt;
   run.metrics.processElapsedMs = process.elapsedMs;
   // This protocol does not expose active-vs-waiting intervals.
@@ -1254,5 +1371,11 @@ export async function runAuditCapture({ profile, workspace, task, selectedSkills
       .catch(() => recordWarning('task-end-callback-failed'));
     await taskEndPromise;
   }
-  return { process, run, capabilities: capture.capabilities, capture };
+  if (ordinary && response.text === null) {
+    const items = [...assistantItems.values()].filter(item => item.turnId === rootTurnId)
+      .map(({ turnId, ...item }) => item);
+    if (items.length) response = { ...response, turnId: rootTurnId, status: 'partial', source: 'item/completed',
+      items, text: items.map(item => item.text).join('\n\n') };
+  }
+  return { process, run, capabilities: capture.capabilities, capture, ...(ordinary ? { response } : {}) };
 }

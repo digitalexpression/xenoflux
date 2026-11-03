@@ -25,17 +25,17 @@ function selectedWrapper(rootAgentId, threads, source) {
   return deriveRecordedUsage({ rootAgentId, threads, source });
 }
 
-function run(id = 'recorded') {
+function run(id = 'recorded', observedVersion = version) {
   const usage = counters(10, 5, 2, 1), cumulative = counters(30, 15, 5, 2);
-  const source = { kind: 'native-rollout', clientVersion: version, nativeSessionId: ids.root,
+  const source = { kind: 'native-rollout', clientVersion: observedVersion, nativeSessionId: ids.root,
     fingerprintScope: 'source-snapshot', fingerprint: createHash('sha256').update(id).digest('hex'), bytes: 200, fileBytes: 200 };
-  const thread = deriveRecordedThreadUsage({ version, sourceComplete: true, source, agentId: ids.root, sessionId: ids.root,
+  const thread = deriveRecordedThreadUsage({ version: observedVersion, sourceComplete: true, source, agentId: ids.root, sessionId: ids.root,
     parentId: null, rootTurnIds: [ids.turn], turns: [{ turnId: ids.turn, contextLine: 2, terminalLine: 5, status: 'completed' }],
     records: [{ response_id: 'resp-record-1', thread_id: ids.root, session_id: ids.root, turn_id: ids.turn,
       root_turn_id: ids.turn, sourceLine: 3, usage, turn_token_usage: usage, thread_token_usage: cumulative }] });
   assert.equal(thread.status, 'complete');
   const recorded = selectedWrapper(ids.root, [thread], source);
-  return { id, status: 'completed', source: { ...source, clientVersion: version },
+  return { id, status: 'completed', source,
     comparisonConditions: structuredClone(eligibleFixture.comparisonConditions),
     sourceWorkspace: { sourceCommit: eligibleFixture.comparisonConditions.baseline.commit,
       sourceTree: eligibleFixture.comparisonConditions.baseline.tree },
@@ -103,7 +103,7 @@ test('byte compaction and omitted response records cannot retain precomputed tot
   assert.equal(compact.usage.recorded.values.totalTokens, null);
 });
 
-test('recorded response comparison requires compatible complete contracts and unique role/turn alignment', () => {
+test('recorded response comparison aligns compatible protocols across versions and unique role/turns', () => {
   const left = compactAuditTrial({ runs: [run('left')] }).runs[0];
   const right = compactAuditTrial({ runs: [run('right')] }).runs[0];
   const comparisonReport = compareAuditRuns(left, right);
@@ -113,10 +113,15 @@ test('recorded response comparison requires compatible complete contracts and un
   assert.equal(comparison.fields.totalTokens[0].delta, 0);
   assert.match(renderAudit(comparisonReport), /Recorded response usage comparison: complete/);
 
-  const unknown = compareAuditRuns(left, { ...right, source: { kind: 'native-rollout', clientVersion: 'other' } })
+  const next = compactAuditTrial({ runs: [run('next', '0.164.9')] }).runs[0];
+  const acrossVersions = compareAuditRuns(left, next).comparison.usage.recordedResponseUsage;
+  assert.equal(acrossVersions.status, 'complete');
+  assert.equal(acrossVersions.fields.totalTokens[0].delta, 0);
+
+  const malformed = compareAuditRuns(left, { ...right, source: { kind: 'native-rollout', clientVersion: 'invalid version' } })
     .comparison.usage.recordedResponseUsage;
-  assert.equal(unknown.status, 'unknown');
-  assert.equal(unknown.fields.totalTokens.length, 0);
+  assert.equal(malformed.status, 'unknown');
+  assert.equal(malformed.fields.totalTokens.length, 0);
 });
 
 test('fresh and legacy comparisons do not gain a historical usage field', () => {

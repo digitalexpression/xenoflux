@@ -9,7 +9,6 @@ import { hostname } from 'node:os';
 const execFileAsync = promisify(execFile);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const DEFAULT_LIMIT = 8 * 1024 * 1024;
-const MAX_LINE = 256 * 1024;
 const MAX_INPUT_CHUNK = 256 * 1024;
 const isAsyncIterable = value => value && typeof value[Symbol.asyncIterator] === 'function';
 
@@ -21,7 +20,7 @@ function validate(o) {
       Object.entries(o.env).some(([k, v]) => !k || k.includes('=') || k.includes('\0') || typeof v !== 'string' || v.includes('\0')) ||
       typeof o.stdoutPath !== 'string' || !o.stdoutPath.startsWith('/') ||
       typeof o.stderrPath !== 'string' || !o.stderrPath.startsWith('/') ||
-      !Number.isFinite(o.timeoutMs) || o.timeoutMs < 1 ||
+      (o.timeoutMs !== null && (!Number.isFinite(o.timeoutMs) || o.timeoutMs < 1)) ||
       (o.outputLimitBytes !== undefined && (!Number.isSafeInteger(o.outputLimitBytes) || o.outputLimitBytes < 1)) ||
       (o.input !== undefined && typeof o.input !== 'string' && !Buffer.isBuffer(o.input) && !isAsyncIterable(o.input)) ||
       (o.signal !== undefined && typeof o.signal?.addEventListener !== 'function') ||
@@ -124,6 +123,9 @@ export async function runAuditProcess(options = {}) {
   const files = { stdout: out, stderr: err };
   const fail = reason => { if (!firstError) firstError = reason; };
   const emitLines = async (stream, chunk, final = false) => {
+    // processChunk bounds all buffered bytes by the combined output limit.
+    // Native thread/read responses can exceed 256 KiB in one JSONL message;
+    // a smaller line cap would silently discard their RPC response.
     const combined = Buffer.concat([lineBuffers[stream], chunk]);
     let offset = 0;
     while (true) {
@@ -132,16 +134,10 @@ export async function runAuditProcess(options = {}) {
       const line = combined.subarray(offset, nl);
       offset = nl + 1;
       lineNumber[stream]++;
-      if (line.length > MAX_LINE) { await onEvent?.({ stream, lineNumber: lineNumber[stream], parseError: 'line-too-long' }); continue; }
       try { await onEvent?.({ stream, lineNumber: lineNumber[stream], value: JSON.parse(line.toString('utf8')) }); }
       catch (e) { if (e instanceof SyntaxError) await onEvent?.({ stream, lineNumber: lineNumber[stream], parseError: 'invalid-json' }); else throw e; }
     }
     lineBuffers[stream] = combined.subarray(offset);
-    if (lineBuffers[stream].length > MAX_LINE) {
-      lineBuffers[stream] = Buffer.alloc(0);
-      lineNumber[stream]++;
-      await onEvent?.({ stream, lineNumber: lineNumber[stream], parseError: 'line-too-long' });
-    }
     if (final && lineBuffers[stream].length) {
       lineNumber[stream]++;
       try { await onEvent?.({ stream, lineNumber: lineNumber[stream], value: JSON.parse(lineBuffers[stream].toString('utf8')) }); }
@@ -177,7 +173,7 @@ export async function runAuditProcess(options = {}) {
     abortHandler = () => { trigger('cancelled'); resolve(); };
     signal?.addEventListener('abort', abortHandler, { once: true });
   });
-  const timer = setTimeout(() => trigger('timeout'), timeoutMs);
+  const timer = timeoutMs === null ? null : setTimeout(() => trigger('timeout'), timeoutMs);
   let processIdentity = null;
   let inputIterator;
   const writeInput = async () => {
@@ -234,7 +230,7 @@ export async function runAuditProcess(options = {}) {
     return { status, exitCode, signal: exitSignal, elapsedMs: Date.now() - startedAt, pid: child.pid,
       processIdentity, shutdown, output: { bytes: total, truncated } };
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
     await Promise.all([out.close().catch(() => {}), err.close().catch(() => {})]);
   }

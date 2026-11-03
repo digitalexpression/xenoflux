@@ -75,7 +75,11 @@ releasing the reservation. After graceful quit, an unavailable `ps` command labe
 with the same PID, UID and start time keeps close waiting; it is never adopted
 or controlled. Timeouts, reused identities, detached helpers, or
 ambiguous launches preserve the record and reservation. If an app is quit
-normally outside Xenoflux, `open NAME` can reconcile its stopped, idle record.
+normally outside Xenoflux, observed listing, ordinary review Start and `open NAME`
+can reconcile its stopped record. A verified review participant may retain
+profile handles and its reservation after Desktop exits; other holders still
+block cleanup. The [review contract](REVIEW-TASK-IMPLEMENTATION.md#execution-with-the-selected-profiles-settings)
+owns the bounded Desktop-plus-review sharing behavior.
 For an interrupted launch or close, run `desktop recover NAME` after
 the instance stops. Recovery validates its binding, journal and reservation
 owner, checks remaining processes and open handles, and releases only its own

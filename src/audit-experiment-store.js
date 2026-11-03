@@ -1,7 +1,7 @@
 // Durable, private records for controlled audit experiments. Native transcripts
 // remain in their owning Codex homes; this store contains only scoped evidence.
-import { constants } from 'node:fs';
-import { mkdir, open, lstat, realpath, rename, unlink, link } from 'node:fs/promises';
+import { constants, linkSync, unlinkSync } from 'node:fs';
+import { mkdir, open, lstat, realpath, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { hostname } from 'node:os';
@@ -10,6 +10,8 @@ import { projectReportResourceProvenance } from './audit-store.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_BYTES = 16 * 1024 * 1024;
+const TRANSIENT_LINK_RETRIES = 30;
+const TRANSIENT_LINK_DELAY_MS = 2;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const auditsPath = store => join(store.directory, 'audits');
 
@@ -51,15 +53,15 @@ async function atomicWrite(directory, name, value, { exclusive = false } = {}) {
           throw new Error('Unsafe audit state file; preserving it');
       } catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
-    // link() provides an atomic no-replace publish; remove the temporary link
-    // immediately so the durable record has link count one.
+    // Preserve atomic no-replace publication without yielding to the UI event
+    // loop between linking the record and removing its temporary name.
     if (exclusive) {
-      try { await link(temp, path); }
+      try { linkSync(temp, path); }
       catch (error) {
         if (error.code === 'EEXIST') throw new Error('Audit final report is immutable and already exists');
         throw error;
       }
-      await unlink(temp);
+      unlinkSync(temp);
     } else await rename(temp, path);
     await syncDirectory(directory);
     return path;
@@ -71,26 +73,74 @@ async function atomicWrite(directory, name, value, { exclusive = false } = {}) {
 }
 
 async function readSafeJSON(path, { optional = false } = {}) {
-  let before;
-  try { before = await lstat(path); }
-  catch (error) { if (optional && error.code === 'ENOENT') return null; throw error; }
-  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.uid !== process.getuid()
-    || (before.mode & 0o077) || before.size > MAX_BYTES || await realpath(path) !== path)
-    throw new Error('Unsafe or oversized audit record; preserving it');
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const now = await handle.stat();
-    if (now.dev !== before.dev || now.ino !== before.ino || now.size !== before.size) throw new Error('Audit record changed while reading');
-    const bytes = Buffer.alloc(now.size); let offset = 0;
-    while (offset < bytes.length) {
-      const { bytesRead } = await handle.read(bytes, offset, Math.min(65536, bytes.length - offset), offset);
-      if (!bytesRead) break;
-      offset += bytesRead;
+  const safeReplacementAtPath = async stale => {
+    let current;
+    try { current = await lstat(path); }
+    catch { return false; }
+    if (!current.isFile() || current.isSymbolicLink() || current.uid !== process.getuid()
+      || (current.mode & 0o077) || current.size > MAX_BYTES || await realpath(path) !== path
+      || ![1, 2].includes(current.nlink)) return false;
+    return current.dev !== stale.dev || current.ino !== stale.ino;
+  };
+  for (let attempt = 0; attempt <= TRANSIENT_LINK_RETRIES; attempt++) {
+    let before;
+    try { before = await lstat(path); }
+    catch (error) { if (optional && error.code === 'ENOENT') return null; throw error; }
+    if (!before.isFile() || before.isSymbolicLink() || before.uid !== process.getuid()
+      || (before.mode & 0o077) || before.size > MAX_BYTES || await realpath(path) !== path)
+      throw new Error('Unsafe or oversized audit record; preserving it');
+    // lstat can finish with a snapshot of the old inode after atomic rename
+    // has already removed its last directory entry. Retry only when the path
+    // now names a different, independently validated safe inode.
+    if (before.nlink === 0) {
+      if (!await safeReplacementAtPath(before) || attempt === TRANSIENT_LINK_RETRIES)
+        throw new Error('Audit record changed while reading');
+      await new Promise(resolve => setTimeout(resolve, TRANSIENT_LINK_DELAY_MS));
+      continue;
     }
-    const after = await handle.stat();
-    if (offset !== now.size || after.size !== now.size || after.mtimeMs !== now.mtimeMs) throw new Error('Audit record changed while reading');
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-  } finally { await handle.close(); }
+    if (before.nlink !== 1) {
+      if (before.nlink !== 2 || attempt === TRANSIENT_LINK_RETRIES)
+        throw new Error('Unsafe or oversized audit record; preserving it');
+      await new Promise(resolve => setTimeout(resolve, TRANSIENT_LINK_DELAY_MS));
+      continue;
+    }
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let retry = false;
+    try {
+      const now = await handle.stat();
+      if (now.dev !== before.dev || now.ino !== before.ino) {
+        if (await safeReplacementAtPath(before)) retry = true;
+        else throw new Error('Audit record changed while reading');
+      } else if (now.size !== before.size) throw new Error('Audit record changed while reading');
+      if (now.nlink === 2) retry = true;
+      else if (now.nlink === 0) {
+        if (await safeReplacementAtPath(now)) retry = true;
+        else throw new Error('Audit record changed while reading');
+      }
+      else if (now.nlink !== 1) throw new Error('Unsafe or oversized audit record; preserving it');
+      if (retry) continue;
+      const bytes = Buffer.alloc(now.size); let offset = 0;
+      while (offset < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, offset, Math.min(65536, bytes.length - offset), offset);
+        if (!bytesRead) break;
+        offset += bytesRead;
+      }
+      const after = await handle.stat();
+      if (after.nlink === 2) retry = true;
+      else if (after.nlink === 0) {
+        if (await safeReplacementAtPath(after)) retry = true;
+        else throw new Error('Audit record changed while reading');
+      }
+      else if (after.nlink !== 1) throw new Error('Unsafe or oversized audit record; preserving it');
+      if (retry) continue;
+      if (offset !== now.size || after.size !== now.size || after.mtimeMs !== now.mtimeMs) throw new Error('Audit record changed while reading');
+      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    } finally {
+      await handle.close();
+      if (retry) await new Promise(resolve => setTimeout(resolve, TRANSIENT_LINK_DELAY_MS));
+    }
+  }
+  throw new Error('Unsafe or oversized audit record; preserving it');
 }
 
 async function recordDirectory(store, id) {

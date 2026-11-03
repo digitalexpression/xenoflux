@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, chmod, symlink, lstat, writeFile, rm, realpath } from 'node:fs/promises';
+import { lstatSync } from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
+import { mkdtemp, mkdir, readFile, chmod, symlink, link, unlink, lstat, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
@@ -146,8 +149,86 @@ test('unsafe IDs, symlink record paths and hard-linked metadata are rejected', a
   await assert.rejects(readAuditRecord(f.store, experiment.id));
   await rm(original);
   const outside = join(f.store.directory, 'state-copy'); await writeFile(outside, saved, { mode: 0o600 });
-  const { link } = await import('node:fs/promises'); await link(outside, original);
+  await link(outside, original);
   await assert.rejects(readAuditRecord(f.store, experiment.id), /Unsafe/);
+});
+
+test('record reader tolerates the short duplicate-link window during exclusive publication', async t => {
+  const f = await fixture(t);
+  const experiment = await createExperiment(f.store, { spec: {}, task: 'publish window', profiles: [] });
+  const original = join(experiment.directory, 'state.json');
+  const transient = join(f.store.directory, 'transient-state-link');
+  await link(original, transient);
+  const removeTransient = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => unlink(transient).then(resolve, reject), 30);
+    t.after(() => clearTimeout(timer));
+  });
+  const reading = readAuditRecord(f.store, experiment.id);
+  await removeTransient;
+  const reopened = await reading;
+  assert.equal(reopened.state.status, 'prepared');
+
+  const persistent = join(f.store.directory, 'persistent-state-link');
+  await link(original, persistent);
+  await assert.rejects(readAuditRecord(f.store, experiment.id), /Unsafe/);
+});
+
+test('exclusive report publication does not yield while the temporary link remains', async t => {
+  const f = await fixture(t), experiment = await createExperiment(f.store, { spec: {}, task: 'publish visibility', profiles: [] });
+  const path = join(experiment.directory, 'report.json');
+  let done = false, sawTwo = false;
+  const publication = finalizeAuditRecord(f.store, experiment.id, { status: 'complete' }).finally(() => { done = true; });
+  while (!done) {
+    await new Promise(resolve => setImmediate(resolve));
+    try { if (lstatSync(path).nlink === 2) sawTwo = true; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  await publication;
+  assert.equal(sawTwo, false);
+});
+
+test('record reader reopens the newly renamed state when its old inode is unlinked mid-read', async t => {
+  const f = await fixture(t);
+  const experiment = await createExperiment(f.store, { spec: {}, task: 'rename window', profiles: [] });
+  const run = await createExperimentRun(f.store, { experimentId: experiment.id, profile: { id: 'p' } });
+  const writing = (async () => {
+    for (let index = 0; index < 24; index++) await writeAuditState(f.store, run.id, {
+      status: `revision-${index}`, detail: 'state replacement fixture '.repeat(24),
+    });
+  })();
+  const reads = Array.from({ length: 48 }, () => readAuditRecord(f.store, run.id));
+  const results = await Promise.allSettled([writing, ...reads]);
+  assert.deepEqual(results.filter(result => result.status === 'rejected'), []);
+  assert.equal(results.filter(result => result.status === 'fulfilled' && result.value?.state).length, reads.length);
+});
+
+test('record reader retries safe replacements and rejects unsafe replacements behind stale pre-open metadata', async t => {
+  for (const unsafe of [false, true]) {
+    const f = await fixture(t);
+    const experiment = await createExperiment(f.store, { spec: {}, task: 'stale lstat snapshot', profiles: [] });
+    const run = await createExperimentRun(f.store, { experimentId: experiment.id, profile: { id: 'p' } });
+    const path = join(run.directory, 'state.json'), originalLstat = fsPromises.lstat;
+    let injected = false;
+    fsPromises.lstat = async (...args) => {
+      if (injected || args[0] !== path) return originalLstat(...args);
+      const stale = await originalLstat(...args);
+      injected = true;
+      await writeAuditState(f.store, run.id, { status: 'new-revision' });
+      if (unsafe) await chmod(path, 0o644);
+      const replacement = await originalLstat(path);
+      assert.notDeepEqual([replacement.dev, replacement.ino], [stale.dev, stale.ino]);
+      return Object.assign(Object.create(Object.getPrototypeOf(stale)), stale, { nlink: 0 });
+    };
+    syncBuiltinESMExports();
+    try {
+      if (unsafe) await assert.rejects(readAuditRecord(f.store, run.id), /Unsafe|changed/);
+      else assert.equal((await readAuditRecord(f.store, run.id)).state.status, 'new-revision');
+      assert.equal(injected, true);
+    } finally {
+      fsPromises.lstat = originalLstat;
+      syncBuiltinESMExports();
+    }
+  }
 });
 
 test('audit-only home lease blocks a colliding audit owner and releases only its exact owner', async t => {

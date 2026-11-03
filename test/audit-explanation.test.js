@@ -12,7 +12,7 @@ import { compareAuditRuns, renderAudit } from '../src/audit-report.js';
 import { compactAuditTrial } from '../src/audit-statistics.js';
 import { exportAuditReport, readAuditReport } from '../src/audit-store.js';
 
-const headings = ['Comparison conditions', 'Behavioral findings', 'Paired action evidence', 'Verification', 'Time and tokens', 'Outcome and code changes'];
+const headings = ['Comparison conditions', 'Session replay', 'Verification', 'Time and tokens', 'Outcome and code changes'];
 const scope = explanation => explanation.findings.find(row => row.rule === 'editable-file-boundary');
 
 test('missing selected arms retain pair accounting through rendering and source-free reopen', async () => {
@@ -62,7 +62,7 @@ test('booking-ledger scope difference has paired owned references and distinct o
     const text = renderAudit(report, { format });
     const positions = headings.map(title => text.indexOf(format === 'markdown' ? `## ${title}\n` : `${title}\n`));
     assert.ok(positions.every((position, i) => position >= 0 && (i === 0 || position > positions[i - 1])));
-    assert.match(text, /synthetic/); assert.match(text, /Recorded an edit outside the declared file boundary/);
+    assert.match(text, /synthetic/); assert.doesNotMatch(text, /Behavioral findings|Paired action evidence/);
   }
 });
 
@@ -108,6 +108,117 @@ test('same-source read/edit order is scoped and never aligned across unrelated a
   pair[1].events[0].agentId = 'unowned-actor';
   assert.equal(find().classification, 'inconclusive');
   assert.equal(find().right.assertion, 'read-edit-order-unknown');
+});
+
+test('native app-server stdout line order supports same-actor sequencing without inventing named command details', () => {
+  const pair = bookingLedgerPair();
+  for (const run of pair) {
+    const actor = run.agents[0], turnId = run.turns[0].turnId;
+    run.source = { ...run.source, kind: 'native-app-server-v2', nativeSessionId: actor.id };
+    delete actor.source;
+    run.turns = [{ agentId: actor.id, turnId, status: 'completed' }];
+    run.events = [{ kind: 'command-execution', agentId: actor.id, turnId, sourceLine: 12,
+      metadata: { operation: 'read', status: 'completed', exitCode: 0 } }];
+    run.artifacts = [{ kind: 'recorded-file-change', agentId: actor.id, turnId, sourceLine: 24, path: 'src/example.js' }];
+    run.actions = [];
+    run.namedActions = [];
+  }
+  const explanation = buildAuditExplanation(...pair);
+  const finding = explanation.findings.find(row => row.rule === 'read-edit-sequence');
+  assert.equal(finding.left.assertion, 'read-before-recorded-edit');
+  assert.equal(finding.right.assertion, 'read-before-recorded-edit');
+  assert.equal(finding.classification, 'similar');
+  assert.equal(explanation.evidence.left.every(row => row.order.basis === 'source-line'), true);
+  assert.deepEqual(explanation.evidence.left.filter(row => row.kind === 'file-change').map(row => row.sourceLine), [24]);
+  assert.deepEqual(explanation.evidence.left.filter(row => row.kind === 'read').map(row => row.sourceLine), [12]);
+  assert.equal(explanation.findings.find(row => row.rule === 'named-visible-test-execution').left.assertion, 'named-visible-test-unknown');
+  const frozen = freezeAuditComparisonEvidence(pair[0]), original = JSON.stringify(frozen);
+  pair[0].comparisonEvidence = structuredClone(frozen);
+  assert.deepEqual(freezeAuditComparisonEvidence(pair[0]), frozen);
+  assert.equal(JSON.stringify(frozen), original, 'fresh source-line ordering never rewrites a frozen original');
+});
+
+test('app-server source-line ordering does not cross actors or invent a missing line', () => {
+  const pair = bookingLedgerPair();
+  for (const [index, run] of pair.entries()) {
+    const root = run.agents[0], rootTurnId = run.turns[0].turnId, childId = `child-${index}`, childTurnId = `child-turn-${index}`;
+    run.source = { ...run.source, kind: 'native-app-server-v2', nativeSessionId: root.id };
+    delete root.source;
+    run.agents.push({ id: childId, parentId: root.id, depth: 1 });
+    run.turns = [{ agentId: root.id, turnId: rootTurnId, status: 'completed' },
+      { agentId: childId, turnId: childTurnId, status: 'completed' }];
+    run.events = [{ kind: 'command-execution', agentId: root.id, turnId: rootTurnId, sourceLine: 12,
+      metadata: { operation: 'read', status: 'completed' } }];
+    run.artifacts = [{ kind: 'recorded-file-change', agentId: index === 0 ? childId : root.id,
+      turnId: index === 0 ? childTurnId : rootTurnId, sourceLine: index === 0 ? 24 : null, path: 'src/example.js' }];
+    run.actions = []; run.namedActions = [];
+  }
+  const finding = buildAuditExplanation(...pair).findings.find(row => row.rule === 'read-edit-sequence');
+  assert.equal(finding.left.assertion, 'read-edit-order-unknown', 'different actor sources are not paired');
+  assert.equal(finding.right.assertion, 'read-edit-order-unknown', 'a missing line cannot be ordered');
+  assert.equal(finding.classification, 'inconclusive');
+});
+
+test('pathless file-change tool evidence is unknown while retained per-path artifacts keep their scope', () => {
+  const pair = bookingLedgerPair();
+  for (const run of pair) {
+    const actor = run.agents[0], turnId = run.turns[0].turnId, artifact = run.artifacts[0];
+    const itemId = `file-change-${actor.id}`;
+    run.events = [{ kind: 'item/completed', agentId: actor.id, turnId, itemId, itemType: 'fileChange',
+      sourceLine: artifact.sourceLine }];
+    run.toolInvocations = [{ agentId: actor.id, turnId, itemId, kind: 'file-change',
+      toolName: 'file-change', status: 'completed', sourceLine: artifact.sourceLine + 10 },
+    ];
+  }
+  const raw = structuredClone(pair);
+  for (const run of raw) run.artifacts = [];
+  const rawFinding = buildAuditExplanation(...raw).findings.find(row => row.rule === 'editable-file-boundary');
+  assert.equal(rawFinding.left.assertion, 'edit-scope-unknown');
+  assert.equal(rawFinding.right.assertion, 'edit-scope-unknown');
+  assert.equal(rawFinding.classification, 'inconclusive');
+
+  const replayed = buildAuditExplanation(...pair).findings.find(row => row.rule === 'editable-file-boundary');
+  assert.equal(replayed.left.assertion, 'in-boundary-edit-observed');
+  assert.equal(replayed.right.assertion, 'outside-boundary-edit-observed');
+  assert.equal(replayed.classification, 'different');
+  for (const run of pair) {
+    const core = freezeAuditComparisonEvidence(run);
+    assert.equal(core.actions.filter(action => action.kind === 'file-change').length, 1,
+      'an exact completed-item link suppresses the pathless tool duplicate');
+  }
+
+  const unmatched = structuredClone(pair);
+  for (const run of unmatched) {
+    const actor = run.agents[0], turnId = run.turns[0].turnId, lineNumber = run.artifacts[0].sourceLine + 20;
+    run.toolInvocations.push({ agentId: actor.id, turnId, itemId: `unlinked-${actor.id}`, kind: 'file-change',
+      toolName: 'file-change', status: 'completed', sourceLine: lineNumber });
+  }
+  const unmatchedFinding = buildAuditExplanation(...unmatched).findings.find(row => row.rule === 'editable-file-boundary');
+  assert.equal(unmatchedFinding.left.assertion, 'edit-scope-unknown', 'known in-boundary edits do not hide a separate unlinked item');
+  assert.equal(unmatchedFinding.right.assertion, 'outside-boundary-edit-observed', 'a known outside edit remains an observed fact');
+  assert.equal(unmatchedFinding.classification, 'inconclusive');
+});
+
+test('started and failed pathless file-change invocations do not count as observed edits', () => {
+  const pair = bookingLedgerPair();
+  for (const run of pair) {
+    const actor = run.agents[0], turnId = run.turns[0].turnId;
+    run.artifacts = [];
+    run.coverage.workspaceDiff = 'complete';
+    run.toolInvocations = [
+      { agentId: actor.id, turnId, itemId: `started-${actor.id}`, kind: 'file-change', status: 'inProgress', sourceLine: 10 },
+      { agentId: actor.id, turnId, itemId: `failed-${actor.id}`, kind: 'file-change', status: 'failed', sourceLine: 20 },
+    ];
+  }
+  for (const run of pair) {
+    const core = freezeAuditComparisonEvidence(run);
+    assert.equal(core.actions.some(action => action.kind === 'file-change'), false);
+    assert.equal(core.actions.filter(action => action.kind === 'tool' && action.tool?.kind === 'file-change').length, 2);
+  }
+  const finding = buildAuditExplanation(...pair).findings.find(row => row.rule === 'editable-file-boundary');
+  assert.equal(finding.left.assertion, 'no-file-change-records');
+  assert.equal(finding.right.assertion, 'no-file-change-records');
+  assert.equal(finding.classification, 'similar');
 });
 
 test('canonical checks preserve conflicts idempotently and do not replace agent behavior with checker outcomes', () => {
@@ -170,7 +281,7 @@ test('complete synthetic report path preserves claims through compact export, si
   assert.deepEqual((await readAuditReport(receipt.evidencePath)).comparison.explanation, expected);
   const markdown = await readFile(markdownPath, 'utf8');
   assert.ok(headings.every(title => markdown.includes(`## ${title}\n`)));
-  assert.ok(scope(expected).left.evidenceRefs.every(ref => markdown.replace(/\\([\\`*_{}\[\]()#+.!|>~-])/g, '$1').includes(ref)));
+  assert.doesNotMatch(markdown, /## Behavioral findings|## Paired action evidence/);
 });
 
 

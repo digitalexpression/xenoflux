@@ -20,7 +20,8 @@ test('accepts only bounded recognizable version output', async t => {
   const invalid = await executable(t, "console.log('unrelated 0.153.4');");
   await assert.rejects(probeVersion(options(invalid)), { code: 'VERSION_MISMATCH' });
   const noisy = await executable(t, "process.stdout.write('x'.repeat(100)); setInterval(() => {}, 1000);");
-  await assert.rejects(probeVersion(options(noisy, { maxBytes: 20, timeoutMs: 1000 })), { code: 'OUTPUT_LIMIT' });
+  // Test the output bound with the normal startup allowance; timeout behavior has its own case.
+  await assert.rejects(probeVersion(options(noisy, { maxBytes: 20 })), { code: 'OUTPUT_LIMIT' });
 });
 
 test('cancels a timed-out owned probe group', async t => {

@@ -14,13 +14,21 @@ import { assessUsageSequence, normalizeUsageSnapshot, USAGE_FIELDS } from './aud
 import { deriveRecordedThreadUsage, deriveRecordedUsage, recordedUsageAccounting } from './audit-recorded-usage.js';
 import { createAuditToolCapture } from './audit-tools.js';
 import { createAuditHookCapture } from './audit-hooks.js';
+import { normalizeSessionReplay, projectNativeReplaySession } from './audit-session-replay.js';
 import { parseLiteralSkillRead, parseLiteralSkillReadDetails } from './audit-skill-read.js';
 import { projectResourceProvenance } from './audit-provenance.js';
 import { extractNamedActions, unambiguousExitCode, countLiteralActionCalls } from './audit-actions.js';
 
+function unavailableReplay(id, status, reason, parentId = null, depth = 0) {
+  const session = projectNativeReplaySession({ id, parentId, depth, status, reason, records: [] });
+  session.limits.push({ kind: 'source-unavailable', message: reason ?? 'Native session evidence is unavailable.' });
+  return normalizeSessionReplay({ schemaVersion: 1, kind: 'session-replay', sessions: [session] });
+}
+
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MAX_BYTES = 32 * 1024 * 1024, MAX_LINE = 1024 * 1024, MAX_RECORDS = 10000;
 const MAX_CHILDREN = 100, MAX_DEPTH = 4, MAX_CANDIDATES = 10000, MAX_PHYSICAL_LINES = 100000;
+const MAX_CHILD_INDEX_ROWS = 250000, MAX_CHILD_INDEX_MS = 2500;
 const DATE_PARTS = [/^\d{4}$/, /^\d{2}$/, /^\d{2}$/];
 const HOOK_HISTORY_BOUNDARY = 'rollout-hook-lifecycle-not-observed';
 const SAFE_TEXT = (v, n = 256) => typeof v === 'string' && v.length > 0 && v.length <= n
@@ -134,7 +142,7 @@ async function exactRow(home, id) {
 function decode(bytes) { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
 function safeMetaText(v, limit = 256) { return SAFE_TEXT(v, limit) ? v : null; }
 
-function recordedClient(originator, indexSource) {
+export function recordedClient(originator, indexSource) {
   const signals = [];
   const label = typeof originator === 'string' ? originator.trim().toLowerCase().replace(/[ _]+/g, '-') : '';
   if (['codex-cli', 'codex-cli-rs', 'codex-exec'].includes(label)) signals.push({ client: 'cli', source: 'recorded-originator' });
@@ -572,9 +580,10 @@ async function readRollout(profile, id, path, options = {}) {
     const physicalLimit = Number.isSafeInteger(options.maxPhysicalLines)
       ? Math.max(1, Math.min(MAX_PHYSICAL_LINES, options.maxPhysicalLines)) : MAX_PHYSICAL_LINES;
     let header = false, badIdentity = false, firstAt = null, lastAt = null, headerPayload, outcomeClaim = null, actionRepoRoot = null;
-    let actionCallsSeen = false, actionEvidencePartial = false;
+    let actionCallsSeen = false, actionEvidencePartial = false, replayUnownedRecordCount = 0;
     let recordedInputIncomplete = false;
     const turns = [], events = [], skills = new Map(), usageRows = [], artifacts = [], actions = [], warnings = new Set();
+    const replayRecords = [];
     const recordedUsageRows = [], recordedTerminals = [], pendingActions = new Map(), resolvedActionResults = new Map(), ambiguousActionCalls = new Set();
     const toolCapture = createAuditToolCapture({ maxInvocations: MAX_RECORDS, maxServers: 1000 });
     const hookCapture = createAuditHookCapture({ maxInvocations: 500 });
@@ -622,6 +631,10 @@ async function readRollout(profile, id, path, options = {}) {
         if (['item_started','item_completed','mcp_tool_call_begin','mcp_tool_call_end','exec_command_begin','exec_command_end','hook_started','hook_completed'].includes(subType) || typedTool)
           warnings.add('Malformed native tool or hook turn identity omitted.');
         return;
+      }
+      if (options.includeReplay && ['event_msg', 'response_item'].includes(record.type)) {
+        const replayPayload = { ...p, ...(p.turn_id == null && turnId ? { turn_id: turnId } : {}) };
+        replayRecords.push({ sourceLine, record: { ...record, payload: replayPayload } });
       }
       if (['turn_context', 'event_msg', 'response_item', 'token_count', 'token_usage_record'].includes(record.type)) {
         if (++relevant > MAX_RECORDS) { warnings.add('Relevant rollout record limit reached.'); return; }
@@ -1077,6 +1090,10 @@ async function readRollout(profile, id, path, options = {}) {
       }
       for (let i = turns.length - 1; i >= 0; i--) if (!owned.has(turns[i].turnId)) turns.splice(i, 1);
       for (let i = events.length - 1; i >= 0; i--) if (!events[i].turnId || !owned.has(events[i].turnId)) events.splice(i, 1);
+      for (let i = replayRecords.length - 1; i >= 0; i--) {
+        const turn = replayRecords[i].record.payload.turn_id;
+        if (!turn || !owned.has(turn)) { replayRecords.splice(i, 1); replayUnownedRecordCount++; }
+      }
       for (let i = usageRows.length - 1; i >= 0; i--) if (!usageRows[i].turnId || !owned.has(usageRows[i].turnId)) usageRows.splice(i, 1);
       for (const skill of skills.values()) skill.observations = skill.observations.filter(obs => obs.agentId === id
         && (obs.turnId ? owned.has(obs.turnId) : obs.kind === 'advertised-session-context'));
@@ -1146,7 +1163,14 @@ async function readRollout(profile, id, path, options = {}) {
           status: terminals.length === 1 ? terminals[0].status : null };
       }) });
     if (!sourceComplete) { toolCoverage.tools = 'partial'; toolCoverage.mcp = 'partial'; hookCoverage = 'partial'; }
-    return { status: sourceComplete ? 'ready' : 'partial', reason: warnings.size ? [...warnings].join(' ') : (!turns.length ? 'No turn contexts were recorded.' : null),
+    const finalStatus = sourceComplete ? 'ready' : 'partial';
+    const finalReason = warnings.size ? [...warnings].join(' ') : (!turns.length ? 'No turn contexts were recorded.' : null);
+    const sessionReplay = options.includeReplay ? projectNativeReplaySession({ id, parentId: options.parentId ?? null,
+      depth: options.depth ?? 0, status: finalStatus, reason: finalReason, sourceFingerprint: fingerprint, records: replayRecords,
+      budget: options.replayBudget }) : undefined;
+    if (sessionReplay && replayUnownedRecordCount) sessionReplay.limits.push({ kind: 'unowned-child-records',
+      omitted: replayUnownedRecordCount, message: 'Native rows without corroborated child-turn ownership were omitted.' });
+    return { status: finalStatus, reason: finalReason,
       resourceProvenance: projectResourceProvenance(),
       source: sourceSnapshot,
       agents, turns, events: events.map(({ _callId, ...event }) => event), skills: sortedSkills, usage, artifacts,
@@ -1155,7 +1179,7 @@ async function readRollout(profile, id, path, options = {}) {
       toolInvocations, mcp: toolResult.mcp, toolCoverage, toolWarnings: toolResult.warnings,
       hookInvocations, hookCoverage, hookCaptureBoundary, hookWarnings: hookResult.warnings,
       metrics: { recordedSpanMs, recordedSpanKind: options.parentId ? 'owned-turn-evidence' : 'source-recorded-span' },
-      warnings: [...warnings], outcomeClaim, sessionRootId: headerPayload.session_id ?? id,
+      warnings: [...warnings], ...(sessionReplay ? { sessionReplay } : {}), outcomeClaim, sessionRootId: headerPayload.session_id ?? id,
       _agentStatus: agentStatus, _verifiedChild: !options.parentId || turns.length > 0 || events.length > 0,
       _actionCwdMatches: !options.actionRepoRoot || actionRepoRoot !== null };
   } catch { return unavailable('The rollout could not be read safely.'); }
@@ -1169,23 +1193,27 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
   profile.defaultUserHome = options.defaultUserHome ?? homedir();
   profile.recordedCwds = new Set();
   const base = resultBase(profile, id);
+  const attachUnavailableReplay = () => { if (options.includeReplay) base.sessionReplay = unavailableReplay(id, base.status, base.reason); };
   let selected;
   try { selected = await exactRow(profile.home, id); }
-  catch { base.status = 'unavailable'; base.reason = 'The selected native history index is unavailable.'; base.coverage = emptyCoverage(); return base; }
+  catch { base.status = 'unavailable'; base.reason = 'The selected native history index is unavailable.'; base.coverage = emptyCoverage(); attachUnavailableReplay(); return base; }
   let retainedFallback = false;
   if (!selected.row && selected.status === 'not-found') {
     const retained = await locateRetainedRollout(profile.home, id);
-    if (retained.status !== 'ready') { base.status = retained.status; base.reason = retained.reason; base.coverage = emptyCoverage(retained.status); return base; }
+    if (retained.status !== 'ready') { base.status = retained.status; base.reason = retained.reason; base.coverage = emptyCoverage(retained.status); attachUnavailableReplay(); return base; }
     selected = { row: { rollout_path: retained.path }, status: 'ready' };
     retainedFallback = true;
   }
-  if (!selected.row) { base.status = selected.status; base.reason = 'The selected native session is unavailable.'; base.coverage = emptyCoverage(selected.status); return base; }
-  if (selected.lineageError) { base.status = 'unavailable'; base.reason = selected.lineageError; base.coverage = emptyCoverage(); return base; }
+  if (!selected.row) { base.status = selected.status; base.reason = 'The selected native session is unavailable.'; base.coverage = emptyCoverage(selected.status); attachUnavailableReplay(); return base; }
+  if (selected.lineageError) { base.status = 'unavailable'; base.reason = selected.lineageError; base.coverage = emptyCoverage(); attachUnavailableReplay(); return base; }
   const selectedParent = selected.row.parentId ?? null;
   const selectedOwners = { owners: new Map(), ownedTurns: new Set() };
+  const replayBudget = options.includeReplay ? { remaining: 16 * 1024 * 1024, remainingRecords: 10000 } : null;
   const root = await readRollout(profile, id, selected.row.rollout_path, selectedParent
-    ? { parentId: selectedParent, ...selectedOwners, depth: 1, maxPhysicalLines: options.maxPhysicalLines, actionRepoRoot: options.actionRepoRoot, indexSource: selected.row.indexSource }
-    : { maxPhysicalLines: options.maxPhysicalLines, actionRepoRoot: options.actionRepoRoot, indexSource: selected.row.indexSource });
+    ? { parentId: selectedParent, ...selectedOwners, depth: 1, maxPhysicalLines: options.maxPhysicalLines, actionRepoRoot: options.actionRepoRoot, indexSource: selected.row.indexSource,
+      includeReplay: options.includeReplay, replayBudget }
+    : { maxPhysicalLines: options.maxPhysicalLines, actionRepoRoot: options.actionRepoRoot, indexSource: selected.row.indexSource,
+      includeReplay: options.includeReplay, replayBudget });
   if (retainedFallback) {
     base.source.discovery = 'exact-retained-rollout';
     base.source.historyIndex = 'unavailable-or-missing-row';
@@ -1196,6 +1224,9 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
   base.skills = root.skills; base.usage = root.usage; base.metrics = root.metrics; base.warnings = root.warnings;
   if (retainedFallback) base.warnings.push('Session was discovered by exact UUID in the selected profile sessions directory because the history index had no row; selected index metadata is unavailable and child coverage may be incomplete.');
   const recordedThreads = root.usage.recordedThread ? [root.usage.recordedThread] : [];
+  const replaySessions = options.includeReplay && root.sessionReplay ? [root.sessionReplay] : [];
+  if (options.includeReplay && !replaySessions.length) replaySessions.push(projectNativeReplaySession({ id, status: root.status,
+    reason: root.reason ?? 'The native history could not be read.', records: [] }));
   delete base.usage.recordedThread;
   base.artifacts = root.artifacts;
   base.actions = root.actions ?? [];
@@ -1216,22 +1247,50 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
   // Child discovery is bounded and strictly same-home. It requires both index
   // parent metadata and a child rollout header plus positively-owned turn evidence.
   try {
-    const childIndex = await discoverChildren(profile.home, options);
-    const queue = [{ id, depth: selectedParent ? 1 : 0 }], visited = new Set([id]);
+    const childIndex = await discoverChildren(profile.home, options, id);
+    // A selected child's indexed parent cannot also become its descendant.
+    // Preserve the selected source relationship without constructing a replay cycle.
+    const queue = [{ id, depth: selectedParent ? 1 : 0 }], visited = new Set(selectedParent ? [id, selectedParent] : [id]);
     let scannedChildren = 0;
     while (queue.length) {
       const parent = queue.shift();
       if (parent.depth >= MAX_DEPTH) {
-        if ((childIndex.byParent.get(parent.id) ?? []).length) { childIndex.partial = true; childIndex.reason = 'Agent tree depth limit reached.'; }
+        const beyond = childIndex.byParent.get(parent.id) ?? [];
+        if (beyond.length) {
+          childIndex.partial = true; childIndex.reason = 'Agent tree depth limit reached.';
+          const available = Math.max(0, MAX_CHILDREN - scannedChildren);
+          for (const child of beyond.slice(0, available)) {
+            if (visited.has(child.id)) continue;
+            visited.add(child.id);
+            scannedChildren++;
+            replaySessions.push(projectNativeReplaySession({ id: child.id, parentId: parent.id,
+              depth: parent.depth + 1, status: 'unavailable', reason: 'Child session depth limit reached.', records: [] }));
+          }
+          if (beyond.length > available) replaySessions[0]?.limits.push({ kind: 'child-count-limit',
+            omitted: beyond.length - available, message: 'Additional child sessions exceeded the replay limit.' });
+        }
         continue;
       }
       for (const child of childIndex.byParent.get(parent.id) ?? []) {
         if (visited.has(child.id)) { childIndex.partial = true; childIndex.reason = 'Agent lineage cycle or duplicate link detected.'; continue; }
         visited.add(child.id); scannedChildren++;
         const depth = parent.depth + 1;
-        if (scannedChildren > MAX_CHILDREN) { childIndex.partial = true; childIndex.reason = 'Child session limit reached.'; break; }
-        const childAudit = await readRollout(profile, child.id, child.rollout_path, { parentId: parent.id, sessionRootId: root.sessionRootId,
+        if (scannedChildren > MAX_CHILDREN) {
+          childIndex.partial = true; childIndex.reason = 'Child session limit reached.';
+          replaySessions[0]?.limits.push({ kind: 'child-count-limit', omitted: (childIndex.byParent.get(parent.id) ?? []).length,
+            message: 'Additional child sessions exceeded the replay limit.' });
+          break;
+        }
+        let rolloutPath = child.rollout_path;
+        if (typeof rolloutPath !== 'string') {
+          const located = await locateRetainedRollout(profile.home, child.id);
+          if (located.status !== 'ready') {
+            childIndex.partial = true; childIndex.reason ??= 'A captured child session could not be resolved in the owning profile.';
+          } else rolloutPath = located.path;
+        }
+        const childAudit = await readRollout(profile, child.id, rolloutPath, { parentId: parent.id, sessionRootId: root.sessionRootId,
           depth, owners: new Map(), ownedTurns: new Set(), maxPhysicalLines: options.maxPhysicalLines,
+          includeReplay: options.includeReplay, replayBudget,
           actionRepoRoot: options.actionRepoRoot,
           rootTurnIds: root.turns.map(turn => turn.turnId) });
         if (childAudit.usage.recordedThread) recordedThreads.push(childAudit.usage.recordedThread);
@@ -1240,6 +1299,8 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
         const agent = { id: child.id, parentId: parent.id, depth, role: 'subagent', sessionId: child.id, source: childAudit.source,
           status: verified ? childAudit.status : 'unavailable', ...(verified ? {} : { reason: childAudit.reason ?? 'Child ownership could not be corroborated.' }) };
         base.agents.push(agent);
+        if (options.includeReplay) replaySessions.push(childAudit.sessionReplay ?? unavailableReplay(child.id,
+          'unavailable', agent.reason ?? 'Child session details are unavailable.', parent.id, depth).sessions[0]);
         if (!verified) {
           base.coverage.tools = 'partial'; base.coverage.mcp = 'partial'; base.coverage.hooks = 'partial';
           continue;
@@ -1289,14 +1350,20 @@ export async function auditNativeSession(store, profileName, id, options = {}) {
           recordedAt: null, sourceLine: childAudit.outcomeClaim.sourceLine, metadata: { success: childAudit.outcomeClaim.success, status: childAudit.outcomeClaim.status } });
       }
     }
+    if (options.includeReplay && childIndex.partial && replaySessions[0])
+      replaySessions[0].limits.push({ kind: 'child-discovery-partial',
+        message: childIndex.reason ?? 'Some child sessions could not be discovered.' });
     if (childIndex.partial || base.agents.some(agent => agent.status === 'unavailable')) {
       base.warnings.push(childIndex.reason ?? 'Some linked agent sessions could not be corroborated.');
       base.status = base.status === 'ready' ? 'partial' : base.status; base.coverage.agents = 'partial';
       base.coverage.tools = 'partial'; base.coverage.mcp = 'partial'; base.coverage.hooks = 'partial';
-    } else base.coverage.agents = base.agents.length > 1 ? 'partial' : 'partial'; // Native lineage is only one documented source of agent activity.
+    } else if (options.recordedDiscovery?.complete === true && root.status === 'ready'
+      && base.agents.every(agent => agent.status === 'ready')) base.coverage.agents = 'complete';
+    else base.coverage.agents = 'partial';
     if (base.skills.length) base.coverage.skills = 'partial';
   } catch { base.warnings.push('Same-home child discovery is unavailable.'); base.coverage.agents = 'partial';
     base.coverage.tools = 'partial'; base.coverage.mcp = 'partial'; base.coverage.hooks = 'partial'; if (base.status === 'ready') base.status = 'partial'; }
+  if (options.includeReplay) base.sessionReplay = normalizeSessionReplay({ schemaVersion: 1, kind: 'session-replay', sessions: replaySessions });
   if (recordedUsageAccounting(root.source?.clientVersion))
     base.usage.recorded = deriveRecordedUsage({ rootAgentId: id, source: base.source, threads: recordedThreads });
   return base;
@@ -1325,7 +1392,10 @@ async function boundedNames(path, limit) {
 
 // Locate an exact retained UUID under the owning profile home. The bounded
 // date-tree walk is shared by replay and the missing-index audit fallback.
-async function locateRetainedRollout(home, id) {
+async function locateRetainedRollout(home, id, cache) {
+  const missing = { status: 'not-found', reason: 'No retained rollout matches the selected session ID.' };
+  if (cache?.failure) return cache.failure;
+  if (cache?.complete) return cache.results.get(id) ?? missing;
   const sessions = join(home, 'sessions');
   if (!await safeSessionDirectory(home))
     return { status: 'unavailable', reason: 'The saved profile session directory is unavailable or unsafe.' };
@@ -1350,19 +1420,23 @@ async function locateRetainedRollout(home, id) {
     }
     directories = next;
   }
-  const candidates = [];
+  const candidates = new Map();
   for (const directory of directories) {
     if (!await safeSessionDirectory(directory)) continue;
     names = await boundedNames(directory, Math.max(1, MAX_CANDIDATES - visited));
     if (!names) return { status: 'partial', reason: 'The saved profile session scan exceeded its bound or could not be read.' };
     visited += names.length;
-    for (const entry of names) if (entry.isFile && !entry.isSymbolicLink && entry.name.startsWith('rollout-')
-      && (entry.name.endsWith(`-${id}.jsonl`) || entry.name.endsWith(`-${id}.jsonl.zst`))) candidates.push(join(directory, entry.name));
+    for (const entry of names) if (entry.isFile && !entry.isSymbolicLink && entry.name.startsWith('rollout-')) {
+      const match = entry.name.match(/-([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.jsonl(?:\.zst)?$/i);
+      if (match) { const paths = candidates.get(match[1]) ?? []; paths.push(join(directory, entry.name)); candidates.set(match[1], paths); }
+    }
     if (visited > MAX_CANDIDATES) return { status: 'partial', reason: 'The saved profile session scan exceeded its bound.' };
   }
-  if (candidates.length !== 1) return { status: candidates.length ? 'unavailable' : 'not-found',
-    reason: candidates.length ? 'Multiple retained rollouts match the selected session ID.' : 'No retained rollout matches the selected session ID.' };
-  return { status: 'ready', path: candidates[0] };
+  const results = new Map([...candidates].map(([key, paths]) => [key, paths.length === 1
+    ? { status: 'ready', path: paths[0] }
+    : { status: 'unavailable', reason: 'Multiple retained rollouts match the selected session ID.' }]));
+  if (cache) { cache.complete = true; cache.results = results; }
+  return results.get(id) ?? missing;
 }
 
 /** Read one retained rollout by exact UUID under a saved profile home, without consulting its history index. */
@@ -1378,55 +1452,322 @@ export async function auditRetainedNativeSession(savedProfile, id, options = {})
     executable: null, version: null, defaultUserHome: options.defaultUserHome ?? savedProfile.userHome ?? homedir(),
     recordedCwds: new Set() };
   const base = resultBase(profile, id);
+  const attachUnavailableReplay = () => { if (options.includeReplay) base.sessionReplay = unavailableReplay(id, base.status, base.reason); };
   // The retained replay response is a normalized evidence view. Never expose
   // profile-home, rollout, or cwd paths from the native source records.
   base.profile = { profileId: profile.profileId, profileName: profile.profileName, environmentId: profile.environmentId };
   const located = await locateRetainedRollout(profile.home, id);
   if (located.status !== 'ready') {
-    base.status = located.status; base.reason = located.reason; base.coverage = emptyCoverage(located.status); return base;
+    base.status = located.status; base.reason = located.reason; base.coverage = emptyCoverage(located.status); attachUnavailableReplay(); return base;
   }
+  const replayBudget = options.includeReplay ? { remaining: 16 * 1024 * 1024, remainingRecords: 10000 } : null;
   const root = await readRollout(profile, id, located.path, { actionRepoRoot: options.actionRepoRoot,
-    maxPhysicalLines: options.maxPhysicalLines });
+    maxPhysicalLines: options.maxPhysicalLines, includeReplay: options.includeReplay, replayBudget });
   if (options.actionRepoRoot && root._actionCwdMatches !== true) {
     base.reason = 'The retained rollout workspace does not match the selected action workspace.';
     base.coverage.timeline = 'unavailable';
+    attachUnavailableReplay();
     return base;
   }
   base.status = root.status; base.reason = root.reason;
   base.source = { ...base.source, ...root.source, path: null };
-  base.agents = (root.agents ?? []).map(agent => ({ ...agent, source: { ...agent.source, path: null } }));
+  base.agents = (root.agents ?? []).map(agent => ({ ...agent, status: root.status, source: { ...agent.source, path: null } }));
   base.turns = (root.turns ?? []).map(turn => ({ agentId: turn.agentId, turnId: turn.turnId,
     model: turn.model ?? null, reasoningEffort: turn.reasoningEffort ?? null, sourceLine: turn.sourceLine,
     workspaceMatched: turn.workspaceMatched === true }));
   base.actions = root.actions ?? [];
+  if (options.includeReplay && root.sessionReplay) {
+    const replaySessions = [root.sessionReplay];
+    try {
+      const childIndex = await discoverChildren(profile.home, options, id);
+      const queue = [{ id, depth: options.parentId ? 1 : 0 }], visited = new Set([id]);
+      let scannedChildren = 0, actorsComplete = true;
+      while (queue.length) {
+        const parent = queue.shift();
+        if (parent.depth >= MAX_DEPTH) {
+          const beyond = childIndex.byParent.get(parent.id) ?? [];
+          if (beyond.length) {
+            replaySessions[0].limits.push({ kind: 'child-depth-limit', omitted: beyond.length,
+              message: 'Child sessions beyond the supported depth could not be inspected.' });
+          const available = Math.max(0, MAX_CHILDREN - scannedChildren);
+          let added = 0;
+          for (const child of beyond.slice(0, available)) {
+              if (visited.has(child.id)) continue;
+              visited.add(child.id);
+            scannedChildren++; added++;
+              replaySessions.push(projectNativeReplaySession({ id: child.id, parentId: parent.id,
+                depth: parent.depth + 1, status: 'unavailable', reason: 'Child session depth limit reached.', records: [] }));
+            }
+          if (beyond.length > added) replaySessions[0].limits.push({ kind: 'child-count-limit',
+            omitted: beyond.length - added, message: 'Additional child sessions exceeded the replay limit.' });
+          }
+          continue;
+        }
+        for (const child of childIndex.byParent.get(parent.id) ?? []) {
+          if (visited.has(child.id)) continue;
+          visited.add(child.id); scannedChildren++;
+          const depth = parent.depth + 1;
+          if (scannedChildren > MAX_CHILDREN) {
+            replaySessions[0].limits.push({ kind: 'child-count-limit', omitted: (childIndex.byParent.get(parent.id) ?? []).length,
+              message: 'Additional child sessions exceeded the replay limit.' });
+            break;
+          }
+          const owners = new Map(), ownedTurns = new Set();
+          let rolloutPath = child.rollout_path;
+          if (typeof rolloutPath !== 'string') {
+            const located = await locateRetainedRollout(profile.home, child.id);
+            if (located.status === 'ready') rolloutPath = located.path;
+            else actorsComplete = false;
+          }
+          const childAudit = await readRollout(profile, child.id, rolloutPath, { parentId: parent.id,
+            sessionRootId: root.sessionRootId, depth, owners, ownedTurns, maxPhysicalLines: options.maxPhysicalLines,
+            includeReplay: true, replayBudget, rootTurnIds: root.turns.map(turn => turn.turnId) });
+          const verified = childAudit._verifiedChild === true;
+          base.agents.push({ id: child.id, parentId: parent.id, depth, role: 'subagent', sessionId: child.id,
+            status: verified ? childAudit.status : 'unavailable', source: { ...childAudit.source, path: null },
+            ...(!verified ? { reason: childAudit.reason ?? 'Child ownership could not be corroborated.' } : {}) });
+          if (!verified || childAudit.status !== 'ready') actorsComplete = false;
+          const childReplay = verified ? childAudit.sessionReplay : unavailableReplay(child.id, 'unavailable',
+            childAudit.reason ?? 'Child ownership could not be corroborated.', parent.id, depth).sessions[0];
+          replaySessions.push(childReplay);
+          if (verified) queue.push({ id: child.id, depth });
+        }
+      }
+      if (childIndex.partial || !actorsComplete) {
+        if (base.status === 'ready') base.status = 'partial';
+        base.reason ??= childIndex.reason ?? 'A discovered child session could not be verified as complete.';
+        replaySessions[0].limits.push({ kind: 'child-discovery-partial', message: base.reason });
+      }
+    } catch {
+      if (base.status === 'ready') base.status = 'partial';
+      base.reason ??= 'Same-home child discovery is unavailable.';
+      replaySessions[0].limits.push({ kind: 'child-discovery-unavailable', message: base.reason });
+    }
+    base.sessionReplay = normalizeSessionReplay({ schemaVersion: 1, kind: 'session-replay', sessions: replaySessions });
+  }
+  if (options.includeReplay && !base.sessionReplay)
+    base.sessionReplay = unavailableReplay(id, root.status, root.reason ?? 'The native history could not be read.');
   base.actionCoverage = root.actionCoverage ?? 'unavailable';
   base.warnings = root.warnings ?? [];
   base.metrics = root.metrics ?? base.metrics;
-  base.coverage = { ...emptyCoverage(root.status), timeline: base.turns.length ? root.status : 'unavailable', agents: 'partial' };
+  base.coverage = { ...emptyCoverage(root.status), timeline: base.turns.length ? root.status : 'unavailable',
+    agents: options.recordedDiscovery?.complete === true && base.status === 'ready' && base.agents.every(agent => agent.status === 'ready')
+      ? 'complete' : 'partial' };
   return base;
 }
 
-async function discoverChildren(home, options = {}) {
-  const path = await checkedIndex(home); if (!path) return { rows: [], partial: true, reason: 'Child discovery index unavailable.' };
+async function discoverChildren(home, options = {}, rootId = null) {
+  if (options.recordedDiscovery) {
+    const discovery = options.recordedDiscovery;
+    const edges = Array.isArray(discovery.edges) ? discovery.edges : [];
+    const canonical = { schemaVersion: 1, kind: 'native-child-discovery', rootId: discovery.rootId,
+      capturedAt: discovery.capturedAt, indexSchema: discovery.indexSchema, indexFingerprint: discovery.indexFingerprint,
+      complete: discovery.complete === true, edges, reason: typeof discovery.reason === 'string' ? discovery.reason : null };
+    const fingerprint = createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+    if (discovery.schemaVersion !== 1 || discovery.kind !== 'native-child-discovery' || discovery.rootId !== rootId
+      || discovery.fingerprint !== fingerprint || edges.length > MAX_CHILDREN
+      || !Number.isFinite(Date.parse(discovery.capturedAt))
+      || JSON.stringify(discovery.indexSchema) !== JSON.stringify({ table: 'threads', columns: ['id', 'source', 'rollout_path'] })
+      || !/^[a-f0-9]{64}$/.test(discovery.indexFingerprint ?? '')
+      || edges.some(edge => !edge || !uuid(edge.id) || !uuid(edge.parentId) || edge.id === edge.parentId)
+      || edges.some(edge => edge.id === rootId)
+      || new Set(edges.map(edge => edge.id)).size !== edges.length)
+      return { byParent: new Map(), partial: true, reason: 'Captured child-discovery evidence is invalid or incomplete.' };
+    const byParent = new Map();
+    for (const edge of edges) {
+      const rows = byParent.get(edge.parentId) ?? [];
+      rows.push({ id: edge.id, rollout_path: null }); byParent.set(edge.parentId, rows);
+    }
+    const reachable = new Set([rootId]); let cycleOrOrphan = false;
+    for (let depth = 0, frontier = [rootId]; frontier.length && depth < MAX_DEPTH; depth++) {
+      const next = [];
+      for (const parent of frontier) for (const child of byParent.get(parent) ?? []) {
+        if (reachable.has(child.id)) cycleOrOrphan = true;
+        else { reachable.add(child.id); next.push(child.id); }
+      }
+      frontier = next;
+    }
+    const complete = canonical.complete && !cycleOrOrphan
+      && edges.every(edge => reachable.has(edge.id) && reachable.has(edge.parentId));
+    return { byParent, partial: !complete, reason: complete ? null : canonical.reason ?? 'Captured child links are incomplete or invalid.' };
+  }
+  let path;
+  try { path = await checkedIndex(options.childIndexHome ?? home); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  if (!path) {
+    const byParent = new Map();
+    // Finalized xfx runs remove their temporary index. Their immutable native
+    // actor observations can identify candidates, but never establish ownership:
+    // callers still verify each exact same-home rollout header and owned turn.
+    const actors = Array.isArray(options.recordedAgents) ? options.recordedAgents.slice(0, MAX_CANDIDATES) : [];
+    if (!actors.some(actor => actor?.id === rootId && actor.parentId == null))
+      return { byParent, partial: true, reason: 'Child discovery index unavailable.' };
+    const cap = Number.isSafeInteger(options.maxChildCandidates) && options.maxChildCandidates > 0
+      ? Math.min(MAX_CHILDREN, options.maxChildCandidates) : MAX_CHILDREN;
+    const seen = new Set([rootId]); let frontier = [rootId], count = 0;
+    const boundedActors = actors, rolloutCache = {};
+    for (let depth = 0; frontier.length && depth <= MAX_DEPTH && count < cap; depth++) {
+      const parents = new Set(frontier); frontier = [];
+      for (const actor of boundedActors) {
+        if (!uuid(actor?.id) || !uuid(actor?.parentId) || !parents.has(actor.parentId)
+          || seen.has(actor.id) || count >= cap) continue;
+        seen.add(actor.id); count++;
+        const located = await locateRetainedRollout(home, actor.id, rolloutCache);
+        if (!rolloutCache.complete && ['partial', 'unavailable'].includes(located.status)) rolloutCache.failure = located;
+        const siblings = byParent.get(actor.parentId) ?? [];
+        siblings.push({ id: actor.id, rollout_path: located.status === 'ready' ? located.path : null });
+        byParent.set(actor.parentId, siblings); frontier.push(actor.id);
+      }
+    }
+    return { byParent, partial: true, reason: 'The temporary native index is unavailable. Child candidates come from retained native actor observations and require matching child histories; additional children cannot be ruled out.' };
+  }
   const { DatabaseSync } = await import('node:sqlite'); const db = new DatabaseSync(path, { readOnly: true });
   try {
     db.exec('PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA busy_timeout=1000; BEGIN;');
     const cols = new Set(db.prepare('PRAGMA table_info(threads)').all().map(x => x.name));
-    if (!cols.has('source') || !cols.has('rollout_path')) return { rows: [], partial: true, reason: 'Child lineage columns are unavailable.' };
-    const cap = Math.min(MAX_CANDIDATES, options.maxChildCandidates ?? MAX_CANDIDATES);
-    const candidates = db.prepare('SELECT substr(id,1,37) id, substr(source,1,8193) source, substr(rollout_path,1,4097) rollout_path FROM threads ORDER BY id LIMIT ?').all(cap + 1);
-    let partial = candidates.length > cap; if (partial) candidates.length = cap;
+    if (!['id', 'source', 'rollout_path'].every(column => cols.has(column)))
+      return { byParent: new Map(), partial: true, reason: 'Child lineage columns are unavailable.' };
+    const requested = options.maxChildCandidates;
+    const cap = Number.isSafeInteger(requested) && requested > 0 ? Math.min(MAX_CANDIDATES, requested) : MAX_CANDIDATES;
+    const inspectLimit = Math.min(cap, MAX_CHILDREN);
     const byParent = new Map();
-    for (const row of candidates) {
-      if (!uuid(row.id) || typeof row.source !== 'string') continue;
-      let src; try { src = JSON.parse(row.source); } catch { continue; }
-      const linked = src?.subagent?.thread_spawn?.parent_thread_id;
-      if (uuid(linked) && linked !== row.id) {
-        const siblings = byParent.get(linked) ?? [];
-        if (siblings.length < MAX_CHILDREN) { siblings.push(row); byParent.set(linked, siblings); }
-        else partial = true;
+    if (!uuid(rootId)) return { byParent, partial: true, reason: 'Selected session ID is invalid for child discovery.' };
+    // Resolve one lineage level at a time, bounding the iterator itself so
+    // unrelated rows do not crowd out linked sessions or evade scan limits.
+    const frontier = [rootId], visited = new Set([rootId]);
+    let partial = false, reason = null, inspected = 0, scanned = 0, depth = 0;
+    const started = Date.now(), parents = new Set();
+    let metadataPartial = false;
+    const parentFor = (source, sourceLength) => {
+      if (sourceLength == null || sourceLength > 8192) { metadataPartial = true; return null; }
+      if (typeof source !== 'string') { metadataPartial = true; return null; }
+      let value;
+      try { value = JSON.parse(source); } catch {
+        if ([...parents].some(parent => source.includes(parent))) metadataPartial = true;
+        return null;
       }
+      const linked = value?.subagent?.thread_spawn?.parent_thread_id;
+      if (linked !== undefined) {
+        if (!uuid(linked)) { metadataPartial = true; return null; }
+        return parents.has(linked) ? linked : null;
+      }
+      if (typeof value === 'string') return null;
+      const mentionsParent = [...parents].some(parent => source.includes(parent));
+      const subagent = value?.subagent;
+      const recognizedOther = value && typeof value === 'object' && !Array.isArray(value)
+        && Object.keys(value).length === 1 && subagent && typeof subagent === 'object' && !Array.isArray(subagent)
+        && Object.keys(subagent).length === 1 && Object.hasOwn(subagent, 'other') && SAFE_TEXT(subagent.other, 128);
+      if (recognizedOther && !mentionsParent) return null;
+      // Only unfamiliar metadata that can plausibly describe this workflow's
+      // lineage prevents completeness. Ordinary empty/source metadata is irrelevant.
+      if (value && typeof value === 'object' && (Object.hasOwn(value, 'subagent')
+        || Object.hasOwn(value, 'thread_spawn') || mentionsParent)) metadataPartial = true;
+      return null;
+    };
+    const candidateQuery = db.prepare(`SELECT CASE WHEN typeof(id)='text' AND octet_length(id)=36 THEN id END AS id,
+      CASE WHEN typeof(source)='text' AND octet_length(source)<=8192 THEN source END AS source,
+      CASE WHEN typeof(rollout_path)='text' AND octet_length(rollout_path)<=4096 THEN rollout_path END AS rollout_path,
+      octet_length(source) AS source_length
+      FROM threads`);
+    // Include one edge beyond the supported traversal depth so callers can
+    // emit an explicit depth-limit state for linked rows there.
+    while (frontier.length && depth <= MAX_DEPTH && inspected < inspectLimit) {
+      parents.clear();
+      for (const parentId of frontier) parents.add(parentId);
+      const next = [];
+      try {
+        for (const row of candidateQuery.iterate()) {
+          if (++scanned > MAX_CHILD_INDEX_ROWS || Date.now() - started > MAX_CHILD_INDEX_MS) {
+            partial = true; reason ??= 'Child index scan or time limit reached.';
+            break;
+          }
+          if (!parentFor(row.source, row.source_length)) continue;
+          if (inspected >= inspectLimit) {
+            partial = true; reason ??= inspectLimit === MAX_CHILDREN ? 'Child session limit reached.' : 'Child candidate scan limit reached.';
+            break;
+          }
+          inspected++;
+          if (!uuid(row.id) || row.source_length > 8192 || typeof row.source !== 'string' || typeof row.rollout_path !== 'string') {
+            partial = true; reason ??= 'Invalid child lineage metadata was omitted.'; continue;
+          }
+          let source;
+          try { source = JSON.parse(row.source); } catch {
+            partial = true; reason ??= 'Malformed child lineage metadata was omitted.'; continue;
+          }
+          const parentId = source?.subagent?.thread_spawn?.parent_thread_id;
+          if (!uuid(parentId) || !parents.has(parentId)) continue;
+          if (row.id === parentId) { partial = true; reason ??= 'Agent lineage cycle or duplicate link detected.'; continue; }
+          const siblings = byParent.get(parentId) ?? [];
+          siblings.push(row); byParent.set(parentId, siblings);
+          if (!visited.has(row.id)) {
+            visited.add(row.id);
+            if (depth < MAX_DEPTH) next.push(row.id);
+          }
+          else { partial = true; reason ??= 'Agent lineage cycle or duplicate link detected.'; }
+        }
+      } catch {
+        partial = true; reason ??= 'Child index scan or time limit reached.';
+      }
+      if (metadataPartial) { partial = true; reason ??= 'Malformed or oversized child lineage metadata was omitted.'; }
+      frontier.splice(0, frontier.length, ...next);
+      depth++;
     }
-    return { byParent, partial, reason: partial ? 'Child candidate scan limit reached.' : null };
+    if (frontier.length && depth >= MAX_DEPTH) {
+      // The consumers report depth-limited linked children; mark discovery
+      // incomplete only if one more corroborated index edge exists.
+      partial = true; reason ??= 'Agent tree depth limit reached.';
+    } else if (frontier.length && inspected >= inspectLimit)
+      { partial = true; reason ??= inspectLimit === MAX_CHILDREN ? 'Child session limit reached.' : 'Child candidate scan limit reached.'; }
+    return { byParent, partial, reason };
   } finally { db.close(); }
+}
+
+/** Capture only bounded child-link evidence from a live run's temporary index. */
+export async function captureAuditChildDiscovery(home, indexHome, rootId) {
+  let result;
+  try { result = await discoverChildren(home, { childIndexHome: indexHome }, rootId); }
+  catch { result = { byParent: new Map(), partial: true, reason: 'The temporary native child index could not be inspected.' }; }
+  const edges = [...result.byParent.entries()].flatMap(([parentId, children]) => children.map(child => ({ id: child.id, parentId })))
+    .sort((a, b) => a.parentId.localeCompare(b.parentId) || a.id.localeCompare(b.id)).slice(0, MAX_CHILDREN);
+  const indexPath = await checkedIndex(indexHome).catch(() => null);
+  const indexFingerprint = indexPath ? await fingerprintIndex(indexHome, indexPath) : null;
+  const manifest = { schemaVersion: 1, kind: 'native-child-discovery', rootId, capturedAt: new Date().toISOString(),
+    indexSchema: { table: 'threads', columns: ['id', 'source', 'rollout_path'] },
+    indexFingerprint,
+    complete: result.partial !== true && edges.length <= MAX_CHILDREN, edges,
+    reason: result.partial ? result.reason ?? 'Native child discovery was incomplete.'
+      : indexFingerprint ? null : 'The temporary child index source could not be fingerprinted.' };
+  manifest.complete = manifest.complete && indexFingerprint !== null;
+  manifest.fingerprint = createHash('sha256').update(JSON.stringify(manifest)).digest('hex');
+  return manifest;
+}
+
+async function fingerprintIndex(home, indexPath) {
+  const hash = createHash('sha256');
+  let totalBytes = 0;
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    const path = `${indexPath}${suffix}`;
+    const info = await safeRegular(home, path);
+    if (!info) {
+      try { await lstat(path); return null; } catch (error) { if (error.code !== 'ENOENT') return null; }
+      continue;
+    }
+    if (info.size > 64 * 1024 * 1024 || totalBytes + info.size > 64 * 1024 * 1024) return null;
+    totalBytes += info.size;
+    hash.update(suffix).update('\0').update(String(info.size)).update('\0');
+    let handle;
+    try {
+      handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const actual = await handle.stat();
+      if (!actual.isFile() || actual.dev !== info.dev || actual.ino !== info.ino || actual.size !== info.size) return null;
+      const buffer = Buffer.alloc(64 * 1024); let position = 0;
+      while (position < info.size) {
+        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, info.size - position), position);
+        if (!bytesRead) return null;
+        hash.update(buffer.subarray(0, bytesRead)); position += bytesRead;
+      }
+    } catch { return null; }
+    finally { await handle?.close(); }
+  }
+  return totalBytes > 0 ? hash.digest('hex') : null;
 }

@@ -133,8 +133,9 @@ test('whole-turn acceptance recomputes verified boundaries and ignores fabricate
   run.turns.forEach(turn => { turn.status = 'completed'; });
   run.usage.accounting = accounting;
   run.usage.observations.forEach((row, index) => {
-    row.sourceLine = index + 1; row.source = 'thread/tokenUsage/updated';
+    row.sourceLine = index + 1; row.source = 'thread/tokenUsage/updated'; row.mode = 'snapshot';
     Object.assign(row.total, { cachedInputTokens: 1, reasoningOutputTokens: 1, cacheWriteInputTokens: 2 });
+    row.last = { ...row.total };
   });
   const rules = { usage: { agents: 'all', wholeTurns: true, fields: ['inputTokens', 'cacheWriteInputTokens', 'totalTokens'] } };
   assert.equal(evaluateCaptureRequirements(run, rules).status, 'passed');
@@ -142,6 +143,6 @@ test('whole-turn acceptance recomputes verified boundaries and ignores fabricate
   run.usage.observations[1].source = 'token_usage_record';
   const rejected = evaluateCaptureRequirements(run, rules);
   assert.equal(rejected.status, 'failed');
-  assert.ok(rejected.checks.some(check => check.reason === 'native-turn-source-unverified'));
+  assert.ok(rejected.checks.some(check => check.reason === 'usage-sequence-incomplete'));
   assert.equal(evaluateCaptureRequirements(run, { usage: { fields: ['inputTokens'] } }).status, 'passed', 'snapshot requirement remains explicitly separate');
 });

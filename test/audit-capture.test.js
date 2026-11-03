@@ -140,7 +140,12 @@ async function fixture(t, { command = 'cat .agents/skills/repo-skill/SKILL.md', 
   const skillRead = "send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'root-thread',turnId:'root-turn',completedAtMs:900,item:{id:'read-skill',type:'commandExecution',command:readCommand,commandActions:[{type:'read',path:'.agents/skills/repo-skill/SKILL.md'}],cwd:'/repo',status:'completed',exitCode:0,aggregatedOutput:'PRIVATE TOOL OUTPUT'}}});";
   const startResponse = "send({jsonrpc:'2.0',id,result:{turn:{id:'root-turn',status:'inProgress'}}});";
   const rootReadForScript = skillRead.replaceAll("'/repo'", JSON.stringify(dir)).replaceAll('/repo/', `${dir}/`).replace('__READ_COMMAND__', JSON.stringify(command));
-  const fileChanges = emitFileChanges ? "const changes=Object.fromEntries(Array.from({length:105},(_,i)=>['/repo/file-'+i,{kind:'modified',diff:'PRIVATE DIFF'}])); send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'root-thread',turnId:'root-turn',item:{id:'many-changes',type:'FileChange',status:'completed',changes}}});" : '';
+  const fileChanges = emitFileChanges === 'same-path-distinct-items' ? `
+    const samePath={'/repo/shared.js':{kind:'modified',diff:'PRIVATE DIFF'}};
+    send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'root-thread',turnId:'root-turn',item:{id:'file-change-a',type:'FileChange',status:'completed',changes:samePath}}});
+    send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'root-thread',turnId:'root-turn',item:{id:'file-change-b',type:'FileChange',status:'completed',changes:samePath}}});
+    send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'root-thread',turnId:'root-turn',item:{id:'file-change-a',type:'FileChange',status:'completed',changes:samePath}}});
+  ` : emitFileChanges ? "const changes=Object.fromEntries(Array.from({length:105},(_,i)=>['/repo/file-'+i,{kind:'modified',diff:'PRIVATE DIFF'}])); send({jsonrpc:'2.0',method:'item/completed',params:{threadId:'root-thread',turnId:'root-turn',item:{id:'many-changes',type:'FileChange',status:'completed',changes}}});" : '';
   const unknownEvent = emitUnknownMethod ? "send({jsonrpc:'2.0',method:'secret.method/private-value',params:{threadId:'root-thread',secret:'PRIVATE_NATIVE_EVENT'}});"
     : emitErrorNotification ? "send({jsonrpc:'2.0',method:'error',params:{threadId:'root-thread',turnId:'root-turn',willRetry:true,error:{message:'PRIVATE_ERROR_MESSAGE',additionalDetails:'PRIVATE_DETAILS',codexErrorInfo:'rateLimitExceeded'}}});" : '';
   let script = serverScript.replaceAll("'/repo'", JSON.stringify(dir)).replaceAll('/repo/', `${dir}/`).replace('__READ_COMMAND__', JSON.stringify(command))
@@ -191,7 +196,7 @@ async function fixture(t, { command = 'cat .agents/skills/repo-skill/SKILL.md', 
     "cwd,skills:catalog.map(skill=>({...skill,path:'file://'+skill.path})),errors:[]");
   if (!emitSkillRead) script = script.replace(rootReadForScript, '');
   if (earlyCompletion) script = script.replace(startResponse, '').replace(terminalAction, `${terminalAction}${startResponse}`);
-  return { dir, script, options: { profile: { profileId: 'fixture-profile', profileName: 'Fixture', home: '/tmp/profile', userHome: '/tmp/user', executable: process.execPath, version: '2.0' },
+  return { dir, script, options: { executionMode: 'audit', profile: { profileId: 'fixture-profile', profileName: 'Fixture', home: '/tmp/profile', userHome: '/tmp/user', executable: process.execPath, version: '2.0' },
     workspace: dir, task: 'private task marker', processOptions: { args: ['-e', script], env: { PATH: process.env.PATH ?? '' }, timeoutMs: 5000,
       stdoutPath: join(dir, 'stdout.jsonl'), stderrPath: join(dir, 'stderr.log') } } };
 }
@@ -200,6 +205,8 @@ test('speaks native app-server protocol and records safe skill inventory, linked
   const f = await fixture(t), phases = [], checkpoints = [];
   const { process, run, capture } = await runAuditCapture({ ...f.options, onPhase: phase => phases.push(phase),
     onTaskEnd: state => checkpoints.push({ complete: state.complete, childTerminal: state.run.agents.find(a => a.id === 'child-thread')?.terminal,
+      nativeEndedAt: state.nativeEndedAt,
+      rootCompletedObservedAt: new Date(state.run.events.find(e => e.kind === 'turn/completed' && e.agentId === 'root-thread').observedAtMs).toISOString(),
       hydrated: state.run.events.some(e => e.kind === 'hydrated:item') }) });
   assert.equal(process.status, 'exited');
   assert.equal(run.status, 'partial');
@@ -224,7 +231,12 @@ test('speaks native app-server protocol and records safe skill inventory, linked
   assert.equal(run.coverage.skillInventory, 'complete');
   assert.equal(run.coverage.skills, 'partial');
   assert.equal(run.status, 'partial');
-    assert.deepEqual(checkpoints, [{ complete: true, childTerminal: true, hydrated: true }]);
+    assert.equal(checkpoints.length, 1);
+    assert.equal(checkpoints[0].nativeEndedAt, checkpoints[0].rootCompletedObservedAt,
+      'task-end uses the native completion receipt timestamp, not a later clock read');
+    assert.equal(checkpoints[0].complete, true);
+    assert.equal(checkpoints[0].childTerminal, true);
+    assert.equal(checkpoints[0].hydrated, true);
   assert.equal(run.skills.some(s => s.name === 'child-skill' && s.catalogs.some(c => c.agentId === 'child-thread')), true);
   assert.equal(run.skills.find(s => s.name === 'repo-skill').catalogs.some(c => c.agentId === 'child-thread'), false);
   assert.equal(run.skills.find(s => s.name === 'child-skill').observations[0].kind, 'definition-read-observed');
@@ -728,8 +740,17 @@ test('projects native object-shaped file changes under the global artifact cap',
   const { run } = await runAuditCapture({ ...f.options, limits: { maxArtifacts: 2 } });
   assert.equal(run.artifacts.length, 2);
   assert.ok(run.warnings.includes('file-change-limit'));
-  assert.ok(run.artifacts.every(artifact => artifact.kind === 'recorded-file-change' && artifact.path));
+  assert.ok(run.artifacts.every(artifact => artifact.kind === 'recorded-file-change' && artifact.path && artifact.itemId === 'many-changes'));
   assert.equal(JSON.stringify(run).includes('PRIVATE DIFF'), false);
+});
+
+test('keeps distinct native file-change items for the same path while deduplicating the same item', async t => {
+  const f = await fixture(t, { emitFileChanges: 'same-path-distinct-items' });
+  const { run } = await runAuditCapture(f.options);
+  const artifacts = run.artifacts.filter(artifact => artifact.kind === 'recorded-file-change');
+  assert.equal(artifacts.length, 2);
+  assert.deepEqual(artifacts.map(artifact => artifact.itemId).sort(), ['file-change-a', 'file-change-b']);
+  assert.deepEqual(new Set(artifacts.map(artifact => artifact.path)), new Set(['/repo/shared.js']));
 });
 
 test('projects unknown native methods as a fixed event kind without preserving method text', async t => {
@@ -932,7 +953,7 @@ test('native startup refuses an incompatible command sandbox before any model tu
 test('native readiness-only capture verifies the command sandbox without starting a task', async t => {
   const f = await fixture(t), home = join(f.dir, 'home'); await mkdir(home);
   const binary = join(f.dir, 'fake-codex');
-  const config = { forced_login_method: 'chatgpt', model_reasoning_effort: 'low', plan_mode_reasoning_effort: 'low' };
+  const config = { forced_login_method: 'chatgpt', model_reasoning_effort: 'low', plan_mode_reasoning_effort: 'low', 'agents.max_depth': 2 };
   const argvPath = join(f.dir, 'invocation.json');
   await writeFile(binary, '#!/usr/bin/env node\nrequire("node:fs").writeFileSync(' + JSON.stringify(argvPath) + ',JSON.stringify(process.argv));\n' + f.script, { mode: 0o700 });
   const { run, capture } = await runAuditCapture({ ...f.options, preflightOnly:true,

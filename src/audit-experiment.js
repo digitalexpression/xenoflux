@@ -30,20 +30,20 @@ function pendingRun(current) {
     warnings: ['Inspect or recover the saved experiment before starting a new attempt.'] };
 }
 
-export async function showAuditRecord(store, id) {
+export async function showAuditRecord(store, id, { includeReplay = false } = {}) {
   const current = await readAuditRecord(store, id);
   if (current.record.kind === 'audit-series' && current.record.spec?.kind === 'audit-cohort') {
     if (!current.report) throw new Error('Selected-session cohort has no finalized report');
     return current.report;
   }
   if (current.record.kind === 'audit-series') return (await import('./audit-series.js')).buildAuditSeriesReport(store, id);
-  if (current.record.kind === 'audit-experiment-run' && current.report) return projectRetainedAuditRun(store, current);
+  if (current.record.kind === 'audit-experiment-run' && current.report) return projectRetainedAuditRun(store, current, { includeReplay });
   if (current.record.kind === 'audit-evaluation' && current.report) return current.report;
   if (current.record.kind === 'audit-experiment-run') return pendingRun(current);
   const runs = [];
   for (const reference of current.state.runs ?? []) {
     try { const run = await readAuditRecord(store, reference.id); runs.push(run.report
-      ? await projectRetainedAuditRun(store, run) : pendingRun(run)); }
+      ? await projectRetainedAuditRun(store, run, { includeReplay }) : pendingRun(run)); }
     catch { runs.push({ schemaVersion: 1, kind: 'audit-run', id: reference.id, status: 'unavailable',
       profile: {}, agents: [], events: [], turns: [], skills: [], metrics: {}, coverage: { source: 'unavailable' } }); }
   }

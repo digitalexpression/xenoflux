@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { stringify } from 'smol-toml';
 import { Store, bind, create } from '../src/profiles.js';
 import { registerHome } from '../src/homes.js';
@@ -10,7 +10,8 @@ import { hostname } from 'node:os';
 import { validateAuditSpec } from '../src/audit-spec.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { auditSettingsIdentity, compareAuditProfileSettings, observeAuditProfileIdle, resolveAuditExecutionProfile,
-  snapshotAuditProfileSettings, parseNativeResourceResult, observeAuditProfileAccess, inspectNativeResources } from '../src/audit-profile.js';
+  snapshotAuditProfileSettings, parseNativeResourceResult, observeAuditProfileAccess, inspectNativeResources,
+  resolveProfileExecutionProfile, recheckProfileExecutionProfile } from '../src/audit-profile.js';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-audit-profile-')));
@@ -84,14 +85,14 @@ test('explicit executable version probing propagates unsafe shutdown and cancell
 
 test('native config overrides are narrowly validated, normalized, and retained per execution profile', async t => {
   const f = await fixture(t);
-  const nativeConfig = { forced_login_method: 'chatgpt', plan_mode_reasoning_effort: 'low', model_reasoning_effort: 'low' };
+  const nativeConfig = { forced_login_method: 'chatgpt', plan_mode_reasoning_effort: 'low', model_reasoning_effort: 'low', 'agents.max_depth': 2 };
   const spec = validateAuditSpec({ schemaVersion: 1, repository: f.repository, revision: 'HEAD', task: 'Fixture',
     profiles: [{ name: 'Research', nativeConfig }, { name: 'Other' }] });
-  assert.deepEqual(spec.profiles[0].nativeConfig, { forced_login_method: 'chatgpt', model_reasoning_effort: 'low', plan_mode_reasoning_effort: 'low' });
+  assert.deepEqual(spec.profiles[0].nativeConfig, { 'agents.max_depth': 2, forced_login_method: 'chatgpt', model_reasoning_effort: 'low', plan_mode_reasoning_effort: 'low' });
   const profile = await resolveAuditExecutionProfile(f.store, spec.profiles[0], { repository: f.repository });
   assert.deepEqual(profile.nativeConfig, spec.profiles[0].nativeConfig);
   assert.deepEqual(await readFile(f.store.file), f.profileStore);
-  for (const bad of [{ model_reasoning_effort: 'turbo' }, { forced_login_method: 'other' }, { profile: 'changed' }, { model: '' }]) {
+  for (const bad of [{ model_reasoning_effort: 'turbo' }, { forced_login_method: 'other' }, { profile: 'changed' }, { model: '' }, { 'agents.max_depth': 0 }, { 'agents.max_depth': 5 }, { 'agents.max_depth': '2' }]) {
     assert.throws(() => validateAuditSpec({ schemaVersion: 1, repository: f.repository, revision: 'HEAD', task: 'Fixture',
       profiles: [{ name: 'Research', nativeConfig: bad }, { name: 'Other' }] }));
   }
@@ -117,6 +118,104 @@ test('Default needs an existing trusted repository entry and explicit executable
   await assert.rejects(resolveAuditExecutionProfile(f.store, 'Default', { repository: f.repository, defaultUserHome: userHome }), /explicit Codex executable/);
   await writeFile(join(home, 'config.toml'), `${stringify({ projects: { [f.repository]: { trust_level: 'untrusted' } } })}\n`, { mode: 0o600 });
   await assert.rejects(resolveAuditExecutionProfile(f.store, input, { repository: f.repository, defaultUserHome: userHome }), /existing trusted repository entry/);
+});
+
+test('ordinary execution resolves the saved profile without a version probe and refuses changed settings at Start', async t => {
+  const f = await fixture(t);
+  const accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
+  const profile = await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository,
+    terminalEnvironment: { PATH: '/usr/bin:/bin', TERM: 'xterm-256color' } });
+  assert.equal(profile.executionMode, 'profile');
+  assert.equal(profile.cwd, f.repository);
+  assert.equal(profile.executable, f.executable);
+  assert.equal(profile.version, '0.162.0');
+  assert.equal(profile.bindingRepository, f.repository);
+  assert.equal(profile.env.CODEX_SQLITE_HOME, f.native.home);
+  assert.equal(profile.settingsSnapshot.status, 'ready');
+  assert.deepEqual(profile.launchArgs, ['-c', `sqlite_home=${JSON.stringify(profile.home)}`]);
+  const fresh = await recheckProfileExecutionProfile(f.store, profile, { repository: f.repository,
+    terminalEnvironment: { PATH: '/usr/bin:/bin', TERM: 'xterm-256color' }, accessOptions });
+  assert.equal(fresh.executableIdentity, profile.executableIdentity);
+  await writeFile(join(f.native.home, 'config.toml'), `${await readFile(join(f.native.home, 'config.toml'), 'utf8')}\nmodel = "changed"\n`, { mode: 0o600 });
+  await assert.rejects(recheckProfileExecutionProfile(f.store, profile, { repository: f.repository,
+    terminalEnvironment: { PATH: '/usr/bin:/bin', TERM: 'xterm-256color' }, accessOptions }), { code: 'profile-settings-changed' });
+  assert.deepEqual(await readFile(f.store.file), f.profileStore);
+});
+
+test('serialized ordinary profile previews recheck by metadata identity across restart boundaries', async t => {
+  const f = await fixture(t), accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
+  const preview = JSON.parse(JSON.stringify(await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository })));
+  assert.equal(preview.versionSource, 'registered');
+  assert.equal(preview.executableSource, 'registered');
+  const fresh = await recheckProfileExecutionProfile(f.store, preview, { repository: f.repository, accessOptions });
+  assert.equal(fresh.executableIdentity, preview.executableIdentity);
+  await writeFile(join(f.native.home, 'config.toml'), `${await readFile(join(f.native.home, 'config.toml'), 'utf8')}\nmodel = "changed"\n`, { mode: 0o600 });
+  await assert.rejects(recheckProfileExecutionProfile(f.store, preview, { repository: f.repository, accessOptions }), { code: 'profile-settings-changed' });
+});
+
+test('ordinary settings snapshot includes project instructions/config, detects replaced cwd, and checks access before Start', async t => {
+  const f = await fixture(t), accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
+  await mkdir(join(f.repository, '.codex'), { mode: 0o700 });
+  await writeFile(join(f.repository, 'AGENTS.md'), 'first instruction', { mode: 0o600 });
+  await writeFile(join(f.repository, '.codex', 'config.toml'), 'model = "first"\n', { mode: 0o600 });
+  await writeFile(join(f.root, 'AGENTS.md'), 'ancestor instruction', { mode: 0o600 });
+  const profile = await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository });
+  await recheckProfileExecutionProfile(f.store, profile, { repository: f.repository, accessOptions });
+  await writeFile(join(f.repository, 'AGENTS.md'), 'changed instruction', { mode: 0o600 });
+  await assert.rejects(recheckProfileExecutionProfile(f.store, profile, { repository: f.repository, accessOptions }), { code: 'profile-settings-changed' });
+
+  await writeFile(join(f.repository, 'AGENTS.md'), 'first instruction', { mode: 0o600 });
+  await writeFile(join(f.root, 'AGENTS.md'), 'changed ancestor instruction', { mode: 0o600 });
+  await assert.rejects(recheckProfileExecutionProfile(f.store, profile, { repository: f.repository, accessOptions }), { code: 'profile-settings-changed' });
+  await writeFile(join(f.root, 'AGENTS.md'), 'ancestor instruction', { mode: 0o600 });
+  const sameContent = await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository });
+  const moved = join(f.root, 'repo-original');
+  await rename(f.repository, moved);
+  await mkdir(f.repository, { mode: 0o700 });
+  await writeFile(join(f.repository, 'AGENTS.md'), 'first instruction', { mode: 0o600 });
+  await mkdir(join(f.repository, '.codex'), { mode: 0o700 });
+  await writeFile(join(f.repository, '.codex', 'config.toml'), 'model = "first"\n', { mode: 0o600 });
+  await assert.rejects(recheckProfileExecutionProfile(f.store, sameContent, { repository: f.repository, accessOptions }), { code: 'profile-settings-changed' });
+
+  const stable = await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository });
+  await mkdir(join(stable.reservationRoot, '.run-lock'), { mode: 0o700 });
+  await assert.rejects(recheckProfileExecutionProfile(f.store, stable, { repository: f.repository, accessOptions }), { code: 'profile-access-blocked' });
+});
+
+test('Default ordinary execution discovers its PATH binary without probing it', async t => {
+  const f = await fixture(t), userHome = join(f.root, 'user');
+  await mkdir(userHome, { mode: 0o700 });
+  const home = join(userHome, '.codex'), repository = join(userHome, 'repo');
+  await mkdir(home, { mode: 0o700 }); await mkdir(repository, { mode: 0o700 });
+  await mkdir(join(repository, '.codex'), { mode: 0o700 });
+  await writeFile(join(repository, '.codex', 'config.toml'), 'model = "project"\n', { mode: 0o600 });
+  await writeFile(join(repository, 'AGENTS.md'), 'project instruction', { mode: 0o600 });
+  await writeFile(join(home, 'config.toml'), `${stringify({ projects: { [repository]: { trust_level: 'trusted' } } })}\n`, { mode: 0o600 });
+  await mkdir(join(home, 'sessions'), { mode: 0o700 });
+  const runtimeFile = join(home, 'sessions', 'rollout.jsonl');
+  await writeFile(runtimeFile, 'first runtime output', { mode: 0o600 });
+  const profile = await resolveProfileExecutionProfile(f.store, 'Default', { repository, defaultUserHome: userHome,
+    terminalEnvironment: { PATH: dirname(f.executable) } });
+  assert.equal(profile.profileId, 'default');
+  assert.equal(profile.executable, f.executable);
+  assert.equal(profile.version, null);
+  assert.equal(profile.versionSource, 'unavailable');
+  assert.equal(profile.executableSource, 'path');
+  assert.equal(profile.env.CODEX_HOME, home);
+  assert.equal(profile.env.CODEX_SQLITE_HOME, undefined);
+  assert.equal(profile.launchArgs, undefined);
+  const accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
+  await writeFile(runtimeFile, 'changed runtime output', { mode: 0o600 });
+  await recheckProfileExecutionProfile(f.store, profile, { repository, defaultUserHome: userHome,
+    terminalEnvironment: { PATH: dirname(f.executable) }, accessOptions });
+  await writeFile(join(repository, 'build.log'), 'unrelated output', { mode: 0o600 });
+  await recheckProfileExecutionProfile(f.store, profile, { repository, defaultUserHome: userHome,
+    terminalEnvironment: { PATH: dirname(f.executable) }, accessOptions });
+  await writeFile(join(repository, 'AGENTS.md'), 'changed project instruction', { mode: 0o600 });
+  await assert.rejects(recheckProfileExecutionProfile(f.store, profile, { repository, defaultUserHome: userHome,
+    terminalEnvironment: { PATH: dirname(f.executable) }, accessOptions }), { code: 'profile-settings-changed' });
+  await assert.rejects(resolveProfileExecutionProfile(f.store, { name: 'Default', nativeConfig: { model: 'override' } },
+    { repository, defaultUserHome: userHome, terminalEnvironment: { PATH: dirname(f.executable) } }));
 });
 
 test('idle observation is targeted, treats a lock or open resources as busy, and failures as unknown', async t => {
@@ -225,7 +324,18 @@ test('access trusts a matching running desktop journal even when its creator PID
   assert.deepEqual(check.clients, [identity]);
   assert.deepEqual(check.sourceReservation, { kind: 'desktop-instance', runId, profileId: profile.profileId,
     host: hostname(), journalPath, phase: 'running' });
-  const foreignClient = { ...identity, pid: identity.pid + 1 };
+  const lateHelper = { ...identity, pid: identity.pid + 2, ppid: identity.pid, executable: '/fixture/late-codex' };
+  const late = await observeAuditProfileAccess(profile, { store: f.store,
+    inspectResources: async () => ({ pids: [lateHelper.pid], records: 1, clients: [], partial: false }),
+    processSnapshot: async () => [identity, lateHelper] });
+  assert.equal(late.status, 'ready');
+  const reusedHelper = { ...staleHelper, executable: '/fixture/unrelated-process' };
+  const reused = await observeAuditProfileAccess(profile, { store: f.store,
+    inspectResources: async () => ({ pids: [reusedHelper.pid], records: 1, clients: [], partial: false }),
+    processSnapshot: async () => [identity, reusedHelper] });
+  assert.equal(reused.status, 'blocked');
+  assert.equal(reused.reason, 'desktop-process-identity-changed');
+  const foreignClient = { ...identity, pid: identity.pid + 3 };
   const mismatch = await observeAuditProfileAccess(profile, { store: f.store,
     inspectResources: async () => ({ pids: [foreignClient.pid], records: 1, clients: [], partial: false }),
     processSnapshot: async () => [identity, foreignClient] });

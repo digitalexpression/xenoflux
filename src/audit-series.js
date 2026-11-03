@@ -31,7 +31,8 @@ const baseSpec = spec => {
 const trialEvidenceBudget = record => Math.floor(6 * 1024 * 1024 / Math.max(1, record.plan.length));
 
 function trialPlan(spec) {
-  const budgetMs = Math.min(spec.limits.experimentMs, Math.floor(spec.trials.budgetMs / spec.trials.count));
+  const slotBudgetMs = Math.floor(spec.trials.budgetMs / spec.trials.count);
+  const budgetMs = spec.limits.experimentMs === null ? slotBudgetMs : Math.min(spec.limits.experimentMs, slotBudgetMs);
   return Array.from({ length: spec.trials.count }, (_, trialIndex) => {
     const names = spec.profiles.map(p => p.name), offset = spec.trials.order === 'balanced' ? trialIndex % names.length : 0;
     return { index: trialIndex + 1, trialIndex, experimentId: randomUUID(),
@@ -263,7 +264,7 @@ async function executeSeries(store, initial, { fresh = false, ...context } = {})
       const spec = current.record.spec, trial = baseSpec(spec);
       trial.revision = current.record.baseline.commit;
       trial.profiles = slot.profileOrder.map(name => spec.profiles.find(item => item.name === name));
-      trial.limits = { ...trial.limits, runMs: Math.min(trial.limits.runMs, slot.budgetMs), experimentMs: slot.budgetMs };
+      trial.limits = { ...trial.limits, runMs: trial.limits.runMs === null ? null : Math.min(trial.limits.runMs, slot.budgetMs), experimentMs: slot.budgetMs };
       const envObservation = environment(epoch);
       await setTrial(slot, { status: 'starting', environment: envObservation });
       await context.onTrialPrepared?.({ seriesId: current.id, slot });
