@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, access } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, readFile, writeFile, access, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInstallation } from '../src/installation.js';
 import { userPaths } from '../src/paths.js';
 import { readLogSettings, writeLogSettings } from '../src/log-storage.js';
+import { startUiServer } from '../src/ui-server.js';
 
 async function fixture(t, options = {}) {
   const home = await mkdtemp(join(tmpdir(), 'xfx-install home '));
@@ -36,6 +37,60 @@ test('install validates Node first, stages a runnable package, and writes a port
   await access(join(result.app, 'node_modules', 'smol-toml', 'package.json'));
   assert.equal(f.calls.filter(([kind]) => kind === 'node').length, 2);
   assert.equal(f.calls.some(([kind, file, args]) => kind === 'execute' && file === 'node' && args[1] === '--help' && args[0].includes('.stage-')), true);
+});
+
+test('managed installation serves the bundled UI from its installed copy', async t => {
+  const f = await fixture(t);
+  const result = await f.instance.install({ env: f.env });
+  const server = await startUiServer({ provider: {}, staticRoot: join(result.app, 'dist', 'ui') });
+  t.after(() => server.close());
+
+  const response = await fetch(server.origin);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /text\/html/);
+  const html = await response.text();
+  assert.match(html, /<title>Xenoflux<\/title>/);
+  const assets = [...html.matchAll(/(?:src|href)="(\/assets\/[^\"]+\.(?:js|css))"/g)].map(match => match[1]);
+  assert.ok(assets.some(asset => asset.endsWith('.js')), 'installed page references a JavaScript bundle');
+  assert.ok(assets.some(asset => asset.endsWith('.css')), 'installed page references a stylesheet');
+  for (const asset of assets) {
+    const served = await fetch(new URL(asset, server.origin));
+    assert.equal(served.status, 200, asset);
+    assert.deepEqual(Buffer.from(await served.arrayBuffer()), await readFile(join(process.cwd(), 'dist', 'ui', asset.slice(1))));
+  }
+});
+
+test('missing source UI refuses upgrade before replacing the installed app or touching user state', async t => {
+  const f = await fixture(t);
+  const installed = await f.instance.install({ env: f.env });
+  const appSentinel = join(installed.app, 'keep-existing');
+  await writeFile(appSentinel, 'previous app');
+  await mkdir(userPaths(f.home).controller, { recursive: true });
+  const controllerSentinel = join(userPaths(f.home).controller, 'keep-existing');
+  await writeFile(controllerSentinel, 'controller data');
+  const launcherBefore = await readFile(userPaths(f.home).bin);
+
+  const source = await mkdtemp(join(tmpdir(), 'xfx-install source without ui '));
+  t.after(async () => { await (await import('node:fs/promises')).rm(source, { recursive: true, force: true }); });
+  for (const name of ['bin', 'src', 'LICENSE', 'package.json']) await cp(join(process.cwd(), name), join(source, name), { recursive: true });
+  await symlink(join(process.cwd(), 'node_modules'), join(source, 'node_modules'));
+  const previousCalls = f.calls.length;
+  // Reuse fixture collaborators while changing only the disposable source path.
+  const retry = createInstallation({ source, home: f.home,
+    execute: async (...args) => { f.calls.push(['execute', ...args]); return { stdout: 'v22.15.0\n' }; },
+    check: async (...args) => { f.calls.push(['node', ...args]); return 'v22.15.0'; },
+    runService: async (...args) => { f.calls.push(['/bin/launchctl', ...args]); },
+    serviceLoaded: async () => false, readLogSettings: () => ({ enabled: false, backgroundPath: '/fixture/node:/usr/bin:/bin' }),
+    writeLogSettings: async value => { f.calls.push(['settings', value]); },
+    prepareLogs: async value => { f.prepared.push(value); }, restoreLogs: async value => { f.restored.push(value); },
+  });
+  await assert.rejects(retry.install({ env: f.env }), /ENOENT/);
+
+  assert.equal(await readFile(appSentinel, 'utf8'), 'previous app');
+  assert.equal(await readFile(controllerSentinel, 'utf8'), 'controller data');
+  assert.deepEqual(await readFile(userPaths(f.home).bin), launcherBefore);
+  assert.equal(f.calls.slice(previousCalls).some(([kind]) => kind === '/bin/launchctl' || kind === 'settings'), false);
+  assert.equal(f.prepared.length, 1, 'only the initial successful install prepared logs');
 });
 
 test('missing or unsupported Node fails before installation writes', async t => {

@@ -50,3 +50,6 @@ Detailed operational handovers and raw receipts remain in private engineering
 records; the versioned release pages contain reviewed public summaries.
 
 [Back to Xenoflux](../README.md).
+
+The [3.0.1 installer hotfix candidate](developer/RELEASE-3.0.1.md) records the
+managed-UI correction and its release checks.

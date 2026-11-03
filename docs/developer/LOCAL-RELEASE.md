@@ -3,19 +3,19 @@
 Audience: maintainers. Users should follow [Installation](../user/INSTALLATION.md)
 to obtain a published npm package or offline bundle.
 
-Version 1.0.0 was the first stable release. Xenoflux 2.1.0 was verified in the
-existing installation on 2026-10-23. The registry’s `latest` tag identifies the
-current stable npm release. Publication and changes to installed user state
+Version 1.0.0 was the first stable release. Xenoflux 3.0.0 is published;
+the [3.0.1 installer hotfix](RELEASE-3.0.1.md) is being prepared separately.
+The stable npm tag is `latest`. Publication and changes to installed user state
 require the applicable explicit request; building a bundle or passing checks
 does not authorize either action.
 
 ## UI major release
 
-The UI major release is **3.0.0**, superseding the proposed 2.2.0 release.
-Use 3.0 prerelease versions for newly prepared candidates; update package and
-lockfile versions together. Retained 2.2.0 candidate branches/bundles keep their
-identities as historical development evidence; do not rename or relabel them as
-3.0 verification. The [3.0 record](RELEASE-3.0.0.md) tracks source-bound evidence.
+The UI major release is **3.0.0**. Update package and lockfile versions together
+for each new candidate. Retained candidate branches/bundles keep their original
+identities; do not rename or relabel them as new verification. The
+[3.0.0 record](RELEASE-3.0.0.md) and [3.0.1 record](RELEASE-3.0.1.md) track their
+separate source-bound evidence.
 
 Breaking changes, legacy removal and cleanup are allowed. Release notes must
 state removed commands/features/formats and any fresh-start requirement.
@@ -66,7 +66,10 @@ npm run local-release -- --output /absolute/new/release-directory --smoke
 The output directory must not exist. The command produces four files: the Xenoflux
 tarball, `smol-toml` dependency tarball, SHA-256 manifest and `install.mjs`. `--smoke`
 installs them into a disposable directory and checks the detached offline package
-and installation lifecycle. It does not sign in, start or quit real Codex, mount
+and managed installation lifecycle. Both the npm and managed shell entries must
+serve their bundled HTML, JavaScript and CSS and refuse unauthenticated API
+requests. The managed check runs outside the package directory with a disposable
+home/controller and mocked native service callbacks. It does not sign in, start or quit real Codex, mount
 RAM storage, or use a real native home. The manifest records the exact source commit,
 artifact hashes and smoke result. Package scripts are ignored during packing.
 

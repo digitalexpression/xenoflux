@@ -6,6 +6,14 @@ owns product scope and [acceptance](AUDIT-GOAL.md#observable-acceptance); the
 
 ## Current work and stop condition
 
+Prepare the [3.0.1 installer hotfix](RELEASE-3.0.1.md) on the published 3.0.0
+baseline: include the bundled UI in managed staging, verify installed asset
+responses and failed-upgrade preservation, and launch the managed shell entry in
+detached offline smoke. Required source checks, reviewed package contents,
+checksums and passing detached smoke complete local preparation. Publication,
+public tags and installed updates remain separate authorized operations.
+The earlier 3.0.0 evidence below retains its original scope and identity.
+
 The three product outcomes are implemented: create profiles, compare two
 profiles on a task and inspect the report, then optionally request and read an
 ordinary AI review. Reviews use the selected profile's normal configuration and
