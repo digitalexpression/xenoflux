@@ -304,6 +304,27 @@ test('quit reconciliation resumes after the Desktop participant was released bef
   await assert.rejects(access(join(`${f.options.lockPath}.instances`, `${state.runId}.json`)), { code: 'ENOENT' });
 });
 
+test('a child first observed during quit keeps the reservation after an interrupted close', async t => {
+  const f = await fixture(t), opened = await openDesktopInstance(f.store, 'A', f.options);
+  const child = row(91, '/usr/bin/tar', opened.main.pid);
+  const stop = f.runtime.close;
+  f.runtime.close = async (main, { onTrackedProcesses }) => {
+    await onTrackedProcesses([...f.rows.filter(entry => entry.pid === main.pid || entry.ppid === main.pid), child]);
+    await stop(main);
+    f.rows.push({ ...child, ppid: 1 });
+    throw Object.assign(new Error('Close timed out'), { code: 'DESKTOP_CLOSE_TIMEOUT' });
+  };
+
+  await assert.rejects(closeDesktopInstance(f.store, 'A', f.options), { code: 'DESKTOP_CLOSE_TIMEOUT' });
+  await assert.rejects(recoverDesktopInstance(f.store, 'A', f.options), /still runs/);
+  await access(lockPath(f, 'A'));
+  assert.ok(JSON.parse(await readFile(statePath(f, opened.profileId))).processes.some(entry => entry.pid === child.pid));
+
+  f.rows.splice(f.rows.findIndex(entry => entry.pid === child.pid), 1);
+  await recoverDesktopInstance(f.store, 'A', f.options);
+  await assert.rejects(access(lockPath(f, 'A')), { code: 'ENOENT' });
+});
+
 test('normal Desktop quit reconciliation refuses a reused helper identity and preserves ownership', async t => {
   const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options);
   const state = JSON.parse(await readFile(statePath(f, a.profileId)));

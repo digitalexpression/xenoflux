@@ -43,6 +43,30 @@ test('a receipt naming a preexisting main is refused', async () => {
   assert.equal(calls, 1);
 });
 
+test('the signed route targets the inspected vendor app and identifies the new instance among shared executables', async () => {
+  const shortcut = { ...application, executable: bootstrapExecutable };
+  const stock = { ...ownMain, pid: 40 };
+  const child = { ...ownMain, pid: 41, ppid: ownMain.pid, executable: '/usr/bin/profiles' };
+  let launched = false;
+  const rt = createDesktopInstanceRuntime(opts({
+    processSnapshot: async () => launched ? [self, stock, ownMain, { ...child, executable: '(profiles)' }] : [self, stock],
+    execFile: async (file, args) => {
+      assert.equal(file, helper);
+      if (args[0] === '--process-executable') {
+        assert.deepEqual(args, ['--process-executable', String(child.pid), targetStartSeconds(child.startedAt)]);
+        return { stdout: `${child.executable}\n`, stderr: '' };
+      }
+      assert.deepEqual(args, ['--open-signed-app', DESKTOP_APP.appPath, '--home', plan.home, '--desktop-data', plan.desktopData,
+        '--user-home', '/Users/test', '--temporary', plan.temporary, '--target-executable', DESKTOP_APP.executable]);
+      launched = true;
+      return { stdout: JSON.stringify({ pid: ownMain.pid, executable: ownMain.executable,
+        startSeconds: Number(targetStartSeconds(ownMain.startedAt)) }), stderr: '' };
+    },
+  }));
+  assert.deepEqual(await rt.open(plan, { helperExecutable: helper, application: shortcut, signedShortcut: true }),
+    { main: ownMain, processes: [ownMain, child] });
+});
+
 test('receipt mismatches report the exact differing identity and never adopt the process', async () => {
   let reads = 0;
   const start = Number(targetStartSeconds(copiedMain.startedAt)) - 5;
@@ -224,32 +248,58 @@ test('an unavailable argv label keeps a close pending until it exits, timing out
   });
 });
 
-test('close retains a shutdown child discovered while its parent argv is unavailable', async () => {
+test('close records and drains a shutdown child inherited by launchd', async () => {
   const child = { ...copiedMain, pid: 31, ppid: copiedMain.pid, executable: '/fixture/shutdown-helper' };
-  let rows = [self, copiedMain];
-  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
-    execFile: async () => { rows = [self, { ...copiedMain, executable: '(Codex)' }, child]; return { stdout: '' }; },
-    sleep: async () => { rows = [self, { ...child, ppid: 1 }]; },
-  }));
-  await assert.rejects(rt.close(copiedMain, { helperExecutable: helper }), error => {
-    assert.equal(error.code, 'PROCESS_TREE_AMBIGUOUS');
-    assert.deepEqual(error.remainingProcesses, [{ ...child, ppid: 1 }]);
-    return true;
-  });
+  for (const executable of [copiedMain.executable, '(Codex)']) {
+    let rows = [self, copiedMain], polls = 0, quits = 0;
+    const recorded = [];
+    const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+      execFile: async () => { quits++; rows = [self, { ...copiedMain, executable }, child]; return { stdout: '' }; },
+      sleep: async () => { rows = ++polls === 1 ? [self, { ...child, ppid: 1 }] : [self]; },
+    }));
+    assert.deepEqual(await rt.close(copiedMain, {
+      helperExecutable: helper, onTrackedProcesses: processes => recorded.push(processes),
+    }), { status: 'stopped', processes: [] });
+    assert.deepEqual(recorded, [[copiedMain], [copiedMain, child]]);
+    assert.equal(polls, 2);
+    assert.equal(quits, 1);
+  }
 });
 
-test('close timeout retains a detached known child whose argv becomes unavailable', async () => {
+test('close timeout retains a detached known child with or without available argv', async () => {
   const child = { ...copiedMain, pid: 31, ppid: copiedMain.pid, executable: '/fixture/shutdown-helper' };
-  let rows = [self, copiedMain, child], tick = 0;
-  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows, now: () => tick,
-    execFile: async () => { rows = [self, { ...child, ppid: 1, executable: '(shutdown-helper)' }]; return { stdout: '' }; },
-    sleep: async ms => { tick += ms; }, closeTimeoutMs: 2, pollIntervalMs: 1,
+  for (const executable of [child.executable, '(shutdown-helper)', 'shutdown-helper']) {
+    const detached = { ...child, ppid: 1, executable };
+    let rows = [self, copiedMain, child], tick = 0;
+    const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows, now: () => tick,
+      execFile: async () => { rows = [self, detached]; return { stdout: '' }; },
+      sleep: async ms => { tick += ms; }, closeTimeoutMs: 2, pollIntervalMs: 1,
+    }));
+    await assert.rejects(rt.close(copiedMain, { helperExecutable: helper }), error => {
+      assert.equal(error.code, 'DESKTOP_CLOSE_TIMEOUT');
+      assert.deepEqual(error.remainingProcesses, [executable === child.executable ? detached : child]);
+      return true;
+    });
+  }
+});
+
+test('close waits for a newly observed child with an unavailable executable path', async () => {
+  const child = { ...copiedMain, pid: 31, ppid: copiedMain.pid, executable: '(profiles)' };
+  let rows = [self, copiedMain], polls = 0;
+  const tracked = [];
+  const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => rows,
+    execFile: async (file, args) => {
+      if (args[0] === '--process-executable') throw new Error('path unavailable');
+      assert.deepEqual(args.slice(0, 2), ['--quit-pid', String(copiedMain.pid)]);
+      rows = [self, copiedMain, child];
+      return { stdout: '' };
+    },
+    sleep: async () => { rows = ++polls === 1 ? [self, { ...child, ppid: 1 }] : [self]; },
   }));
-  await assert.rejects(rt.close(copiedMain, { helperExecutable: helper }), error => {
-    assert.equal(error.code, 'DESKTOP_CLOSE_TIMEOUT');
-    assert.deepEqual(error.remainingProcesses, [child]);
-    return true;
-  });
+  assert.equal((await rt.close(copiedMain, { helperExecutable: helper,
+    onTrackedProcesses: processes => tracked.push(processes) })).status, 'stopped');
+  assert.deepEqual(tracked, [[copiedMain]]);
+  assert.equal(polls, 2);
 });
 
 test('close preserves helper failure while the exact main remains live', async () => {

@@ -18,6 +18,7 @@ const absoluteCanonical = value => safeText(value) && value.startsWith('/') && r
 const ownerName = '.xfx-owned.json';
 const markerName = '.xfx-profile-app-owner.json';
 const signingPolicy = 'main-host-disable-library-validation-v1';
+const shortcutPolicy = 'vendor-signed-shortcut-v1';
 const currentUid = () => typeof process.getuid === 'function' ? process.getuid() : -1;
 const privateMode = value => (value.mode & 0o077) === 0;
 const privateRegular = value => value.isFile() && value.nlink === 1 && value.uid === currentUid() && privateMode(value);
@@ -249,7 +250,7 @@ async function loadOwnedMarker(path, { lstat, readFile }, expected) {
 }
 function applicationFor(appPath, bundleId, executable) { return { appPath, bundleId, executable }; }
 
-/** Prepare a signed, profile-labelled copy of the verified vendor app. */
+/** Prepare the profile's private macOS launcher bundle. */
 export function prepareProfileApp(store, plan, options = {}) {
   return profileApp(store, plan, true, options);
 }
@@ -262,7 +263,7 @@ function preparationRequired(plan, refresh) {
   return Object.assign(new Error(`${code}: Run xfx desktop ${refresh ? 'refresh' : 'prepare'} ${JSON.stringify(plan.name)} before opening this profile.`), { code });
 }
 async function profileApp(store, plan, allowRebuild, {
-  build, nodeExecutable = process.execPath, entryPoint = fileURLToPath(new URL('../bin/xfx.js', import.meta.url)),
+  signedShortcut = false, build, nodeExecutable = process.execPath, entryPoint = fileURLToPath(new URL('../bin/xfx.js', import.meta.url)),
   source = sourceDefault, prebuiltDirectory = prebuiltDirectoryDefault, execFile = execFileDefault,
   verifyOriginal: verifyOriginalFn = async (appPath, expected) => inspectDesktopApp({ appPath, expected, execFile, readFile, realpath }),
   copyApp = (from, to) => nodeCp(from, to, { recursive: true, verbatimSymlinks: true, mode: fsConstants.COPYFILE_FICLONE }),
@@ -295,6 +296,7 @@ async function profileApp(store, plan, allowRebuild, {
   const ownerPath = join(profileDir, markerName);
   const tempApp = join(profileDir, `.profile-app-${randomUUID()}.app`);
   const bundleId = `com.xenoflux.profile.${plan.profileId.toLowerCase()}`;
+  const policy = signedShortcut ? shortcutPolicy : signingPolicy;
   const expectedBase = { kind: 'xenoflux-profile-app', store: store.directory, profileId: plan.profileId, nativeRoot: plan.nativeRoot, appPath };
   const existingMarker = await lstat(ownerPath).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
   if (!allowRebuild && !existingMarker) throw preparationRequired(plan, false);
@@ -320,13 +322,14 @@ async function profileApp(store, plan, allowRebuild, {
     if (!existingApp) fail('PROFILE_APP_OWNERSHIP_MISMATCH');
     const oldLabel = basename(existing.appPath).slice('Codex · '.length, -'.app'.length);
     const oldPlan = { ...plan, name: oldLabel };
-    const existingBundle = applicationFor(existing.appPath, existing.bundleId, join(existing.appPath, 'Contents', 'MacOS', existing.sourceExecutable));
+    const existingBundle = applicationFor(existing.appPath, existing.bundleId, join(existing.appPath, 'Contents', 'MacOS',
+      existing.signingPolicy === shortcutPolicy ? 'XfxProfileLauncher' : existing.sourceExecutable));
     const validation = await validateProfileApp(store, oldPlan, existingBundle, { execFile, lstat, realpath, readFile, readdir, readlink });
-    const needsRefresh = existing.appPath !== appPath || existing.sourceAppPath !== sourceAppPath
-      || existing.sourceBundleId !== plan.app.bundleId || existing.sourceAsarSha256 !== copiedAsarSha256
-      || existing.sourceExecutableSha256 !== sourceExecutableSha256
+    const vendorChanged = existing.sourceAppPath !== sourceAppPath || existing.sourceBundleId !== plan.app.bundleId
+      || existing.sourceAsarSha256 !== copiedAsarSha256 || existing.sourceExecutableSha256 !== sourceExecutableSha256;
+    const needsRefresh = existing.appPath !== appPath || (!signedShortcut && vendorChanged)
       || existing.helperSourceSha256 !== helper.sourceHash || existing.helperSha256 !== helper.helperSha256
-      || existing.signingPolicy !== signingPolicy || existing.node !== canonicalNode || existing.entry !== canonicalEntry;
+      || existing.signingPolicy !== policy || existing.node !== canonicalNode || existing.entry !== canonicalEntry;
     if (!needsRefresh) {
       return { ...validation, helperExecutable: helper.helper, helperSha256: helper.helperSha256 };
     }
@@ -338,14 +341,29 @@ async function profileApp(store, plan, allowRebuild, {
     fail('PROFILE_APP_OWNERSHIP_MISMATCH');
   try {
     await scanLinks(sourceAppPath, sourceAppPath, { lstat, readdir, readlink, realpath });
-    await copyApp(sourceAppPath, tempApp);
     const tempContents = join(tempApp, 'Contents'), infoPath = join(tempContents, 'Info.plist');
     const vendorExecutable = join(tempContents, 'MacOS', basename(plan.app.executable));
     const bootstrapExecutable = join(tempContents, 'MacOS', 'XfxProfileLauncher');
     if (basename(plan.app.executable) === 'XfxProfileLauncher') fail('PROFILE_APP_INVALID_SOURCE');
+    const sourceInfo = await readPlist(join(sourceAppPath, 'Contents', 'Info.plist'), execFile);
+    let iconName;
+    if (signedShortcut) {
+      for (const dir of [tempApp, tempContents, dirname(bootstrapExecutable)]) await mkdir(dir, { mode: 0o700 });
+      await writeFile(infoPath, '<?xml version="1.0"?><plist version="1.0"><dict/></plist>\n', { mode: 0o600, flag: 'wx' });
+      const icon = sourceInfo.CFBundleIconFile;
+      if (safeText(icon) && basename(icon) === icon && icon !== '.' && icon !== '..') {
+        const file = icon.endsWith('.icns') ? icon : `${icon}.icns`;
+        const from = join(sourceAppPath, 'Contents', 'Resources', file);
+        if ((await lstat(from).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error)))?.isFile()) {
+          const resources = join(tempContents, 'Resources');
+          await mkdir(resources, { mode: 0o700 });
+          await nodeCopyFile(from, join(resources, file));
+          iconName = file;
+        }
+      }
+    } else await copyApp(sourceAppPath, tempApp);
     await nodeCopyFile(helper.helper, bootstrapExecutable);
     await chmod(bootstrapExecutable, 0o700);
-    const sourceInfo = await readPlist(infoPath, execFile);
     const removeInfoKeys = ['CFBundleURLTypes', 'CFBundleDocumentTypes'];
     if (Object.hasOwn(sourceInfo, 'SUFeedURL')) removeInfoKeys.push('SUFeedURL');
     await updatePlist(infoPath, { set: {
@@ -354,18 +372,22 @@ async function profileApp(store, plan, allowRebuild, {
       XfxStore: store.directory, XfxProfileId: plan.profileId, XfxNode: canonicalNode,
       XfxEntryPoint: canonicalEntry, XfxNativeRoot: plan.nativeRoot,
       XfxVendorExecutable: basename(plan.app.executable),
+      ...(signedShortcut ? { CFBundlePackageType: 'APPL', LSUIElement: true, XfxSignedShortcut: true,
+        ...(iconName ? { CFBundleIconFile: iconName } : {}) } : {}),
     }, remove: removeInfoKeys });
-    if (await hashFile(join(tempContents, 'Resources', 'app.asar'), { readFile, lstat }) !== copiedAsarSha256) fail('PROFILE_APP_SOURCE_CHANGED');
-    if (await hashFile(vendorExecutable, { readFile, lstat }) !== sourceExecutableSha256) fail('PROFILE_APP_SOURCE_CHANGED');
+    if (!signedShortcut && (await hashFile(join(tempContents, 'Resources', 'app.asar'), { readFile, lstat }) !== copiedAsarSha256
+      || await hashFile(vendorExecutable, { readFile, lstat }) !== sourceExecutableSha256)) fail('PROFILE_APP_SOURCE_CHANGED');
     await chmod(tempApp, 0o700);
-    await signApp(tempApp, sourceAppPath, { sourceExecutable: plan.app.executable, vendorExecutable, bootstrapExecutable });
+    if (signedShortcut) await execFile('/usr/bin/codesign', ['--force', '--sign', '-', '--options', 'runtime', tempApp], { encoding: 'utf8', timeout: 30000 });
+    else await signApp(tempApp, sourceAppPath, { sourceExecutable: plan.app.executable, vendorExecutable, bootstrapExecutable });
     await verifySignature(tempApp, execFile);
     await scanLinks(tempApp, tempApp, { lstat, readdir, readlink, realpath });
     const bootstrapSha256 = await hashFile(bootstrapExecutable, { readFile, lstat }, 'PROFILE_APP_UNSAFE', true);
-    const copiedExecutableSha256 = await hashFile(vendorExecutable, { readFile, lstat });
+    const copiedExecutableSha256 = signedShortcut ? null : await hashFile(vendorExecutable, { readFile, lstat });
     const owner = await markerFor(store.directory, plan, appPath, helper.helperSha256, helper.sourceHash, {
       sourceExecutableSha256, copiedAsarSha256, copiedExecutableSha256, bootstrapSha256, node: canonicalNode, entry: canonicalEntry,
     });
+    owner.signingPolicy = policy;
     let backup = null;
     if (previousAppPath) {
       backup = join(profileDir, `.previous-profile-app-${randomUUID()}.app`);
@@ -381,15 +403,17 @@ async function profileApp(store, plan, allowRebuild, {
     }
     if (backup) await rm(backup, { recursive: true, force: true });
     await requireOwnedFile(ownerPath, { lstat }, 'PROFILE_APP_OWNERSHIP_MISMATCH');
-    const application = applicationFor(appPath, bundleId, join(appPath, 'Contents', 'MacOS', basename(plan.app.executable)));
-    return { application, bootstrapExecutable: join(appPath, 'Contents', 'MacOS', 'XfxProfileLauncher'), helperExecutable: helper.helper, helperSha256: helper.helperSha256 };
+    const installedBootstrap = join(appPath, 'Contents', 'MacOS', 'XfxProfileLauncher');
+    const application = applicationFor(appPath, bundleId, signedShortcut ? installedBootstrap : join(appPath, 'Contents', 'MacOS', basename(plan.app.executable)));
+    return { application, bootstrapExecutable: installedBootstrap, helperExecutable: helper.helper, helperSha256: helper.helperSha256,
+      ...(signedShortcut ? { signedShortcut: true } : {}) };
   } catch (error) {
     await rm(tempApp, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
 }
 
-/** Validate an existing private copy without depending on the current vendor installation. */
+/** Validate a shortcut or legacy bundle independently of the vendor installation. */
 export async function validateProfileApp(store, plan, appBundle, {
   execFile = execFileDefault, lstat = nodeLstat, realpath = nodeRealpath, readFile = nodeReadFile,
   readdir = nodeReaddir, readlink = nodeReadlink,
@@ -409,7 +433,9 @@ export async function validateProfileApp(store, plan, appBundle, {
   const appInfo = await lstat(appBundle.appPath), dirInfo = await lstat(profileDir);
   if (appInfo.isSymbolicLink() || !appInfo.isDirectory() || appInfo.uid !== currentUid() || !privateMode(appInfo)
       || dirInfo.isSymbolicLink() || !dirInfo.isDirectory() || dirInfo.uid !== currentUid() || !privateMode(dirInfo)) fail('PROFILE_APP_UNSAFE');
-  if (appBundle.bundleId !== owner.bundleId || appBundle.executable !== join(appBundle.appPath, 'Contents', 'MacOS', owner.sourceExecutable))
+  const signedShortcut = owner.signingPolicy === shortcutPolicy;
+  if (appBundle.bundleId !== owner.bundleId || appBundle.executable !== join(appBundle.appPath, 'Contents', 'MacOS',
+    signedShortcut ? 'XfxProfileLauncher' : owner.sourceExecutable))
     fail('PROFILE_APP_OWNERSHIP_MISMATCH');
   const contents = join(appBundle.appPath, 'Contents'), infoPath = join(contents, 'Info.plist');
   await scanLinks(appBundle.appPath, appBundle.appPath, { lstat, readdir, readlink, realpath });
@@ -418,13 +444,19 @@ export async function validateProfileApp(store, plan, appBundle, {
       || info.CFBundleName !== `Codex · ${safeName(plan.name)}` || info.CFBundleDisplayName !== `Codex · ${safeName(plan.name)}`
       || info.XfxStore !== store.directory || info.XfxProfileId !== plan.profileId || info.XfxNativeRoot !== plan.nativeRoot
       || info.XfxNode !== owner.node || info.XfxEntryPoint !== owner.entry
-      || info.XfxVendorExecutable !== owner.sourceExecutable) fail('PROFILE_APP_OWNERSHIP_MISMATCH');
-  const copiedAsarSha256 = await hashFile(join(contents, 'Resources', 'app.asar'), { readFile, lstat });
-  const copiedExecutableSha256 = await hashFile(appBundle.executable, { readFile, lstat });
+      || info.XfxVendorExecutable !== owner.sourceExecutable
+      || (info.XfxSignedShortcut === true) !== signedShortcut) fail('PROFILE_APP_OWNERSHIP_MISMATCH');
   const bootstrapExecutable = join(contents, 'MacOS', 'XfxProfileLauncher');
   const bootstrapSha256 = await hashFile(bootstrapExecutable, { readFile, lstat }, 'PROFILE_APP_UNSAFE', true);
+  if (bootstrapSha256 !== owner.bootstrapSha256) fail('PROFILE_APP_CONTENT_CHANGED');
+  if (signedShortcut) {
+    await verifySignature(appBundle.appPath, execFile);
+    return { application: appBundle, bootstrapExecutable, helperSha256: owner.helperSha256, signedShortcut: true };
+  }
+  const copiedAsarSha256 = await hashFile(join(contents, 'Resources', 'app.asar'), { readFile, lstat });
+  const copiedExecutableSha256 = await hashFile(appBundle.executable, { readFile, lstat });
   if (copiedAsarSha256 !== owner.copiedAsarSha256 || copiedAsarSha256 !== owner.sourceAsarSha256
-      || copiedExecutableSha256 !== owner.copiedExecutableSha256 || bootstrapSha256 !== owner.bootstrapSha256) fail('PROFILE_APP_CONTENT_CHANGED');
+      || copiedExecutableSha256 !== owner.copiedExecutableSha256) fail('PROFILE_APP_CONTENT_CHANGED');
   await verifySignature(appBundle.appPath, execFile);
   return { application: appBundle, bootstrapExecutable, helperSha256: owner.helperSha256 };
 }

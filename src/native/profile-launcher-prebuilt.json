@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "sourceSha256": "be47340b3fd51af738113551c335a2cf6edf5eb3c93aaccde42e9ae2ecab3e0e",
-  "helperSha256": "7010f271b62ce59579076fd34241d8b6794b2980007621f031cd2553fa2d8548",
+  "sourceSha256": "4abe4b57d62ca6da888babda30e08ab0302559f225ce30a77cc7bf0ea1903a2d",
+  "helperSha256": "e08560b88f6b4858d82876f9ec4a90101cf579e2f0a62605317ff81c8a4a8cc4",
   "architectures": [
     "arm64",
     "x86_64"

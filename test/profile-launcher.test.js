@@ -45,7 +45,8 @@ async function fixture(t, profileId = profileA, name = 'Blue & <QA>') {
     verifyOriginal: async sourcePath => ({ ...app, appPath: sourcePath }),
     copyApp: (sourcePath, destination) => cp(sourcePath, destination, { recursive: true, verbatimSymlinks: true }),
     updatePlist: async (path, { set, remove }) => {
-      const plist = JSON.parse(await readFile(path, 'utf8'));
+      const source = await readFile(path, 'utf8');
+      const plist = source.startsWith('<?xml') ? {} : JSON.parse(source);
       for (const key of remove) delete plist[key];
       Object.assign(plist, set);
       await writeFile(path, JSON.stringify(plist), { mode: 0o600 });
@@ -59,6 +60,23 @@ async function fixture(t, profileId = profileA, name = 'Blue & <QA>') {
   };
   return { root, store: { directory: await realpath(storeDirectory) }, plan, sourceApp: appPath, options };
 }
+
+test('migrates a stopped profile app to a shortcut without copying vendor code', async t => {
+  const { store, plan, options } = await fixture(t);
+  const previous = await prepareProfileApp(store, plan, options);
+  const shortcutOptions = { ...options, signedShortcut: true,
+    copyApp: async () => assert.fail('the shortcut must never copy the vendor app'),
+    signApp: async () => assert.fail('the shortcut must never sign vendor code'),
+  };
+  await assert.rejects(loadPreparedProfileApp(store, plan, shortcutOptions), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+  const shortcut = await prepareProfileApp(store, plan, shortcutOptions);
+  assert.equal(shortcut.application.appPath, previous.application.appPath);
+  assert.equal(shortcut.application.bundleId, previous.application.bundleId);
+  assert.equal(shortcut.application.executable, shortcut.bootstrapExecutable);
+  assert.equal(shortcut.signedShortcut, true);
+  await assert.rejects(lstat(previous.application.executable), { code: 'ENOENT' });
+  assert.deepEqual(await loadPreparedProfileApp(store, plan, shortcutOptions), shortcut);
+});
 
 test('preparation copies the packaged universal helper and reuses it without a compiler or app rewrite', async t => {
   const { store, plan, options } = await fixture(t);

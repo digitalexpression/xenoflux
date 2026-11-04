@@ -69,7 +69,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   history --profile NAME --id TASK_ID [--turns]
                                         Look up a task, optionally its native turn metadata
   pick [--repo DIRECTORY] [--dry-run]
-  desktop prepare NAME [--dry-run]       Prepare or refresh a stopped profile app
+  desktop prepare NAME [--dry-run]       Prepare or refresh a stopped profile shortcut
   desktop refresh NAME [--dry-run]       Alias for desktop prepare
   desktop open NAME [--dry-run]          Prepare as needed, then open or focus
   desktop list [--observe] | desktop focus NAME | desktop close NAME
@@ -279,8 +279,8 @@ try {
       } else if (operation === 'open') result = options['--dry-run']
         ? await desktopInstancePlan(store, targets[0]) : await openDesktopInstance(store, targets[0], {
           onBootstrapReady: async reply => {
-            // The Finder bootstrap is waiting on this line before exec. Once
-            // authorized it closes the pipe; do not write the ordinary result.
+            // The shortcut or legacy bootstrap is waiting for this reply and
+            // closes the pipe after receiving it.
             await new Promise((resolve, reject) => process.stdout.write(`${JSON.stringify(reply)}\n`, error => error ? reject(error) : resolve()));
             bootstrapReplied = true;
           },
