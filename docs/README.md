@@ -1,7 +1,7 @@
 # Documentation
 
 Choose a guide based on whether you are using Xenoflux or changing it. User guides
-cover commands and operational recovery; the app guide describes the 3.0.0 local
+cover commands and operational recovery; the app guide describes the local
 browser UI. Developer guides cover source changes, implementation contracts,
 verification and publication. Version and distribution identity are recorded in
 the [package manifest](../package.json), [GitHub releases](https://github.com/digitalexpression/xenoflux/releases)
@@ -37,6 +37,10 @@ not a required reading sequence; use relevant sections as needed.
 | [Profile copy policy](developer/PROFILE-COPY-POLICY.md) | Review or change creation/copy behavior against its contract. |
 
 ## Developer records
+
+The [3.1.0 candidate](developer/RELEASE-3.1.0.md) records the unpublished
+same-profile concurrency release. Its [native validation summary](developer/SAME-PROFILE-NATIVE-VALIDATION.md)
+separates observed outcomes from capture and process-observation limits.
 
 [Audit acceptance index](developer/AUDIT-ACCEPTANCE.md) links immutable,
 version-specific records, including [3.0.0](developer/RELEASE-3.0.0.md) and

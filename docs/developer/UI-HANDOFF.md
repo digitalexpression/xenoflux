@@ -178,11 +178,11 @@ cases. Global accessibility and edge-case rules are in §6–§8.
 | State | Behavior |
 | --- | --- |
 | No profiles | Replace both panels with "Add an existing Codex folder" / "Create profile" (Profiles actions). |
-| One profile | Compare setups and Run a new task explain "Needs two profiles" with a link to Profiles; Use existing sessions stays available (same-profile session comparisons are allowed). |
+| One profile | Compare setups explains "Needs two profiles" with a link to Profiles. Run a new task and Use existing sessions support same-profile sides. |
 | No recent items | Hide the Recent list; keep the "Open a saved report…" link. |
 | Status line still reading | "Reading sessions…" in muted text; never a fake count. |
 
-The Run a new task tile reads "Run one task in two profiles. Nothing starts until you review it."
+The Run a new task tile reads "Run one task with two sets of execution settings. Nothing starts until you review it."
 
 ### 5.2 Profiles (`/profiles`)
 
@@ -443,13 +443,13 @@ observed edit paths and do not claim a complete count.
 | Section | Spec |
 | --- | --- |
 | Task | Textarea "What should both profiles do?" (label visible, resizable vertically); hint 14px "Sent unchanged to both profiles. Kept private; reports don't include the text."; optional "Files it may change" (mono) + hint "Used to point out edits to other files. It doesn't block them." |
-| Profiles · exactly two | Two side slots: "First · left side of the report" (side A) and "Second · right side of the report" (side B), each a select (mono) with a readiness note (warning text when sign-in is unknown); round swap button between. Hint: "They run one after the other, first then second. The colours follow each profile into the report." Same profile twice → `WarningAlert` "Choose two different profiles." |
+| Profiles · exactly two | Two side slots: "First · left side of the report" (side A) and "Second · right side of the report" (side B), each a select (mono) with a readiness note (warning text when sign-in is unknown); round swap button between. Hint: "They run one after the other, first then second. The colours follow each profile into the report." Each side has its own model and reasoning effort, with profile defaults. The same profile may be selected twice. |
 | Project | Repository select + "Commit or branch" (mono); hint about separate copies excluding uncommitted/untracked/ignored files. |
 | Verification · optional | Default "No verification checks selected" + consequence + dashed "Add a check command". Added: Name + "Command you already use" (mono) + Remove; warning-colored 14px note about running outside the Codex sandbox. Never invent commands. |
-| Advanced settings | Collapsed `Disclosure` whose button shows the current values in one line ("15 min per run · Codex can edit only its copy, no network · 8 MiB output · no setup commands"). Expanded: time per run, Codex access, output cap, Codex program, reasoning effort override, add setup command; note "Overrides apply to this run only". |
+| Advanced settings | Collapsed `Disclosure` whose button shows the current values in one line ("15 min per run · Codex can edit only its copy, no network · 8 MiB output · no setup commands"). Expanded: time per run, Codex access, output cap, Codex program, add setup command; note "Overrides apply to this run only". |
 | This run panel | `dl`: Profiles (SideText "baseline then strict-review"), Model runs (2), Longest it can take, Verification; note on real model tasks and sign-ins; primary **Review before starting**; hint "Checks profiles, project and commit. Starts nothing." |
 
-The task comparison runs exactly two profiles. The planner's wider range stays a
+The task comparison runs exactly two sides. The planner's wider range stays a
 CLI capability; don't expose it here.
 
 ### 5.11 Review before starting (`/runs/new/review`)
@@ -526,9 +526,9 @@ revisions, evidence references, "Side-by-side code · Not in this report");
 ### 5.15 Reviews (`/reports/:id/reviews`)
 
 **Target interaction** ([implementation status](ROADMAP.md#current-work-and-stop-condition)): from Report or Reviews,
-choose **Review**, select a profile and its normal workspace, inspect/edit the
+choose **Review**, select a profile, workspace, model and reasoning effort, inspect/edit the
 prompt and choose retained report content, then **Start review**. Show exact report
-identity/files, cwd and the selected profile's normal settings/provider. Declared
+identity/files, cwd and the requested settings. Display native-reported settings separately on the result. Declared
 settings are not effective-setting proof; unknowns stay explicit. Show an uncapped
 model duration by default, optional time cap and the process-output bound.
 Preparation and cancelling before Start invoke no model. Reuse one form and
@@ -536,7 +536,7 @@ normal single-task execution; no isolation wizard or forced JSON submission.
 
 Show prepared/starting/running/waiting-for-user/completed/failed/cancelled,
 interrupted or uncertain states according to the
-[task lifecycle](REVIEW-TASK-IMPLEMENTATION.md#durable-record-api-and-lifecycle). There is no task queue.
+[task lifecycle](REVIEW-TASK-IMPLEMENTATION.md#durable-record-api-and-lifecycle). Independent jobs can overlap on the same profile. Choose a separate writable workspace for each review. The header links to active jobs.
 When Codex asks for approval or input under that profile's settings, show the
 native action/question and response choices inline. Submit only the user's
 explicit decision to that live request. Stale requests are unavailable, not

@@ -462,7 +462,15 @@ runs at a different absolute path from the source checkout, which can affect
 project path-specific configuration or trust. Review the resolved baseline and
 source-dirty flag before interpreting results.
 
-Select between two and eight distinct profiles. Named profiles must already be
+Select between two and eight sides. Distinct profiles can be selected by name.
+To use one profile more than once, give every selection sharing that home a
+distinct `sideId`, such as `a` and `b`. Each selection can include an `execution`
+object with optional `model` and `reasoningEffort` fields; omitted fields inherit
+the saved profile settings. Explicit values are process-local and must be
+confirmed by the native session before its turn starts. Do not also set model or
+effort through `nativeConfig` on the same selection.
+
+Named profiles must already be
 bound to the selected source repository and have a registered executable/version.
 If needed, bind the existing profile to the original source directory first with
 `xfx profile bind NAME /path/to/repository`; this changes Xenoflux registry

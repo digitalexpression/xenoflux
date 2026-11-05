@@ -14,6 +14,7 @@ import { showAuditRecord, recoverAuditExperiment } from './audit-experiment.js';
 import { compareAuditRuns } from './audit-report.js';
 import { resolveAuditProfile } from './audit-discovery.js';
 import { buildAuditComparisonConditions } from './audit-conditions.js';
+import { validateNativeResponse } from './native-requests.js';
 import { UiError } from './ui-server.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -27,6 +28,10 @@ const checkedId = id => { if (!UUID.test(id ?? '')) throw new UiError(400, 'Choo
 function requestSpec(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Describe the task first.');
   const advanced = request.advanced ?? {};
+  const execution = request.execution;
+  if (execution !== undefined && (!execution || typeof execution !== 'object' || Array.isArray(execution)
+    || Object.keys(execution).some(key => key !== 'a' && key !== 'b')))
+    throw new Error('Choose execution settings for comparison sides A and B');
   const commandList = (rows = []) => {
     if (!Array.isArray(rows) || rows.length > 20) throw new Error('Choose at most twenty commands.');
     return rows.map(row => {
@@ -35,11 +40,11 @@ function requestSpec(request) {
     });
   };
   const files = typeof request.files === 'string' ? request.files.split(/[,\n]/).map(value => value.trim()).filter(Boolean) : [];
-  const config = advanced.reasoningEffort ? { model_reasoning_effort: advanced.reasoningEffort } : null;
+  const defaultExecution = advanced.reasoningEffort ? { reasoningEffort: advanced.reasoningEffort } : {};
   const runMs = advanced.timeMinutes === null ? null : (advanced.timeMinutes ?? 15) * 60000;
   return validateAuditSpec({ schemaVersion: 1, repository: request.repository, revision: request.commit,
-    task: request.task, profiles: [request.a, request.b].map(name => ({ name,
-      ...(advanced.program ? { executable: advanced.program } : {}), ...(config ? { nativeConfig: config } : {}) })),
+    task: request.task, profiles: ['a', 'b'].map(sideId => ({ name: request[sideId], sideId,
+      ...(advanced.program ? { executable: advanced.program } : {}), execution: execution && Object.hasOwn(execution, sideId) ? execution[sideId] : defaultExecution })),
     limits: { runMs, ...(runMs === null ? { experimentMs: null } : {}), outputBytes: (advanced.outputMiB ?? 8) * 1024 * 1024, maxRuns: 2 },
     checks: commandList(request.checks), setup: commandList(advanced.setup), sandbox: advanced.sandbox ?? 'workspace-write',
     allowIncompleteCapture: true, ...(files.length ? { taskContract: { id: 'ui-task', editableFiles: files } } : {}) });
@@ -47,8 +52,8 @@ function requestSpec(request) {
 
 export function createUiRuns({ store, defaultUserHome, context = {}, admission }) {
   const root = join(store.directory, 'ui-runs');
-  const previews = new Map(), starts = new Map(), active = new Map(), recoveryPlans = new Map();
-  let starting = false, closing = false;
+  const previews = new Map(), starts = new Map(), active = new Map(), finished = new Map(), recoveryPlans = new Map();
+  let closing = false;
   const baseContext = { ...context,
     resolveProfile: (selectedStore, selection, options = {}) => (context.resolveProfile ?? resolveAuditExecutionProfile)(selectedStore, selection, { defaultUserHome, ...options }) };
   // Recovery checks the saved home/lease identity; it never prepares execution.
@@ -64,6 +69,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       await privateDirectory(root);
       const value = await readJSON(join(root, `${id}.json`));
       if (value?.id !== id || !Array.isArray(value.profiles) || value.profiles.length !== 2
+        || (value.sideIds !== undefined && !same(value.sideIds, ['a', 'b']))
         || value.profiles.some(name => typeof name !== 'string' || !name.trim()) || !Number.isFinite(Date.parse(value.createdAt))) throw new Error('Invalid UI run receipt');
       return value;
     }
@@ -112,14 +118,13 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       reason: preview.failures.map(failure => `${failure.profile ? `${failure.profile}: ` : ''}${failure.message}`).join(' ') },
       summary: `2 model runs, one after the other · ${minutes(spec.limits.experimentMs)}`, limit: minutes(spec.limits.experimentMs),
       task: spec.task, files: spec.taskContract?.editableFiles.join(', ') ?? '',
-      runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: profile.profileName, text: profileText(profile) })),
+      runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: profile.profileName, text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'}` })),
       where: [preview.baseline?.repository ?? spec.repository, `Pinned commit: ${preview.baseline?.commit ?? 'not available'}`,
         'Each profile starts in a separate checkout of this commit. Uncommitted edits and untracked or ignored files are excluded.',
         'Workspace preparation preserves the source checkout. Task, setup and check commands can have effects outside their copy.'],
       checks: spec.checks.map(check => `${check.name}: ${check.argv[2]} (up to ${minutes(check.timeoutMs)})`),
       limits: [`${minutes(spec.limits.runMs)} per profile; ${minutes(spec.limits.experimentMs)} overall.`,
-        `Codex access: ${spec.sandbox}; network disabled. Output per program: ${spec.limits.outputBytes / 1024 / 1024} MiB.`,
-        `Reasoning effort: ${spec.profiles[0].nativeConfig?.model_reasoning_effort ?? 'each profile’s own setting'}.`,
+        `Codex access: ${spec.sandbox}; network disabled inside the sandbox. Native approvals are shown during the run. Output per program: ${spec.limits.outputBytes / 1024 / 1024} MiB.`,
         ...spec.setup.map(command => `Setup before each task: ${command.name}: ${command.argv[2]} (ordinary program outside the Codex sandbox).`),
         'Native skill-use capture is best effort; incomplete evidence stays explicit. No automatic review or rating is run.'],
       willDo: ['Start exactly two real model tasks using the selected profiles’ sign-ins.', 'Run only the setup and verification commands listed here.', 'Retain the evidence and open the shared comparison report.'],
@@ -133,8 +138,6 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const reviewed = previews.get(token);
     if (!reviewed || Date.now() - reviewed.at > 20 * 60000) throw new UiError(409, 'This preview expired. Refresh the preview before starting.', 'preview-stale');
     if (closing) throw new UiError(409, 'Xenoflux is stopping. Start it again before reviewing a new task.', 'stopping');
-    if (starting || [...active.values()].some(entry => !entry.done)) throw new UiError(409, 'A task is already starting or running. Open its progress before starting another.', 'run-active');
-    starting = true;
     let admitted = false, launched = false;
     try {
       if (admission) { await admission.acquire(token); admitted = true; }
@@ -144,7 +147,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       if (changed) throw new UiError(409, 'The commit, profile setup or access changed after review. Nothing started; refresh the preview.', 'preview-stale');
       if (closing) throw new UiError(409, 'Xenoflux stopped while checking the preview. No task started.', 'stopping');
       await privateDirectory(store.directory, true); await privateDirectory(root, true);
-      const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.spec.profiles.map(profile => profile.name) };
+      const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.spec.profiles.map(profile => profile.name), sideIds: reviewed.spec.profiles.map(profile => profile.sideId) };
       try { await writeFile(join(root, `${token}.json`), JSON.stringify(entry) + '\n', { flag: 'wx', mode: 0o600 }); }
       catch (error) { if (error.code === 'EEXIST') return { id: token }; throw error; }
       if (closing) {
@@ -153,17 +156,35 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         throw new UiError(409, 'Xenoflux stopped before the experiment started. No task started.', 'stopping');
       }
       const controller = new AbortController();
-      const work = { ...entry, task: reviewed.spec.task, spec: reviewed.spec, controller, done: false };
-      boundedSet(active, token, work);
+      const work = { ...entry, task: reviewed.spec.task, spec: reviewed.spec, controller, done: false, pendingRequests: new Map() };
+      active.set(token, work);
       launched = true;
       work.promise = runAuditExperiment(store, { ...reviewed.spec, revision: reviewed.preview.baseline.commit },
-        { ...baseContext, experimentId: token, signal: controller.signal })
-        .then(result => { work.result = result; }, error => { work.error = errorText(error); })
-        .finally(() => { work.done = true; admission?.release(token); });
+        { ...baseContext, experimentId: token, signal: controller.signal,
+          onNativeRequest: (legId, side, request, { signal, item }) => {
+            if (signal.aborted || controller.signal.aborted) throw new Error('Comparison stopped');
+            const requestId = randomUUID();
+            return new Promise((resolve, reject) => {
+              const abort = () => { work.pendingRequests.delete(requestId); reject(new Error('Comparison leg stopped')); };
+              signal.addEventListener('abort', abort, { once: true });
+              work.pendingRequests.set(requestId, { legId, side, requestId, request, item,
+                signal, resolve: value => { signal.removeEventListener('abort', abort); resolve(value); } });
+            });
+          } })
+        .then(async result => {
+          work.result = result;
+          if (result.kind === 'audit-experiment-preview') {
+            work.error = result.failures.map(failure => failure.message).join(' ') || 'Native preflight could not complete.';
+            await record(join(root, `${token}.json`), { ...entry, startFailure: work.error }).catch(() => {});
+          }
+        }, async error => {
+          work.error = errorText(error);
+          await record(join(root, `${token}.json`), { ...entry, startFailure: work.error }).catch(() => {});
+        })
+        .finally(() => { work.done = true; active.delete(token); boundedSet(finished, token, work); admission?.release(token); });
       return { id: token };
     } finally {
       if (admitted && !launched) admission.release(token);
-      starting = false;
     }
   }
   async function startRun({ previewToken } = {}) {
@@ -179,7 +200,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     let current = null;
     try { current = await readAuditRecord(store, id); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const work = active.get(id);
+    const work = active.get(id) ?? finished.get(id);
     return { saved, current, work };
   }
   async function run({ id }) {
@@ -212,7 +233,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const started = Date.parse(current?.record.createdAt ?? saved.createdAt), ended = Date.parse(report?.execution?.completedAt ?? '') || Date.now();
     const elapsedMs = Math.max(0, ended - started), limit = spec?.limits.experimentMs;
     const columns = saved.profiles.map((profile, index) => {
-      const record = runRecords.find(item => item.record.profile.profileName === profile);
+      const record = runRecords.find(item => (saved.sideIds ? item.record.profile.sideId === saved.sideIds[index] : item.record.profile.profileName === profile));
       const phase = record?.state.phase ?? 'waiting';
       const outcome = record?.report ?? report?.runs?.find(item => item.id === record?.id) ?? {};
       const task = outcome.outcome?.task ?? record?.state.outcome?.task;
@@ -245,18 +266,35 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
           : checks.some(item => item.status === 'failed') ? 'failed' : phaseState(3, checks.length === spec.checks.length && checks.every(item => item.status === 'passed')) },
         { text: 'Evidence saved', state: record?.finalized ? 'done' : phaseState(4, false) },
       ];
-      return { side: index ? 'b' : 'a', profile, state: record?.state.status ?? 'Not started',
-        failure: startupSandboxUnavailable ? 'The native command sandbox could not be verified, so the model task did not start.' : null,
+      const side = index ? 'b' : 'a';
+      const waitingForUser = live && [...work.pendingRequests.values()].some(request => request.side === side);
+      return { side, profile, state: waitingForUser ? 'Waiting for your response' : record?.state.status ?? 'Not started',
+        failure: startupSandboxUnavailable ? 'The native command sandbox could not be verified, so the model task did not start.'
+          : captureErrors.some(error => error?.code === 'requested-execution-unconfirmed') ? 'Codex did not confirm the requested model or reasoning effort. The model turn did not start.'
+            : captureErrors.some(error => error?.code === 'native-request-failed') ? 'The native approval or input request could not be handled.' : null,
         steps };
     });
     const counts = runRecords.reduce((total, record) => total + (record.captureCheckpoint?.run?.events?.length ?? record.report?.events?.length ?? 0), 0);
     return { id, task: current?.record.task ?? work?.task ?? 'Task comparison',
       meta: `${saved.profiles.join(' then ')} · commit ${current?.record.baseline?.repository?.commit ?? work?.result?.baseline?.commit ?? 'recorded in the reviewed preview'} · ${id}`,
       state: status, stateText, headline: live ? work.controller.signal.aborted ? 'Cancelling the owned run and preserving its evidence…' : 'Reading the recorded progress of the two profiles'
-        : work?.error ?? (status === 'cannot-tidy' ? 'A coordinator or owned process is still running or uncertain. Existing resources are preserved.' : stateText),
+        : work?.error ?? saved.startFailure ?? (status === 'cannot-tidy' ? 'A coordinator or owned process is still running or uncertain. Existing resources are preserved.' : stateText),
       elapsed: `${Math.floor(elapsedMs / 1000)} s elapsed · overall limit ${minutes(limit)}`, timeUsed: Number.isFinite(limit) && limit > 0 ? Math.min(1, elapsedMs / limit) : null, columns,
       sofar: `${counts} recorded events retained so far. Messages and command output are not shown here.${status === 'finished-partial' ? ' Some evidence could not be captured; see the report’s limits.' : ''}`,
+      pendingRequests: live ? [...work.pendingRequests.values()].map(({ legId, side, requestId, request, item }) =>
+        ({ legId, side, requestId, method: request.method, params: request.params, item })) : [],
       reportHref: !live && current && (current.finalized || runRecords.length) ? `/reports/e.${id}` : null, recovery, simulated: false };
+  }
+  async function respondRun({ id, requestId, response }) {
+    checkedId(id);
+    const work = active.get(id), request = work?.pendingRequests.get(requestId);
+    if (!request || request.signal.aborted || work.controller.signal.aborted)
+      throw new UiError(409, 'This comparison request is no longer waiting for an answer.', 'stale-run-request');
+    try { validateNativeResponse(request.request, response); }
+    catch (error) { throw new UiError(400, errorText(error), 'invalid-run-request'); }
+    work.pendingRequests.delete(requestId);
+    request.resolve(response);
+    return run({ id });
   }
   async function cancelRun({ id }) {
     await receipt(id);
@@ -281,7 +319,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const { current, saved } = await load(id);
     if (!current) throw new UiError(404, 'No experiment evidence was created for this attempt.', 'report-missing');
     const evidence = await showAuditRecord(store, id, { includeReplay: true });
-    const runs = saved.profiles.map((name, index) => evidence.runs.find(item => (item.profile?.profileName ?? item.profile?.name) === name)
+    const runs = saved.profiles.map((name, index) => evidence.runs.find(item => (saved.sideIds ? item.profile?.sideId === saved.sideIds[index] : (item.profile?.profileName ?? item.profile?.name) === name))
       ?? { schemaVersion: 1, kind: 'audit-run', id: `not-started-${index}`, profile: { profileName: name }, status: 'not-started',
         agents: [], events: [], turns: [], skills: [], metrics: {}, outcome: { status: 'unverified', checks: [] }, coverage: { execution: 'unavailable' } });
     const spec = { ...current.record.spec, task: current.record.task };
@@ -290,24 +328,10 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         profile: spec.profiles[index], profileOrder: saved.profiles }) });
     return compareAuditRuns(withConditions[0], withConditions[1]);
   }
-  async function assertAvailable(excludeId) {
-    if ([...active.values()].some(work => work.id !== excludeId && !work.done))
-      throw new UiError(409, 'A task comparison is still running.', 'run-active');
-    for (const saved of await receiptList()) {
-      if (saved.id === excludeId) continue;
-      let current;
-      try { current = await readAuditRecord(store, saved.id); }
-      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-      if (current.finalized) continue;
-      const plan = await recoverAuditExperiment(store, saved.id, { ...recoveryContext, apply: false });
-      if (plan.status === 'blocked')
-        throw new UiError(409, 'An earlier comparison still has live or uncertain ownership. Open its progress before starting another task.', 'run-active');
-    }
+  function activeJobs() {
+    return [...active.values()].map(work => ({ id: work.id, kind: 'comparison', task: work.task, profiles: work.profiles, href: `/runs/${work.id}` }));
   }
-  async function activeRun() {
-    const work = [...active.values()].find(entry => !entry.done);
-    return work ? { task: 'Task comparison', profiles: work.profiles, href: `/runs/${work.id}` } : null;
-  }
+  const activeRun = () => activeJobs()[0] ?? null;
   async function recent() {
     return (await receiptList()).slice(0, 5).map(row => ({ kind: 'task', title: 'Task comparison', meta: `started ${new Date(row.createdAt).toLocaleString('en-GB')}`, href: `/runs/${row.id}` }));
   }
@@ -322,5 +346,5 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     }
     await Promise.allSettled(working.map(work => work.promise));
   }
-  return { runOptions, runPreview, startRun, run, cancelRun, recoverRun, comparison, activeRun, recent, close, assertAvailable };
+  return { runOptions, runPreview, startRun, run, respondRun, cancelRun, recoverRun, comparison, activeJobs, activeRun, recent, close };
 }

@@ -7,6 +7,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { parse, stringify } from 'smol-toml';
 import { resolveHome } from './homes.js';
+import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { acquire, release, globalLock, privateDirectory, readJSON, record, exists } from './metadata.js';
 import { createDesktopRuntime } from './desktop-runtime.js';
 import { redactText, redactValue } from './redact.js';
@@ -195,7 +196,7 @@ function alive(pid) {
 }
 async function locks(store, journal, preflight, action, { runtime = createDesktopRuntime(), lockPath = globalLock(), isAlive = alive, signal } = {}, recovering = false, targetOnly = false) {
   const owner = { kind: 'native-copy', host: hostname(), pid: process.pid, runId: journal.id, storePath: store.directory };
-  const paths = [lockPath + '.operation', lockPath, ...new Set([journal.source.root, journal.target.root].filter(Boolean).map(p => join(p, '.run-lock')))];
+  const paths = [lockPath + '.operation', lockPath, ...new Set([journal.source.root ?? journal.source.home, journal.target.root ?? journal.target.home].filter(Boolean).map(p => join(p, '.run-lock')))];
   const acquired = [];
   try {
     for (const path of paths) {
@@ -209,6 +210,8 @@ async function locks(store, journal, preflight, action, { runtime = createDeskto
       await acquire(path, owner);
       acquired.push(path);
     }
+    for (const home of new Set([journal.source.home, journal.target.home].filter(Boolean)))
+      await assertNoLegacyAuditLease(store.directory, home);
     const needsClients = await preflight();
     if (signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
     if (needsClients !== false) {

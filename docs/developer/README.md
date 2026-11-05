@@ -23,6 +23,11 @@ The tests use disposable fixtures and mocked clients; native bootstrap fixtures
 may compile synthetic code and sign only their disposable bundles. They do not
 establish real profile sign-in, Dock behavior or reboot/RAM-service success.
 
+If a managed environment places its temporary directory inside the account home,
+run fixture checks with `TMPDIR=/private/tmp` on macOS. This keeps project-ancestor
+discovery away from personal configuration. UI export folders can be displayed
+with `~`; filesystem assertions must expand that prefix before reading files.
+
 `test:ui` builds the app and runs Chromium journeys against its real local server
 and engine. Each test uses disposable native-style homes, SQLite histories and
 export files; it checks visible results and actual filesystem effects without

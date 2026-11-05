@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { test, expect } from './fixtures.js';
 import { bookingLedgerPair } from '../../test-support/audit-explanation/booking-ledger.js';
 import { compareAuditRuns } from '../../src/audit-report.js';
@@ -29,7 +30,7 @@ async function exportValue(page, include) {
   const response = page.waitForResponse(value => value.request().method() === 'POST' && value.url().endsWith('/export'));
   await page.getByRole('button', { name: 'Export', exact: true }).click();
   const result = await (await response).json();
-  const path = `${result.folder}${result.files.find(file => file.endsWith('.audit.json'))}`;
+  const path = `${result.folder.replace(/^~(?=\/|$)/, homedir())}${result.files.find(file => file.endsWith('.audit.json'))}`;
   return JSON.parse(await readFile(path, 'utf8'));
 }
 

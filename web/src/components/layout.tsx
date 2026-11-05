@@ -20,6 +20,7 @@ const NAV: { key: Exclude<NavKey, null>; label: string; to: string }[] = [
 
 export function AppHeader({ current }: { current: NavKey }) {
   const info = useInfo();
+  const jobs = info?.activeJobs ?? (info?.activeRun ? [{ ...info.activeRun, kind: 'comparison' }] : []);
   return (
     <header className="app-header">
       <div className="app-header-inner">
@@ -35,12 +36,13 @@ export function AppHeader({ current }: { current: NavKey }) {
         <span className="meta ml-auto">{info?.mode === 'demo' ? 'Demo data · nothing on this Mac is read or changed' : 'Local app · this Mac only'}</span>
         <ThemeSelect />
       </div>
-      {info?.activeRun ? (
-        <div className="notice rounded-none" role="status">
+      {jobs.length > 0 ? (
+        <div className="notice rounded-none">
           <div className="max-w-[var(--content-max)] mx-auto px-[var(--page-gutter)] flex flex-wrap gap-x-4 gap-y-1 text-ui">
-            <strong className="font-semibold">1 task run in progress</strong>
-            <span className="wrap-anywhere">{info.activeRun.task} · {info.activeRun.profiles.join(' then ')}</span>
-            <Link to={info.activeRun.href}>View progress</Link>
+            <strong className="font-semibold">{jobs.length} {jobs.length === 1 ? 'job' : 'jobs'} in progress{info?.maxActiveJobs ? ` · capacity ${info.maxActiveJobs}` : ''}</strong>
+            {jobs.map(job => <Link key={job.href} className="wrap-anywhere" to={job.href}>
+              {job.kind === 'review' ? 'Review' : 'Comparison'} · {job.task} · {job.profiles.join(' then ')}
+            </Link>)}
           </div>
         </div>
       ) : null}

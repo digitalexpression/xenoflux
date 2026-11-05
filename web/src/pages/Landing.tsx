@@ -37,8 +37,8 @@ export function Landing() {
               <EntryTile to="/compare/sessions" title="Use existing sessions" text="Work you already did in Codex CLI or Desktop. Reads history only."
                 status={data ? data.sessions.text : 'Reading sessions…'} />
               {info?.features.runs ? (
-                <EntryTile to="/runs/new" title="Run a new task" text="Run one task in two profiles. Nothing starts until you review it."
-                  status={data ? (needsTwo ? 'Needs two profiles' : data.runs.text) : 'Checking profiles…'} disabledReason={needsTwo ? 'Needs two profiles. Add or create one in Profiles.' : undefined} />
+                <EntryTile to="/runs/new" title="Run a new task" text="Run one task with two sets of execution settings. Nothing starts until you review it."
+                  status={data?.runs.text ?? 'Checking profiles…'} />
               ) : null}
             </div>
           </section>

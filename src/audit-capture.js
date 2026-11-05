@@ -5,7 +5,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { realpathSync } from 'node:fs';
 import { mkdir, lstat, realpath, rm } from 'node:fs/promises';
-import { runAuditProcess } from './audit-process.js';
+import { getAuditProcessIdentity, runAuditProcess } from './audit-process.js';
 import { validateNativeRequest, validateNativeResponse } from './native-requests.js';
 import { createAuditToolCapture } from './audit-tools.js';
 import { createAuditHookCapture } from './audit-hooks.js';
@@ -20,7 +20,7 @@ import { projectInstructionSources, compactInstructionSources } from './audit-in
 import { createResourceProvenance } from './audit-provenance.js';
 import { evaluateRequiredContext, validateRequiredContextRules } from './audit-context.js';
 import { prepareAuditStartup } from './audit-startup.js';
-import { validateAuditNativeConfig } from './audit-spec.js';
+import { validateExecution, validateAuditNativeConfig } from './audit-spec.js';
 import { captureAuditChildDiscovery } from './audit-session.js';
 
 const MAX_SKILLS = 5000;
@@ -218,10 +218,11 @@ function linkedAgentCandidates(item) {
  */
 export async function runAuditCapture(options = {}) {
   const { executionMode, profile, workspace, task, selectedSkills = [], sandbox = 'workspace-write', processOptions = {},
-    onSession, onPhase, onTaskEnd, onTurn, onNativeRequest, requiredContext, preflightOnly = false, limits = {},
+    onSession, onPhase, onTaskEnd, onTurn, onNativeRequest, onProcessReady, requiredContext, preflightOnly = false, limits = {},
     telemetryFactory = startAuditTelemetry } = options;
   if (!['audit', 'profile'].includes(executionMode)) throw new TypeError('Select an explicit capture executionMode');
   const ordinary = executionMode === 'profile';
+  const auditApprovalPolicy = typeof onNativeRequest === 'function' ? 'on-request' : 'never';
   if (ordinary && (['sandbox', 'sandboxPolicy', 'approvalPolicy', 'model', 'effort', 'nativeConfig', 'selectedSkills', 'requiredContext', 'preflightOnly', 'telemetryFactory'].some(key => Object.hasOwn(options, key))
     || profile?.nativeConfig !== undefined || profile?.skills !== undefined
     || ['args', 'runtimeDirectory'].some(key => Object.hasOwn(processOptions, key))
@@ -241,7 +242,11 @@ export async function runAuditCapture(options = {}) {
     throw new TypeError('Invalid audit capture input');
   }
   const contextRules = requiredContext === undefined ? null : validateRequiredContextRules(requiredContext);
-  const nativeConfig = validateAuditNativeConfig(profile.nativeConfig);
+  const execution = validateExecution(options.execution);
+  const nativeConfig = { ...validateAuditNativeConfig(profile.nativeConfig),
+    ...(execution?.model !== undefined ? { model: execution.model } : {}),
+    ...(execution?.reasoningEffort !== undefined ? { model_reasoning_effort: execution.reasoningEffort } : {}) };
+  const executionArgs = Object.entries(nativeConfig).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]);
   const maxEvents = Math.min(MAX_EVENTS, limits.maxEvents ?? MAX_EVENTS);
   const maxItems = Math.min(MAX_ITEMS, limits.maxItems ?? MAX_ITEMS);
   const toolCapture = createAuditToolCapture({ maxInvocations: maxItems, maxServers: 1000 });
@@ -311,7 +316,7 @@ export async function runAuditCapture(options = {}) {
   let requestFailure = null;
   let sequence = 0;
   let rpcClosed = false;
-  let captureStopped = false;
+  let captureStopped = false, spawnedProcess = null;
   let inputStarted = false;
   let settleInput;
   const inputSettled = new Promise(resolve => { settleInput = resolve; });
@@ -583,6 +588,11 @@ export async function runAuditCapture(options = {}) {
       };
       try {
         const validated = validateNativeRequest(message);
+        const requestThread = threadMap.get(validated.params.threadId);
+        const requestTurn = requestThread?.currentTurnId;
+        if (!requestThread || requestTurn && requestTurn !== validated.params.turnId
+          || requestThread.id === rootThreadId && rootTerminalTurn?.id === validated.params.turnId)
+          throw new Error('Native request does not belong to the active session and turn');
         if (nativeRequests.size >= MAX_ITEMS) throw new Error(`Native request limit exceeded: ${message.method}`);
         if (nativeRequests.has(key)) throw new Error(`Duplicate native request: ${message.method}`);
         if (typeof onNativeRequest !== 'function') throw new Error(`Native request requires user input: ${message.method}`);
@@ -711,6 +721,14 @@ export async function runAuditCapture(options = {}) {
       // Paginated history and bounded child-item hydration require the native
       // experimental API opt-in; this is scoped to this connection.
       const initialized = await request('initialize', { clientInfo: { name: ordinary ? 'xfx-review' : 'xfx-audit', title: ordinary ? 'Xenoflux Review' : 'Xenoflux Audit', version: '1' }, capabilities: { experimentalApi: true } });
+      if (onProcessReady) {
+        const initial = spawnedProcess?.processIdentity;
+        const ready = await getAuditProcessIdentity(spawnedProcess?.pid);
+        if (!initial || !ready || ready.pid !== initial.pid || ready.started !== initial.started || ready.host !== initial.host)
+          throw new Error('Native process identity changed during initialization');
+        // The initialized owned connection proves the launcher's exec transition.
+        await onProcessReady({ pid: ready.pid, processIdentity: ready });
+      }
       capture.capabilities.appServerV2 = initialized ? 'available' : 'partial';
       pushOutgoing(JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} }) + '\n');
       await onPhase?.('discovery');
@@ -738,7 +756,7 @@ export async function runAuditCapture(options = {}) {
       // the saved profile. Inherit the process cwd instead, preserving native
       // trust/config/managed-policy decisions, and verify it before any task.
       const started = await request('thread/start', { ephemeral: false, experimentalRawEvents: false,
-        ...(ordinary ? { cwd: workspace } : { sandbox, approvalPolicy: 'never', historyMode: 'paginated' }) });
+        ...(ordinary ? { cwd: workspace } : { sandbox, approvalPolicy: auditApprovalPolicy, historyMode: 'paginated' }) });
       const nativeCwds = [started?.cwd, started?.thread?.cwd].filter(cwd => cwd !== undefined);
       if (!nativeCwds.length || nativeCwds.some(cwd => nativePath(cwd) !== nativePath(workspace))) {
         recordWarning('native-workspace-mismatch');
@@ -748,11 +766,12 @@ export async function runAuditCapture(options = {}) {
       rootThreadId = started?.thread?.id;
       if (!validId(rootThreadId)) throw new Error('thread-start-missing-id');
       rootSessionId = validId(started?.thread?.sessionId) ? started.thread.sessionId : null;
-      if (ordinary) {
-        response.threadId = rootThreadId;
-        capture.effectiveSettings = Object.fromEntries(['model', 'modelProvider', 'reasoningEffort', 'approvalPolicy', 'sandbox']
-          .map(key => [key, started[key] ?? null]));
-      }
+      if (ordinary) response.threadId = rootThreadId;
+      capture.effectiveSettings = Object.fromEntries(['model', 'modelProvider', 'reasoningEffort', 'approvalPolicy', 'sandbox']
+        .map(key => [key, ordinary ? started[key] ?? null : safeText(started[key], 100)]));
+      if ((execution?.model !== undefined && started.model !== execution.model)
+        || (execution?.reasoningEffort !== undefined && started.reasoningEffort !== execution.reasoningEffort))
+        throw Object.assign(new Error('Native app-server did not confirm the requested model or reasoning effort'), { code: 'requested-execution-unconfirmed' });
       agentFor(rootThreadId, null, 0, rootSessionId, workspace);
       for (const skill of run.skills) for (const catalog of skill.catalogs ?? []) if (!catalog.agentId) catalog.agentId = rootThreadId;
       await provenance.observeCatalog(capture.capabilities.skillsList === 'available' ? run.skills : null,
@@ -827,7 +846,7 @@ export async function runAuditCapture(options = {}) {
         return;
       }
       const turnResponse = await request('turn/start', { threadId: rootThreadId, cwd: workspace,
-        ...(ordinary ? {} : { sandboxPolicy, approvalPolicy: 'never' }), input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, ordinary ? 30000 : timeoutMs);
+        ...(ordinary ? {} : { sandboxPolicy, approvalPolicy: auditApprovalPolicy }), input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, ordinary ? 30000 : timeoutMs);
       rootTurnId = turnResponse?.turn?.id;
       if (!validId(rootTurnId)) throw new Error('turn-start-missing-id');
       if (ordinary) response.turnId = rootTurnId;
@@ -1223,8 +1242,10 @@ export async function runAuditCapture(options = {}) {
         rootComplete: complete, childAgentsComplete: !childWaitIncomplete };
     } catch (error) {
       run.status = 'partial'; run.reason = ordinary ? `App-server capture failed: ${error.message}` : 'App-server capture failed';
-      capture.errors.push({ code: 'app-server-capture-failed' });
-      recordWarning('app-server-capture-failed');
+      const code = error.code === 'requested-execution-unconfirmed' ? error.code : 'app-server-capture-failed';
+      if (code === 'requested-execution-unconfirmed') run.reason = error.message;
+      capture.errors.push({ code });
+      recordWarning(code);
       capture.status = 'partial';
     } finally {
       rpcClosed = true;
@@ -1258,7 +1279,7 @@ export async function runAuditCapture(options = {}) {
     if (!processOptions.args) {
       runtime = await privateRuntimeDirectory(processOptions.stdoutPath, processOptions.runtimeDirectory);
       const isolated = isolatedNativeOptions(processOptions.env, runtime);
-      nativeArgs = [...Object.entries(nativeConfig ?? {}).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]), ...isolated.args];
+      nativeArgs = [...executionArgs, ...isolated.args];
       nativeEnv = isolated.env;
       capture.observer = { transport: 'loopback-otlp-http-json', savedSettingsChanged: false,
         profileHomeUsedForReadOnlySettingsAndSkills: true,
@@ -1272,7 +1293,7 @@ export async function runAuditCapture(options = {}) {
   }
   let process;
   try {
-    const args = [...(receiver?.args ?? []), ...nativeArgs, ...(ordinary ? (profile.launchArgs ?? []) : []), ...(processOptions.args ?? ['app-server'])];
+    const args = [...(receiver?.args ?? []), ...(ordinary ? executionArgs : nativeArgs), ...(ordinary ? (profile.launchArgs ?? []) : []), ...(processOptions.args ?? ['app-server'])];
     const launch = runtime ? await prepareAuditStartup({ profile,
       directory: join(runtime.root, 'startup-protection'), args, commandSandbox: true }) : { executable: profile.executable, args };
     if (runtime) capture.observer.startupPreservation = { status: 'write-protected',
@@ -1283,7 +1304,7 @@ export async function runAuditCapture(options = {}) {
       args: launch.args, cwd: workspace,
       env: nativeEnv, timeoutMs, outputLimitBytes: processOptions.outputLimitBytes,
       stdoutPath: processOptions.stdoutPath, stderrPath: processOptions.stderrPath, signal: captureSignal,
-      onSpawn: processOptions.onSpawn, onEvent, input: drive });
+      onSpawn: async info => { spawnedProcess = info; await processOptions.onSpawn?.(info); }, onEvent, input: drive });
   } finally {
     if (receiver) {
       try { telemetrySnapshot = await receiver.close() ?? receiver.snapshot(); }

@@ -36,7 +36,7 @@ async function retainedContext(store, current, read) {
   if (parent.record.kind !== 'audit-experiment'
     || !parent.state.runs?.some(row => row.id === current.id && row.profileId === saved.profileId)
     || !baseline || ['repository', 'commit', 'tree'].some(key => baseline[key] !== current.record.baseline?.[key])) throw Error('parent-binding');
-  let spec = { ...parent.record.spec, task: parent.record.task }, order = spec.profiles.map(row => row.name), recipe;
+  let spec = { ...parent.record.spec, task: parent.record.task }, order = spec.profiles.map(row => row.sideId ?? row.name), recipe;
   let trialIndex = null, environment = current.report.comparisonConditions?.environment;
   if (parent.record.series) {
     const series = await read(store, parent.record.series.id);
@@ -46,15 +46,16 @@ async function retainedContext(store, current, read) {
       || ['repository', 'commit', 'tree'].some(key => series.record.baseline[key] !== baseline[key])) throw Error('series-binding');
     const { quality, variables, trials, ...trial } = series.record.spec;
     const expected = { ...trial, revision: series.record.baseline.commit,
-      profiles: slot.profileOrder.map(name => trial.profiles.find(row => row.name === name)),
+      profiles: slot.profileOrder.map(name => trial.profiles.find(row => (row.sideId ?? row.name) === name)),
       limits: { ...trial.limits, runMs: trial.limits.runMs === null ? null : Math.min(trial.limits.runMs, slot.budgetMs), experimentMs: slot.budgetMs } };
     if (!isDeepStrictEqual(expected, { ...parent.record.spec, task: parent.record.task })) throw Error('recipe-binding');
     spec = series.record.spec; order = slot.profileOrder; recipe = series.record.recipe;
     trialIndex = slot.trialIndex;
     environment = series.state.trials?.find(row => row.experimentId === parent.id)?.environment;
   }
-  const selection = spec.profiles.find(row => row.name === saved.profileName);
+  const selection = spec.profiles.find(row => saved.sideId ? row.sideId === saved.sideId : row.name === saved.profileName);
   if (!selection || selection.executable !== saved.executable
+    || !isDeepStrictEqual(selection.execution, saved.execution)
     || !isDeepStrictEqual(selection.nativeConfig, saved.nativeConfig)) throw Error('profile-binding');
   const joined = buildAuditComparisonConditions({ spec: { ...spec, task: parent.record.task }, recipe,
     baseline, profile: selection, profileOrder: order, trialIndex, environment });

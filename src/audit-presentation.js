@@ -341,13 +341,14 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
       // Keep all recorded root values; never select a child's or a single turn's setting.
       return values.length > 1 ? `Multiple recorded: ${values.join(', ')}` : values[0] ?? null;
     };
-    const actualModel = root?.model ?? run.source?.model ?? nativeValue('model');
-    const actualEffort = root?.reasoningEffort ?? run.source?.reasoningEffort ?? nativeValue('effort');
+    const actualModel = root?.model ?? run.source?.model ?? nativeValue('model') ?? run.capture?.effectiveSettings?.model;
+    const actualEffort = root?.reasoningEffort ?? run.source?.reasoningEffort ?? nativeValue('effort') ?? run.capture?.effectiveSettings?.reasoningEffort;
+    const selected = run.profile?.execution ?? run.comparisonConditions?.requestedExecution;
     const requested = run.nativeControls?.configured ?? {};
     return {
       model: valueText('model', actualModel), effort: valueText('reasoningEffort', actualEffort),
-      requestedModel: actualModel == null && requested.model != null ? valueText('model', requested.model) : null,
-      requestedEffort: actualEffort == null && requested.modelReasoningEffort != null ? valueText('reasoningEffort', requested.modelReasoningEffort) : null,
+      requestedModel: selected ? selected.model ?? 'Profile default' : actualModel == null && requested.model != null ? valueText('model', requested.model) : null,
+      requestedEffort: selected ? selected.reasoningEffort ?? 'Profile default' : actualEffort == null && requested.modelReasoningEffort != null ? valueText('reasoningEffort', requested.modelReasoningEffort) : null,
     };
   };
 
@@ -506,7 +507,8 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
     counts: countLabels(findings),
     summaryLine: `Verification: ${noChecks ? 'no independent check was recorded' : notStarted ? 'checks not run; model tasks did not start' : noResults ? 'checks selected; no results recorded' : 'checks recorded'} · Reviews: ${review.reviewed ? 'attached' : 'not reviewed'} · One pair, so whether this repeats is unmeasured.`,
     conditions: { rows: differing, allRows: rows,
-      scopeNote: 'Model and reasoning effort summarize recorded turns across the captured actors; root values are shown separately. Missing turn settings do not establish matching child settings.',
+      scopeNote: 'Model and reasoning effort summarize recorded turns across the captured actors. Root values are shown separately.'
+        + ([left, right].some(run => run.comparisonConditions?.sharedProfileOverlap) ? ' Other jobs were observed on the same profile. Timing reflects shared conditions.' : ''),
       footer: `${plural(same, 'condition')} the same · ${unknown} not recorded`,
       all: rows.map(row => ({ label: row.name, value: row.a === row.b ? `${row.a} on both` : `${names.a}: ${row.a} · ${names.b}: ${row.b}` })) },
     limits,

@@ -127,6 +127,7 @@ export async function recoverAuditExperiment(store, id, { apply = false, ...cont
       }
       report = { ...(evidence ?? pendingRun(run)), id: run.id, kind: 'audit-run', schemaVersion: 1,
         experimentId: run.record.experimentId, status: 'partial',
+        profile: { ...evidence?.profile, ...run.record.profile },
         execution: { status: 'interrupted', recovery: 'process-stopped-no-rerun', originalPhase: run.state.phase,
           groupStopped: true, escapedDescendants: 'unverified' },
         metrics: { ...(evidence?.metrics ?? {}), ...(run.state.metrics ?? {}) },

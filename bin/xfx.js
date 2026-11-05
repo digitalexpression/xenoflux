@@ -2,7 +2,7 @@
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { Store, renameProfile, bind, unbind, find } from '../src/profiles.js';
-import { removeProfile } from '../src/profile-removal.js';
+import { editProfileRegistry, removeProfile } from '../src/profile-removal.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
 import { auditCommand, compareAuditProfiles } from '../src/audit.js';
 import { renderAudit } from '../src/audit-report.js';
@@ -338,7 +338,7 @@ try {
           throw new Error('Invalid profile command; run xfx --help');
         if (operation === 'register') result = await registerHome(store, profile, directory, { executable: options['--codex'], version: options['--codex-version'] });
         else if (operation === 'unbind') result = params.length === 2 ? await unbindHome(store, profile)
-          : await store.update(data => unbind(data, profile, directory));
+          : await editProfileRegistry(store, profile, (data, current) => unbind(data, current.id, directory));
         else if (operation === 'list') result = await listHomes(store);
         else if (operation === 'inspect') {
           const inventory = await inspectProfile(store, profile);
@@ -346,9 +346,9 @@ try {
           result.inventory = inventory;
           result.logStorage = await createLogStorage().inspect({ home: result.home, key: result.environmentId ?? 'default' });
         } else if (operation === 'delete') result = await removeProfile(store, profile);
-        else result = await store.update(data => {
-          if (operation === 'rename') return renameProfile(data, profile, directory);
-          return bind(data, profile, directory);
+        else result = await editProfileRegistry(store, profile, (data, current) => {
+          if (operation === 'rename') return renameProfile(data, current.id, directory);
+          return bind(data, current.id, directory);
         });
       }
     } else if (['launch','resume','pick'].includes(command)) {

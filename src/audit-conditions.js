@@ -13,12 +13,15 @@ const boundedEnvironment = value => {
 };
 
 /** Build a privacy-safe, versioned description from frozen experiment inputs. */
-export function buildAuditComparisonConditions({ spec, baseline, profile, profileOrder, trialIndex, environment, recipe } = {}) {
+export function buildAuditComparisonConditions({ spec, baseline, profile, profileOrder, trialIndex, environment, recipe, sharedProfileOverlap } = {}) {
   const taskContract = spec?.taskContract;
   return { schemaVersion: 1, taskFingerprint: digest(spec?.task ?? ''),
     ...(taskContract ? { taskId: taskContract.id, editableFiles: [...taskContract.editableFiles] } : {}),
     checkRecipes: (spec?.checks ?? []).map(check => ({ name: check.name, fingerprint: digest(check) })),
     qualityFingerprint: auditQualityFingerprint(spec?.quality, spec?.checks ?? []) ?? null,
+    ...(sharedProfileOverlap ? { sharedProfileOverlap: true } : {}),
+    ...(profile?.sideId ? { sideId: profile.sideId } : {}),
+    ...(profile?.execution ? { requestedExecution: profile.execution } : {}),
     setupFingerprint: digest(profile?.nativeConfig === undefined ? spec?.setup ?? []
       : { setup: spec?.setup ?? [], nativeConfig: profile.nativeConfig }),
     selectedSkills: safeLabels(profile?.skills).length === (profile?.skills ?? []).length ? safeLabels(profile?.skills) : null,

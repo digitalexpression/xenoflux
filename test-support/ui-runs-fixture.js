@@ -26,7 +26,7 @@ const execFile = promisify(execFileCallback);
  */
 export async function createUiRunsFixture({
   staticRoot = join(process.cwd(), 'dist', 'ui'),
-  mode = {}, reviewContext = {},
+  mode = {}, reviewContext = {}, beforeCapture,
 } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-runs-')));
   let server, provider;
@@ -61,6 +61,10 @@ export async function createUiRunsFixture({
       if (mode.capture === 'crash') throw Object.assign(new Error('Fixture capture interruption'), { code: 'FIXTURE_CAPTURE_CRASH' });
       await input.processOptions.onSpawn?.({ pid: 4000 + calls.captures.length,
         processIdentity: { pid: 4000, started: 'fixture', command: 'fixture-capture', host: 'test' } });
+      if (beforeCapture && !await beforeCapture(input)) return { process: { status: 'cancelled', exitCode: null,
+        shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } },
+        run: { status: 'partial', coverage: {}, skills: [], agents: [], turns: [], events: [],
+          outcome: { status: 'unknown', nativeTurnStatus: 'cancelled' } }, capture: { status: 'partial', errors: [] } };
       if (mode.capture === 'delayed') {
         await new Promise(resolve => {
           let done = false;
@@ -84,7 +88,7 @@ export async function createUiRunsFixture({
             outcome: { status: 'unknown', nativeTurnStatus: 'cancelled' } },
           capture: { status: 'unavailable', capabilities: {}, errors: [] }, capabilities: {} };
       }
-      const threadId = input.profile.profileName === 'baseline'
+      const threadId = beforeCapture && input.execution?.model ? input.limits.id : input.profile.profileName === 'baseline'
         ? '00000000-0000-4000-8000-000000000001' : '00000000-0000-4000-8000-000000000002';
       if (mode.capture === 'sandbox-unavailable') {
         const run = { schemaVersion: 1, kind: 'audit-run', id: input.limits.id,
@@ -106,7 +110,7 @@ export async function createUiRunsFixture({
         profile: { profileId: input.profile.profileId, profileName: input.profile.profileName,
           home: input.profile.home, userHome: input.profile.userHome },
         agents: [{ id: threadId, parentId: null, depth: 0 }],
-        turns: [{ agentId: threadId, turnId: 'fixture-turn', model: 'fixture-model', reasoningEffort: 'medium', status: 'completed' }],
+        turns: [{ agentId: threadId, turnId: 'fixture-turn', model: input.execution?.model ?? 'fixture-model', reasoningEffort: input.execution?.reasoningEffort ?? 'medium', status: 'completed' }],
         events: [], skills: [], usage: {}, metrics: { wallMs: 5, processElapsedMs: 5, toolsActiveIntervalMs: 0, activeWaitMs: 0 },
         coverage: { skills: 'complete', agents: 'complete', timeline: 'complete' },
         outcome: { status: 'native-claim', nativeTurnStatus: 'completed' },
@@ -147,8 +151,12 @@ export async function createUiRunsFixture({
       return { status: 'exited', exitCode: failed ? 1 : 0, elapsedMs: 2,
         processIdentity: null, shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } };
     };
+    let accessChecks = 0;
     const runContext = {
       capture, process: runProcess,
+      ...(mode.blockFinalPreflight ? { observeAccess: async () => ++accessChecks > 4
+        ? { status: 'blocked', reason: 'fixture-access-changed', clients: [], sourceReservation: null }
+        : { status: 'ready', clients: [], sourceReservation: null } } : {}),
       ...(mode.staleCommit ? { inspectRepository: async (...args) => {
         calls.repositoryInspections = (calls.repositoryInspections ?? 0) + 1;
         const { inspectAuditRepository } = await import('../src/audit-workspace.js');

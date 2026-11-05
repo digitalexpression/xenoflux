@@ -6,6 +6,8 @@ import { dirname, join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { acquire, privateDirectory, readJSON, release } from './metadata.js';
+import { withProfileOperation } from './desktop-instances.js';
+import { acquireProfileParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
 import { projectReportResourceProvenance } from './audit-store.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -433,6 +435,12 @@ export async function inspectAuditReservation({ root, owner } = {}) {
   await validateReservationRoot(root, owner);
   if (!allowedHome || await realpath(owner.home) !== owner.home)
     throw new Error('Audit reservation home does not match its native-root identity');
+  if (owner.membershipVersion === 1) {
+    let owners;
+    try { owners = await readProfileOwners(root); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    return owners.find(current => current?.runId === owner.runId) ?? null;
+  }
   const lock = await auditLeasePath(owner);
   if (!lock) return null;
   try { await lstat(lock); }
@@ -443,12 +451,20 @@ export async function inspectAuditReservation({ root, owner } = {}) {
 }
 
 /** Reserve an audit-only lease for a native home without touching Xenoflux's .run-lock. */
-export async function reserveAuditProfile({ root, owner } = {}) {
+export async function reserveAuditProfile({ root, owner, desktopOwner } = {}) {
   validateReservationOwner(owner);
   const allowedHome = owner.home === root || owner.home === join(root, 'codex-home');
   if (!allowedHome || await realpath(owner.home) !== owner.home)
     throw new Error('Audit reservation home does not match its native-root identity');
   await validateReservationRoot(root, owner);
+  if (owner.membershipVersion === 1) {
+    await withProfileOperation({ directory: owner.storePath }, owner.profileId, { waitMs: 5000, recovery: true }, async () => {
+      const legacy = await inspectAuditReservation({ root, owner: { ...owner, membershipVersion: undefined } });
+      if (legacy) throw new Error('An earlier audit lease still needs recovery');
+      await acquireProfileParticipant(root, owner, desktopOwner);
+    });
+    return { root, lock: join(root, '.run-lock'), owner };
+  }
   const lock = await auditLeasePath(owner, { create: true });
   await acquire(lock, owner, false);
   const observed = await inspectAuditReservation({ root, owner });
@@ -462,6 +478,11 @@ export async function releaseAuditProfileReservation({ root, owner } = {}) {
   const allowedHome = owner.home === root || owner.home === join(root, 'codex-home');
   if (!allowedHome || await realpath(owner.home) !== owner.home)
     throw new Error('Audit reservation home does not match its native-root identity');
+  if (owner.membershipVersion === 1) {
+    await validateReservationRoot(root, owner);
+    return withProfileOperation({ directory: owner.storePath }, owner.profileId, { waitMs: 5000, recovery: true },
+      () => releaseProfileParticipant(root, owner));
+  }
   const observed = await inspectAuditReservation({ root, owner });
   if (!observed) return false;
   if (!equal(observed, owner)) throw new Error('Audit profile reservation belongs to another operation; preserving it');

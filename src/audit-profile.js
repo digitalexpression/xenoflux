@@ -14,6 +14,7 @@ import { nativePath } from './node-runtime.js';
 import { privateDirectory, readJSON } from './metadata.js';
 import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
 import { hostname } from 'node:os';
+import { observeAuditProcess } from './audit-process.js';
 import { profileOwners } from './profile-reservations.js';
 import { probeAuditVersion } from './audit-native-version.js';
 import { validateAuditNativeConfig } from './audit-spec.js';
@@ -372,23 +373,25 @@ function sameJournalProcessIdentitySet(before, after) {
     && [...beforeProcesses].every(identity => afterProcesses.has(identity));
 }
 
-async function readDesktopJournal(store, profile, owner) {
-  if (!store || typeof store.directory !== 'string' || !isAbsolute(store.directory) || resolve(store.directory) !== store.directory
-    || owner?.kind !== 'desktop-instance' || owner.host !== hostname() || owner.profileId !== profile.profileId
+async function readDesktopJournal(profile, owner) {
+  const store = { directory: owner?.storePath };
+  if (typeof store.directory !== 'string' || !isAbsolute(store.directory) || resolve(store.directory) !== store.directory
+    || owner?.kind !== 'desktop-instance' || owner.host !== hostname() || !/^[a-f0-9-]{36}$/i.test(owner.profileId ?? '')
     || !Number.isSafeInteger(owner.pid) || owner.pid < 1 || typeof owner.runId !== 'string'
     || !/^[0-9a-f-]{36}$/i.test(owner.runId) || owner.storePath !== store.directory) return null;
   const expectedRoot = join(store.directory, 'desktop-instances');
-  const expectedPath = join(expectedRoot, `${profile.profileId}.json`);
+  const expectedPath = join(expectedRoot, `${owner.profileId}.json`);
   if (owner.journalPath !== expectedPath) return null;
   try {
+    await privateDirectory(store.directory);
     await privateDirectory(expectedRoot);
     if (await realpath(expectedPath) !== expectedPath) return null;
     const info = await lstat(expectedPath);
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid() || (info.mode & 0o077)) return null;
     const state = await readJSON(expectedPath);
-    if (state?.schemaVersion !== 1 || state.kind !== 'desktop-instance' || state.profileId !== profile.profileId
+    if (state?.schemaVersion !== 1 || state.kind !== 'desktop-instance' || state.profileId !== owner.profileId
       || state.phase !== 'running' || state.owner?.kind !== 'desktop-instance'
-      || !isDeepStrictEqual(state.owner, owner) || state.plan?.profileId !== profile.profileId
+      || !isDeepStrictEqual(state.owner, owner) || state.plan?.profileId !== owner.profileId
       || state.plan?.nativeRoot !== profile.nativeRoot || state.plan?.home !== profile.home
       || !validProcessIdentity(state.main) || !Array.isArray(state.processes)
       || !state.processes.every(validProcessIdentity)) return null;
@@ -398,7 +401,18 @@ async function readDesktopJournal(store, profile, owner) {
 
 /** Read-only preflight for running Codex homes. It accepts ordinary open resources and
  * only trusts an existing reservation when the exact running desktop journal owns it. */
-export async function observeAuditProfileAccess(profile, { store, expectedClients = [], inspectResources = inspectNativeResourcesDefault,
+export async function observeAuditProfileAccess(profile, options = {}) {
+  // SQLite sidecars and short-lived native helpers can change during inspection.
+  // Admit only after a complete fresh observation succeeds.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { retryable, ...result } = await inspectAuditProfileAccess(profile, options);
+    const transient = retryable || result.reason === 'unattributed-native-client';
+    if (!transient || attempt === 2) return result;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+async function inspectAuditProfileAccess(profile, { expectedClients = [], inspectResources = inspectNativeResourcesDefault,
   processSnapshot = () => createDesktopInstanceRuntime().snapshot() } = {}) {
   if (!profile || typeof profile.home !== 'string' || typeof profile.reservationRoot !== 'string'
     || typeof inspectResources !== 'function' || typeof processSnapshot !== 'function')
@@ -415,7 +429,7 @@ export async function observeAuditProfileAccess(profile, { store, expectedClient
     } else if (profile.reservationRoot !== profile.home) throw new Error('Selected default home identity is inconsistent');
     void homeInfo;
     const lockPath = join(profile.reservationRoot, '.run-lock');
-    let sourceReservation = null, trustedOwner = null;
+    let sourceReservation = null, trustedOwner = null, participants = [];
     try {
       const lock = await lstat(lockPath);
       if (lock.isSymbolicLink() || !lock.isDirectory() || lock.uid !== process.getuid() || (lock.mode & 0o077))
@@ -426,17 +440,22 @@ export async function observeAuditProfileAccess(profile, { store, expectedClient
         const ownerPath = join(lockPath, 'owner.json');
         if (await realpath(ownerPath) !== ownerPath) throw new Error('unsafe');
         const owners = profileOwners(await readJSON(ownerPath));
-        if (owners.length > 1 || owners[0]?.kind === 'review-task')
-          return { status: 'blocked', reason: 'profile-review-active', clients: [], sourceReservation: null };
-        owner = owners[0];
+        owner = owners.find(value => value?.kind === 'desktop-instance');
+        participants = owners.filter(value => value !== owner);
+        if (participants.some(value => !['audit-experiment', 'review-task'].includes(value?.kind)
+          || value.home !== profile.home || value.host !== hostname()
+          || !/^[a-f0-9-]{36}$/i.test(value.runId ?? '')))
+          return { status: 'blocked', reason: 'profile-reservation-foreign', clients: [], sourceReservation: { status: 'foreign' } };
       } catch {
         return { status: 'blocked', reason: 'profile-reservation-untrusted', clients: [], sourceReservation: { status: 'untrusted' } };
       }
-      const journal = await readDesktopJournal(store, profile, owner);
-      if (!journal) return { status: 'blocked', reason: 'profile-reservation-foreign', clients: [], sourceReservation: { status: 'foreign' } };
-      trustedOwner = owner;
-      sourceReservation = { kind: 'desktop-instance', runId: owner.runId, profileId: owner.profileId,
-        host: owner.host, journalPath: owner.journalPath, phase: 'running' };
+      if (owner) {
+        const journal = await readDesktopJournal(profile, owner);
+        if (!journal) return { status: 'blocked', reason: 'profile-reservation-foreign', clients: [], sourceReservation: { status: 'foreign' } };
+        trustedOwner = owner;
+        sourceReservation = { kind: 'desktop-instance', runId: owner.runId, profileId: owner.profileId,
+          host: owner.host, journalPath: owner.journalPath, phase: 'running' };
+      }
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
@@ -459,7 +478,7 @@ export async function observeAuditProfileAccess(profile, { store, expectedClient
     if (!Array.isArray(observed) && observed.partial && observed.records > 0) throw new Error('Partial resource observation');
     if (!Array.isArray(expectedClients) || expectedClients.some(row => !validProcessIdentity(row)))
       throw new Error('Invalid expected client identities');
-    const initialJournal = sourceReservation ? await readDesktopJournal(store, profile, trustedOwner) : null;
+    const initialJournal = sourceReservation ? await readDesktopJournal(profile, trustedOwner) : null;
     if (sourceReservation && !initialJournal) throw new Error('Desktop journal changed during inspection');
     const trackedPids = new Set([...pids, ...expectedClients.map(row => row.pid),
       ...(initialJournal ? [initialJournal.state.main, ...initialJournal.state.processes].map(row => row.pid) : [])]);
@@ -468,19 +487,44 @@ export async function observeAuditProfileAccess(profile, { store, expectedClient
     const byPid = new Map(rows.filter(validProcessIdentity).map(row => [row.pid, row]));
     const holders = pids.map(pid => byPid.get(pid));
     if (holders.some(client => !client)) throw new Error('Resource holder identity unavailable');
+    const ownedPids = new Set();
+    if (holders.length) for (const member of participants) {
+      const review = member.kind === 'review-task';
+      if (typeof member.storePath !== 'string' || !isAbsolute(member.storePath)) continue;
+      const parent = join(member.storePath, review ? 'review-tasks' : 'audits');
+      const directory = join(parent, member.runId);
+      try {
+        await privateDirectory(member.storePath);
+        await privateDirectory(parent);
+        await privateDirectory(directory);
+        const journal = await readJSON(join(directory, review ? 'task.json' : 'state.json'));
+        if (journal.id !== member.runId || journal.reservation?.root !== profile.reservationRoot
+          || !isDeepStrictEqual(journal.reservation?.owner, member)) continue;
+        const expected = journal.process?.processIdentity, current = byPid.get(expected?.pid);
+        if (!current || (await observeAuditProcess(expected)).status !== 'running') continue;
+        ownedPids.add(current.pid);
+        // Only current descendants of the verified process can be attributed.
+        let previous;
+        do {
+          previous = ownedPids.size;
+          for (const row of byPid.values()) if (ownedPids.has(row.ppid)) ownedPids.add(row.pid);
+        } while (ownedPids.size !== previous);
+      } catch { /* Preserve the member. Unverified holders remain external. */ }
+    }
+    const externalHolders = holders.filter(row => !ownedPids.has(row.pid));
     const liveExpected = expectedClients.map(expected => byPid.get(expected.pid)).filter(Boolean);
     const liveJournal = initialJournal ? [initialJournal.state.main, ...initialJournal.state.processes]
       .map(expected => ({ expected, current: byPid.get(expected.pid) })).filter(({ expected, current }) => current && current
         .startedAt === expected.startedAt && current.uid === expected.uid && current.executable === expected.executable)
       .map(({ current }) => current) : [];
-    const uniqueClients = [...new Map([...holders, ...liveExpected, ...liveJournal]
+    const uniqueClients = [...new Map([...externalHolders, ...liveExpected, ...liveJournal]
       .map(row => [`${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`, row])).values()];
     if (sourceReservation) {
       const lock = await lstat(lockPath);
       if (lock.isSymbolicLink() || !lock.isDirectory() || lock.uid !== process.getuid() || (lock.mode & 0o077)
-        || !isDeepStrictEqual(await readJSON(join(lockPath, 'owner.json')), trustedOwner))
+        || !profileOwners(await readJSON(join(lockPath, 'owner.json'))).some(owner => isDeepStrictEqual(owner, trustedOwner)))
         throw new Error('Desktop reservation changed during inspection');
-      const journal = await readDesktopJournal(store, profile, trustedOwner);
+      const journal = await readDesktopJournal(profile, trustedOwner);
       if (!journal) throw new Error('Desktop ownership journal changed during inspection');
       if (!sameJournalProcessIdentitySet(initialJournal.state, journal.state))
         throw new Error('Desktop process ownership changed during inspection');
@@ -499,7 +543,7 @@ export async function observeAuditProfileAccess(profile, { store, expectedClient
         // reservation when every recorded process is absent/reused and no
         // process currently holds profile resources. The lock and journal are
         // preserved byte-for-byte; any live helper or resource holder blocks.
-        if (exactLiveOwned.length || pids.length)
+        if (exactLiveOwned.length || externalHolders.length)
           return { status: 'blocked', reason: 'desktop-main-not-live', clients: uniqueClients, sourceReservation };
         return { status: 'ready', clients: [], sourceReservation: { ...sourceReservation, phase: 'stopped-owner-observed' } };
       }
@@ -508,12 +552,13 @@ export async function observeAuditProfileAccess(profile, { store, expectedClient
       if (current.status !== 'running' || current.orphaned)
         return { status: 'blocked', reason: 'desktop-process-identity-changed', clients: uniqueClients, sourceReservation };
       const owned = new Set(current.processes.map(row => `${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`));
-      if (holders.some(row => !owned.has(`${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`)))
+      if (externalHolders.some(row => !owned.has(`${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`)))
         return { status: 'blocked', reason: 'unattributed-native-client', clients: uniqueClients, sourceReservation };
     }
-    return { status: 'ready', clients: uniqueClients, sourceReservation, ...(trustedOwner ? { desktopOwner: trustedOwner } : {}) };
-  } catch {
-    return { status: 'unavailable', reason: 'profile-access-inspection-failed', clients: [], sourceReservation: null };
+    return { status: 'ready', clients: uniqueClients, overlap: participants.map(({ kind, runId, experimentId }) => ({ kind, runId, experimentId })), sourceReservation, ...(trustedOwner ? { desktopOwner: trustedOwner } : {}) };
+  } catch (error) {
+    return { status: 'unavailable', reason: 'profile-access-inspection-failed', clients: [], sourceReservation: null,
+      retryable: error.code === 'ENOENT' || ['Partial resource observation', 'Resource holder identity unavailable'].includes(error.message) };
   }
 }
 

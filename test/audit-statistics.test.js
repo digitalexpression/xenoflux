@@ -1043,3 +1043,23 @@ test('compact MCP bounds keep counts partial and startup identity visible after 
   assert.equal(compared.comparison.mcp.left.count, null);
   assert.equal(compared.comparison.mcp.status, 'partial-or-unknown');
 });
+
+test('same-profile series sides stay distinct through summary and export', async t => {
+  const sides = ['a', 'b'].map(sideId => ({ profileId: 'shared', profileName: 'Shared', sideId }));
+  const runs = sides.map((profile, index) => ({ ...run(`side-${index}`, 'A', 10 + index),
+    profile, profileId: profile.profileId, profileName: profile.profileName }));
+  const report = summarizeAuditSeries({ profiles: sides, spec, plan: [{ index: 1, experimentId: 'same-profile', profileOrder: ['b', 'a'] }],
+    trials: [{ index: 1, status: 'complete', runs: compactAuditTrial({ runs }).runs }] });
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-same-profile-series-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const receipt = await exportAuditReport(report, { output: join(directory, 'series.json') });
+  const reopened = await readAuditReport(receipt.evidencePath);
+  for (const value of [report, reopened]) {
+    assert.deepEqual(value.trials[0].profiles.map(row => [row.sideId, row.run.id]), [['b', 'side-1'], ['a', 'side-0']]);
+    assert.deepEqual(value.profiles.map(row => [row.sideId, row.executed]), [['a', 1], ['b', 1]]);
+    assert.equal(value.comparisons[0].left, 'a');
+    assert.equal(value.comparisons[0].right, 'b');
+    assert.equal(value.comparisons[0].metrics.processElapsedMs.leftObservedN, 1);
+    assert.equal(value.consistency.comparisons[0].coverage.observedPairs, 1);
+  }
+});

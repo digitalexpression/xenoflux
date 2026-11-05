@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { exists, globalLock, acquire, release, readJSON, privateDirectory } from './metadata.js';
+import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { find, remove } from './profiles.js';
 import { prepareDesktopInstanceRemoval } from './desktop-instances.js';
 
@@ -20,7 +21,7 @@ async function withProfileOperation(store, lockPath, action) {
 
 async function referenced(store, profile) {
   if (profile.native && await exists(join(profile.native.root, '..', `.${profile.id}.setup-lock`)))
-    throw new Error('Profile native home is locked by setup; finish it before deleting or unbinding the profile');
+    throw new Error('Profile native home is locked by setup; finish it before changing the profile');
   const pending = pendingCopyPath(store);
   if (await exists(pending)) {
     const pointer = await readJSON(pending);
@@ -36,7 +37,7 @@ async function referenced(store, profile) {
   }
 }
 
-async function mutateProfile(store, name, action, { lockPath = globalLock() } = {}) {
+async function mutateProfile(store, name, action, { lockPath = globalLock(), removal = false } = {}) {
   const profile = find(await store.read(), name);
   return withProfileOperation(store, lockPath, async () => {
     let runLock, owner, runLockAcquired = false;
@@ -45,7 +46,7 @@ async function mutateProfile(store, name, action, { lockPath = globalLock() } = 
         const current = find(data, profile.id);
         if (current.native?.root !== profile.native?.root)
           throw new Error('Profile native binding changed during removal; retry');
-        await prepareDesktopInstanceRemoval(store, current.id, { lockPath });
+        if (removal) await prepareDesktopInstanceRemoval(store, current.id, { lockPath });
         await referenced(store, current);
         if (current.native) {
           await privateDirectory(current.native.root);
@@ -53,8 +54,9 @@ async function mutateProfile(store, name, action, { lockPath = globalLock() } = 
           owner = { kind: 'profile-removal', host: hostname(), pid: process.pid,
             storePath: store.directory, profileId: current.id, runId: randomUUID() };
           try { await acquire(runLock, owner); }
-          catch { throw new Error('Profile native home is locked by a run or concurrent instance; finish it before deleting or unbinding the profile'); }
+          catch { throw new Error('Profile native home is locked by a run or concurrent instance; finish it before changing the profile'); }
           runLockAcquired = true;
+          await assertNoLegacyAuditLease(store.directory, join(current.native.root, 'codex-home'));
         }
         return action(data, current);
       });
@@ -63,7 +65,7 @@ async function mutateProfile(store, name, action, { lockPath = globalLock() } = 
 }
 
 export async function removeProfile(store, name, options = {}) {
-  return mutateProfile(store, name, (data, profile) => remove(data, profile.id), options);
+  return mutateProfile(store, name, (data, profile) => remove(data, profile.id), { ...options, removal: true });
 }
 
 export async function unbindNativeHome(store, name, options = {}) {
@@ -71,5 +73,9 @@ export async function unbindNativeHome(store, name, options = {}) {
     if (!profile.native) throw new Error('Native home binding not found');
     delete profile.native; profile.revision += 1;
     return profile;
-  }, options);
+  }, { ...options, removal: true });
+}
+
+export function editProfileRegistry(store, name, action, options) {
+  return mutateProfile(store, name, action, options);
 }

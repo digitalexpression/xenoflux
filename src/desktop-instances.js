@@ -13,7 +13,7 @@ import { reserveInstanceControl, releaseInstanceControl } from './desktop-instan
 import { createLogStorage } from './log-storage.js';
 import { ramLogTarget } from './ram-logs.js';
 import { acquire, exists, globalLock, privateDirectory, readJSON, record, release } from './metadata.js';
-import { readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
+import { assertNoLegacyAuditLease, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -119,8 +119,8 @@ async function ownedReservation(state) {
   if (!await exists(lock)) return false;
   await privateDirectory(lock);
   const owners = await readProfileOwners(state.plan.nativeRoot);
-  if (owners.length === 1 && owners[0]?.kind === 'review-task' && owners[0].profileId === state.profileId
-    && owners[0].storePath === state.owner.storePath) return false;
+  if (owners.every(owner => ['review-task', 'audit-experiment'].includes(owner?.kind)
+    && owner.home === state.plan.home)) return false;
   if (!owners.some(owner => equal(owner, state.owner)))
     throw new Error('Desktop profile reservation belongs to another operation; preserving it');
   return true;
@@ -152,14 +152,14 @@ async function finishStopped(store, state, runtime, options) {
   const observed = await observation(state, runtime);
   if (observed.status !== 'stopped') throw new Error('Desktop instance still runs or its ownership is uncertain; preserving its reservation');
   const reserved = await ownedReservation(state);
-  const review = await exists(join(state.plan.nativeRoot, '.run-lock'))
-    ? (await readProfileOwners(state.plan.nativeRoot)).find(owner => owner.kind === 'review-task') : null;
-  let allowedProcesses = [];
-  if (review) {
-    if (review.storePath !== store.directory || review.profileId !== state.profileId || !uuid.test(review.runId))
+  const reviews = await exists(join(state.plan.nativeRoot, '.run-lock'))
+    ? (await readProfileOwners(state.plan.nativeRoot)).filter(owner => owner.kind === 'review-task') : [];
+  const allowedProcesses = [];
+  for (const review of reviews) {
+    if (review.home !== state.plan.home || !uuid.test(review.runId))
       throw new Error('Review participant identity is unavailable; preserving reservation');
-    const taskRoot = join(store.directory, 'review-tasks', review.runId);
-    await privateDirectory(join(store.directory, 'review-tasks')); await privateDirectory(taskRoot);
+    const taskRoot = join(review.storePath, 'review-tasks', review.runId);
+    await privateDirectory(review.storePath); await privateDirectory(join(review.storePath, 'review-tasks')); await privateDirectory(taskRoot);
     const task = await readJSON(join(taskRoot, 'task.json'));
     if (task.kind !== 'xfx-review-task' || task.id !== review.runId || !equal(task.reservation?.owner, review)
       || task.profile?.reservationRoot !== state.plan.nativeRoot)
@@ -168,7 +168,7 @@ async function finishStopped(store, state, runtime, options) {
       const observedReview = await runtime.observe(task.process.nativeIdentity, { trackedProcesses: [task.process.nativeIdentity] });
       if (!['running', 'stopped'].includes(observedReview.status) || observedReview.orphaned)
         throw new Error('Review process ownership is uncertain; preserving reservation');
-      allowedProcesses = observedReview.processes;
+      allowedProcesses.push(...observedReview.processes);
     } else if (task.captureIntent) throw new Error('Review process identity is unavailable; preserving reservation');
   }
   await runtime.assertResourcesIdle(resources(state.plan), { allowedProcesses });
@@ -235,7 +235,7 @@ export async function desktopInstancePlan(store, name, { runtime = createDesktop
   return { profileId: profile.id, name: profile.name, environmentId: environment.id, nativeRoot: native.root,
     home: environment.home, desktopData: environment.desktopData, temporary: environment.launch.env.TMPDIR, userHome: environment.launch.env.HOME,
     app: await runtime.inspectApp(), displayName: `Codex · ${profile.name}`, liveHomeChanged: false,
-    sameProfileConcurrency: 'desktop-with-one-review', nativeAcceptance: 'pending' };
+    sameProfileConcurrency: 'execution-participants', nativeAcceptance: 'pending' };
 }
 function result(state, status) {
   return { status, profileId: state.profileId, name: state.plan.name, main: state.main,
@@ -266,6 +266,7 @@ export async function prepareDesktopInstance(store, name, {
     if (previous && previous.phase !== 'closed')
       throw new Error('Profile has a running or unfinished desktop instance; prepare or refresh only after it stops and is closed or recovered');
     const plan = await desktopInstancePlan(store, id, { runtime });
+    await assertNoLegacyAuditLease(store.directory, plan.home);
     const reservation = join(plan.nativeRoot, '.run-lock');
     if (await exists(reservation)) throw new Error('Profile is in use or has an unfinished operation; preserve its reservation');
     // A raw Finder/CLI launch can bypass the controller journal. Never replace
@@ -338,6 +339,7 @@ export async function openDesktopInstance(store, name, {
       await finishStopped(store, state, runtime, options);
     }
     const plan = await desktopInstancePlan(store, id, { runtime });
+    await assertNoLegacyAuditLease(store.directory, plan.home);
     await privateDirectory(store.directory); await privateDirectory(paths(store, id).root, true);
     const runId = randomUUID();
     const owner = { kind: 'desktop-instance', host: hostname(), pid: process.pid, runId, storePath: store.directory,
