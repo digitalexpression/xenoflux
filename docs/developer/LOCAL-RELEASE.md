@@ -3,8 +3,8 @@
 Audience: maintainers. Users should follow [Installation](../user/INSTALLATION.md)
 to obtain a published npm package or offline bundle.
 
-Version 1.0.0 was the first stable release. Xenoflux 3.0.1 is published;
-the [3.0.1 installer hotfix record](RELEASE-3.0.1.md) binds final verification.
+Version 1.0.0 was the first stable release. Xenoflux 3.1.0 is published;
+the [3.1.0 release record](RELEASE-3.1.0.md) binds final verification.
 The stable npm tag is `latest`. Publication and changes to installed user state
 require the applicable explicit request; building a bundle or passing checks
 does not authorize either action.

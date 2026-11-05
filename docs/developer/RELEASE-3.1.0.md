@@ -1,11 +1,45 @@
-# Xenoflux 3.1.0 release candidate
+# Xenoflux 3.1.0 release
 
 ## Status
 
-Unpublished candidate. Preparation, package checks and a detached installation
-smoke test are authorized. Publication, merging, release tags and updates to an
-existing installation remain pending approval. The bundle manifest binds the
-exact committed source revision, tarball checksums and detached smoke result.
+Published on 2026-11-05 after the user authorized public CI, merge and publication.
+Updates to existing installations remain pending explicit approval. The original
+candidate, failed CI run, corrected source and published artifacts retain their
+own identities. This post-publication documentation closeout does not rebuild,
+retag or replace the released source or artifacts.
+
+## Published identity and verification
+
+| Identity | Verified value |
+| --- | --- |
+| Release PR | [#10](https://github.com/digitalexpression/xenoflux/pull/10) |
+| Tested PR head | `48127b61ba56182f99d708096d98b30a07f201a6` |
+| Merged source / tag target | `b1e3eb28ec7af581460e79570281d863898e76b9` |
+| Stable GitHub release | [v3.1.0](https://github.com/digitalexpression/xenoflux/releases/tag/v3.1.0) |
+| npm | [xenoflux 3.1.0](https://www.npmjs.com/package/xenoflux/v/3.1.0), public `latest` tag |
+| Public CI | [Passing macOS matrix](https://github.com/digitalexpression/xenoflux/actions/runs/41995057810), Node 22.15 and 24 |
+
+Both public jobs passed 1,363 unit tests with zero failures and one opt-in native
+test skipped, all 48 browser tests, syntax, native-helper integrity, packaged-doc
+links and detached offline npm/managed installation smoke. The merged source tree
+matched the tested PR head; the final bundle was built and smoke-tested again from
+that merged revision.
+
+| Published asset | SHA-256 |
+| --- | --- |
+| `xenoflux-3.1.0.tgz` | `61c3a29a428eef70725e9f076699db1b75e7b8dfc9329b236cef6f5a8f4dcb58` |
+| `smol-toml-1.9.0.tgz` | `cc9e8fca082c67ed05444f5027ff32e8b935e0988663c911843a54d5339af354` |
+| `manifest.json` | `ac4f6bc23a66ef25afe81b13728b1140d28db5935828443ba32debbf4851e3d7` |
+| `install.mjs` | `81b851ebc456398c4706345c887dff9088e2acccb2e42b41f9f10c7dfbd95425` |
+
+The public npm tarball and all four downloaded GitHub assets matched the tested
+bundle byte for byte. npm SHA-1/SHA-512 metadata also matched, and the public tag
+resolved to the merged source. npm initially returned HTTP 202 for the accepted
+upload while public version lookups still returned 404 and `latest` remained
+3.0.1; later public metadata confirmed version/latest 3.1.0 and its tarball was
+downloaded and verified. The archive's 173 files matched source and passed private
+metadata exclusion and actual packaged-document link checks. Disposable smoke
+installations were removed. No existing installed application was updated.
 
 ## Changes
 
@@ -59,12 +93,11 @@ passed every gate on Node 24. Node 22.15 passed 47 browser tests but failed repl
 search/selection restoration, preventing its later unit/smoke steps. Investigation
 reproduced focus being stolen from search when the nonmodal inspector closed.
 The regression failed before the correction and passed five consecutive local
-runs afterward. The updated source requires a fresh full public matrix; the
-original failed run and artifact remain preserved rather than relabelled.
+runs afterward. The updated source subsequently passed the complete public matrix linked above.
+The original failed run and artifact remain preserved rather than relabelled.
 
-The bundle manifest records the detached offline npm and managed installation
-lifecycle smoke outcome. Require `smoke.status: passed` before publication
-approval. This smoke checks bundled HTML/JavaScript/CSS, refusal of unauthenticated
+The published bundle manifest records `smoke.status: passed` for the detached
+offline npm and managed installation lifecycle. This smoke checks bundled HTML/JavaScript/CSS, refusal of unauthenticated
 API calls and a disposable managed installation lifecycle. It does not update a
 real installation or exercise live native sign-in/model work.
 

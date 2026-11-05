@@ -3,6 +3,8 @@
 This index points to version-specific release records. Published records are
 immutable; each record states its evidence scope and limits.
 
+- [Xenoflux 3.1.0](RELEASE-3.1.0.md): same-profile concurrent comparisons/reviews,
+  signed-vendor Desktop shortcuts, native recovery limits and verified publication.
 - [Xenoflux 3.0.1](RELEASE-3.0.1.md): published managed-installer and replay-focus
   corrections, installed-UI regressions and public/disposable-install checks.
 - [Xenoflux 3.0.0](RELEASE-3.0.0.md): publication, local review acceptance,

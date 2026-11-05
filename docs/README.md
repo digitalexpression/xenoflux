@@ -38,8 +38,8 @@ not a required reading sequence; use relevant sections as needed.
 
 ## Developer records
 
-The [3.1.0 candidate](developer/RELEASE-3.1.0.md) records the unpublished
-same-profile concurrency release. Its [native validation summary](developer/SAME-PROFILE-NATIVE-VALIDATION.md)
+The [3.1.0 record](developer/RELEASE-3.1.0.md) binds the published
+same-profile concurrency release and its verification. Its [native validation summary](developer/SAME-PROFILE-NATIVE-VALIDATION.md)
 separates observed outcomes from capture and process-observation limits.
 
 [Audit acceptance index](developer/AUDIT-ACCEPTANCE.md) links immutable,
