@@ -176,19 +176,19 @@ test('Start response is delayed across reload but the URL task reconnects withou
   expect(JSON.parse(await readFile(`${app.executable}.starts`, 'utf8'))).toBe(1);
 });
 
-test('active task rejects a second Start before native execution and returns to the review form', async ({ app, page }) => {
+test('a second review in the same workspace is refused before native execution', async ({ app, page }) => {
   await openReview(page, app);
   await prepare(page);
   await page.getByRole('button', { name: 'Start review' }).click();
   await expect(page.getByRole('region', { name: 'Native request' })).toBeVisible({ timeout: 20000 });
   await page.getByRole('button', { name: 'Return to review form' }).click();
   await page.getByLabel('Profile').selectOption({ label: 'strict-review' });
-  await page.getByLabel('Review prompt').fill('A second task must be refused while the first is active.');
+  await page.getByLabel('Review prompt').fill('A review using the workspace held by another review.');
   await page.getByRole('button', { name: 'Preview review' }).click();
   await expect(page.getByRole('region', { name: 'Review task preview' })).toBeVisible();
   await page.getByRole('button', { name: 'Start review' }).click();
   await expect(page.getByRole('alert')).toContainText('Review could not start');
-  await expect(page.getByText(/A task is already starting or running/i)).toBeVisible();
+  await expect(page.getByText(/This workspace overlaps an active or unresolved review/i)).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Review task', level: 2 })).toHaveCount(0);
   expect(new URL(page.url()).searchParams.has('task')).toBe(false);
   expect(JSON.parse(await readFile(`${app.executable}.starts`, 'utf8'))).toBe(1);

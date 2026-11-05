@@ -349,6 +349,9 @@ function compactComparisonConditions(value) {
     fingerprint: fingerprint(row?.fingerprint),
   }));
   return { schemaVersion: source.schemaVersion === 1 ? 1 : null,
+    ...(source.sharedProfileOverlap === true ? { sharedProfileOverlap: true } : {}),
+    ...(source.sideId ? { sideId: text(source.sideId, 40) } : {}),
+    ...(source.requestedExecution ? { requestedExecution: pick(source.requestedExecution, ['model', 'reasoningEffort']) } : {}),
     taskFingerprint: fingerprint(source.taskFingerprint), ...(taskId ? { taskId } : {}),
     ...(Array.isArray(source.editableFiles) ? { editableFiles } : {}), checkRecipes,
     qualityFingerprint: fingerprint(source.qualityFingerprint),
@@ -446,7 +449,9 @@ function compactRun(run) {
   if (hookInvalidOrOmitted > 0) coverage.hooks = 'partial';
   if (rawHooks.length > hookInvocations.length && rawHooks.length > 0) coverage.hooks = 'partial';
   const projectedRun = {
-    id: run.id ?? null, profileId: run.profileId ?? profile.profileId ?? profile.id ?? null,
+    id: run.id ?? null,
+    ...((run.sideId ?? profile.sideId) ? { sideId: text(run.sideId ?? profile.sideId, 40) } : {}),
+    profileId: run.profileId ?? profile.profileId ?? profile.id ?? null,
     profileName: run.profileName ?? profile.profileName ?? profile.name ?? null,
     ...(nativeConfigOf(run.nativeConfig ?? profile.nativeConfig) !== undefined
       ? { nativeConfig: nativeConfigOf(run.nativeConfig ?? profile.nativeConfig) } : {}),
@@ -755,13 +760,15 @@ export function summarizeAuditSeries({ id, baseline, profiles = [], plan = [], s
     const rawRuns = list(incoming?.runs ?? incoming?.report?.runs);
     const profileOrder = list(slot.profileOrder ?? slot.profiles);
     const rows = profileOrder.map(profile => {
-      const profileName = typeof profile === 'string' ? profile : profile.profileName ?? profile.name;
+      const sideId = typeof profile === 'string' ? list(profiles).find(item => item.sideId === profile)?.sideId : profile.sideId;
+      const side = sideId ? list(profiles).find(item => item.sideId === sideId) : null;
+      const profileName = side?.profileName ?? (typeof profile === 'string' ? profile : profile.profileName ?? profile.name);
       const requestedId = typeof profile === 'string' ? null : profile.profileId ?? profile.id ?? null;
-      const declaredProfile = requestedId
+      const declaredProfile = side ?? (requestedId
         ? list(profiles).find(item => (item.profileId ?? item.id) === requestedId)
-        : list(profiles).find(item => (item.profileName ?? item.name) === profileName);
+        : list(profiles).find(item => (item.profileName ?? item.name) === profileName));
       const profileId = requestedId ?? declaredProfile?.profileId ?? declaredProfile?.id ?? null;
-      const run = profileId
+      const run = sideId ? rawRuns.find(r => (r.sideId ?? r.profile?.sideId ?? r.comparisonConditions?.sideId) === sideId) : profileId
         ? rawRuns.find(r => (r.profileId ?? r.profile?.profileId ?? r.profile?.id) === profileId)
         : rawRuns.find(r => profileName && (r.profileName ?? r.profile?.profileName ?? r.profile?.name) === profileName);
       const status = run ? run.status ?? run.execution?.status ?? 'captured' : incoming?.status ?? 'not-started';
@@ -773,7 +780,7 @@ export function summarizeAuditSeries({ id, baseline, profiles = [], plan = [], s
         const canonicalRun = { ...run, checks: canonicalAuditChecks(run) };
         evaluation = evaluateAuditQuality(canonicalRun, quality, { checks, review: review ?? null });
       }
-      return { index, experimentId: slot.experimentId ?? null, profileId: profileId ?? run?.profileId ?? run?.profile?.profileId ?? run?.profile?.id ?? null, profileName, status,
+      return { index, experimentId: slot.experimentId ?? null, ...(sideId ? { sideId } : {}), profileId: profileId ?? run?.profileId ?? run?.profile?.profileId ?? run?.profile?.id ?? null, profileName, status,
         run: run ? compactRun(run) : null, quality: evaluation ? { status: evaluation.status, fingerprint: evaluation.fingerprint,
           definitionId: evaluation.definition.id, definitionVersion: evaluation.definition.version,
           criteria: evaluation.criteria, rubric: evaluation.rubric, review: evaluation.review ?? null,
@@ -794,6 +801,7 @@ export function summarizeAuditSeries({ id, baseline, profiles = [], plan = [], s
       failures: bounded(incoming?.failures, 40).map(item => ({ code: item?.code ?? 'trial-failure-recorded' })),
       warnings: bounded(incoming?.warnings, 40).map(item => ({ code: item?.code ?? 'trial-warning-recorded' })),
       profileOrder: profileOrder.map(p => typeof p === 'string' ? p : ({
+        ...(typeof p.sideId === 'string' ? { sideId: p.sideId } : {}),
         ...(typeof (p.profileId ?? p.id) === 'string' ? { profileId: p.profileId ?? p.id } : {}),
         ...(typeof (p.profileName ?? p.name) === 'string' ? { profileName: p.profileName ?? p.name } : {}),
       })),
@@ -803,7 +811,7 @@ export function summarizeAuditSeries({ id, baseline, profiles = [], plan = [], s
   const profileRows = list(profiles).slice(0, 160).map(profile => {
     const profileName = profile.profileName ?? profile.name ?? profile.id;
     const profileId = profile.profileId ?? profile.id;
-    const observations = slots.flatMap(slot => slot.profiles.filter(row => profileId
+    const observations = slots.flatMap(slot => slot.profiles.filter(row => profile.sideId ? row.sideId === profile.sideId : profileId
       ? row.profileId === profileId : row.profileName === profileName));
     const qs = observations.map(row => row.quality?.status ?? 'incomplete');
     const plannedN = observations.length, passed = qs.filter(s => s === 'passed').length, failed = qs.filter(s => s === 'failed').length;
@@ -836,7 +844,7 @@ export function summarizeAuditSeries({ id, baseline, profiles = [], plan = [], s
         reviewedN, scoredN: scored.length, missingN: plannedN - scored.length, unreviewedN: plannedN - reviewedN,
         ...distribution(scored) };
     }
-    return { profileId: profile.profileId ?? profile.id ?? null, profileName, planned: plannedN,
+    return { ...(profile.sideId ? { sideId: profile.sideId, execution: profile.execution } : {}), profileId: profile.profileId ?? profile.id ?? null, profileName, planned: plannedN,
       ...(nativeConfigOf(profile.nativeConfig) !== undefined ? { nativeConfig: nativeConfigOf(profile.nativeConfig) } : {}),
       executed: observations.filter(row => row.run).length,
       quality: { passed, failed, incomplete: plannedN - passed - failed, notRun: observations.filter(row => !row.run).length,
@@ -967,7 +975,7 @@ export function summarizeAuditSeries({ id, baseline, profiles = [], plan = [], s
     }
     const qualityDelta = qualityEligibleN > 0 && qualityMissingN === 0 && qualityExcludedN === 0
       ? qualityRightPassed / qualityPairedN - qualityLeftPassed / qualityPairedN : null;
-    comparisons.push({ left: left.profileId ?? left.profileName, right: right.profileId ?? right.profileName,
+    comparisons.push({ left: left.sideId ?? left.profileId ?? left.profileName, right: right.sideId ?? right.profileId ?? right.profileName,
       qualityDelta,
       qualityDeltaEvidence: { plannedN: pairIndexes.length,
         eligibleN: qualityEligibleN, excludedN: qualityExcludedN, missingN: qualityMissingN,
@@ -994,6 +1002,7 @@ export function summarizeAuditSeries({ id, baseline, profiles = [], plan = [], s
     recipe: pick(recipe, ['fingerprint', 'qualityFingerprint', 'criteria', 'meta']),
     plan: slots.map(slot => ({ ...pick(slot, ['index', 'experimentId', 'status']),
       profileOrder: list(list(plan).find(item => item.experimentId === slot.experimentId)?.profileOrder).map(p => typeof p === 'string' ? p : ({
+        ...(typeof p.sideId === 'string' ? { sideId: p.sideId } : {}),
         ...(typeof (p.profileId ?? p.id) === 'string' ? { profileId: p.profileId ?? p.id } : {}),
         ...(typeof (p.profileName ?? p.name) === 'string' ? { profileName: p.profileName ?? p.name } : {}),
       })),

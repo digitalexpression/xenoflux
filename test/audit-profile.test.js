@@ -341,7 +341,42 @@ test('access trusts a matching running desktop journal even when its creator PID
     processSnapshot: async () => [identity, foreignClient] });
   assert.equal(mismatch.status, 'blocked');
   assert.equal(mismatch.reason, 'unattributed-native-client');
+  let holderChecks = 0;
+  const settled = await observeAuditProfileAccess(profile, { store: f.store,
+    inspectResources: async () => ({ pids: ++holderChecks === 1 ? [foreignClient.pid] : [], records: 1, clients: [], partial: false }),
+    processSnapshot: async () => [identity, foreignClient] });
+  assert.equal(settled.status, 'ready');
+  assert.equal(holderChecks, 2);
   assert.deepEqual(JSON.parse(await readFile(join(lockPath, 'owner.json'))), owner);
+});
+
+test('access finds the owning controller journal when another store gives the same home a different profile ID', async t => {
+  const f = await fixture(t), profile = await resolveAuditExecutionProfile(f.store, 'Research');
+  const otherStore = new Store(join(f.root, 'other-store'));
+  await registerHome(otherStore, 'Other name', f.native.root, { executable: f.executable, version: '0.162.0' });
+  const other = await resolveAuditExecutionProfile(otherStore, 'Other name');
+  assert.notEqual(other.profileId, profile.profileId);
+  const desktopRoot = join(f.store.directory, 'desktop-instances'); await mkdir(desktopRoot, { mode: 0o700 });
+  const journalPath = join(desktopRoot, `${profile.profileId}.json`);
+  const owner = { kind: 'desktop-instance', host: hostname(), pid: 987654,
+    runId: '11111111-2222-4333-8444-555555555558', storePath: f.store.directory, profileId: profile.profileId, journalPath };
+  const identity = { pid: 811, ppid: 1, uid: process.getuid(), startedAt: 'Thu Oct 15 10:00:00 2026 UTC', executable: '/Applications/Codex.app/Contents/MacOS/Codex' };
+  const state = { schemaVersion: 1, kind: 'desktop-instance', profileId: profile.profileId, owner, phase: 'running',
+    plan: { profileId: profile.profileId, nativeRoot: profile.nativeRoot, home: profile.home }, main: identity, processes: [identity] };
+  await writeFile(journalPath, JSON.stringify(state), { mode: 0o600 });
+  await mkdir(join(profile.reservationRoot, '.run-lock'), { mode: 0o700 });
+  await writeFile(join(profile.reservationRoot, '.run-lock', 'owner.json'), JSON.stringify(owner), { mode: 0o600 });
+  const check = await observeAuditProfileAccess(other, { store: otherStore,
+    inspectResources: async () => ({ pids: [identity.pid], records: 1, clients: [], partial: false }),
+    processSnapshot: async () => [identity] });
+  assert.equal(check.status, 'ready');
+  assert.deepEqual(check.clients, [identity]);
+  assert.equal(check.sourceReservation.profileId, profile.profileId);
+  assert.equal(check.sourceReservation.journalPath, journalPath);
+  state.plan.home = join(f.root, 'unrelated-home');
+  await writeFile(journalPath, JSON.stringify(state), { mode: 0o600 });
+  const changed = await observeAuditProfileAccess(other, { inspectResources: async () => assert.fail('wrong home must block') });
+  assert.equal(changed.status, 'blocked');
 });
 
 test('access tolerates an unchanged valid stale desktop reservation only when all owned processes and resource holders are absent', async t => {
@@ -515,4 +550,17 @@ test('settings snapshots fingerprint bounded internal and external skill package
   const unsafe = await snapshotAuditProfileSettings(profile);
   assert.equal(unsafe.status, 'unavailable');
   assert.equal(unsafe.reason, 'settings-symlink-target-unsafe');
+});
+
+
+test('access inspection retries a vanished resource holder using a fresh complete observation', async t => {
+  const f = await fixture(t);
+  const profile = await resolveAuditExecutionProfile(f.store, 'Research', { repository: f.repository });
+  let observations = 0;
+  const result = await observeAuditProfileAccess(profile, {
+    inspectResources: async () => ++observations === 1 ? [2147483000] : [],
+    processSnapshot: async () => [],
+  });
+  assert.equal(result.status, 'ready');
+  assert.equal(observations, 2);
 });

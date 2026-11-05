@@ -39,7 +39,13 @@ test('run preview is read-only and binds exactly two profiles, commands and limi
   assert.equal(app.calls.captures.length, 0);
   await assert.rejects(access(join(app.store.directory, 'audits')), { code: 'ENOENT' });
   await assert.rejects(access(join(app.store.directory, 'ui-runs')), { code: 'ENOENT' });
-  await assert.rejects(app.provider.runPreview({ ...request(app), b: 'baseline' }), { code: 'invalid-run' });
+  const same = await app.provider.runPreview({ ...request(app), b: 'baseline',
+    execution: { a: { model: 'left-model' }, b: { model: 'right-model' } } });
+  assert.equal(same.ready, true);
+  assert.match(same.runs[0].text, /left-model/);
+  assert.match(same.runs[1].text, /right-model/);
+  for (const execution of [null, { a: null }, { a: { approvalPolicy: 'never' } }])
+    await assert.rejects(app.provider.runPreview({ ...request(app), execution }), { code: 'invalid-run' });
   await assert.rejects(app.provider.startRun({ ...request(app) }), { code: 'invalid-run' });
 });
 
@@ -295,4 +301,20 @@ test('recovery previews stopped owned records, rejects an unreviewed apply, and 
   assert.equal(await inspectAuditReservation(defaultLease), null, 'Default recovery releases only its exact owned lease');
   assert.equal(app.calls.captures.length, 0);
   assert.ok(recovered.reportHref);
+});
+
+
+test('a preflight refusal after Start keeps its reason through completion and restart', async t => {
+  const app = await fixture(t, { blockFinalPreflight: true });
+  const preview = await app.provider.runPreview(request(app));
+  assert.equal(preview.ready, true);
+  const started = await app.provider.startRun({ previewToken: preview.previewToken });
+  const result = await waitFor(() => app.provider.run(started), value => value.state !== 'running', 'Run did not settle');
+  assert.equal(result.state, 'failed');
+  assert.match(result.headline, /Safe coexistence/);
+  assert.deepEqual(app.calls.captures, []);
+  await app.restartServer();
+  assert.equal((await app.provider.run(started)).headline, result.headline);
+  assert.deepEqual(await app.provider.startRun({ previewToken: preview.previewToken }), started);
+  assert.deepEqual(app.calls.captures, []);
 });

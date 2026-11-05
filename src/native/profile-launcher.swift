@@ -64,8 +64,19 @@ func oneShot(_ args: [String]) -> Never {
     exit(ok ? EXIT_SUCCESS : EXIT_FAILURE)
 }
 
+func inspectExecutable(_ args: [String]) -> Never {
+    guard args.count == 3, let pid = Int32(args[1]), pid > 0,
+          let start = Int(args[2]), start > 0 else { exit(EXIT_FAILURE) }
+    guard processStartSeconds(pid) == start,
+          let executable = executablePath(pid), safeAbsolutePath(executable),
+          processStartSeconds(pid) == start else { exit(EXIT_FAILURE) }
+    print(executable)
+    exit(EXIT_SUCCESS)
+}
+
 func openApplicationOneShot(_ args: [String]) -> Never {
-    guard args.count == 12, args[0] == "--open-app",
+    let signedApp = args.first == "--open-signed-app"
+    guard args.count == 12, (signedApp || args[0] == "--open-app"),
           args[2] == "--home", args[4] == "--desktop-data", args[6] == "--user-home",
           args[8] == "--temporary", args[10] == "--target-executable",
           [args[1], args[3], args[5], args[7], args[9], args[11]].allSatisfy(safeAbsolutePath),
@@ -76,7 +87,7 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     let expectedExecutable = resolvedPath(URL(fileURLWithPath: args[11]))
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.createsNewApplicationInstance = true
-    configuration.arguments = ["--profile-run"]
+    configuration.arguments = signedApp ? ["--user-data-dir=\(args[5])"] : ["--profile-run"]
     configuration.environment = ["CODEX_HOME": args[3], "CODEX_SQLITE_HOME": args[3],
         "CODEX_ELECTRON_USER_DATA_PATH": args[5], "HOME": userHome, "TMPDIR": args[9]]
     var completed = false
@@ -99,8 +110,7 @@ func openApplicationOneShot(_ args: [String]) -> Never {
         }
         exit(EXIT_FAILURE)
     }
-    // LaunchServices starts the bootstrap. exec replaces it in the same PID,
-    // so inspect the kernel path rather than cached CFBundleExecutable metadata.
+    // Verify the kernel executable, including for legacy bootstrap launches.
     let target = TargetIdentity(pid: application.processIdentifier, executable: expectedExecutable,
         startSeconds: startSeconds)
     while validatedApplication(target) == nil && Date() < deadline && !application.isTerminated {
@@ -123,6 +133,7 @@ struct ProfileMetadata {
     let entry: String
     let nativeRoot: String
     let vendorExecutable: String
+    let signedShortcut: Bool
 }
 
 func metadataFromBundle() -> ProfileMetadata? {
@@ -138,7 +149,7 @@ func metadataFromBundle() -> ProfileMetadata? {
           !vendor.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { return nil }
     let executable = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/\(vendor)")
     return ProfileMetadata(store: store, profileID: profile, node: node, entry: entry,
-        nativeRoot: root, vendorExecutable: resolvedPath(executable))
+        nativeRoot: root, vendorExecutable: resolvedPath(executable), signedShortcut: info["XfxSignedShortcut"] as? Bool == true)
 }
 
 func executeProfile(_ metadata: ProfileMetadata) -> Never {
@@ -192,17 +203,18 @@ func openFromFinder(_ metadata: ProfileMetadata) -> Never {
         fputs("The controller did not authorize this profile launch.\n", stderr); exit(EXIT_FAILURE)
     }
     output.fileHandleForReading.closeFile()
-    if status == "already-running" { exit(EXIT_SUCCESS) }
-    guard status == "launch" else { exit(EXIT_FAILURE) }
+    if status == "already-running" || (metadata.signedShortcut && status == "opened") { exit(EXIT_SUCCESS) }
+    guard status == "launch", !metadata.signedShortcut else { exit(EXIT_FAILURE) }
     executeProfile(metadata)
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-if arguments.first == "--open-app" { openApplicationOneShot(arguments) }
+if arguments.first == "--process-executable" { inspectExecutable(arguments) }
+if arguments.first == "--open-app" || arguments.first == "--open-signed-app" { openApplicationOneShot(arguments) }
 if arguments.first == "--focus-pid" || arguments.first == "--quit-pid" { oneShot(arguments) }
 guard let metadata = metadataFromBundle() else {
     fputs("This profile app is missing its controller settings.\n", stderr); exit(EXIT_FAILURE)
 }
-if arguments == ["--profile-run"] { executeProfile(metadata) }
+if arguments == ["--profile-run"], !metadata.signedShortcut { executeProfile(metadata) }
 guard arguments.isEmpty else { exit(EXIT_FAILURE) }
 openFromFinder(metadata)

@@ -2,6 +2,9 @@
 import { access, lstat, open, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
+import { acquire, release } from './metadata.js';
+import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 import { parse } from 'smol-toml';
 import { create, find } from './profiles.js';
@@ -102,24 +105,30 @@ export async function registerHome(store, name, root, { executable: requestedExe
   const binary = await executable(requestedExecutable);
   const candidate = { environmentId: randomUUID(), root: canonicalRoot, ...binary, version: declaredVersion };
   await load(candidate);
-  return store.update(data => {
-    // Registration is the public entry point for an existing native profile.
-    // Validate the candidate above, then create its registry record in this
-    // same locked update so invalid paths cannot leave an empty record behind.
-    // Setup must bind the same record it prepared, even if its name was reused
-    // after a concurrent deletion. Public registration may create a new record.
-    const profile = expectedProfileId !== undefined ? find(data, expectedProfileId)
-      : data.profiles.some(item => item.id === name || item.name === name) ? find(data, name) : create(data, name);
-    if (profile.native) {
-      if (profile.native.root === candidate.root && profile.native.executable === candidate.executable) return profile;
-      fail('Profile already has a different native home binding');
-    }
-    if (data.profiles.some(item => item.id !== profile.id && item.native?.root === candidate.root))
-      fail('Native home is already bound to another profile');
-    profile.native = candidate;
-    profile.revision += 1;
-    return profile;
-  });
+  const lock = join(canonicalRoot, '.run-lock');
+  const owner = { kind: 'native-home-registration', host: hostname(), pid: process.pid, runId: randomUUID(), storePath: store.directory };
+  await acquire(lock, owner, true);
+  try {
+    await assertNoLegacyAuditLease(store.directory, join(canonicalRoot, 'codex-home'));
+    return await store.update(data => {
+      // Registration is the public entry point for an existing native profile.
+      // Validate the candidate above, then create its registry record in this
+      // same locked update so invalid paths cannot leave an empty record behind.
+      // Setup must bind the same record it prepared, even if its name was reused
+      // after a concurrent deletion. Public registration may create a new record.
+      const profile = expectedProfileId !== undefined ? find(data, expectedProfileId)
+        : data.profiles.some(item => item.id === name || item.name === name) ? find(data, name) : create(data, name);
+      if (profile.native) {
+        if (profile.native.root === candidate.root && profile.native.executable === candidate.executable) return profile;
+        fail('Profile already has a different native home binding');
+      }
+      if (data.profiles.some(item => item.id !== profile.id && item.native?.root === candidate.root))
+        fail('Native home is already bound to another profile');
+      profile.native = candidate;
+      profile.revision += 1;
+      return profile;
+    });
+  } finally { await release(lock, owner); }
 }
 export { unbindNativeHome as unbindHome } from './profile-removal.js';
 export async function loadHomeBinding(native) { return load(native); }

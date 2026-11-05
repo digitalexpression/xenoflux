@@ -21,7 +21,7 @@ import { createDesktopRuntime, DESKTOP_APP } from './desktop-runtime.js';
 import { createHome, planHomeCreation } from './home-create.js';
 import { nativeClient } from './profile-command.js';
 import { bind, renameProfile as renameInData } from './profiles.js';
-import { removeProfile as removeFromStore } from './profile-removal.js';
+import { editProfileRegistry, removeProfile as removeFromStore } from './profile-removal.js';
 import { privateDirectory } from './metadata.js';
 import { findHistory, listHistory } from './history.js';
 import { listHomes, registerHome } from './homes.js';
@@ -122,16 +122,15 @@ const MAX_SAVED = 20;
 
 export function createEngineProvider({ store, version = 'unknown', reportsRoot = join(homedir(), 'Xenoflux reports'), defaultUserHome = homedir(),
   observeClients = observeProfileClients, clientOps = defaultClientOps(store), copyRuntime = () => createDesktopRuntime({ closeClients: false }),
-  resolveClient = signal => nativeClient(store, {}, signal), profilesBase = join(dirname(store.directory), 'profiles'), lockOptions = {}, runContext = {}, reviewContext = {} }) {
-  let admittedTask = null;
+  resolveClient = signal => nativeClient(store, {}, signal), profilesBase = join(dirname(store.directory), 'profiles'), lockOptions = {}, runContext = {}, reviewContext = {}, maxActiveJobs = 8 }) {
+  if (!Number.isSafeInteger(maxActiveJobs) || maxActiveJobs < 1) throw new Error('Invalid active job capacity');
+  const admitted = new Set();
   const admission = {
     async acquire(id) {
-      if (admittedTask) throw new UiError(409, 'A task is already starting or running. Open its progress before starting another.', 'run-active');
-      admittedTask = id;
-      try { await runs.assertAvailable(id); await reviewTasks.assertAvailable(id); }
-      catch (error) { admittedTask = null; throw error; }
+      if (admitted.size >= maxActiveJobs) throw new UiError(409, `This controller can run ${maxActiveJobs} jobs at once. Try again after one finishes.`, 'job-capacity');
+      admitted.add(id);
     },
-    release(id) { if (admittedTask === id) admittedTask = null; },
+    release(id) { admitted.delete(id); },
   };
   const runs = createUiRuns({ store, defaultUserHome, context: runContext, admission });
   const reviewTasks = createUiReviewTasks({ store, defaultUserHome, context: reviewContext, admission,
@@ -414,6 +413,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     startRun: runs.startRun,
     run: runs.run,
     cancelRun: runs.cancelRun,
+    respondRun: runs.respondRun,
     recoverRun: runs.recoverRun,
     previewReviewTask: reviewTasks.previewReviewTask,
     startReviewTask: reviewTasks.startReviewTask,
@@ -422,7 +422,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     respondReviewTask: reviewTasks.respondReviewTask,
     async close() { await Promise.all([runs.close(), reviewTasks.close()]); },
     async info() {
-      return { mode: 'engine', version, activeRun: await runs.activeRun(),
+      return { mode: 'engine', version, activeJobs: [...runs.activeJobs(), ...reviewTasks.activeJobs()], maxActiveJobs, activeRun: await runs.activeRun(),
         features: { runs: true, copy: true, create: true, clientControls: true, profileEdits: true } };
     },
 
@@ -656,14 +656,14 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     async renameProfile({ name, newName }) {
       if (!plain(newName)) throw new UiError(400, 'Enter the new name.', 'invalid-name');
       if (name === 'Default') throw new UiError(400, 'Default can’t be renamed.', 'invalid-target');
-      try { await store.update(data => renameInData(data, name, newName.trim())); }
+      try { await editProfileRegistry(store, name, (data, profile) => renameInData(data, profile.id, newName.trim()), lockOptions); }
       catch (error) { throw new UiError(409, error.message, 'rename-failed'); }
       return { status: 'success', message: `Renamed ${name} to ${newName.trim()}. Its files, sign-in and history are unchanged.` };
     },
 
     async bindProfile({ name, repository }) {
       if (typeof repository !== 'string' || !isAbsolute(repository.trim())) throw new UiError(400, 'Enter the project folder’s full path, starting with /.', 'invalid-path');
-      try { await store.update(data => bind(data, name, repository.trim())); }
+      try { await editProfileRegistry(store, name, (data, profile) => bind(data, profile.id, repository.trim()), lockOptions); }
       catch (error) { throw new UiError(409, error.message, 'bind-failed'); }
       return { status: 'success', message: `Bound ${name} to ${basename(repository.trim())}.` };
     },

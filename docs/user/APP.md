@@ -33,9 +33,11 @@ it. Running `xfx ui` again while it is running reopens the same app.
 - **Compare a task from existing sessions.** Tick two sessions you ran in Codex CLI
   or Desktop. The first one you tick is the left side of the report; **Swap sides**
   changes that. Choosing sessions only reads their recorded history.
-- **Run a new task.** Describe one task, choose two distinct profiles and a
+- **Run a new task.** Describe one task, choose a profile for each side and a
   repository, then review the pinned commit, limits and any commands you add.
-  Nothing starts until **Start 2 model runs**. The profiles run sequentially in
+  Both sides can use the same profile. Each side can select its own model ID and
+  reasoning effort; blank fields inherit saved profile settings. Nothing starts
+  until **Start 2 model runs**. The sides run sequentially in
   separate copies of the committed source; uncommitted, untracked and ignored
   files are excluded. Setup and check commands are ordinary programs outside
   the Codex sandbox and may affect files beyond those copies. No check command
@@ -114,7 +116,11 @@ content. **Preview review** shows the exact frozen inputs and prompt, workspace,
 executable and limits; it starts no native session. Editing the form invalidates
 that preview. Choose **Start review** to start one ordinary model task.
 
-The selected profile supplies its normal provider connection, model settings,
+You can select a model ID and reasoning effort for each review. Blank fields
+inherit the profile settings; overrides apply only to that task. The native
+session must confirm explicit selections before a model turn starts.
+
+The selected profile supplies its normal provider connection, default model settings,
 instructions, integrations and permissions. Xenoflux does not change sign-in,
 trust or configuration to prepare a review. The task has the profile's normal
 native history and runtime effects; the request to reason from the report is a
@@ -128,8 +134,14 @@ already-running Xfx-managed Desktop instance can remain open on that profile;
 other Desktop profiles are unaffected. Cancelling the review leaves Desktop
 running. You can quit Desktop normally: observed profile listing or the next
 review Start reconciles its stopped reservation automatically. Remaining helpers
-or uncertain file holders still block cleanup. This does not enable overlapping
-review/comparison executions or isolate edits in a shared workspace.
+or uncertain file holders still block cleanup.
+
+Independent comparisons and reviews can overlap on the same profile, up to eight
+active jobs per controller by default. The header links to each active job. Each
+keeps its own approvals, progress, cancellation and results. Choose a separate
+workspace for each simultaneous review; overlapping directories are refused.
+Profile changes are blocked while its execution reservations remain. Timings
+during overlapping work reflect shared machine and profile conditions.
 
 When Codex needs approval or input, the review page shows its requested action
 and choices. Nothing is answered automatically. **Cancel review** stops owned

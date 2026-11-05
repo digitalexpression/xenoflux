@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { create, find } from './profiles.js';
 import { registerHome, resolveHome } from './homes.js';
 import { runInteractive } from './interactive-process.js';
+import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { acquire, exists, readJSON, release } from './metadata.js';
 import { probeVersion } from './version-probe.js';
 import { createLogStorage } from './log-storage.js';
@@ -257,6 +258,7 @@ export async function startHomeSignIn({ store, name, base, signal, run = runInte
   let preserveLock = false;
   let enteredLogin = false;
   try {
+    await assertNoLegacyAuditLease(store.directory, join(root, 'codex-home'));
     const fresh = find(await store.read(), profile.id);
     assertRegistered(fresh, root);
     await privateDirectory(root, 'native home root');

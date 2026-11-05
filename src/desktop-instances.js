@@ -13,7 +13,7 @@ import { reserveInstanceControl, releaseInstanceControl } from './desktop-instan
 import { createLogStorage } from './log-storage.js';
 import { ramLogTarget } from './ram-logs.js';
 import { acquire, exists, globalLock, privateDirectory, readJSON, record, release } from './metadata.js';
-import { readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
+import { assertNoLegacyAuditLease, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -23,7 +23,9 @@ const paths = (store, id) => ({ root: join(store.directory, 'desktop-instances')
 const receiptPath = (store, state) => join(paths(store, state.profileId).root, `${state.profileId}.${state.runId}.launch`);
 const rowValid = row => row && Number.isSafeInteger(row.pid) && row.pid > 0 && Number.isSafeInteger(row.ppid) && row.ppid >= 0
   && row.uid === process.getuid() && typeof row.startedAt === 'string' && Number.isFinite(Date.parse(row.startedAt)) && absolute(row.executable);
-const applicationOf = state => state.launcherPaths?.application ?? state.plan.app;
+const applicationOf = state => state.launcherPaths?.signedShortcut ? state.plan.app : state.launcherPaths?.application ?? state.plan.app;
+const prepareShortcut = (store, plan) => prepareProfileApp(store, plan, { signedShortcut: true });
+const loadShortcut = (store, plan) => loadPreparedProfileApp(store, plan, { signedShortcut: true });
 
 function validateState(state, store, id) {
   const p = state?.plan;
@@ -57,7 +59,8 @@ function validateLauncherPaths(launcher, store, id) {
       || !basename(app.appPath).startsWith('Codex · ') || !basename(app.appPath).endsWith('.app')
       || app.bundleId !== `com.xenoflux.profile.${id.toLowerCase()}`
       || !absolute(app.executable) || dirname(app.executable) !== join(app.appPath, 'Contents', 'MacOS')
-      || launcher.bootstrapExecutable !== join(app.appPath, 'Contents', 'MacOS', 'XfxProfileLauncher'))
+      || launcher.bootstrapExecutable !== join(app.appPath, 'Contents', 'MacOS', 'XfxProfileLauncher')
+      || (launcher.signedShortcut !== undefined && (launcher.signedShortcut !== true || app.executable !== launcher.bootstrapExecutable)))
       throw new Error('Invalid profile app binding; preserving the desktop instance');
   } else {
     // Retain only enough authority to close/recover the interrupted native test.
@@ -79,7 +82,8 @@ async function pinnedHelper(state) {
 async function pinnedApplication(store, state, validateApp) {
   const validated = await validateApp(store, state.plan, state.launcherPaths.application);
   if (validated && (validated.bootstrapExecutable !== state.launcherPaths.bootstrapExecutable
-    || validated.helperSha256 !== state.launcherPaths.helperSha256))
+    || validated.helperSha256 !== state.launcherPaths.helperSha256
+    || validated.signedShortcut !== state.launcherPaths.signedShortcut))
     throw new Error('Profile app binding changed; preserving the desktop instance');
 }
 async function readState(store, id) {
@@ -115,8 +119,8 @@ async function ownedReservation(state) {
   if (!await exists(lock)) return false;
   await privateDirectory(lock);
   const owners = await readProfileOwners(state.plan.nativeRoot);
-  if (owners.length === 1 && owners[0]?.kind === 'review-task' && owners[0].profileId === state.profileId
-    && owners[0].storePath === state.owner.storePath) return false;
+  if (owners.every(owner => ['review-task', 'audit-experiment'].includes(owner?.kind)
+    && owner.home === state.plan.home)) return false;
   if (!owners.some(owner => equal(owner, state.owner)))
     throw new Error('Desktop profile reservation belongs to another operation; preserving it');
   return true;
@@ -134,7 +138,8 @@ async function assertLaunchReceipt(store, state) {
 }
 const resources = plan => [plan.home, plan.desktopData, ...['', '-wal', '-shm'].map(s => ramLogTarget(plan.environmentId) + s)];
 async function observation(state, runtime) {
-  if (state.main) return runtime.observe(state.main, { trackedProcesses: state.processes });
+  if (state.main) return runtime.observe(state.main, { trackedProcesses: state.processes,
+    ...(state.launcherPaths?.signedShortcut ? { helperExecutable: await pinnedHelper(state) } : {}) });
   if (state.phase === 'opening') {
     const baseline = new Set(state.baselineMains.map(processIdentity));
     const unknown = (await runtime.snapshot()).filter(row => [applicationOf(state).executable, state.launcherPaths?.bootstrapExecutable].includes(row.executable)
@@ -147,14 +152,14 @@ async function finishStopped(store, state, runtime, options) {
   const observed = await observation(state, runtime);
   if (observed.status !== 'stopped') throw new Error('Desktop instance still runs or its ownership is uncertain; preserving its reservation');
   const reserved = await ownedReservation(state);
-  const review = await exists(join(state.plan.nativeRoot, '.run-lock'))
-    ? (await readProfileOwners(state.plan.nativeRoot)).find(owner => owner.kind === 'review-task') : null;
-  let allowedProcesses = [];
-  if (review) {
-    if (review.storePath !== store.directory || review.profileId !== state.profileId || !uuid.test(review.runId))
+  const reviews = await exists(join(state.plan.nativeRoot, '.run-lock'))
+    ? (await readProfileOwners(state.plan.nativeRoot)).filter(owner => owner.kind === 'review-task') : [];
+  const allowedProcesses = [];
+  for (const review of reviews) {
+    if (review.home !== state.plan.home || !uuid.test(review.runId))
       throw new Error('Review participant identity is unavailable; preserving reservation');
-    const taskRoot = join(store.directory, 'review-tasks', review.runId);
-    await privateDirectory(join(store.directory, 'review-tasks')); await privateDirectory(taskRoot);
+    const taskRoot = join(review.storePath, 'review-tasks', review.runId);
+    await privateDirectory(review.storePath); await privateDirectory(join(review.storePath, 'review-tasks')); await privateDirectory(taskRoot);
     const task = await readJSON(join(taskRoot, 'task.json'));
     if (task.kind !== 'xfx-review-task' || task.id !== review.runId || !equal(task.reservation?.owner, review)
       || task.profile?.reservationRoot !== state.plan.nativeRoot)
@@ -163,7 +168,7 @@ async function finishStopped(store, state, runtime, options) {
       const observedReview = await runtime.observe(task.process.nativeIdentity, { trackedProcesses: [task.process.nativeIdentity] });
       if (!['running', 'stopped'].includes(observedReview.status) || observedReview.orphaned)
         throw new Error('Review process ownership is uncertain; preserving reservation');
-      allowedProcesses = observedReview.processes;
+      allowedProcesses.push(...observedReview.processes);
     } else if (task.captureIntent) throw new Error('Review process identity is unavailable; preserving reservation');
   }
   await runtime.assertResourcesIdle(resources(state.plan), { allowedProcesses });
@@ -230,12 +235,13 @@ export async function desktopInstancePlan(store, name, { runtime = createDesktop
   return { profileId: profile.id, name: profile.name, environmentId: environment.id, nativeRoot: native.root,
     home: environment.home, desktopData: environment.desktopData, temporary: environment.launch.env.TMPDIR, userHome: environment.launch.env.HOME,
     app: await runtime.inspectApp(), displayName: `Codex · ${profile.name}`, liveHomeChanged: false,
-    sameProfileConcurrency: 'desktop-with-one-review', nativeAcceptance: 'pending' };
+    sameProfileConcurrency: 'execution-participants', nativeAcceptance: 'pending' };
 }
 function result(state, status) {
   return { status, profileId: state.profileId, name: state.plan.name, main: state.main,
     mainStartSeconds: state.main ? targetStartSeconds(state.main.startedAt) : null,
     application: state.launcherPaths?.application ?? null, applicationPath: state.launcherPaths?.application?.appPath ?? null,
+    ...(state.launcherPaths?.signedShortcut ? { signedAppPath: state.plan.app.appPath } : {}),
     home: state.plan.home, desktopData: state.plan.desktopData,
     liveHomeChanged: false, nativeAcceptance: 'pending' };
 }
@@ -252,7 +258,7 @@ async function launcherCaller(runtime, launcherPaths, env) {
 
 /** Explicitly create or refresh a cached app, without launching or closing it. */
 export async function prepareDesktopInstance(store, name, {
-  runtime = createDesktopInstanceRuntime(), prepareLauncher = prepareProfileApp, ...options
+  runtime = createDesktopInstanceRuntime(), prepareLauncher = prepareShortcut, ...options
 } = {}) {
   const id = find(await store.read(), name).id;
   return withOperation(store, id, options, async () => {
@@ -260,6 +266,7 @@ export async function prepareDesktopInstance(store, name, {
     if (previous && previous.phase !== 'closed')
       throw new Error('Profile has a running or unfinished desktop instance; prepare or refresh only after it stops and is closed or recovered');
     const plan = await desktopInstancePlan(store, id, { runtime });
+    await assertNoLegacyAuditLease(store.directory, plan.home);
     const reservation = join(plan.nativeRoot, '.run-lock');
     if (await exists(reservation)) throw new Error('Profile is in use or has an unfinished operation; preserve its reservation');
     // A raw Finder/CLI launch can bypass the controller journal. Never replace
@@ -300,7 +307,7 @@ export async function prepareDesktopInstance(store, name, {
 }
 
 export async function openDesktopInstance(store, name, {
-  runtime = createDesktopInstanceRuntime(), loadLauncher = loadPreparedProfileApp, prepareLauncher = prepareProfileApp,
+  runtime = createDesktopInstanceRuntime(), loadLauncher = loadShortcut, prepareLauncher = prepareShortcut,
   validateApp = validateProfileApp, ramLogs,
   launcherEnvironment = process.env, onBootstrapReady, ...options
 } = {}) {
@@ -332,6 +339,7 @@ export async function openDesktopInstance(store, name, {
       await finishStopped(store, state, runtime, options);
     }
     const plan = await desktopInstancePlan(store, id, { runtime });
+    await assertNoLegacyAuditLease(store.directory, plan.home);
     await privateDirectory(store.directory); await privateDirectory(paths(store, id).root, true);
     const runId = randomUUID();
     const owner = { kind: 'desktop-instance', host: hostname(), pid: process.pid, runId, storePath: store.directory,
@@ -368,10 +376,13 @@ export async function openDesktopInstance(store, name, {
       if (bootstrap && typeof onBootstrapReady !== 'function') throw new Error('Profile bootstrap needs a controller handshake');
       const helperExecutable = await pinnedHelper(state);
       await (ramLogs ?? createLogStorage()).prepareHome({ home: plan.home, key: plan.environmentId });
-      state.baselineMains = (await runtime.snapshot()).filter(row => row.executable === state.launcherPaths.application.executable);
+      const target = applicationOf(state);
+      state.baselineMains = (await runtime.snapshot()).filter(row => row.executable === target.executable);
       await save(store, state, 'opening'); launchAttempted = true;
-      const opened = await runtime.open(plan, { helperExecutable, application: state.launcherPaths.application, bootstrap: bootstrap ?? undefined, onBootstrapReady });
-      if (!rowValid(opened.main) || opened.main.executable !== state.launcherPaths.application.executable || !opened.processes?.every(rowValid))
+      const signedShortcut = state.launcherPaths.signedShortcut === true;
+      const opened = await runtime.open(plan, { helperExecutable, application: state.launcherPaths.application,
+        signedShortcut, bootstrap: signedShortcut ? undefined : bootstrap ?? undefined, onBootstrapReady });
+      if (!rowValid(opened.main) || opened.main.executable !== target.executable || !opened.processes?.every(rowValid))
         throw new Error('Desktop returned incomplete process ownership; preserving its reservation');
       if (state.baselineMains.some(row => processIdentity(row) === processIdentity(opened.main)))
         throw new Error('Desktop returned a preexisting process; preserving its reservation');
@@ -379,6 +390,8 @@ export async function openDesktopInstance(store, name, {
       state.main = opened.main; state.processes = opened.processes;
       await save(store, state);
       await save(store, state, 'running');
+      if (signedShortcut && bootstrap)
+        await onBootstrapReady({ kind: 'xfx-profile-bootstrap', status: 'opened', profileId: id, pid: bootstrap.pid });
       return result(state, 'opened');
     } catch (error) {
       state.error = error.code ?? 'DESKTOP_INSTANCE_FAILED';
@@ -429,7 +442,13 @@ export async function closeDesktopInstance(store, name, { runtime = createDeskto
       await assertLaunchReceipt(store, state);
       if (state.launcherPaths.application) await pinnedApplication(store, state, validateApp);
       state.processes = observed.processes; await save(store, state, 'closing');
-      await runtime.close(state.main, { helperExecutable: await pinnedHelper(state) });
+      await runtime.close(state.main, {
+        helperExecutable: await pinnedHelper(state),
+        onTrackedProcesses: async processes => {
+          state.processes = processes;
+          await save(store, state);
+        },
+      });
     }
     await finishStopped(store, state, runtime, options);
     return result(state, 'closed');

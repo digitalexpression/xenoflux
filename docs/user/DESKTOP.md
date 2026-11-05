@@ -10,9 +10,9 @@ xfx desktop open OtherProfile
 xfx desktop list --observe
 ```
 
-`open` creates or refreshes a stopped profile's cached `Codex · NAME.app` when
-needed, then launches it. Opening a running profile focuses that same instance
-without replacing or signing its cached app. Named operations keep Default's
+`open` creates or refreshes a stopped profile's `Codex · NAME.app` shortcut when
+needed, then launches the OpenAI-signed Desktop app for that profile. Opening a
+running profile focuses that same instance. Named operations keep Default's
 normal paths and leave other clients running. Different profiles can run
 concurrently; the same profile cannot use the managed CLI and desktop together.
 
@@ -21,12 +21,13 @@ the account HOME for login-keychain access; account-wide resources can remain
 shared. Xenoflux does not copy credentials, reset keychains or change their search
 lists. Filesystem separation does not guarantee all native resources are isolated.
 
-The package includes the launcher, so Swift compilation is unnecessary. A first
-open or stale stopped cache still copies and signs a customized app using macOS's
-built-in tools. The installed Codex app remains intact. Keep a profile app in the
-Dock or open it in Finder after preparation; if it becomes stale, refresh it through
-CLI `desktop open NAME`. Renaming takes effect on its app label after the profile
-stops and is next prepared.
+The package includes the launcher. Open the `applicationPath` reported by
+`desktop open NAME` in Finder, or drag that app from Finder to the applications
+side of the Dock to pin it. Click **Codex · NAME** to open or focus that profile.
+The running Desktop app has its own **ChatGPT** Dock tile. Use the named shortcut
+for profile-specific reopening and `desktop close NAME` for profile-specific quit.
+If a shortcut becomes stale, refresh it through `desktop open NAME` in a terminal.
+Renaming takes effect on the shortcut after the profile stops and is next prepared.
 
 ## Observe, focus or close
 
@@ -63,7 +64,7 @@ separate [profile recovery guide](PROFILE-RECOVERY.md).
 ## Explicit cache maintenance
 
 Normal use needs only `desktop open`. For diagnostics or maintenance of a stopped
-profile, `xfx desktop prepare NAME` creates or refreshes its cached app;
+profile, `xfx desktop prepare NAME` creates or refreshes its shortcut;
 `xfx desktop refresh NAME` is an alias. These commands refuse running profiles.
 `--dry-run` previews routing without preparing, signing or launching.
 

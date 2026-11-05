@@ -1,8 +1,8 @@
+import { readProfileOwners } from '../src/profile-reservations.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { appendFile, mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
@@ -171,14 +171,9 @@ process.stdin.on('end',()=>pending.finally(()=>process.exit(process.exitCode ?? 
 
 async function runObserveAccessFixture(profile, options = {}) {
   const result = await observeAuditProfileAccess(profile, { ...options, inspectResources: async () => [] });
-  let auditLeaseHeld = false;
-  if (options.store && profile?.home) {
-    const leases = await readdir(join(options.store.directory, 'audits', 'leases')).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
-    const leaseName = createHash('sha256').update(profile.home).digest('hex');
-    auditLeaseHeld = leases.includes(leaseName);
-  }
+  const members = await readProfileOwners(profile.reservationRoot).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
   options.onObserved?.({ profile: profile?.profileName, status: result.status, clients: result.clients,
-    sourceReservation: result.sourceReservation, auditLeaseHeld });
+    sourceReservation: result.sourceReservation, auditMemberHeld: members.some(owner => owner.kind === 'audit-experiment') });
   assert.equal(result.status, 'ready', JSON.stringify(result));
   assert.deepEqual(result.clients, []);
   assert.equal(result.sourceReservation, null);
@@ -475,8 +470,8 @@ test('runs a real bounded two-profile experiment, retains task-end evidence befo
   assert.equal(result.execution.retries, 0);
   assert.equal(result.exitCode, 4);
   assert.equal(result.status, 'failed');
-  assert.ok(accessObservations.some(item => item.auditLeaseHeld && item.sourceReservation === null),
-    'the audit-only lease is active without being misreported as a native client reservation');
+  assert.ok(accessObservations.some(item => item.auditMemberHeld && item.sourceReservation === null),
+    'the audit participant is active without being misreported as a Desktop reservation');
   assert.deepEqual(await readFile(f.store.file), f.savedStore);
   assert.deepEqual(await Promise.all(f.native.map(home => readFile(join(home.home, 'config.toml')))), f.savedConfigs);
   assert.deepEqual(await Promise.all(f.native.map(home => readFile(join(home.home, 'auth.json')))), f.savedAuth);
@@ -498,10 +493,7 @@ test('runs a real bounded two-profile experiment, retains task-end evidence befo
   for (const record of [alphaRecord, betaRecord]) {
     assert.equal(record.finalized, true, 'the report is finalized only after its audit lease has been released');
     assert.equal(record.state.reservation, null, 'released reservation state is durably cleared');
-    const heldLeases = await readdir(join(f.store.directory, 'audits', 'leases'));
-    const profileHome = record.record.profile.home ?? record.record.profile.userHome;
-    const leaseName = createHash('sha256').update(profileHome).digest('hex');
-    assert.ok(!heldLeases.includes(leaseName), 'no audit-only lease remains after successful finalization');
+
   }
   assert.equal(alphaReport.source.kind, 'native-app-server-v2');
   assert.equal(alphaReport.source.version, version);

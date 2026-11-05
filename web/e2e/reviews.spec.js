@@ -1,4 +1,5 @@
 import { readFile, readdir, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { test, expect } from './fixtures.js';
 
 test('prepare an export-bound review packet, import a citation, and reopen source-free', async ({ app, page }, testInfo) => {
@@ -83,7 +84,7 @@ test('prepare an export-bound review packet, import a citation, and reopen sourc
   const exportResponse = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/export'));
   await page.getByRole('button', { name: 'Export', exact: true }).click();
   const savedExport = await (await exportResponse).json();
-  const finalJson = `${savedExport.folder}${savedExport.files.find(name => name.endsWith('.audit.json'))}`;
+  const finalJson = `${savedExport.folder.replace(/^~(?=\/|$)/, homedir())}${savedExport.files.find(name => name.endsWith('.audit.json'))}`;
   const retained = JSON.parse(await readFile(finalJson, 'utf8'));
   expect(retained.reviewHistory.entries.some(entry => entry.reviewer.name === 'Fixture reviewer')).toBe(true);
 

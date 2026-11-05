@@ -12,8 +12,9 @@ const stable = value => JSON.stringify(value);
 const digest = value => createHash('sha256').update(stable(value)).digest('hex').slice(0, 20);
 
 function runOf(row) { return row?.run && typeof row.run === 'object' ? row.run : null; }
+const armKey = row => row.sideId ?? row.profileId ?? row.profileName;
 function findArm(rows, key, displayName) {
-  const exact = list(rows).find(row => (row.profileId ?? row.profileName) === key);
+  const exact = list(rows).find(row => armKey(row) === key);
   if (exact) return exact;
   if (key !== displayName) return null;
   const byName = list(rows).filter(row => row.profileName === displayName);
@@ -464,19 +465,18 @@ function buildPairConsistency(report, { reviews, requestedPair, taskGroupKey } =
   if (report?.kind !== 'audit-series-report' || !Array.isArray(report.trials))
     throw new Error('Repeated-run consistency requires an audit-series-report with trial slots');
   const slots = report.trials.slice(0, 160), first = slots.flatMap(slot => list(slot.profiles)).filter(row => row && (row.profileId || row.profileName));
-  const identity = row => row.profileId ?? row.profileName;
   const arms = list(report?.cohort?.arms);
   let left = requestedPair?.left ?? arms[0]?.id ?? arms[0]?.profileId ?? (report.comparisons?.[0]?.left),
     right = requestedPair?.right ?? arms[1]?.id ?? arms[1]?.profileId ?? (report.comparisons?.[0]?.right);
   if (!left || !right) {
     const ordered = [];
-    for (const slot of slots) for (const row of list(slot.profiles)) if (!ordered.includes(identity(row))) ordered.push(identity(row));
+    for (const slot of slots) for (const row of list(slot.profiles)) if (!ordered.includes(armKey(row))) ordered.push(armKey(row));
     [left, right] = ordered;
   }
   if (!left || !right) return { schemaVersion: 1, status: 'unmeasured', cohort: null, coverage: { plannedPairs: null,
     selectedPairs: 0, observedPairs: 0, eligiblePairs: 0, excludedPairs: 0, missingPairs: 0, duplicatePairs: 0 }, findings: [], outcomes: [], reviewers: [],
     limitations: ['No fixed two-profile pair is present in the retained trial slots.'] };
-  const leftRow = first.find(row => identity(row) === left), rightRow = first.find(row => identity(row) === right);
+  const leftRow = first.find(row => armKey(row) === left), rightRow = first.find(row => armKey(row) === right);
   const pair = { left, right, leftName: leftRow?.profileName ?? left, rightName: rightRow?.profileName ?? right };
   const taskGroups = pairTaskGroups(report, pair), keys = [...taskGroups.keys()].sort();
   const taskCohort = taskGroupKey !== undefined ? taskGroupKey : keys.length === 1 ? keys[0] : null;
@@ -526,15 +526,15 @@ export function buildAuditConsistency(report, { reviews } = {}) {
   if (!pairs.length) {
     const names = [];
     for (const trial of report.trials) for (const row of list(trial.profiles)) {
-      const value = row.profileId ?? row.profileName;
+      const value = armKey(row);
       if (value && !names.includes(value)) names.push(value);
     }
     if (names.length >= 2) pairs.push({ left: names[0], right: names[1] });
   }
   const comparisons = pairs.flatMap(requestedPair => {
     const rows = list(report.trials).flatMap(slot => list(slot.profiles));
-    const left = rows.find(row => (row.profileId ?? row.profileName) === requestedPair.left);
-    const right = rows.find(row => (row.profileId ?? row.profileName) === requestedPair.right);
+    const left = rows.find(row => armKey(row) === requestedPair.left);
+    const right = rows.find(row => armKey(row) === requestedPair.right);
     const pair = { ...requestedPair, leftName: left?.profileName ?? requestedPair.left, rightName: right?.profileName ?? requestedPair.right };
     const groups = [...pairTaskGroups(report, pair).keys()].sort();
     return groups.length ? groups.map(taskGroupKey => buildPairConsistency(report, { reviews, requestedPair, taskGroupKey }))

@@ -57,12 +57,12 @@ export function Report() {
             <span className="meta">{index ? 'Right profile' : 'Left profile'}</span>
             <div><ProfileChip side={side.side} name={side.profile} meta={side.client} /></div>
             {data.replay?.[side.side] ? <>
-              <p className="meta">Root model (actual): {data.replayRootContext?.[side.side].model ?? 'Not recorded'}</p>
-              <p className="meta">Root reasoning effort (actual): {data.replayRootContext?.[side.side].effort ?? 'Not recorded'}</p>
-              {data.replayRootContext?.[side.side].model === 'Not recorded' && data.replayRootContext?.[side.side].requestedModel
-                ? <p className="meta">Requested model: {data.replayRootContext[side.side].requestedModel}</p> : null}
-              {data.replayRootContext?.[side.side].effort === 'Not recorded' && data.replayRootContext?.[side.side].requestedEffort
-                ? <p className="meta">Requested reasoning effort: {data.replayRootContext[side.side].requestedEffort}</p> : null}
+              <p className="meta">Root model (reported): {data.replayRootContext?.[side.side].model ?? 'Not recorded'}</p>
+              <p className="meta">Root reasoning effort (reported): {data.replayRootContext?.[side.side].effort ?? 'Not recorded'}</p>
+              {data.replayRootContext?.[side.side].requestedModel
+                ? <p className="meta">Requested model: {data.replayRootContext?.[side.side].requestedModel}</p> : null}
+              {data.replayRootContext?.[side.side].requestedEffort
+                ? <p className="meta">Requested reasoning effort: {data.replayRootContext?.[side.side].requestedEffort}</p> : null}
             </> : null}
             {data.attempt?.cells[index] ? <><p className="text-body font-semibold">{data.attempt.cells[index].text}</p>
               {data.attempt.cells[index].detail ? <p className="hint">{data.attempt.cells[index].detail}</p> : null}</> : null}

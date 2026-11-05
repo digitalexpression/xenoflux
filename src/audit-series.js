@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { rename } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
-import { validateAuditSpec, readAuditInput } from './audit-spec.js';
+import { selectionKey, validateAuditSpec, readAuditInput } from './audit-spec.js';
 import { previewAuditExperiment, runAuditExperiment } from './audit-runner.js';
 import { createAuditSeries, createAuditEvaluation, readAuditRecord, writeAuditState, finalizeAuditRecord } from './audit-experiment-store.js';
 import { resolveAuditExecutionProfile, snapshotAuditProfileSettings, auditSettingsIdentity } from './audit-profile.js';
@@ -16,7 +16,7 @@ import { buildAuditComparisonConditions } from './audit-conditions.js';
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const profileKeys = ['profileId', 'profileName', 'home', 'userHome', 'nativeRoot', 'environmentId',
+const profileKeys = ['sideId', 'execution', 'profileId', 'profileName', 'home', 'userHome', 'nativeRoot', 'environmentId',
   'executable', 'executableIdentity', 'version', 'bindingRepository', 'nativeConfig'];
 const identityOf = profile => Object.fromEntries(profileKeys.map(key => [key, profile[key] ?? null]));
 const stableError = code => Object.assign(new Error(code.replaceAll('-', ' ')), { code });
@@ -34,7 +34,7 @@ function trialPlan(spec) {
   const slotBudgetMs = Math.floor(spec.trials.budgetMs / spec.trials.count);
   const budgetMs = spec.limits.experimentMs === null ? slotBudgetMs : Math.min(spec.limits.experimentMs, slotBudgetMs);
   return Array.from({ length: spec.trials.count }, (_, trialIndex) => {
-    const names = spec.profiles.map(p => p.name), offset = spec.trials.order === 'balanced' ? trialIndex % names.length : 0;
+    const names = spec.profiles.map(p => p.sideId ?? p.name), offset = spec.trials.order === 'balanced' ? trialIndex % names.length : 0;
     return { index: trialIndex + 1, trialIndex, experimentId: randomUUID(),
       profileOrder: [...names.slice(offset), ...names.slice(0, offset)], budgetMs };
   });
@@ -66,7 +66,7 @@ async function freezeProfiles(store, spec, context) {
   const profiles = [];
   for (const selection of spec.profiles) {
     const resolved = await (context.resolveProfile ?? resolveAuditExecutionProfile)(store, selection, { repository: spec.repository });
-    const profile = { ...resolved, ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}) };
+    const profile = { ...resolved, sideId: selection.sideId, execution: selection.execution, ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}) };
     const snapshot = await (context.snapshotSettings ?? snapshotAuditProfileSettings)(profile);
     const settingsIdentity = (context.settingsIdentity ?? auditSettingsIdentity)(snapshot);
     if (!settingsIdentity) throw stableError('series-settings-unavailable');
@@ -124,7 +124,7 @@ async function claimSeries(store, current, { fresh = false, ...context } = {}) {
 }
 
 function publicProfiles(profiles) {
-  return profiles.map(profile => ({ profileId: profile.profileId, profileName: profile.profileName,
+  return profiles.map(profile => ({ ...(profile.sideId ? { sideId: profile.sideId, execution: profile.execution } : {}), profileId: profile.profileId, profileName: profile.profileName,
     executable: profile.executable, version: profile.version,
     ...(profile.nativeConfig !== undefined ? { nativeConfig: { ...profile.nativeConfig } } : {}) }));
 }
@@ -173,7 +173,7 @@ async function collectTrials(store, current) {
         if (run.reportProjection && run.reportProjection.context !== 'verified') return run;
         const comparisonConditions = buildAuditComparisonConditions({ spec: current.record.spec,
           baseline: current.record.baseline,
-          profile: current.record.spec.profiles.find(item => item.name === run.profile?.profileName),
+          profile: current.record.spec.profiles.find(item => selectionKey(item) === (run.profile?.sideId ?? run.profile?.profileName?.toLowerCase())),
           profileOrder, trialIndex: slot.trialIndex, environment: saved?.environment, recipe: current.record.recipe });
         return JSON.stringify(run.comparisonConditions) === JSON.stringify(comparisonConditions)
           ? run : { ...run, comparisonConditions };
@@ -211,12 +211,12 @@ async function guardedProfiles(store, current, context, lease) {
   for (const selection of current.record.spec.profiles) {
     if (!equal(await readJSON(join(lease.path, 'owner.json')), lease.owner)) throw stableError('series-coordinator-changed');
     const resolvedProfile = await (context.resolveProfile ?? resolveAuditExecutionProfile)(store, selection, { repository: current.record.spec.repository });
-    const profile = { ...resolvedProfile, ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}) };
-    const frozen = current.record.profiles.find(item => item.profileName === selection.name);
+    const profile = { ...resolvedProfile, sideId: selection.sideId, execution: selection.execution, ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}) };
+    const frozen = current.record.profiles.find(item => (item.sideId ?? item.profileName.toLowerCase()) === selectionKey(selection));
     if (!frozen || !equal(identityOf(profile), identityOf(frozen))) throw stableError('series-profile-identity-changed');
     const token = (context.settingsIdentity ?? auditSettingsIdentity)(await (context.snapshotSettings ?? snapshotAuditProfileSettings)(profile));
     if (!token || !equal(token, frozen.settingsIdentity)) throw stableError('series-settings-drift');
-    resolved.set(selection.name.toLowerCase(), { ...profile, env: { ...frozen.env } });
+    resolved.set(selectionKey(selection), { ...profile, env: { ...frozen.env } });
   }
   return resolved;
 }
@@ -263,7 +263,7 @@ async function executeSeries(store, initial, { fresh = false, ...context } = {})
       await guardedProfiles(store, current, context, lease);
       const spec = current.record.spec, trial = baseSpec(spec);
       trial.revision = current.record.baseline.commit;
-      trial.profiles = slot.profileOrder.map(name => spec.profiles.find(item => item.name === name));
+      trial.profiles = slot.profileOrder.map(name => spec.profiles.find(item => (item.sideId ?? item.name) === name));
       trial.limits = { ...trial.limits, runMs: trial.limits.runMs === null ? null : Math.min(trial.limits.runMs, slot.budgetMs), experimentMs: slot.budgetMs };
       const envObservation = environment(epoch);
       await setTrial(slot, { status: 'starting', environment: envObservation });
@@ -273,7 +273,7 @@ async function executeSeries(store, initial, { fresh = false, ...context } = {})
         profileOrder: slot.profileOrder, comparisonEnvironment: envObservation,
         resolveProfile: async (selectedStore, selection) => {
           const profiles = await guardedProfiles(selectedStore, current, context, lease);
-          const profile = profiles.get(selection.name.toLowerCase());
+          const profile = profiles.get(selectionKey(selection));
           if (!profile) throw stableError('series-profile-identity-changed');
           return profile;
         },
@@ -318,7 +318,7 @@ export async function runAuditSeries(store, input, context = {}) {
   const pinned = { ...spec, repository: preview.baseline.repository, revision: preview.baseline.commit };
   const profiles = await freezeProfiles(store, pinned, context);
   pinned.profiles = pinned.profiles.map(selection => {
-    const profile = profiles.find(item => item.profileName.toLowerCase() === selection.name.toLowerCase());
+    const profile = profiles.find(item => (item.sideId ?? item.profileName.toLowerCase()) === selectionKey(selection));
     return { ...selection, name: profile.profileName, executable: profile.executable, version: profile.version };
   });
   const plan = trialPlan(pinned);

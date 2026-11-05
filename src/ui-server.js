@@ -131,6 +131,8 @@ export function uiRoutes(provider) {
     route('POST', '/api/runs/preview', call('runPreview', ({ body }) => body)),
     route('POST', '/api/runs', call('startRun', ({ body }) => body)),
     route('GET', '/api/runs/:id', call('run', ({ params }) => ({ id: params.id }))),
+    route('POST', '/api/runs/:id/requests/:requestId',
+      call('respondRun', ({ params, body }) => ({ ...params, response: body?.response })), { bodyLimit: 1 << 20 }),
     route('POST', '/api/runs/:id/cancel', call('cancelRun', ({ params }) => ({ id: params.id }))),
     route('POST', '/api/runs/:id/recover', call('recoverRun', ({ params, body }) => ({ id: params.id, ...body }))),
   ];

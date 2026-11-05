@@ -1,102 +1,95 @@
-# Xenoflux 3.0 roadmap
+# Xenoflux roadmap
 
-This roadmap tracks the **3.0.0** release. The [goal](AUDIT-GOAL.md#current-release-boundary)
-owns product scope and [acceptance](AUDIT-GOAL.md#observable-acceptance); the
-[review specification](REVIEW-TASK-IMPLEMENTATION.md) owns execution details.
+**3.0.1 released. Updated 2026-11-05.** This is the active delivery/status
+record. The [goal](AUDIT-GOAL.md#current-release-boundary) owns scope and
+[acceptance](AUDIT-GOAL.md#observable-acceptance); the
+[review specification](REVIEW-TASK-IMPLEMENTATION.md) owns implementation details.
 
 ## Current work and stop condition
 
-Prepare the [3.0.1 installer hotfix](RELEASE-3.0.1.md) on the published 3.0.0
-baseline: include the bundled UI in managed staging, verify installed asset
-responses and failed-upgrade preservation, and launch the managed shell entry in
-detached offline smoke. Required source checks, reviewed package contents,
-checksums and passing detached smoke complete local preparation. Publication,
-public tags and installed updates remain separate authorized operations.
-The earlier 3.0.0 evidence below retains its original scope and identity.
+**The unpublished 3.1.0 candidate is the active delivery slice.**
+The user authorized full diff review, package checks and detached installation
+smoke preparation. Publication and updates to installed applications remain
+pending explicit approval. The [candidate record](RELEASE-3.1.0.md) owns the
+resulting verification and artifact status.
+The [goal](AUDIT-GOAL.md#observable-acceptance) and
+[review contract](REVIEW-TASK-IMPLEMENTATION.md) define the scope. The
+checkout passed the four-job fixture, cross-controller ownership checks and
+bundled browser suite. The [native validation record](SAME-PROFILE-NATIVE-VALIDATION.md)
+retains the stopped model-selection preflight, partial eight-turn campaign and
+successful separately authorized five-turn campaign. Four native model jobs
+shared one home with Desktop and reached approval together. Cancelling one
+comparison preserved the other three jobs; both sides of the surviving comparison
+executed and both reviews completed. Results reopened without new model work.
+Owned processes and disposable credentials/profile/workspaces were cleaned up.
+The comparison retains partial exhaustive-capture status. A subsequent three-turn
+native campaign verified cached-token refresh after an injected expired/invalid
+access token and live coordinator SIGKILL recovery for a comparison and review,
+while an independent review completed. Reopening preserved live ownership as
+uncertain, then recovered stopped work without replay. Natural signed-token
+expiry and escaped-descendant proof remain outside the native evidence.
+Native-discovered ownership/error-reporting fixes are
+implemented. Candidate review corrected the cross-controller Desktop journal
+lookup and sanitized the public validation summary while preserving its original
+privately. Final candidate verification passed with 1,363 unit tests, one
+opt-in native test skipped, and 48 browser tests. The candidate record preserves
+the initial environment-dependent failures and the complete passing reruns.
+Publication and installed
+updates require a separate grant.
 
-The three product outcomes are implemented: create profiles, compare two
-profiles on a task and inspect the report, then optionally request and read an
-ordinary AI review. Reviews use the selected profile's normal configuration and
-retain exact inputs, progress and the captured response. Legacy campaign paths
-selected for removal are gone. See the [review acceptance record](RELEASE-3.0.0.md#ordinary-review-live-attempt)
-and [coexistence evidence](RELEASE-3.0.0.md#reviewerdesktop-coexistence-correction).
+The approved 3.0.1 release batch is complete.
+The [3.0.1 record](RELEASE-3.0.1.md#published-identity-and-verification) binds
+merged source, published npm/GitHub artifacts, passing public CI and isolated
+installation verification. It also preserves the original failed CI outcome,
+the controlled replay-focus regression and native acceptance limits.
 
-| Outcome | Development evidence | Candidate binding |
+The [3.0.0 record](RELEASE-3.0.0.md#published-identity-and-verification) owns
+that release's publication and acceptance evidence. A separately authorized
+[managed-installation update](RELEASE-3.0.0.md#separate-managed-installation-verification)
+to 3.0.0 and read-only browser verification are complete. The 3.0.1 release batch
+did not update an existing installed app or run a new model/profile/client task.
+Published tags, assets, earlier failed outcomes and original receipts retain
+their source identities.
+
+## Delivery order
+
+The 3.0.0 feature sequence and subsequent 3.0.1 hotfix are complete:
+
+| Slice | Delivered behavior | Evidence owner |
 | --- | --- | --- |
-| Empty and selected-parts profile creation | Retained native creation/copy acceptance; current fixture and browser checks. | Core creation/copy source is unchanged; exact package identity belongs to the manifest. |
-| Task comparison and report | Retained native CLI/report evidence plus current fixture and browser checks; known scope limits are preserved. | Source applicability reviewed; candidate checks pass within the recorded limits. |
-| Ordinary AI review | Fixture and browser coverage; one corrected live review completed and reopened with its response associated to the task. | Unchanged native execution/capture and scoped publication/browser checks supplement retained native evidence. |
+| A–B: native execution and durable review tasks/API | Selected-profile settings, native requests, exact session association, single Start, frozen inputs, cancellation and recovery. | [Review contract](REVIEW-TASK-IMPLEMENTATION.md) and [3.0.0 verification](RELEASE-3.0.0.md#integrated-development-verification). |
+| C–D: Reviews UI and legacy removal | Report-to-review flow, captured responses and citations, labelled demo and removal of the retired isolated reviewer campaign. | [3.0.0 acceptance and limits](RELEASE-3.0.0.md#retained-verification-and-limits). |
+| E: verification and release | Source/package parity, bundled UI, required checks, detached smoke, stable publication and isolated installed-package verification. | [3.0.0 closeout](RELEASE-3.0.0.md#published-identity-and-verification). |
+| 3.0.1 hotfix | Managed copier includes bundled UI; replay keyboard-open focus follows the dialog mount lifecycle. | [3.0.1 release record](RELEASE-3.0.1.md). |
 
-Initial candidate source checks passed: syntax, native launcher, packaged documentation
-links, 1,347 engine tests (one skipped) and all 47 browser journeys. The 203
-application, UI and build-input files matched the initial development source
-byte-for-byte. A later replay correction updates disclosure state handling and
-its browser focus precondition. The following record publication correction
-removes an event-loop scheduling window in one store module, while keeping
-native execution/capture and record formats unchanged. The [candidate record](RELEASE-3.0.0.md#candidate-verification)
-separates these results from inherited native evidence. The generated release
-manifest identifies the packaged revision, artifact hashes and detached smoke
-outcome; only a passed smoke result completes the package gate.
+Candidate preparation is authorized for 3.1.0. Publication and installed updates
+remain pending approval; this checkpoint and historical grants provide no
+additional operational authorization.
 
-After the replay and publication corrections, full local verification passed
-1,348 engine tests (one skipped) and all 47 browser journeys, plus syntax,
-native launcher, packaged docs and UI types/tokens/build freshness. The initial
-failed CI outcomes remain retained; the corrected head must pass fresh CI.
-Exact-runtime boundary verification additionally passed complete engine suites
-on Node 22.15.0 and Node 24.22.1 (1,348 passes / one skip each), and all 47
-browser journeys under Node 24 after enforcing child-discovery bounds in the
-calling iterator and correcting compressed/shutdown fixture assumptions.
+## Verification and release gates
 
-A subsequent Node 22 fixture failure narrowed the remaining record handoff to
-mutable state. An exact-runtime probe demonstrated a stale pre-open snapshot
-of an already-unlinked inode while the path held a different safe replacement.
-The reader now retries only after independently validating that replacement,
-within its existing bound. A deterministic regression passes on both runtimes
-and rejects an unsafe replacement; see the
-[state snapshot correction](RELEASE-3.0.0.md#state-snapshot-handoff).
+For future changes, run the affected checks and required final checks from the
+[developer guide](README.md#checkout-and-checks). Rebuild bundled UI when its
+source changes and run browser suites sequentially. Documentation-only closeout
+requires packed-document membership/link checks and review of the public text.
 
-After the state snapshot correction, complete local engine suites pass on exact
-Node 22.15.0 and 24.22.1 (1,349 passes / one skip each), and all 47 browser
-journeys pass under Node 24. Syntax, native launcher, packaged documentation and
-UI type/token/build-freshness checks pass.
+Reuse evidence only where source and behavior still apply. The
+[goal's acceptance contract](AUDIT-GOAL.md#observable-acceptance) and
+[3.0.0 evidence limits](RELEASE-3.0.0.md#retained-verification-and-limits) remain
+applicable; fixtures do not establish unobserved native behavior. Follow the
+[release procedure](LOCAL-RELEASE.md) for source/package review, checksums and
+detached smoke. New publication, installed updates and live operations require
+current authorization covering their effects.
 
-Stable source preparation aligns the package and lockfile roots to `3.0.0` and
-updates current-release documentation. A controlled probe also reproduced a
-false `uncertain` task status when a stale zero-link metadata snapshot hid a
-valid atomic replacement. The shared reader retries only a validated different
-private inode, with a three-attempt bound. Unsafe replacements remain rejected;
-UI/native capture and record formats are unchanged. Earlier candidate receipts
-retain their identities; the final manifest identifies stable source/artifacts.
+## Branch cleanup and historical records
 
-### Delivery order
+`main` contains the released application and reconciled public release records.
+The private `ui/implementation` history is archived locally as a self-contained
+Git bundle with a checksum and verified restore. Its branch name is retired;
+private history is not merged into public source. Candidate worktrees retain
+their exact detached commits, and release tags and raw evidence are preserved.
+The archive manifest records the original development head and restore command.
 
-Slices A–D are complete: selected-profile execution, durable review tasks and
-API, Reviews UI and demo, and removal of the retired campaign implementation.
-The [implementation contract](REVIEW-TASK-IMPLEMENTATION.md) documents these
-behaviors and safeguards.
-
-Slice E completes the candidate. It is done when package and lockfile versions
-agree, the bundled UI matches its source, required checks pass, the sanitized
-package contents are reviewed, detached offline smoke passes, and the candidate
-record binds evidence and artifact hashes to one exact source revision. The
-candidate record distinguishes inherited development evidence from the completed
-candidate source checks. Exact package identity and smoke results travel with the
-generated release manifest.
-
-### Verification and release gates
-
-- Run `npm run check`, `npm run check:native`, `npm run check:docs`, `npm test`
-  and `npm run check:ui` for the candidate. Rebuild `dist/ui` after UI changes;
-  run browser checks sequentially. The [developer guide](README.md#checkout-and-checks)
-  describes these checks.
-- Reuse evidence where source and behavior still apply. Reopen a passed case
-  when a candidate change affects it or conflicting evidence appears.
-- Apply the [observable acceptance](AUDIT-GOAL.md#observable-acceptance),
-  including affected keyboard, focus, themes, narrow layouts and 200% zoom.
-  Fixtures cover failure paths; they do not establish live native behavior.
-- Follow the [local release procedure](LOCAL-RELEASE.md) to review sanitized
-  source and package contents, align versions, build the package and run detached
-  offline smoke. Record candidate identity, hashes, breaking changes and limits
-  in the [candidate record](RELEASE-3.0.0.md#final-candidate-evidence-to-record).
-
-Release readiness does not publish, merge, tag or update an installed app.
+Historical development plans and operational receipts remain private. The
+[2.1.0 roadmap](ROADMAP-2.1.0-HISTORY.md) and
+[capability assessment](PROFILE-AUDIT-ASSESSMENT.md) remain historical references.

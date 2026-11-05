@@ -325,12 +325,13 @@ function median(values) {
 }
 function plannedTrialProfiles(trial) {
   if (Array.isArray(trial?.profiles)) return trial.profiles;
-  return (trial?.runs ?? []).map(run => ({ profileId: run?.profileId ?? run?.profile?.profileId ?? run?.profile?.id,
+  return (trial?.runs ?? []).map(run => ({ sideId: run?.sideId ?? run?.profile?.sideId, profileId: run?.profileId ?? run?.profile?.profileId ?? run?.profile?.id,
     profileName: run?.profileName ?? run?.profile?.profileName ?? run?.profile?.name, run, quality: run?.quality }));
 }
 function matchTrialProfile(trial, selector) {
   const profiles = plannedTrialProfiles(trial);
-  return profiles.find(profile => profile?.profileId === selector || profile?.id === selector
+  return profiles.find(profile => profile?.sideId === selector)
+    ?? profiles.find(profile => profile?.profileId === selector || profile?.id === selector
     || profile?.run?.profileId === selector || profile?.run?.profile?.profileId === selector)
     ?? profiles.find(profile => profile?.profileName === selector || profile?.name === selector
       || profile?.run?.profile?.profileName === selector);
@@ -351,7 +352,7 @@ function rebuildSeriesComparison(row, trials) {
   const pairs = trials.map((trial, index) => ({ index, left: matchTrialProfile(trial, row.left), right: matchTrialProfile(trial, row.right),
     selection: retainedAuditSelectionOptions(trial.selection),
     planned: [row.left, row.right].every(id => (trial?.profileOrder ?? []).some(profile =>
-      (typeof profile === 'string' ? profile : profile?.profileId ?? profile?.profileName) === id)) }))
+      (typeof profile === 'string' ? profile : profile?.sideId ?? profile?.profileId ?? profile?.profileName) === id)) }))
     .filter(pair => pair.left || pair.right || pair.planned);
   const metrics = {};
   const names = new Set(Object.keys(row.metrics ?? {}));

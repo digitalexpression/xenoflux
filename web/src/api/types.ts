@@ -13,6 +13,8 @@ export interface Info {
   mode: 'engine' | 'demo';
   version: string;
   features: { runs: boolean; copy: boolean; create: boolean; clientControls: boolean; profileEdits: boolean };
+  activeJobs?: { id: string; kind: 'comparison' | 'review'; task: string; profiles: string[]; href: string }[];
+  maxActiveJobs?: number;
   activeRun: { id: string; task: string; profiles: [string, string]; href: string } | null;
 }
 
@@ -314,7 +316,9 @@ export interface ReviewTaskOptions {
   includeRecordedContent: boolean;
   defaults: { timeoutMs: number | null };
 }
+export interface ExecutionSelection { model?: string; reasoningEffort?: string }
 export interface ReviewTaskRequest {
+  execution?: ExecutionSelection;
   profile: string;
   cwd?: string;
   prompt: string;
@@ -343,7 +347,10 @@ export interface ReviewTaskPreview {
   never: string[];
   simulated: boolean;
 }
-export interface ReviewTaskSummary { id: string; status: ReviewTaskState; createdAt: string; profile: string; summary: string }
+export interface ReviewTaskSummary {
+  id: string; status: ReviewTaskState; createdAt: string; profile: string; summary: string;
+  execution?: ExecutionSelection; observedModel?: string | null; observedEffort?: string | null;
+}
 export interface ReviewTaskSummaries { tasks: ReviewTaskSummary[] }
 export interface ReviewTaskPendingRequest {
   requestId: string;
@@ -364,6 +371,13 @@ export interface ReviewTaskView {
   reportRef: string;
   title: string;
   nativeSettings: Record<string, unknown> | null;
+  execution?: ExecutionSelection;
+  sourceRef?: string | null;
+  sourceEvidenceFingerprint?: string | null;
+  frozenPrompt?: string | null;
+  inputFingerprint?: string | null;
+  promptSha256?: string | null;
+  includeRecordedContent?: boolean;
   response: { status: 'complete' | 'partial' | 'unavailable'; text: string | null; threadId: string | null; turnId: string | null } | null;
   pendingRequests: ReviewTaskPendingRequest[];
   shutdown: { status: string; groupTerminated: boolean; processStatus?: string | null; exitCode?: number | null } | null;
@@ -420,10 +434,11 @@ export interface RunAdvanced {
   sandbox: 'read-only' | 'workspace-write';
   outputMiB: number;
   program: string;
-  reasoningEffort: string;
+  reasoningEffort?: string;
   setup: { name: string; command: string }[];
 }
 export interface RunRequest {
+  execution?: Record<'a' | 'b', ExecutionSelection>;
   task: string;
   files: string;
   a: string;
@@ -452,6 +467,7 @@ export interface RunPreview {
 }
 export interface RunStep { text: string; state: 'done' | 'active' | 'waiting' | 'failed' | 'skipped' }
 export interface RunView {
+  pendingRequests?: (ReviewTaskPendingRequest & { legId: string; side: 'a' | 'b' })[];
   id: string;
   task: string;
   meta: string;

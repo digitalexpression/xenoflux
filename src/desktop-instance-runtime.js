@@ -83,11 +83,11 @@ export function matchesProcessIdentity(row, identity) {
     && row.uid === identity.uid && row.executable === identity.executable);
 }
 // macOS ps may lose argv before a quitting process becomes a zombie and fall
-// back to `(command)`. This is uncertain executable identity, not a new target:
+// back to a short command label, sometimes in parentheses. This is uncertain executable identity:
 // close may only wait for it to disappear, keeping the PID/UID/start guards.
 function awaitingExit(row, identity) {
   return Boolean(row && identity && row.pid === identity.pid && row.startedAt === identity.startedAt
-    && row.uid === identity.uid && /^\([^\r\n]+\)$/.test(row.executable));
+    && row.uid === identity.uid && !row.executable.includes('/'));
 }
 export function targetStartSeconds(startedAt) {
   const millis = Date.parse(startedAt);
@@ -160,6 +160,30 @@ export function createDesktopInstanceRuntime({
     }
     return [...selected.values()];
   }
+  async function snapshotFor(main, helperExecutable, known = new Map(), initialRows) {
+    let rows = initialRows ?? await snapshot();
+    if (!helperExecutable) return rows;
+    // ps may show a short command label while a newly forked child is
+    // starting or exiting. Resolve only that descendant via the kernel.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const root = rows.find(row => matchesProcessIdentity(row, main) || awaitingExit(row, main));
+      if (!root) break;
+      const unknown = descendants(rows, root).filter(row => row.pid !== main.pid
+        && !absoluteCanonical(row.executable) && !awaitingExit(row, known.get(row.pid)));
+      if (!unknown.length) break;
+      await Promise.all(unknown.map(async row => {
+        try {
+          const { stdout } = await execFile(helperExecutable, ['--process-executable', String(row.pid), targetStartSeconds(row.startedAt)],
+            { cwd: '/', encoding: 'utf8', maxBuffer: 8192, timeout: systemTimeoutMs });
+          const executable = stdout.replace(/\n$/, '');
+          if (absoluteCanonical(executable)) row.executable = executable;
+        } catch { /* The process may already have exited. Check the next snapshot. */ }
+      }));
+      if (unknown.every(row => absoluteCanonical(row.executable)) || attempt === 2) break;
+      rows = await snapshot();
+    }
+    return rows;
+  }
   function appDescendants(rows, root, excludePid) {
     const selected = new Map([[root.pid, root]]), excluded = new Set();
     let changed = true;
@@ -184,7 +208,7 @@ export function createDesktopInstanceRuntime({
     if (!current || !matchesProcessIdentity(current, main)) throw identityChanged(main, current);
     return current;
   }
-  async function open(plan, { helperExecutable, application, bootstrap, onBootstrapReady } = {}) {
+  async function open(plan, { helperExecutable, application, signedShortcut = false, bootstrap, onBootstrapReady } = {}) {
     const inspected = await inspectApp();
     const before = await snapshot();
     if (!sameDesktopApp(plan?.app, inspected)) throw fail('APP_IDENTITY_CHANGED');
@@ -194,14 +218,14 @@ export function createDesktopInstanceRuntime({
     if (![plan?.home, plan?.desktopData, userHome, plan?.temporary, helperExecutable,
       application?.appPath, application?.executable].every(absoluteCanonical)
       || typeof application?.bundleId !== 'string' || !application.bundleId) throw fail('INVALID_PLAN');
-    const vendorName = basename(inspected.executable);
+    const vendorName = signedShortcut ? 'XfxProfileLauncher' : basename(inspected.executable);
     if (!sameDesktopApp(plan.app, inspected) || application.bundleId !== `com.xenoflux.profile.${String(plan.profileId ?? '').toLowerCase()}`
       || application.appPath === inspected.appPath || !basename(application.appPath).startsWith('Codex · ')
       || !basename(application.appPath).endsWith('.app')
       || application.executable !== join(application.appPath, 'Contents', 'MacOS', vendorName)) throw fail('APP_IDENTITY_CHANGED');
     const bootstrapExecutable = join(application.appPath, 'Contents', 'MacOS', 'XfxProfileLauncher');
     if (bootstrap != null) {
-      if (!bootstrap || !Number.isSafeInteger(bootstrap.pid) || bootstrap.pid <= 0
+      if (signedShortcut || !bootstrap || !Number.isSafeInteger(bootstrap.pid) || bootstrap.pid <= 0
         || !Number.isSafeInteger(bootstrap.ppid) || bootstrap.ppid < 0 || bootstrap.uid !== uid
         || typeof bootstrap.startedAt !== 'string' || !bootstrap.startedAt
         || bootstrap.executable !== bootstrapExecutable || typeof onBootstrapReady !== 'function') throw fail('PROFILE_BOOTSTRAP_INVALID');
@@ -230,8 +254,9 @@ export function createDesktopInstanceRuntime({
       }
       throw fail('DESKTOP_OPEN_TIMEOUT', []);
     }
-    const args = ['--open-app', application.appPath, '--home', plan.home, '--desktop-data', plan.desktopData,
-      '--user-home', userHome, '--temporary', plan.temporary, '--target-executable', application.executable];
+    const target = signedShortcut ? inspected : application;
+    const args = [signedShortcut ? '--open-signed-app' : '--open-app', target.appPath, '--home', plan.home, '--desktop-data', plan.desktopData,
+      '--user-home', userHome, '--temporary', plan.temporary, '--target-executable', target.executable];
     let receipt, result;
     try {
       result = await execFile(helperExecutable, args, {
@@ -252,7 +277,7 @@ export function createDesktopInstanceRuntime({
         || !Number.isSafeInteger(receipt.pid) || receipt.pid < 1
         || typeof receipt.executable !== 'string' || !receipt.executable.startsWith('/') || /[\x00-\x1f\x7f]/.test(receipt.executable)
         || !Number.isSafeInteger(receipt.startSeconds) || receipt.startSeconds < 0
-        || receipt.executable !== application.executable) throw new Error();
+        || receipt.executable !== target.executable) throw new Error();
     } catch { throw fail('DESKTOP_OPEN_RECEIPT_INVALID'); }
     const prior = new Set(before.map(processIdentity));
     const deadline = now() + openTimeoutMs;
@@ -267,7 +292,10 @@ export function createDesktopInstanceRuntime({
         }
         if (prior.has(processIdentity(row))) throw fail('DESKTOP_OPEN_PREEXISTING', [row]);
         const main = row;
-        const processes = descendants(after, main);
+        const resolved = signedShortcut ? await snapshotFor(main, helperExecutable, undefined, after) : after;
+        const current = resolved.find(process => process.pid === main.pid);
+        if (!matchesProcessIdentity(current, main)) throw identityChanged(main, current);
+        const processes = descendants(resolved, main).filter(process => !signedShortcut || absoluteCanonical(process.executable));
         const owned = ownedFor(main);
         for (const row of processes) owned.set(row.pid, row);
         return { main, processes };
@@ -276,7 +304,7 @@ export function createDesktopInstanceRuntime({
     }
     throw fail('DESKTOP_OPEN_TIMEOUT', []);
   }
-  async function observe(main, { trackedProcesses = [] } = {}) {
+  async function observe(main, { trackedProcesses = [], helperExecutable } = {}) {
     if (!Array.isArray(trackedProcesses)) throw fail('PROCESS_OBSERVATION_INVALID');
     const owned = ownedFor(main);
     for (const row of trackedProcesses) {
@@ -284,7 +312,7 @@ export function createDesktopInstanceRuntime({
         throw fail('PROCESS_OBSERVATION_INVALID');
       owned.set(row.pid, { pid: row.pid, ppid: row.ppid, uid: row.uid, startedAt: row.startedAt, executable: row.executable });
     }
-    const rows = await snapshot();
+    const rows = await snapshotFor(main, helperExecutable, owned);
     const samePid = rows.find(r => r.pid === main?.pid);
     if (samePid && !matchesProcessIdentity(samePid, main)) return { status: 'identity-changed', processes: [samePid], identityChange: identityChanged(main, samePid).identityChange };
     const liveTracked = [];
@@ -301,8 +329,8 @@ export function createDesktopInstanceRuntime({
     const tree = descendants(rows, samePid);
     const treePids = new Set(tree.map(row => row.pid));
     const escaped = liveTracked.filter(row => !treePids.has(row.pid));
-    const processes = [...tree, ...escaped.filter(row => !treePids.has(row.pid))];
-    for (const row of tree) owned.set(row.pid, row);
+    const processes = [...tree.filter(row => !helperExecutable || absoluteCanonical(row.executable)), ...escaped];
+    for (const row of tree) if (absoluteCanonical(row.executable)) owned.set(row.pid, row);
     return { status: 'running', ...(escaped.length ? { orphaned: true } : {}), processes };
   }
   async function assertResourcesIdle(paths, { allowedProcesses = [] } = {}) {
@@ -390,14 +418,32 @@ export function createDesktopInstanceRuntime({
     } catch { throw fail(flag === '--focus-pid' ? 'DESKTOP_FOCUS_FAILED' : 'DESKTOP_QUIT_FAILED', [main]); }
   }
   async function focus(main, { helperExecutable } = {}) { return control('--focus-pid', main, helperExecutable); }
-  async function close(main, { helperExecutable } = {}) {
+  async function close(main, { helperExecutable, onTrackedProcesses } = {}) {
     const owned = ownedFor(main);
-    const before = await snapshot();
+    const pending = new Map();
+    async function trackDescendants(rows, root) {
+      if (root) for (const row of descendants(rows, root)) {
+        if (!owned.has(row.pid) && !pending.has(row.pid)) pending.set(row.pid, row);
+      }
+      let added = false;
+      for (const [pid, first] of pending) {
+        const current = rows.find(row => row.pid === pid);
+        if (!current || current.startedAt !== first.startedAt || current.uid !== first.uid) {
+          pending.delete(pid);
+        } else if (absoluteCanonical(current.executable)) {
+          owned.set(pid, { ...current, ppid: first.ppid });
+          pending.delete(pid);
+          added = true;
+        }
+      }
+      if (added) await onTrackedProcesses?.([...owned.values()]);
+    }
+    const before = await snapshotFor(main, helperExecutable, owned);
     const beforeMain = before.find(row => row.pid === main?.pid);
     if (beforeMain && !matchesProcessIdentity(beforeMain, main)) throw identityChanged(main, beforeMain);
     if (beforeMain) {
       validateTarget(before, main);
-      for (const row of descendants(before, main)) owned.set(row.pid, row);
+      await trackDescendants(before, beforeMain);
       try { await control('--quit-pid', main, helperExecutable); }
       catch (error) {
         // The app may exit after our preflight but before the native helper
@@ -411,27 +457,22 @@ export function createDesktopInstanceRuntime({
     }
     const deadline = now() + closeTimeoutMs;
     while (now() <= deadline) {
-      const rows = await snapshot();
+      const rows = await snapshotFor(main, helperExecutable, owned);
       const byPid = new Map(rows.map(r => [r.pid, r]));
-      if ([...owned.values()].some(previous => awaitingExit(byPid.get(previous.pid), previous))) {
+      const root = byPid.get(main.pid);
+      if (root && !matchesProcessIdentity(root, main) && !awaitingExit(root, main)) throw identityChanged(main, root);
+      // Unresolved command labels are wait-only until the kernel identifies
+      // them or the original process exits, including after reparenting.
+      await trackDescendants(rows, root ? main : null);
+      if (pending.size || [...owned.values()].some(previous => awaitingExit(byPid.get(previous.pid), previous))) {
         for (const previous of owned.values()) {
           const current = byPid.get(previous.pid);
           if (current && !matchesProcessIdentity(current, previous) && !awaitingExit(current, previous))
             throw identityChanged(previous, current);
         }
-        // Shutdown can spawn children while argv is unavailable. Retain each
-        // verified descendant so reparenting cannot make it disappear from our
-        // ownership set; an unknown child's missing path stays ambiguous.
-        for (const row of descendants(rows, main)) {
-          if (owned.has(row.pid)) continue;
-          if (!absoluteCanonical(row.executable)) throw fail('PROCESS_TREE_AMBIGUOUS', [main]);
-          owned.set(row.pid, row);
-        }
         await sleep(pollIntervalMs);
         continue;
       }
-      const root = byPid.get(main.pid);
-      if (root && !matchesProcessIdentity(root, main)) throw identityChanged(main, root);
       const liveOwned = [];
       for (const [pid, previous] of owned) {
         const row = byPid.get(pid);
@@ -440,19 +481,20 @@ export function createDesktopInstanceRuntime({
         if (pid !== main.pid) {
           const parent = owned.get(row.ppid);
           const endedMainParent = row.ppid === main.pid && !root && matchesProcessIdentity(parent, main);
-          if (!endedMainParent && (!parent || !byPid.has(row.ppid) || !matchesProcessIdentity(byPid.get(row.ppid), parent)))
+          // launchd can inherit an exact child after its recorded parent exits.
+          // It stays in the wait set and is never a target for process control.
+          const reparented = row.ppid === 1 && owned.has(previous.ppid) && !byPid.has(previous.ppid);
+          if (!endedMainParent && !reparented && !matchesProcessIdentity(byPid.get(row.ppid), parent))
             throw fail('PROCESS_TREE_AMBIGUOUS', [row]);
         }
         liveOwned.push(row);
       }
-      const tree = root ? descendants(rows, root) : liveOwned;
-      const merged = new Map([...liveOwned, ...tree].map(r => [r.pid, r]));
-      if (!merged.size) return { status: 'stopped', processes: [] };
+      if (!liveOwned.length) return { status: 'stopped', processes: [] };
       await sleep(pollIntervalMs);
     }
     const rows = await snapshot();
     const remaining = rows.filter(r => (owned.has(r.pid) && (matchesProcessIdentity(r, owned.get(r.pid)) || awaitingExit(r, owned.get(r.pid))))
-      || descendants(rows, main).some(child => child.pid === r.pid));
+      || pending.get(r.pid)?.startedAt === r.startedAt || descendants(rows, main).some(child => child.pid === r.pid));
     // Keep the last verified executable in the reservation when ps cannot read
     // a quitting process's argv. That fallback label is never a control target.
     throw fail('DESKTOP_CLOSE_TIMEOUT', remaining.map(row => awaitingExit(row, owned.get(row.pid)) ? owned.get(row.pid) : row));

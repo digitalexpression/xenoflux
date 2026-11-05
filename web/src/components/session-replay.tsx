@@ -500,7 +500,19 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
             }
           }}
           onInteractOutside={event => event.preventDefault()}
-          onCloseAutoFocus={event => { event.preventDefault(); if (reportOrigin?.isConnected) { reportOrigin.focus(); setReportOrigin(null); } else if (agentView && agentTrigger.current?.isConnected) agentTrigger.current.focus(); else if (selected) focusEvent(selected.key); }}>
+          onCloseAutoFocus={event => {
+            event.preventDefault();
+            const focused = document.activeElement;
+            // Closing a nonmodal inspector must not steal focus already moved elsewhere.
+            if (focused instanceof HTMLElement && focused !== document.body
+              && event.target instanceof HTMLElement && !event.target.contains(focused)) {
+              setReportOrigin(null);
+              return;
+            }
+            if (reportOrigin?.isConnected) { reportOrigin.focus(); setReportOrigin(null); }
+            else if (agentView && agentTrigger.current?.isConnected) agentTrigger.current.focus();
+            else if (selected) focusEvent(selected.key);
+          }}>
           <SheetHeader><SheetTitle id={`${labelled}-inspector-title`} tabIndex={-1}>{agentView ? 'Agent summary' : 'Event inspector'}</SheetTitle>
             <SheetDescription id={`${labelled}-inspector-description`}>{agentView ? 'Recorded excerpts and direct source links. Missing evidence stays explicit.' : 'Select events from either conversation while this panel stays open.'}</SheetDescription>
           </SheetHeader>

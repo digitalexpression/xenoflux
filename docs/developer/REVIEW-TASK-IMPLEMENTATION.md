@@ -10,11 +10,14 @@ checkout-only UI handoff's Reviews section, not a second backend contract.
 ## Execution with the selected profile's settings
 
 Use the selected profile's existing home, executable, sign-in and normal launch
-environment. Let Codex resolve its model/provider, reasoning effort, approval
-policy, sandbox/network policy, instructions, skills, MCP/plugins, hooks and
-memory configuration in the selected working directory. Do not copy those
-settings into a reviewer configuration, supply `nativeConfig` overrides or
-change persistent settings. Do not disable delegation or tools for review.
+environment. Omit model and reasoning effort to inherit the profile defaults.
+A preview may freeze a narrow `execution: { model?, reasoningEffort? }` selection.
+Pass explicit values as process-local configuration and require the new native
+session to confirm them before sending the model turn. Keep requested values
+separate from native reports. Codex retains its ordinary provider, approval
+policy, sandbox, instructions, skills, MCP/plugins, hooks and memory. Preserve
+persistent profile settings and keep general `nativeConfig` overrides out of
+ordinary review.
 Declared configuration is not proof of loaded behavior; record effective values
 only when the native session reports them, otherwise show unknown.
 
@@ -23,13 +26,13 @@ only when the native session reports them, otherwise show unknown.
 `executionMode: 'profile' | 'audit'` at the internal capture boundary; update
 `src/audit-runner.js` to select `audit` and the review service to select `profile`.
 Keep one transport/event/session/result implementation over `src/audit-process.js`.
-Do not call `runAuditExperiment` with duplicate profiles or create a second
-reviewer-specific protocol runner.
+Reviews use capture directly. Comparison sides use stable side IDs, which can
+resolve to the same profile.
 
 For `profile` execution:
 
 - Launch the native executable directly using the normal profile environment.
-  Omit `sandbox`, `sandboxPolicy`, `approvalPolicy`, model/effort and config
+  Omit `sandbox`, `sandboxPolicy`, `approvalPolicy` and general config
   overrides from thread/turn requests so native profile settings apply. Reject
   conflicting audit-only options at the internal boundary rather than silently
   applying them. The prompt, actual cwd and fresh-session request remain explicit.
@@ -45,20 +48,21 @@ For `profile` execution:
   owned-process shutdown. Xfx does not close existing clients, change bindings,
   sign in or edit trust/configuration as preparation. An actual unsafe access or
   ownership conflict is an actionable refusal, not a reason to weaken a guard.
-- An ordinary review may join a verified running Xfx-managed Desktop instance
-  on the selected profile. Refresh verified descendants through the shared
-  Desktop observer; executable paths alone do not establish ownership. Retain
-  one `.run-lock` with independent Desktop/review participants, serialized under
-  the existing lifecycle operation guard. Existing exclusive callers still see
-  a busy profile. Either participant leaving preserves the other's reservation.
-  Legacy single-owner records remain readable. A second review or new Desktop
-  launch during a review remains blocked; UI execution admission is unchanged.
-- Reconcile normal Desktop quit before review Start and on observed profile
-  listing, without signalling processes. All Desktop helpers must have stopped;
-  profile resources may remain open only by the matching durable review's
-  verified live process tree. Uncertain ownership preserves the reservation.
-  Terminal review responses survive reservation-release contention; later reads
-  retry confirmed-stopped cleanup without sending another model turn.
+- A canonical profile's `.run-lock` represents independent execution
+  participants across controllers. Comparison legs and reviews may join a
+  verified running Xfx-managed Desktop. Membership changes use the lifecycle
+  guard and cleanup releases only the exact participant after confirmed
+  shutdown. Legacy single-owner and Desktop/review records remain readable.
+  Profile mutation requires an exclusive reservation. A new Desktop launch
+  still uses its existing exclusive startup procedure.
+- Reconcile normal Desktop quit without signalling processes. Profile resources
+  may remain open by verified durable review owners. A comparison retains its
+  existing-client preservation checks when Desktop changes. Uncertain ownership preserves
+  the reservation. Terminal review responses survive reservation-release
+  contention and confirmed-stopped cleanup can be retried on a later read.
+- After native initialization, checkpoint the owned process identity again. Require
+  the same PID, start identity and host across the launcher exec transition. Later
+  ownership checks use that initialized executable identity.
 - Preserve the checkpoint before `turn/start`: save the returned native thread
   identity durably before sending the prompt; checkpoint failure sends no turn.
   Capture the response from that session's recorded assistant output, never from
@@ -196,9 +200,11 @@ Use exclusive attempt creation plus one in-process Start promise, following
 `ui-runs.js`, so double clicks/HTTP retries, including a lost Start response followed by a
 server restart, cannot launch twice. If the attempt directory exists
 but staging or its record is incomplete/corrupt, return an interrupted/uncertain
-attempt and preserve it; never treat it as an unused ID. Share the UI's
-active-work admission with comparison runs: no automatic queue or overlapping
-start from this UI. Keep the normal profile reservation against other xfx work.
+attempt and preserve it. The UI admits independent comparisons and reviews up to
+its configured controller capacity (eight jobs by default). Multiple reviews of a report retain separate
+task IDs and frozen evidence. Claim each review's canonical writable workspace
+across controllers. Choose another workspace when the selected directory overlaps an active or
+unresolved review claim.
 The server may retain a terminal response while shutdown is uncertain, but must
 not release ownership or admit conflicting work until safely reconciled.
 

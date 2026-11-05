@@ -6,12 +6,12 @@ determine authorization. A goal or historical grant does not authorize operation
 
 ## Current release boundary
 
-Deliver **3.0.0**, a major release of the locally bundled browser UI for **Codex
+Deliver **3.1.0**, extending the locally bundled browser UI for **Codex
 on macOS**, launched with `xfx ui`. Users can:
 
 1. Create an empty profile or one from selected supported parts of another.
-2. Run the same task on two profiles and read the comparison report.
-3. Request an ordinary AI review of that report and read a task-scoped preference,
+2. Run the same task on two comparison sides and read the report. Both sides may use one profile.
+3. Request ordinary AI reviews of that report and read each task-scoped preference,
    tie or inconclusive judgment in the UI.
 
 **Create → compare → read report → optionally request review → read response.**
@@ -35,11 +35,19 @@ conversation state are never copied; profiles evolve independently.
 
 ## Task comparison and report
 
-Choose two distinct profiles, one task and a repository; inspect the pinned
+Choose two sides, one task and a repository. Each side selects a profile and
+can override the model and reasoning effort for that job. Both sides may use the
+same profile. Inspect the pinned
 commit, execution order, checks and limits before explicit Start. Each run uses
 its own checkout of that commit, excluding uncommitted/untracked/ignored files.
 Explain that boundary and possible effects of setup/check commands outside the
 checkout. Select no checks automatically; no checks means unverified.
+
+Independent comparisons and report reviews can overlap on the same profile.
+Each job keeps its own native session, approval requests, cancellation, progress
+and results. Sides run in their recorded order within a comparison. Report
+review workspaces are claimed independently of the profile. Treat timings during
+overlapping activity as observations from shared conditions.
 
 Show progress, cancellation, failures and partial results, then the report without
 manual session-ID reconstruction. Refresh/reconnect must not duplicate model work.
@@ -67,7 +75,7 @@ source stays unavailable rather than being fetched from today's checkout.
 
 ## AI review
 
-From the report, choose a profile/workspace, inspect/edit the prompt and supplied
+From the report, choose a profile/workspace and optional per-review model and effort, then inspect/edit the prompt and supplied
 content, then explicitly Start. Use the selected profile's ordinary configuration,
 provider connection, permissions and integrations; explain potential model usage.
 Show native approval/input requests and accept explicit responses without silently
@@ -76,7 +84,7 @@ started tasks retain normal native history/authentication/runtime side effects.
 
 Retain exact frozen report inputs, selected profile, actual session/model when
 known, progress, failures/cancellation and the captured natural-language response.
-Keep the comparison unchanged. No separate isolation system, forced JSON, invented
+Keep the comparison and each other review unchanged. No separate isolation system, forced JSON, invented
 score, automatic retry or attachment to the newest unrelated session. The
 [review implementation contract](REVIEW-TASK-IMPLEMENTATION.md) owns execution,
 storage and recovery details. Ordinary task results are separate from optional
@@ -98,6 +106,7 @@ Verify these outcomes on a source-bound installable candidate with explicit limi
 | Create profiles | Use visible controls for empty and selected-parts creation; inspect independent state and setup guidance. Preview/cancel preserves state. |
 | Compare a task | Preview/start both runs, follow progress and read results/checks/replay with evidence limits. Cancellation/interruption is truthful and does not duplicate work. |
 | Ask for AI review | Start one ordinary task from a report and read its response with exact comparison/profile/session association. Failures are visible; browsing never invokes review. |
+| Overlap jobs | Run two comparisons and two report reviews together on one profile with separate selections and workspaces. Verify independent approvals, cancellation, results, restart and mutation exclusion. Verify shared native state separately on a disposable profile. |
 | Deliver safely | Required checks and affected regressions pass; the bundled UI works by keyboard, at applicable narrow layouts and 200% zoom in both themes. Detached package smoke, preservation, recovery, local web security and export privacy pass. |
 
 Use real Codex evidence for changed launch/result paths and fixtures for failures

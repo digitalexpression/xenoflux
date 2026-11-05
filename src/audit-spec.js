@@ -18,6 +18,18 @@ const integer = (value, fallback, min, max, label) => {
 
 const NATIVE_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
+export const selectionKey = selection => selection.sideId ?? selection.name.toLowerCase();
+
+export function validateExecution(value) {
+  if (value === undefined) return undefined;
+  allowed(value, ['model', 'reasoningEffort'], 'execution settings');
+  if (value.model !== undefined && (typeof value.model !== 'string' || !/^[a-z0-9][a-z0-9._:/-]{0,99}$/i.test(value.model))) throw new Error('Model must be a plain model ID');
+  if (value.reasoningEffort !== undefined && !NATIVE_REASONING_EFFORTS.has(value.reasoningEffort))
+    throw new Error('Choose a supported reasoning effort');
+  return { ...(value.model !== undefined ? { model: value.model } : {}),
+    ...(value.reasoningEffort !== undefined ? { reasoningEffort: value.reasoningEffort } : {}) };
+}
+
 /** Validate the narrow set of per-process native Codex config overrides accepted by audit recipes. */
 export function validateAuditNativeConfig(value) {
   if (value === undefined) return undefined;
@@ -83,11 +95,17 @@ export function validateAuditSpec(value) {
     throw new Error('Experiment task must be nonempty text of at most 64 KiB');
   if (!Array.isArray(value.profiles) || value.profiles.length < 2 || value.profiles.length > 8)
     throw new Error('Select between two and eight distinct profiles');
+  const keys = new Set();
   const names = new Set();
   const profiles = value.profiles.map(selection => {
     const profile = typeof selection === 'string' ? { name: selection } : selection;
-    allowed(profile, ['name', 'executable', 'version', 'skills', 'nativeConfig'], 'profile selection');
-    if (!plain(profile.name, 200) || names.has(profile.name.toLowerCase())) throw new Error('Select distinct plain profile names');
+    allowed(profile, ['name', 'executable', 'version', 'skills', 'nativeConfig', 'sideId', 'execution'], 'profile selection');
+    if (!plain(profile.name, 200) || (profile.sideId !== undefined && !/^[a-z][a-z0-9-]{0,39}$/.test(profile.sideId))
+      || (profile.sideId === undefined && names.has(profile.name.toLowerCase())))
+      throw new Error('Select distinct plain profile names or give each side a distinct side ID');
+    const key = selectionKey(profile);
+    if (keys.has(key)) throw new Error('Choose distinct side IDs');
+    keys.add(key);
     names.add(profile.name.toLowerCase());
     if ((profile.executable !== undefined && (!plain(profile.executable) || !profile.executable.startsWith('/')
         || resolve(profile.executable) !== profile.executable))
@@ -97,7 +115,11 @@ export function validateAuditSpec(value) {
     if (!Array.isArray(skills) || skills.length > 50 || skills.some(skill => !plain(skill, 160)) || new Set(skills).size !== skills.length)
       throw new Error('Selected skills must be distinct plain names');
     const nativeConfig = validateAuditNativeConfig(profile.nativeConfig);
-    return { name: profile.name, ...(profile.executable ? { executable: profile.executable } : {}),
+    const execution = validateExecution(profile.execution);
+    if (execution && (nativeConfig?.model !== undefined || nativeConfig?.model_reasoning_effort !== undefined))
+      throw new Error('Choose one way to specify the model and reasoning effort');
+    return { name: profile.name, ...(profile.sideId ? { sideId: profile.sideId } : {}),
+      ...(execution !== undefined ? { execution } : {}), ...(profile.executable ? { executable: profile.executable } : {}),
       ...(profile.version !== undefined ? { version: profile.version } : {}), skills: [...skills],
       ...(nativeConfig !== undefined ? { nativeConfig } : {}) };
   });

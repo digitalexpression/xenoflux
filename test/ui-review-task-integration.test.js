@@ -70,15 +70,21 @@ function reviewContext(mode = 'complete') {
   } } };
 }
 
-function fakeCodexServer(earlyApproval = false) {
+function fakeCodexServer(earlyApproval = false, uniqueSessions = false) {
   return `#!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write('codex 0.153.4\\n'); process.exit(0); }
 const fs = require('node:fs');
 const readline = require('node:readline');
 const lines = readline.createInterface({ input: process.stdin });
 const earlyApproval = ${JSON.stringify(earlyApproval)};
-const threadId = 'ordinary-review-thread', sessionId = 'ordinary-review-session', turnId = 'ordinary-review-turn';
+const suffix = ${JSON.stringify(uniqueSessions)} ? '-' + process.pid : '';
+const threadId = 'ordinary-review-thread' + suffix, sessionId = 'ordinary-review-session' + suffix, turnId = 'ordinary-review-turn' + suffix;
 const responseText = 'Reviewed the frozen report through the selected profile.';
+const overrides = Object.fromEntries(process.argv.flatMap((arg, index) => {
+  if (arg !== '-c') return [];
+  const next = process.argv[index + 1], separator = next.indexOf('=');
+  return [[next.slice(0, separator), JSON.parse(next.slice(separator + 1))]];
+}));
 let cwd = null, prompt = null;
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 lines.on('line', line => {
@@ -89,7 +95,7 @@ lines.on('line', line => {
   if (method === 'skills/list') return result({ data: [{ cwd: params.cwds[0], skills: [], errors: [] }] });
   if (method === 'thread/start') {
     cwd = params.cwd;
-    result({ cwd, model: 'gpt-6-luna', reasoningEffort: 'medium', thread: { id: threadId, sessionId, cwd } });
+    result({ cwd, model: overrides.model === 'fixture-unavailable' ? 'fixture-fallback' : overrides.model ?? 'gpt-6-luna', reasoningEffort: overrides.model_reasoning_effort ?? 'medium', thread: { id: threadId, sessionId, cwd } });
     send({ jsonrpc: '2.0', method: 'thread/started', params: { thread: { id: threadId, sessionId, cwd } } });
     return;
   }
@@ -99,7 +105,7 @@ lines.on('line', line => {
     const reportPath = prompt.slice(prompt.indexOf(marker) + marker.length).split(String.fromCharCode(10))[0].trim();
     let reportText;
     try { reportText = fs.readFileSync(reportPath, 'utf8'); } catch { process.exit(31); }
-    fs.writeFileSync(__filename + '.observed', JSON.stringify({ cwd: process.cwd(), reportPath, reportText, prompt }));
+    fs.writeFileSync(__filename + '.observed', JSON.stringify({ cwd: process.cwd(), reportPath, reportText, prompt, overrides }));
     if (earlyApproval) send({ jsonrpc: '2.0', id: 41, method: 'item/commandExecution/requestApproval', params: {
       threadId, turnId, itemId: 'early-command', startedAtMs: 1, command: 'cat report.md',
       cwd: process.cwd(), availableDecisions: ['accept', 'decline'],
@@ -261,7 +267,8 @@ test('ordinary review uses real capture against a disposable fake Codex executab
   const configPath = join(app.homes.baseline.home, 'config.toml');
   const configBefore = await readFile(configPath, 'utf8');
   const ref = await seedComparison(app);
-  const preview = await previewTask(app, ref);
+  const preview = await app.provider.previewReviewTask({ ref, profile: 'baseline', cwd: app.repository,
+    execution: { model: 'fixture-explicit-model', reasoningEffort: 'high' } });
   const started = await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
   const task = await until(() => app.provider.reviewTask({ id: started.id }), value => value.status === 'completed' || value.status === 'failed',
     'real capture did not reach a terminal state');
@@ -272,48 +279,181 @@ test('ordinary review uses real capture against a disposable fake Codex executab
   assert.deepEqual(task.shutdown, { status: 'confirmed', groupTerminated: true, processStatus: 'exited', exitCode: 0 });
   const observed = JSON.parse(await readFile(`${app.executable}.observed`, 'utf8'));
   assert.equal(observed.cwd, app.repository);
+  assert.equal(observed.overrides.model, 'fixture-explicit-model');
+  assert.equal(observed.overrides.model_reasoning_effort, 'high');
+  assert.equal(task.nativeSettings.model, 'fixture-explicit-model');
+  assert.equal(task.nativeSettings.reasoningEffort, 'high');
   assert.ok(observed.reportPath.endsWith('/report.md'));
   assert.ok(observed.reportText.trim().length > 0, 'fake Codex read the report file named in the actual task prompt');
   assert.ok(observed.prompt.includes(observed.reportPath));
   assert.equal(await readFile(configPath, 'utf8'), configBefore, 'ordinary review did not alter selected profile config');
+  const unsupported = await app.provider.previewReviewTask({ ref, profile: 'baseline', cwd: app.repository,
+    execution: { model: 'fixture-unavailable' } });
+  const failed = await app.provider.startReviewTask({ ref, previewToken: unsupported.previewToken });
+  const refused = await until(() => app.provider.reviewTask(failed), value => value.status === 'failed',
+    'unsupported explicit model did not fail visibly');
+  assert.match(refused.error, /did not confirm the requested model/);
+  assert.equal(refused.nativeSettings.model, 'fixture-fallback');
+  assert.deepEqual(JSON.parse(await readFile(`${app.executable}.observed`, 'utf8')), observed,
+    'the mismatched native session never received a model turn');
 });
 
-test('early native approval remains waiting after delayed turn/start acknowledgement', async t => {
-  const app = await createUiRunsFixture({ mode: {}, reviewContext: { accessOptions: {
+test('two real app-server fixture processes retain early approvals and per-job settings on one home', async t => {
+  const { mkdir } = await import('node:fs/promises');
+  const app = await createUiRunsFixture({ reviewContext: { accessOptions: {
     inspectResources: async () => ({ clients: [], pids: [], records: 0, partial: false }), processSnapshot: async () => [],
   } } });
   t.after(() => app.close());
-  await writeFile(app.executable, fakeCodexServer(true), { mode: 0o700 });
-  await chmod(app.executable, 0o700);
-  const ref = await seedComparison(app), preview = await previewTask(app, ref);
-  const started = await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
-  const waiting = await until(() => app.provider.reviewTask({ id: started.id }), task =>
-    task.turnId === 'ordinary-review-turn' && task.pendingRequests.length === 1,
-  'early approval and turn checkpoint were not both persisted');
-  assert.equal(waiting.status, 'waiting-for-user');
-  const result = await app.provider.respondReviewTask({ id: waiting.id,
-    requestId: waiting.pendingRequests[0].requestId, response: { decision: 'decline' } });
-  assert.deepEqual(result.pendingRequests, []);
-  const completed = await until(() => app.provider.reviewTask({ id: waiting.id }), task =>
-    task.status === 'completed' || task.status === 'failed', 'review did not finish after early approval');
-  assert.equal(completed.status, 'completed', JSON.stringify(completed));
+  await writeFile(app.executable, fakeCodexServer(true, true), { mode: 0o700 });
+  const ref = await seedComparison(app), secondWorkspace = join(app.root, 'separate-workspace');
+  await mkdir(secondWorkspace, { mode: 0o700 });
+  await app.provider.bindProfile({ name: 'baseline', repository: secondWorkspace });
+  const selections = [
+    { model: 'fixture-model-a', reasoningEffort: 'low', cwd: app.repository },
+    { model: 'fixture-model-b', reasoningEffort: 'high', cwd: secondWorkspace },
+  ];
+  const ids = await Promise.all(selections.map(async ({ cwd, ...execution }) => {
+    const preview = await app.provider.previewReviewTask({ ref, profile: 'baseline', cwd, execution });
+    return (await app.provider.startReviewTask({ ref, previewToken: preview.previewToken })).id;
+  }));
+  const read = () => Promise.all(ids.map(id => app.provider.reviewTask({ id })));
+  const waiting = await until(read, rows => rows.every(task => task.turnId && task.pendingRequests.length === 1),
+    'early approvals and turn checkpoints were not both persisted');
+  assert.ok(waiting.every(task => task.status === 'waiting-for-user'));
+  const { observeAuditProcess } = await import('../src/audit-process.js');
+  for (const id of ids) {
+    const saved = JSON.parse(await readFile(join(app.store.directory, 'review-tasks', id, 'task.json'), 'utf8'));
+    assert.notEqual(saved.process.processIdentity.command, '/bin/sh');
+    assert.equal((await observeAuditProcess(saved.process.processIdentity)).status, 'running');
+    assert.equal(saved.process.nativeIdentity.pid, saved.process.pid);
+  }
+  assert.notEqual(waiting[0].threadId, waiting[1].threadId);
+  assert.notEqual(waiting[0].turnId, waiting[1].turnId);
+  assert.notEqual(waiting[0].pendingRequests[0].requestId, waiting[1].pendingRequests[0].requestId);
+  await Promise.all(waiting.map(task => app.provider.respondReviewTask({ id: task.id,
+    requestId: task.pendingRequests[0].requestId, response: { decision: 'decline' } })));
+  const done = await until(read, rows => rows.every(task => ['completed', 'failed'].includes(task.status)),
+    'reviews did not finish after early approvals');
+  for (const [index, task] of done.entries()) {
+    assert.equal(task.status, 'completed', JSON.stringify(task));
+    assert.equal(task.nativeSettings.model, selections[index].model);
+    assert.equal(task.nativeSettings.reasoningEffort, selections[index].reasoningEffort);
+  }
 });
 
-test('cancel preserves partial response and releases shared admission only after owned shutdown', async t => {
+test('cancel preserves the partial response while an independent comparison runs', async t => {
   const app = await fixture(t, 'cancel');
   const ref = await seedComparison(app), comparisonPreview = await app.provider.runPreview(input(app));
   assert.equal(comparisonPreview.ready, true);
   const preview = await previewTask(app, ref);
   await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
   const running = await until(() => app.provider.reviewTask({ id: preview.previewToken }), task => task.status === 'running', 'review did not start');
-  await assert.rejects(app.provider.startRun({ previewToken: comparisonPreview.previewToken }), /active|running|admission|reserved/i,
-    'an active review holds the shared admission lock against a comparison start');
+  const comparison = await app.provider.startRun({ previewToken: comparisonPreview.previewToken });
   const cancelled = await app.provider.cancelReviewTask({ id: running.id });
   assert.equal(cancelled.status, 'cancelled');
   assert.equal(cancelled.response.status, 'partial');
   assert.equal(cancelled.response.text, 'partial fixture response');
-  const comparison = await app.provider.startRun({ previewToken: comparisonPreview.previewToken });
   const finished = await until(() => app.provider.run({ id: comparison.id }), value => value.state !== 'running',
-    'comparison could not start after the cancelled review released shared admission');
+    'comparison did not finish independently');
   assert.equal(finished.state, 'finished');
+});
+
+test('two comparisons and two reviews overlap on one profile with separate settings, approvals and results', async t => {
+  const { mkdir } = await import('node:fs/promises');
+  const { readProfileOwners } = await import('../src/profile-reservations.js');
+  const captures = new Map(), approvals = new Map();
+  const app = await createUiRunsFixture({
+    beforeCapture: async options => {
+      if (!options.execution?.model) return true;
+      captures.set(options.execution.model, options);
+      if (options.profile.sideId === 'a') {
+        try {
+          const decision = await options.onNativeRequest(nativeRequest(), { signal: options.processOptions.signal });
+          approvals.set(options.execution.model, decision.decision);
+        } catch { return false; }
+      }
+      return true;
+    },
+    reviewContext: { capture: async options => {
+      const model = options.execution.model, threadId = `thread-${model}`, turnId = `turn-${model}`;
+      captures.set(model, options);
+      const result = captured('complete');
+      result.run.source.threadId = threadId;
+      result.capture.effectiveSettings = { model, reasoningEffort: options.execution.reasoningEffort };
+      result.response = { ...result.response, threadId, turnId, text: options.task.split('\n')[0] };
+      await options.onSession(result.run, result.capture);
+      await options.onTurn({ threadId, turnId });
+      const request = nativeRequest();
+      Object.assign(request.params, { threadId, turnId, cwd: options.workspace });
+      approvals.set(model, (await options.onNativeRequest(request, { signal: options.processOptions.signal })).decision);
+      return result;
+    } },
+  });
+  t.after(() => app.close());
+  const ref = await seedComparison(app);
+  const workspace = join(app.root, 'second-review-workspace');
+  await mkdir(workspace, { mode: 0o700 });
+  await app.provider.bindProfile({ name: 'baseline', repository: workspace });
+  const startComparison = async (name, effort) => {
+    const preview = await app.provider.runPreview({ ...input(app), task: name, b: 'baseline',
+      execution: { a: { model: `${name}-a`, reasoningEffort: effort }, b: { model: `${name}-b` } } });
+    assert.equal(preview.ready, true, JSON.stringify(preview.blocked));
+    return (await app.provider.startRun({ previewToken: preview.previewToken })).id;
+  };
+  const startReview = async (name, cwd, reasoningEffort) => {
+    const { previewToken } = await app.provider.previewReviewTask({ ref, profile: 'baseline', cwd, prompt: `Review ${name}`,
+      execution: { model: name, reasoningEffort }, includeRecordedContent: name === 'r2', timeoutMs: 60000 });
+    return (await app.provider.startReviewTask({ ref, previewToken })).id;
+  };
+  const [c1, c2, r1, r2] = await Promise.all([
+    startComparison('c1', 'high'), startComparison('c2', 'low'),
+    startReview('r1', app.repository, 'medium'), startReview('r2', workspace, 'high'),
+  ]);
+  const jobs = [c1, c2, r1, r2];
+  const [one, two, first, second] = await until(
+    () => Promise.all([app.provider.run({ id: c1 }), app.provider.run({ id: c2 }),
+      app.provider.reviewTask({ id: r1 }), app.provider.reviewTask({ id: r2 })]),
+    rows => rows.every(row => row.pendingRequests?.length === 1), 'four jobs did not reach native approval together');
+  assert.deepEqual(new Set((await app.provider.info()).activeJobs.map(job => job.id)), new Set(jobs));
+  assert.equal((await readProfileOwners(app.homes.baseline.root)).length, 6);
+  assert.equal(new Set([one, two, first, second].map(row => row.pendingRequests[0].requestId)).size, 4);
+  assert.equal(new Set([...captures.values()].map(options => options.workspace)).size, 4);
+  assert.equal(new Set([...captures.values()].map(options => options.profile.home)).size, 1);
+  await assert.rejects(app.provider.renameProfile({ name: 'baseline', newName: 'busy' }), /locked by a run/);
+  await assert.rejects(startReview('conflict', workspace, 'low'), { code: 'review-workspace-busy' });
+  await assert.rejects(app.provider.respondRun({ id: c1, requestId: two.pendingRequests[0].requestId, response: { decision: 'accept' } }), { code: 'stale-run-request' });
+  await app.provider.cancelRun({ id: c2 });
+  await assert.rejects(async () => captures.get('c2-a').onNativeRequest(nativeRequest(), {
+    signal: new AbortController().signal,
+  }), /Comparison leg stopped/);
+  await assert.rejects(app.provider.respondRun({ id: c2, requestId: two.pendingRequests[0].requestId, response: { decision: 'accept' } }), { code: 'stale-run-request' });
+  await Promise.all([
+    app.provider.respondRun({ id: c1, requestId: one.pendingRequests[0].requestId, response: { decision: 'accept' } }),
+    app.provider.respondReviewTask({ id: r1, requestId: first.pendingRequests[0].requestId, response: { decision: 'decline' } }),
+    app.provider.respondReviewTask({ id: r2, requestId: second.pendingRequests[0].requestId, response: { decision: 'accept' } }),
+  ]);
+  const done = await until(
+    () => Promise.all([app.provider.run({ id: c1 }), app.provider.reviewTask({ id: r1 }), app.provider.reviewTask({ id: r2 })]),
+    rows => rows[0].state === 'finished' && rows.slice(1).every(row => row.status === 'completed'), 'remaining jobs did not complete');
+  const view = await app.provider.report({ ref: `e.${c1}` });
+  assert.notEqual(view.a.session, view.b.session);
+  assert.equal(view.replayRootContext.a.requestedModel, 'c1-a');
+  assert.equal(view.replayRootContext.b.requestedModel, 'c1-b');
+  assert.equal(done[1].response.text, 'Review r1');
+  assert.equal(done[2].response.text, 'Review r2');
+  assert.equal(done[1].nativeSettings.model, 'r1');
+  assert.equal(done[2].nativeSettings.model, 'r2');
+  await captures.get('r1').onTurn({ threadId: 'late-thread', turnId: 'late-turn' });
+  assert.equal((await app.provider.reviewTask({ id: r1 })).threadId, 'thread-r1');
+  assert.notEqual(done[1].promptSha256, done[2].promptSha256);
+  assert.match(done[1].frozenPrompt, /^Review r1/);
+  assert.match(done[2].frozenPrompt, /^Review r2/);
+  assert.equal(done[1].sourceEvidenceFingerprint, done[2].sourceEvidenceFingerprint);
+  assert.equal(captures.has('c2-b'), false);
+  assert.deepEqual(approvals, new Map([['c1-a', 'accept'], ['r1', 'decline'], ['r2', 'accept']]));
+  await app.restartServer();
+  assert.deepEqual(await app.provider.startRun({ previewToken: c1 }), { id: c1 });
+  assert.deepEqual(await app.provider.startReviewTask({ ref, previewToken: r2 }), { id: r2 });
+  assert.equal((await app.provider.reviewTask({ id: r1 })).response.text, 'Review r1');
+  assert.equal((await app.provider.reviews({ ref })).reviewTasks.filter(row => row.status === 'completed').length, 2);
 });

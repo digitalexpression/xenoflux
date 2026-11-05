@@ -14,7 +14,7 @@ import { launchHome } from '../src/launcher.js';
 import { removeProfile, unbindNativeHome } from '../src/profile-removal.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
 import { assertNoConcurrentDesktops } from '../src/desktop-instance-guard.js';
-import { acquireReviewReservation, releaseProfileParticipant } from '../src/profile-reservations.js';
+import { acquireProfileParticipant, releaseProfileParticipant } from '../src/profile-reservations.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
 import { desktopInstancePlan, openDesktopInstance, prepareDesktopInstance, focusDesktopInstance, closeDesktopInstance,
   recoverDesktopInstance, listDesktopInstances, reconcileDesktopInstance, withProfileOperation } from '../src/desktop-instances.js';
@@ -257,11 +257,11 @@ test('normal Desktop quit reconciliation preserves a shared review reservation a
   const aRunId = JSON.parse(await readFile(statePath(f, a.profileId))).runId;
   const desktopOwner = JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json')));
   const bRunId = JSON.parse(await readFile(statePath(f, b.profileId))).runId;
-  const runId = randomUUID(), reviewOwner = { kind: 'review-task', runId, storePath: f.store.directory,
+  const runId = randomUUID(), reviewOwner = { kind: 'review-task', runId, home: f.homes.A.home, storePath: f.store.directory,
     profileId: a.profileId, host: hostname(), pid: process.pid };
   const reviewProcess = row(700, '/fixture/review-native-process');
   f.rows.push(reviewProcess);
-  await acquireReviewReservation(f.homes.A.root, reviewOwner, desktopOwner);
+  await acquireProfileParticipant(f.homes.A.root, reviewOwner, desktopOwner);
   const taskRoot = join(f.store.directory, 'review-tasks', runId);
   await mkdir(taskRoot, { recursive: true, mode: 0o700 });
   await writeFile(join(taskRoot, 'task.json'), JSON.stringify({ kind: 'xfx-review-task', id: runId,
@@ -287,9 +287,9 @@ test('quit reconciliation resumes after the Desktop participant was released bef
   const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options);
   const state = JSON.parse(await readFile(statePath(f, a.profileId)));
   const desktopOwner = JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json')));
-  const runId = randomUUID(), reviewOwner = { kind: 'review-task', runId, storePath: f.store.directory,
+  const runId = randomUUID(), reviewOwner = { kind: 'review-task', runId, home: f.homes.A.home, storePath: f.store.directory,
     profileId: a.profileId, host: hostname(), pid: process.pid };
-  await acquireReviewReservation(f.homes.A.root, reviewOwner, desktopOwner);
+  await acquireProfileParticipant(f.homes.A.root, reviewOwner, desktopOwner);
   const taskRoot = join(f.store.directory, 'review-tasks', runId);
   await mkdir(taskRoot, { recursive: true, mode: 0o700 });
   await writeFile(join(taskRoot, 'task.json'), JSON.stringify({ kind: 'xfx-review-task', id: runId,
@@ -302,6 +302,27 @@ test('quit reconciliation resumes after the Desktop participant was released bef
   assert.equal(JSON.parse(await readFile(statePath(f, a.profileId))).phase, 'closed');
   assert.deepEqual(JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json'))), reviewOwner);
   await assert.rejects(access(join(`${f.options.lockPath}.instances`, `${state.runId}.json`)), { code: 'ENOENT' });
+});
+
+test('a child first observed during quit keeps the reservation after an interrupted close', async t => {
+  const f = await fixture(t), opened = await openDesktopInstance(f.store, 'A', f.options);
+  const child = row(91, '/usr/bin/tar', opened.main.pid);
+  const stop = f.runtime.close;
+  f.runtime.close = async (main, { onTrackedProcesses }) => {
+    await onTrackedProcesses([...f.rows.filter(entry => entry.pid === main.pid || entry.ppid === main.pid), child]);
+    await stop(main);
+    f.rows.push({ ...child, ppid: 1 });
+    throw Object.assign(new Error('Close timed out'), { code: 'DESKTOP_CLOSE_TIMEOUT' });
+  };
+
+  await assert.rejects(closeDesktopInstance(f.store, 'A', f.options), { code: 'DESKTOP_CLOSE_TIMEOUT' });
+  await assert.rejects(recoverDesktopInstance(f.store, 'A', f.options), /still runs/);
+  await access(lockPath(f, 'A'));
+  assert.ok(JSON.parse(await readFile(statePath(f, opened.profileId))).processes.some(entry => entry.pid === child.pid));
+
+  f.rows.splice(f.rows.findIndex(entry => entry.pid === child.pid), 1);
+  await recoverDesktopInstance(f.store, 'A', f.options);
+  await assert.rejects(access(lockPath(f, 'A')), { code: 'ENOENT' });
 });
 
 test('normal Desktop quit reconciliation refuses a reused helper identity and preserves ownership', async t => {

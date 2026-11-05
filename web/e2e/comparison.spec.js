@@ -1,4 +1,5 @@
 import { readFile, readdir, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { test, expect } from './fixtures.js';
 
 async function choosePair(page) {
@@ -19,8 +20,8 @@ async function assertReportSides(page, { leftName = 'strict-review', rightName =
   await expect(page.locator('.chip-b')).toContainText(rightName);
   await expect(page.locator('.chip-b')).toContainText(rightClient);
   const sides = page.getByRole('group', { name: 'Compared profiles' });
-  await expect(sides.getByText('Root model (actual): fixture-model', { exact: true })).toHaveCount(2);
-  await expect(sides.getByText('Root reasoning effort (actual): medium', { exact: true })).toHaveCount(2);
+  await expect(sides.getByText('Root model (reported): fixture-model', { exact: true })).toHaveCount(2);
+  await expect(sides.getByText('Root reasoning effort (reported): medium', { exact: true })).toHaveCount(2);
 }
 
 async function assertCompactMeasurements(page, profiles = ['strict-review', 'baseline']) {
@@ -104,7 +105,7 @@ test('export report files and reopen JSON after source histories are removed', a
   await page.getByRole('link', { name: 'Export report' }).first().click();
   await page.getByRole('button', { name: 'Export', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Both files are in the folder above' })).toBeVisible();
-  const folder = await page.locator('aside p.font-mono').innerText();
+  const folder = (await page.locator('aside p.font-mono').innerText()).replace(/^~(?=\/|$)/, homedir());
   const files = await readdir(folder);
   const mdName = files.find(name => name.endsWith('.md'));
   const jsonName = files.find(name => name.endsWith('.audit.json'));
