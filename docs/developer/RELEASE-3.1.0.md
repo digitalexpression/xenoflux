@@ -23,6 +23,8 @@ exact committed source revision, tarball checksums and detached smoke result.
   shortcut. The shortcut itself does not establish native task correctness.
 - Correct Desktop journal lookup when another controller registers the same
   native home under a different profile ID.
+- Preserve focus moved outside the nonmodal replay inspector when it closes,
+  so late focus restoration cannot interrupt search input.
 
 Existing report schemas remain version 1. Same-home CLI selections need distinct
 `sideId` values. No automatic migration or deletion of old evidence is performed.
@@ -51,6 +53,14 @@ while discovering account ancestors. Browser assertions now expand the displayed
 prefix. The complete passing reruns used `TMPDIR=/private/tmp` to isolate fixture
 project ancestry. Original failed logs and traces remain separate from the final
 passing evidence.
+
+The first [public CI run](https://github.com/digitalexpression/xenoflux/actions/runs/41993264549)
+passed every gate on Node 24. Node 22.15 passed 47 browser tests but failed replay
+search/selection restoration, preventing its later unit/smoke steps. Investigation
+reproduced focus being stolen from search when the nonmodal inspector closed.
+The regression failed before the correction and passed five consecutive local
+runs afterward. The updated source requires a fresh full public matrix; the
+original failed run and artifact remain preserved rather than relabelled.
 
 The bundle manifest records the detached offline npm and managed installation
 lifecycle smoke outcome. Require `smoke.status: passed` before publication

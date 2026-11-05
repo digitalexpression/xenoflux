@@ -686,7 +686,14 @@ test('comparison reconciles task outcomes, scoped measurements and recorded clos
     await expect(inspector).toHaveCount(0);
     await expect(responseEventTrigger).toBeFocused();
     await expect(search).toHaveValue('no matching recorded event');
+    await responseEventTrigger.click();
+    await expect(inspector).toBeVisible();
+    await search.focus();
+    await page.keyboard.press('Escape');
+    await expect(inspector).toHaveCount(0);
+    await expect(search).toBeFocused();
     await search.fill('');
+    await expect(search).toHaveValue('');
     await expect(rightSelection).toHaveAttribute('data-replay-event', rightSelectedId);
 
     rightWorkflowValidated = true;
