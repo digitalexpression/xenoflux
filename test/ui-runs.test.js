@@ -49,6 +49,14 @@ test('run preview is read-only and binds exactly two profiles, commands and limi
   await assert.rejects(app.provider.startRun({ ...request(app) }), { code: 'invalid-run' });
 });
 
+test('run history reports an unsafe receipt directory instead of presenting it as empty', async t => {
+  const app = await fixture(t);
+  const receiptRoot = join(app.store.directory, 'ui-runs');
+  await writeFile(receiptRoot, 'not a directory', { mode: 0o600 });
+
+  await assert.rejects(app.provider.overview(), /Expected a private directory/);
+});
+
 test('uncapped run preview and progress keep the overall limit explicitly null', async t => {
   const app = await fixture(t, { capture: 'delayed' });
   const preview = await app.provider.runPreview({ ...request(app), advanced: { timeMinutes: null } });

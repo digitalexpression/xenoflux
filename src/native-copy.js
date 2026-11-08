@@ -11,7 +11,7 @@ import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { acquire, release, globalLock, privateDirectory, readJSON, record, exists } from './metadata.js';
 import { createDesktopRuntime } from './desktop-runtime.js';
 import { redactText, redactValue } from './redact.js';
-import { MAX_COPIED_NATIVE_CONFIG_BYTES } from './native-config.js';
+import { AGENT_KEYS, CONFIG_KEYS, MAX_COPIED_NATIVE_CONFIG_BYTES, supportsNativeProvider } from './native-config.js';
 import { buildAdvancedCopy, selectAdvancedComponents, validateAdvancedSelection, persistAdvancedFiles, validateAdvancedFiles,
   writeAdvanced, matchesAdvanced, snapshotAdvanced, cleanupAdvancedDirectories, matchesAdvancedPackages,
   applyAdvancedPackageDirectories } from './advanced-copy.js';
@@ -20,12 +20,6 @@ export { fingerprintAdvancedSelection as fingerprintCopySource } from './advance
 
 
 export const COPY_COMPONENTS = Object.freeze(['config', 'instructions', 'agents']);
-const CONFIG_KEYS = ['model', 'model_reasoning_effort', 'plan_mode_reasoning_effort', 'model_verbosity',
-  'model_context_window', 'model_auto_compact_token_limit', 'personality', 'service_tier',
-  'approval_policy', 'approvals_reviewer', 'sandbox_mode', 'project_doc_max_bytes', 'project_doc_fallback_filenames'];
-const AGENT_KEYS = ['max_threads', 'max_concurrent_threads_per_session', 'max_depth', 'job_max_runtime_seconds',
-  'default_subagent_model', 'default_subagent_reasoning_effort'];
-const ROLE_KEYS = ['name', 'description', 'model', 'model_reasoning_effort', 'sandbox_mode', 'nickname_candidates', 'developer_instructions'];
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const MAX_FILE = MAX_COPIED_NATIVE_CONFIG_BYTES, MAX_FILES = 64;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -142,7 +136,7 @@ function projected(value, keys, name) {
 /** Project the native configuration fields that copy/undo can represent. */
 export function projectNativeSettingsConfig(content, components) {
   const config = toml(content, 'native configuration');
-  if ((config.model_provider ?? 'openai') !== 'openai' || Object.hasOwn(config.model_providers ?? {}, 'openai'))
+  if (!supportsNativeProvider(config))
     throw new Error('Custom model providers are outside the supported settings comparison surface');
   const selected = Array.isArray(components) ? components : selection(components);
   const result = {};

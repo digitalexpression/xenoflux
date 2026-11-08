@@ -9,6 +9,7 @@ import { parse, stringify } from 'smol-toml';
 import { inspectProfile } from './profile-inventory.js';
 import { resolveNativeSettingsHome } from './native-copy.js';
 import { redactText, redactValue } from './redact.js';
+import { supportsNativeProvider } from './native-config.js';
 import { privateDirectory } from './metadata.js';
 
 const MAX_FILES = 256, MAX_FILE = 4 * 1024 * 1024, MAX_TOTAL = 32 * 1024 * 1024;
@@ -145,7 +146,7 @@ async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint)
   if (t.kind === 'config') {
     const f = await readSafe(expected, { text: true }); if (!f) throw new Error('Selected config source is missing');
     const config = parse(f.content), key = t.key;
-    if ((config.model_provider ?? 'openai') !== 'openai' || Object.hasOwn(config.model_providers ?? {}, 'openai'))
+    if (!supportsNativeProvider(config))
       throw new Error('Config copy does not support custom model providers in the source');
     if (typeof key !== 'string' || !/^(?:[A-Za-z_][\w-]*|agents\.[A-Za-z_][\w-]*|features\.multi_agent)$/.test(key)) throw new Error('Unsupported config key');
     const value = key.includes('.') ? key.split('.').reduce((o,k) => o?.[k], config) : config[key];
@@ -200,7 +201,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     await parentSafe(targetEndpoint.home,targetPath);
     const current = await readSafe(targetPath,{text:true}); if (!current) throw new Error('Destination configuration is missing');
     const destinationConfig=parse(current.content);
-    if((destinationConfig.model_provider??'openai')!=='openai'||Object.hasOwn(destinationConfig.model_providers??{},'openai'))
+    if(!supportsNativeProvider(destinationConfig))
       throw new Error('Config copy does not support custom model providers in the destination');
     const sourceValues = new Map();
     for(const item of configItems) {

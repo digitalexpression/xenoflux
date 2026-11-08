@@ -334,7 +334,9 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     catch (error) { await Promise.resolve(admission.release(id)).catch(() => {}); admissionHeld = false; throw error; }
     let reserved = false, reservationAttempted = false, captureCalled = false;
     const controller = new AbortController();
-    const work = { id, controller, done: false, pendingRequests: new Map(), owner, directory: taskRoot, task: info };
+    let finish;
+    const completed = new Promise(resolve => { finish = resolve; });
+    const work = { id, controller, completed, done: false, pendingRequests: new Map(), owner, directory: taskRoot, task: info };
     active.set(id, work); pending.set(id, work.pendingRequests);
     try {
       if (closing) throw new UiError(409, 'The app is stopping. Start it again before reviewing.', 'stopping');
@@ -485,10 +487,12 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       if (error.code === 'review-workspace-busy') throw new UiError(409, errorMessage(error), error.code);
       throw error;
     } finally {
-      active.delete(id); work.done = true;
+      active.delete(id);
       for (const value of work.pendingRequests.values()) value.reject(new Error('Review task stopped'));
       work.pendingRequests.clear(); pending.delete(id);
       if (admissionHeld) await Promise.resolve(admission.release(id)).catch(() => {});
+      work.done = true;
+      finish();
     }
   }
   async function startReviewTask(arguments_) {
@@ -634,10 +638,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     task.task.cancellation ??= { reason: 'user-cancel', requestedAt: new Date().toISOString() };
     try { await save(task.directory, task.task); } catch { /* Abort remains authoritative; completion writes the reason again. */ }
     task.controller.abort('user-cancel');
-    await new Promise(resolve => {
-      const poll = () => task.done ? resolve() : setTimeout(poll, 20);
-      poll();
-    });
+    await task.completed;
     return reviewTask({ id: taskId });
   }
   async function frozenComparison(id) {
@@ -683,10 +684,6 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       item.controller.abort('coordinator-shutdown');
     }
     await Promise.allSettled([...operations.values()]);
-    await Promise.allSettled([...active.values()].map(item => new Promise(resolve => {
-      const poll = () => item.done ? resolve() : setTimeout(poll, 20);
-      poll();
-    })));
   }
 
   return { reviewTaskOptions, taskSummaries, previewReviewTask, startReviewTask, reviewTask, cancelReviewTask,

@@ -174,6 +174,21 @@ test('cancel stops an active task and replaying the same token against another r
   assert.equal(cancelled.shutdown.groupTerminated, true);
 });
 
+test('closing waits for active review shutdown and its durable cancellation record', async t => {
+  const app = await fixture(t, { delayed: true });
+  const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict' });
+  const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
+  await waitFor(async () => app.calls.capture, count => count === 1, 'Capture did not start');
+
+  await app.service.close();
+
+  const task = JSON.parse(await readFile(join(app.store.directory, 'review-tasks', id, 'task.json'), 'utf8'));
+  assert.equal(task.status, 'cancelled');
+  assert.equal(task.cancellation.reason, 'coordinator-shutdown');
+  assert.equal(task.shutdown.groupTerminated, true);
+  assert.equal(task.reservation.status, 'released');
+});
+
 
 test('a blank or mismatched assistant response is never marked complete', async t => {
   for (const [name, response] of [

@@ -81,7 +81,10 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       const files = (await readdir(root)).filter(name => UUID.test(name.replace(/\.json$/, '')) && name.endsWith('.json'));
       const rows = await Promise.all(files.map(name => receipt(name.slice(0, -5)).catch(() => null)));
       return rows.filter(Boolean).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    } catch { return []; }
+    } catch (error) {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    }
   }
   async function inspect(spec) {
     const profiles = [], snapshots = [];
