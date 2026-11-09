@@ -52,8 +52,8 @@ corrected full rerun passed. Earlier failed evidence remains separate.
 Those full runs precede this candidate's version, documentation and package-boundary
 canary changes. The eight package/documentation regression tests passed on each
 runtime, as did syntax, native helper, documentation, type, token and UI build
-parity checks. Runtime source, rebuilt UI, remaining tests and tooling match the
-validated correction source. Outgoing candidate history excludes knowledge files
+parity checks. The original local candidate's runtime source, rebuilt UI, remaining
+tests and tooling matched the validated correction source. Outgoing candidate history excludes knowledge files
 and their private commits. Final preparation verifies actual tarball membership
 and content, hashes and the detached offline installation; the generated manifest
 records that bundle's result.
@@ -62,3 +62,16 @@ The bundle contains `xenoflux-3.1.1.tgz`, `smol-toml-1.9.0.tgz`, `manifest.json`
 and `install.mjs`. Build and verify it using the [release procedure](LOCAL-RELEASE.md).
 The detached smoke uses disposable npm/managed installations, homes and controllers.
 Fixture results retain the [3.1.0 native evidence limits](RELEASE-3.1.0.md#remaining-limits).
+
+## Public CI follow-up
+
+The [first public run](https://github.com/digitalexpression/xenoflux/actions/runs/42610534368)
+passed the Node 22 browser journeys but failed one of 49 on Node 24: a queued
+inspector-opening animation frame could steal focus after the user moved to
+search. Ten ordinary local repetitions passed; a controlled delayed-frame
+regression reproduced the focus loss. Deferred event focus now respects a newer
+focus choice, and the browser regression explicitly holds and flushes that frame.
+The corrected controlled journey passed ten repetitions on Node 22.15.0 and
+24.0.0. UI parity passed on both runtimes, and syntax, native-helper integrity,
+documentation, type and token checks passed after the correction. The original
+failed logs and browser trace remain separate from corrected runs.

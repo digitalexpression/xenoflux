@@ -686,9 +686,20 @@ test('comparison reconciles task outcomes, scoped measurements and recorded clos
     await expect(inspector).toHaveCount(0);
     await expect(responseEventTrigger).toBeFocused();
     await expect(search).toHaveValue('no matching recorded event');
+    await page.evaluate(() => {
+      const nextFrame = window.requestAnimationFrame.bind(window);
+      const pending = [];
+      window.requestAnimationFrame = callback => { pending.push(callback); return 0; };
+      window.flushReplayFrame = () => new Promise(resolve => {
+        window.requestAnimationFrame = nextFrame;
+        nextFrame(time => { for (const callback of pending) callback(time); resolve(); });
+      });
+    });
     await responseEventTrigger.click();
     await expect(inspector).toBeVisible();
     await search.focus();
+    await page.evaluate(() => window.flushReplayFrame());
+    await expect(search).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(inspector).toHaveCount(0);
     await expect(search).toBeFocused();

@@ -239,6 +239,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
   const axisSpan = Math.max(1, axisEnd - axisStart);
 
   function focusEvent(key: string, inspector = false) {
+    const previousFocus = document.activeElement;
     requestAnimationFrame(() => {
       const target = document.querySelector<HTMLButtonElement>(`[data-replay-event="${CSS.escape(key)}"]`);
       let ancestor = target?.parentElement?.closest('details') ?? null;
@@ -249,6 +250,8 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
         }
         ancestor = ancestor.parentElement?.closest('details') ?? null;
       }
+      // A delayed frame must respect focus moved by a newer user action.
+      if (document.activeElement !== previousFocus && document.activeElement !== document.body) return;
       if (inspector) document.getElementById(`${labelled}-inspector-title`)?.focus();
       else target?.focus();
     });
