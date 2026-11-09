@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, access, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { createUiRunsFixture } from '../test-support/ui-runs-fixture.js';
@@ -269,6 +269,30 @@ test('stopping and reopening the server reports interruption without repeating a
   assert.ok((await app.provider.overview()).recent.some(item => item.href === `/runs/${run.id}`));
   await app.provider.startRun({ previewToken: preview.previewToken });
   assert.deepEqual(app.calls.captures, ['baseline']);
+});
+
+test('cancel stops owned work even after its UI receipt disappears', async t => {
+  const app = await fixture(t, { capture: 'delayed' });
+  const preview = await app.provider.runPreview(request(app));
+  const started = await app.provider.startRun({ previewToken: preview.previewToken });
+  await waitFor(() => app.calls.captures.length, count => count === 1, 'Capture did not start');
+  await rm(join(app.store.directory, 'ui-runs', `${started.id}.json`));
+  assert.equal((await app.provider.cancelRun(started)).state, 'cancelled');
+  assert.equal((await app.provider.info()).activeJobs.length, 0);
+  assert.equal((await readAuditRecord(app.store, started.id)).report.status, 'cancelled');
+});
+
+test('shutdown stops every owned job when one receipt is corrupt', async t => {
+  const app = await fixture(t, { capture: 'delayed' });
+  const previews = await Promise.all([app.provider.runPreview(request(app)), app.provider.runPreview(request(app))]);
+  const started = await Promise.all(previews.map(preview => app.provider.startRun({ previewToken: preview.previewToken })));
+  await waitFor(() => app.calls.captures.length, count => count === 2, 'Both captures did not start');
+  const damaged = join(app.store.directory, 'ui-runs', `${started[0].id}.json`);
+  await writeFile(damaged, 'broken JSON');
+  await assert.rejects(app.provider.close(), /Owned comparisons stopped/);
+  assert.equal((await app.provider.info()).activeJobs.length, 0);
+  for (const run of started) assert.equal((await readAuditRecord(app.store, run.id)).report.status, 'cancelled');
+  assert.equal(await readFile(damaged, 'utf8'), 'broken JSON');
 });
 
 test('recovery previews stopped owned records, rejects an unreviewed apply, and retains both partial sides', async t => {

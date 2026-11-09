@@ -14,7 +14,7 @@ export function SkillDetail() {
   const [params] = useSearchParams();
   const a = params.get('a') ?? '', b = params.get('b') ?? '';
   const item = params.get('item') ?? undefined;
-  const view = useResource(() => apiGet<View>(`/api/compare/setups/skills/${encodeURIComponent(skill)}`, { a, b, item }), `${skill}|${a}|${b}|${item ?? ''}`);
+  const view = useResource(() => apiGet<View>(`/api/compare/setups/skills/${encodeURIComponent(skill)}`, { a, b, item }), JSON.stringify([skill, a, b, item]));
   const [current, setCurrent] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const data = view.data;

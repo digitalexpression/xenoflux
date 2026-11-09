@@ -37,7 +37,7 @@ async function git(root, ...args) {
   } })).stdout.trim();
 }
 
-function appServer(counterPath, protocolErrorsPath, pauseOnTurnStartMarker = null, pausePidMarker = null,
+function appServer(counterPath, protocolErrorsPath, pauseOnTurnStartMarker = null,
   nativeVersion = version, contextSource = null) {
   return `#!/usr/bin/env node
 const fs = require('node:fs');
@@ -45,7 +45,6 @@ const path = require('node:path');
 const VERSION = ${JSON.stringify(nativeVersion)};
 const CONTEXT_SOURCE = ${JSON.stringify(contextSource)};
 const PAUSE_ON_TURN_START = ${JSON.stringify(pauseOnTurnStartMarker)};
-const PAUSE_PID_MARKER = ${JSON.stringify(pausePidMarker)};
 const { createServer } = require('node:http');
 if (process.argv.includes('--version')) { process.stdout.write('codex-cli ' + VERSION + '\\n'); process.exit(0); }
 const configArgs = process.argv.slice(2);
@@ -130,13 +129,17 @@ async function respond(message) {
       || policy.networkAccess !== false || policy.excludeTmpdirEnvVar !== false || policy.excludeSlashTmp !== false) return fail(id,'turn-start-schema');
     const model=(fs.readFileSync(path.join(process.env.CODEX_HOME,'config.toml'),'utf8').match(/^model\\s*=\\s*"([^"]+)"/m)||[])[1] ?? 'unknown';
     fs.writeFileSync(path.join(params.cwd,'result.txt'), 'model=' + model + '\\n', {mode:0o600});
-    if (PAUSE_ON_TURN_START) fs.writeFileSync(PAUSE_ON_TURN_START, 'turn-started\\n', {flag:'wx',mode:0o600});
+    if (PAUSE_ON_TURN_START) {
+      const ready = PAUSE_ON_TURN_START + '.ready-' + process.pid;
+      fs.writeFileSync(ready, JSON.stringify({pid:process.pid}), {flag:'wx',mode:0o600});
+      fs.renameSync(ready, PAUSE_ON_TURN_START);
+    }
     reply(id,{turn:{id:'root-turn',status:'inProgress'}});
     notify('turn/started',{threadId:'11111111-1111-4111-8111-111111111111',turn:{id:'root-turn',status:'inProgress'}});
     for (const method of ['item/agentMessage/delta','item/commandExecution/outputDelta','turn/diff/updated','turn/moderationMetadata','thread/readState/changed'])
       notify(method,{threadId:'11111111-1111-4111-8111-111111111111',...(method==='thread/readState/changed'?{}:{turnId:'root-turn'}),
         itemId:'root-read',delta:'PRIVATE_STREAM_PAYLOAD',diff:'PRIVATE_STREAM_PATCH',metadata:{secret:'PRIVATE_MODERATION_PAYLOAD'},readState:'unread'});
-    if (PAUSE_ON_TURN_START) { if (PAUSE_PID_MARKER) fs.writeFileSync(PAUSE_PID_MARKER,String(process.pid),{flag:'wx',mode:0o600}); setInterval(()=>{},1000); return; }
+    if (PAUSE_ON_TURN_START) { setInterval(()=>{},1000); return; }
     const projectSkill=path.join(params.cwd,'.agents/skills/shared/SKILL.md');
     notify('item/completed',{threadId:'11111111-1111-4111-8111-111111111111',turnId:'root-turn',completedAtMs:20,item:{id:'root-read',type:'commandExecution',command:'cat .agents/skills/shared/SKILL.md',commandActions:[{type:'read',path:projectSkill}],cwd:params.cwd,status:'completed',exitCode:0,aggregatedOutput:'PRIVATE_TOOL_OUTPUT'}});
     notify('thread/tokenUsage/updated',{threadId:'11111111-1111-4111-8111-111111111111',turnId:'root-turn',tokenUsage:{last:{inputTokens:11,outputTokens:4,cachedInputTokens:2,reasoningOutputTokens:1,totalTokens:15},total:{inputTokens:11,outputTokens:4,cachedInputTokens:2,reasoningOutputTokens:1,totalTokens:15}}});
@@ -180,7 +183,7 @@ async function runObserveAccessFixture(profile, options = {}) {
   return result;
 }
 
-async function fixture(t, { pauseOnTurnStartMarker = null, pauseOnTurnStartPidMarker = null,
+async function fixture(t, { pauseOnTurnStartMarker = null,
   nativeVersion = version, contextSource = null } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-audit-experiment-')));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -200,7 +203,7 @@ async function fixture(t, { pauseOnTurnStartMarker = null, pauseOnTurnStartPidMa
   const commit = await git(repo, 'rev-parse', 'HEAD');
   const counter = join(root, 'app-server-launches.txt'), protocolErrors = join(root, 'protocol-errors.txt'), telemetry = `${counter}.telemetry`;
   const executable = join(root, 'fake-codex');
-  await writeFile(executable, appServer(counter, protocolErrors, pauseOnTurnStartMarker, pauseOnTurnStartPidMarker,
+  await writeFile(executable, appServer(counter, protocolErrors, pauseOnTurnStartMarker,
     nativeVersion, contextSource === 'source' ? join(repo, 'AGENTS.md') : contextSource), { mode: 0o700 });
   const native = await Promise.all(['alpha','beta'].map(name => prepareNativeHome({
     directory: join(root, `native-${name}`), executable, codexVersion: nativeVersion,
@@ -984,38 +987,42 @@ test('SIGKILL after the first finalized child report resumes only unstarted stab
 test('an uncapped native task remains cancellable through the runner signal', async t => {
   const markerRoot = await realpath(await mkdtemp(join(tmpdir(), 'xfx-audit-uncapped-cancel-')));
   t.after(() => rm(markerRoot, { recursive: true, force: true }));
-  const marker = join(markerRoot, 'native-task-started'), pidMarker = `${marker}.pid`;
-  const f = await fixture(t, { pauseOnTurnStartMarker: marker, pauseOnTurnStartPidMarker: pidMarker });
+  const marker = join(markerRoot, 'native-task-started');
+  const f = await fixture(t, { pauseOnTurnStartMarker: marker });
   const input = { ...f.spec, limits: { ...f.spec.limits, runMs: null, experimentMs: null }, setup: [], checks: [] };
   const controller = new AbortController();
   const context = { baseDirectory: join(f.store.directory, 'audits'), signal: controller.signal,
     observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store }) };
   const running = runAuditExperiment(f.store, input, context);
-  const deadline = Date.now() + 30000;
-  while (Date.now() < deadline) {
-    try { await stat(marker); break; }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
-    await new Promise(resolve => setTimeout(resolve, 20));
+  try {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      try { await stat(marker); break; }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    await stat(marker);
+    const pid = JSON.parse(await readFile(marker, 'utf8')).pid;
+    assert.ok(Number.isSafeInteger(pid) && pid > 0);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.doesNotThrow(() => process.kill(pid, 0), 'the model process remains active without a run or experiment deadline');
+    controller.abort('fixture-cancel');
+    const report = await running;
+    assert.equal(report.status, 'cancelled');
+    assert.equal(report.limits.runMs, null);
+    assert.equal(report.limits.experimentMs, null);
+    assert.equal(await launchCount(f.counter), 1, 'cancellation stops later profiles without retrying the started task');
+    await waitForPidExit(pid);
+  } finally {
+    controller.abort('fixture-cleanup');
+    await running;
   }
-  await stat(marker);
-  const pid = Number(await readFile(pidMarker, 'utf8'));
-  assert.ok(Number.isSafeInteger(pid) && pid > 0);
-  await new Promise(resolve => setTimeout(resolve, 100));
-  assert.doesNotThrow(() => process.kill(pid, 0), 'the model process remains active without a run or experiment deadline');
-  controller.abort('fixture-cancel');
-  const report = await running;
-  assert.equal(report.status, 'cancelled');
-  assert.equal(report.limits.runMs, null);
-  assert.equal(report.limits.experimentMs, null);
-  assert.equal(await launchCount(f.counter), 1, 'cancellation stops later profiles without retrying the started task');
-  await waitForPidExit(pid);
 });
 
 test('SIGTERM during an audit resume cancels the active native task and leaves started slots unreplayed', async t => {
   const marker = join(await realpath(await mkdtemp(join(tmpdir(), 'xfx-audit-resume-term-'))), 'native-task-started');
   t.after(() => rm(dirname(marker), { recursive: true, force: true }));
-  const pidMarker = `${marker}.pid`;
-  const f = await fixture(t, { pauseOnTurnStartMarker: marker, pauseOnTurnStartPidMarker: pidMarker });
+  const f = await fixture(t, { pauseOnTurnStartMarker: marker });
   const spec = { ...repeatedSpec(f), trials: { count: 2, order: 'balanced', budgetMs: 90000 } };
   const context = { baseDirectory: join(f.store.directory, 'audits'),
     observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store }),
@@ -1052,7 +1059,7 @@ test('SIGTERM during an audit resume cancels the active native task and leaves s
   assert.deepEqual(seriesAtPause.record.plan.map(slot => slot.experimentId), plannedIds);
   assert.equal(seriesAtPause.state.trials[0].status, 'interrupted', 'the prior started slot remains recorded as interrupted');
   assert.equal(seriesAtPause.state.trials[1].status, 'starting');
-  const nativePid = Number(await readFile(pidMarker, 'utf8'));
+  const nativePid = JSON.parse(await readFile(marker, 'utf8')).pid;
   assert.ok(Number.isSafeInteger(nativePid) && nativePid > 0, 'fixture identifies its paused native process');
 
   child.kill('SIGTERM');

@@ -303,3 +303,62 @@ test('client controls run only on request and refuse a CLI/Desktop conflict', as
   assert.equal(f.calls.at(-1)[0], 'showTerminal');
   await assert.rejects(f.provider.clientAction({ name: 'baseline', action: 'format-disk' }), error => error.code === 'invalid-action');
 });
+
+test('copy refuses a preview whose destination name now identifies another profile', async t => {
+  const f = await fixture(t);
+  await put(f.a.home, 'AGENTS.md', await text(join(f.b.home, 'AGENTS.md')));
+  const plan = await f.provider.copyPlan({ from: 'Default', target: 'strict-review' });
+  const item = plan.items.find(entry => entry.name === 'AGENTS.md');
+  const before = await Promise.all([text(join(f.a.home, 'AGENTS.md')), text(join(f.b.home, 'AGENTS.md'))]);
+  await f.provider.renameProfile({ name: 'strict-review', newName: 'old-destination' });
+  await f.provider.renameProfile({ name: 'baseline', newName: 'strict-review' });
+  await assert.rejects(f.provider.copyApply({ from: 'Default', target: 'strict-review', items: [item.id], planToken: plan.planToken }), { code: 'changed' });
+  assert.deepEqual(await Promise.all([text(join(f.a.home, 'AGENTS.md')), text(join(f.b.home, 'AGENTS.md'))]), before);
+});
+
+test('copy fingerprints bind raw destination bytes while allowing unselected setting edits', async t => {
+  const f = await fixture(t);
+  const first = 'api_key = "sk-123456789012345678901234567890"\n';
+  const second = 'api_key = "sk-abcdefghijklmnopqrstuvwxyz1234"\n';
+  await put(f.b.home, 'AGENTS.md', first);
+  const plan = await f.provider.copyPlan({ from: 'Default', target: 'strict-review' });
+  const item = plan.items.find(entry => entry.name === 'AGENTS.md');
+  await put(f.b.home, 'AGENTS.md', second);
+  const fresh = await f.provider.copyPlan({ from: 'Default', target: 'strict-review' });
+  assert.deepEqual(fresh.items.find(entry => entry.id === item.id).details, item.details, 'the redacted previews are identical');
+  await assert.rejects(f.provider.copyApply({ from: 'Default', target: 'strict-review', items: [item.id], planToken: plan.planToken }), { code: 'changed' });
+  assert.equal(await text(join(f.b.home, 'AGENTS.md')), second);
+  await put(f.b.home, 'config.toml', (await text(join(f.b.home, 'config.toml'))).replace('model_reasoning_effort = "high"', 'model_reasoning_effort = "low"'));
+  const applied = await f.provider.copyApply({ from: 'Default', target: 'strict-review', items: [item.id], planToken: fresh.planToken });
+  assert.equal(applied.status, 'applied');
+  assert.match(await text(join(f.b.home, 'config.toml')), /"low"/);
+  assert.equal(await text(join(f.b.home, 'AGENTS.md')), 'Default instructions.\n');
+});
+
+test('copy rechecks reviewed bytes after client preparation under its transaction lock', async t => {
+  let destination, replacement;
+  const f = await fixture(t, { copyRuntime: () => ({
+    prepareClients: async () => { await writeFile(destination, replacement); }, assertIdle: async () => {},
+  }) });
+  destination = join(f.b.home, 'AGENTS.md');
+  replacement = 'Edited while waiting for client preparation.\n';
+  const plan = await f.provider.copyPlan({ from: 'Default', target: 'strict-review' });
+  const item = plan.items.find(entry => entry.name === 'AGENTS.md');
+  await assert.rejects(f.provider.copyApply({ from: 'Default', target: 'strict-review', items: [item.id], planToken: plan.planToken }), { code: 'changed' });
+  assert.equal(await text(destination), replacement);
+});
+
+test('setup cache distinguishes profile pairs containing separators', async t => {
+  const f = await fixture(t);
+  const names = ['A|B', 'C', 'A', 'B|C'];
+  for (const [index, name] of names.entries()) {
+    const native = await prepareNativeHome({ directory: join(f.root, `cache-${index}`), executable: join(f.root, 'codex'), codexVersion: '0.153.4' });
+    await f.store.update(data => create(data, name));
+    await registerHome(f.store, name, native.root, { executable: join(f.root, 'codex'), version: '0.153.4' });
+    await put(native.home, 'config.toml', `allow_symlinked_codex_home = true\nmodel = "model-${index}"\n`);
+  }
+  await f.provider.setupComparison({ a: 'A|B', b: 'C' });
+  const view = await f.provider.setupComparison({ a: 'A', b: 'B|C' });
+  const model = view.groups.flatMap(group => group.items).find(item => item.name === 'model');
+  assert.deepEqual(model.summary.map(part => part.text), ['model-2', ' → ', 'model-3']);
+});

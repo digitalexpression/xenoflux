@@ -457,3 +457,36 @@ test('two comparisons and two reviews overlap on one profile with separate setti
   assert.equal((await app.provider.reviewTask({ id: r1 })).response.text, 'Review r1');
   assert.equal((await app.provider.reviews({ ref })).reviewTasks.filter(row => row.status === 'completed').length, 2);
 });
+
+test('shutdown waits for an ordinary review even when comparison receipt cleanup fails', async t => {
+  const harness = reviewContext('cancel'), mode = {};
+  let releaseReview;
+  const gate = new Promise(resolve => { releaseReview = resolve; });
+  const originalCapture = harness.context.capture;
+  harness.context.capture = async options => {
+    const result = await originalCapture(options);
+    await gate;
+    return result;
+  };
+  const app = await createUiRunsFixture({ mode, reviewContext: harness.context });
+  t.after(async () => { releaseReview(); await app.close(); });
+  const ref = await seedComparison(app);
+  const preview = await previewTask(app, ref);
+  const review = await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
+  await until(() => app.provider.reviewTask(review), task => task.status === 'running', 'Review did not start');
+  mode.capture = 'delayed';
+  const runPreview = await app.provider.runPreview(input(app));
+  const comparison = await app.provider.startRun({ previewToken: runPreview.previewToken });
+  await until(() => app.calls.captures.length, count => count === 3, 'Comparison did not start');
+  await writeFile(join(app.store.directory, 'ui-runs', `${comparison.id}.json`), 'corrupt receipt');
+  let settled = false;
+  const closing = app.provider.close().finally(() => { settled = true; });
+  void closing.catch(() => {});
+  await until(async () => (await app.provider.info()).activeJobs.filter(job => job.kind === 'comparison').length,
+    count => count === 0, 'Comparison did not stop');
+  assert.equal(settled, false, 'provider shutdown must await the review after comparison cleanup fails');
+  releaseReview();
+  await assert.rejects(closing, /Owned comparisons stopped/);
+  assert.equal((await app.provider.info()).activeJobs.length, 0);
+  assert.equal((await app.provider.reviewTask(review)).status, 'cancelled');
+});

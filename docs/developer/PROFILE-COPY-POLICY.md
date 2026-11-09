@@ -79,8 +79,9 @@ bounded evidence and limitations.
    conversation with a user-reviewed handover when that is the desired outcome.
 
 7. **Keep the flow and recovery small.** Reuse the existing preview, transaction,
-   conflict, journal, undo, and recovery mechanisms. Revalidate reviewed inputs before
-   applying. Undo must restore replaced and removed package files and relevant modes,
+   conflict, journal, undo, and recovery mechanisms. Bind copy previews to stable source/destination identities and fingerprints of
+   selected before/after contents and modes. Revalidate these under the copy lock
+   before applying. Undo must restore replaced and removed package files and relevant modes,
    and refuse to overwrite subsequent user edits. Preserve original recovery records.
    Recovery and Undo must work for supported current-format operations; older journal
    readers and migration are not required under the [major-release policy](AUDIT-GOAL.md#evolution-and-provider-version-policy).

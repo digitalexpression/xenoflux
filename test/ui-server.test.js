@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
-import { mkdtemp, mkdir, rm, writeFile, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, symlink, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startUiServer, UiError } from '../src/ui-server.js';
 import { createDemoProvider } from '../src/ui-demo.js';
+import { runUi } from '../src/ui-command.js';
 
 function call(port, { method = 'GET', path = '/', headers = {}, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -23,6 +24,17 @@ function call(port, { method = 'GET', path = '/', headers = {}, body } = {}) {
     if (body !== undefined) req.end(typeof body === 'string' ? body : JSON.stringify(body)); else req.end();
   });
 }
+
+test('app shutdown closes its listener and launch state after provider cleanup fails', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-ui-stop-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const app = await runUi({ store: { directory: root }, provider: { close: async () => { throw new Error('receipt failure'); } },
+    staticRoot: null, openBrowser: false, signals: false, out: () => {} });
+  await assert.rejects(app.stop(), /receipt failure/);
+  await app.closed;
+  await assert.rejects(fetch(app.origin));
+  await assert.rejects(access(join(root, 'ui-server.json')), { code: 'ENOENT' });
+});
 
 async function fixture(t, provider = createDemoProvider()) {
   const root = await mkdtemp(join(tmpdir(), 'xfx-ui-'));

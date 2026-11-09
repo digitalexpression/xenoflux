@@ -20,7 +20,7 @@ export function SetupComparison() {
   const [params, setParams] = useSearchParams();
   const a = params.get('a') ?? '', b = params.get('b') ?? '';
   if (!a || !b) return <ChooseProfiles />;
-  return <ComparisonView key={`${a}|${b}`} a={a} b={b} onChange={(x, y) => setParams({ a: x, b: y })} />;
+  return <ComparisonView key={JSON.stringify([a, b])} a={a} b={b} onChange={(x, y) => setParams({ a: x, b: y })} />;
 }
 
 function ChooseProfiles() {
@@ -73,7 +73,7 @@ function ProfilePairForm({ names, initial, onSubmit, submitLabel, onCancel }:
 
 function ComparisonView({ a, b, onChange }: { a: string; b: string; onChange: (a: string, b: string) => void }) {
   const info = useInfo();
-  const view = useResource(() => apiGet<View>('/api/compare/setups', { a, b }), `${a}|${b}`);
+  const view = useResource(() => apiGet<View>('/api/compare/setups', { a, b }), JSON.stringify([a, b]));
   const profiles = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles');
   const [preset, setPreset] = useState<'attention' | 'all'>('attention');
   const [only, setOnly] = useState<TileKey | null>(null);

@@ -4,7 +4,7 @@ import { test, expect } from './fixtures.js';
 
 test('prepare an export-bound review packet, import a citation, and reopen source-free', async ({ app, page }, testInfo) => {
   await page.goto(`${app.origin}/compare/sessions`);
-  const search = page.getByRole('searchbox', { name: 'Search task text or project' });
+  const search = page.getByRole('searchbox', { name: 'Search title or project' });
   await search.fill('Fix the date test');
   await page.getByRole('checkbox', { name: /Fix the date test, baseline, Codex CLI/ }).check();
   await page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop/ }).check();

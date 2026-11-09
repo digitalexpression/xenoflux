@@ -378,7 +378,7 @@ export interface ReviewTaskView {
   inputFingerprint?: string | null;
   promptSha256?: string | null;
   includeRecordedContent?: boolean;
-  response: { status: 'complete' | 'partial' | 'unavailable'; text: string | null; threadId: string | null; turnId: string | null } | null;
+  response: { status: 'complete' | 'partial' | 'unavailable'; text: string | null; reason?: string; threadId: string | null; turnId: string | null } | null;
   pendingRequests: ReviewTaskPendingRequest[];
   shutdown: { status: string; groupTerminated: boolean; processStatus?: string | null; exitCode?: number | null } | null;
   error: string | null;
@@ -408,7 +408,7 @@ export interface ExportPlan {
   reviewedEvidence?: boolean;
   privacy: string;
 }
-export interface ExportResult { folder: string; files: string[]; contentIncluded: string; replayContentIncluded?: string; reviewPacketFingerprint?: string; reviewPacketRef?: string }
+export interface ExportResult { warning?: string; folder: string; files: string[]; contentIncluded: string; replayContentIncluded?: string; reviewPacketFingerprint?: string; reviewPacketRef?: string }
 export interface SavedSummary {
   id: string;
   title: string;

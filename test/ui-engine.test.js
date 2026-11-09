@@ -243,3 +243,55 @@ test('native replay bodies are local until selected, and frozen replay reopens w
   const omitted = await fresh.report({ ref: metadataOnly.ref });
   assert.ok(omitted.replay.a.sessions[0].events.every(event => event.body == null));
 });
+
+test('concurrent exports reserve separate folders and retain every Recent entry', async t => {
+  const f = await fixture(t);
+  const rows = (await f.provider.sessions({})).sessions;
+  const keys = ['baseline', 'strict-review'].map(name => rows.find(row => row.profile === name).key);
+  const { ref } = await f.provider.compareSessions({ left: keys[0], right: keys[1], title: 'Concurrent exports' });
+  const other = createEngineProvider({ store: new Store(f.store.directory), reportsRoot: f.reportsRoot, defaultUserHome: join(f.root, 'no-default-home') });
+  const otherRef = (await other.compareSessions({ left: keys[0], right: keys[1], title: 'Concurrent exports' })).ref;
+  const results = await Promise.all(Array.from({ length: 10 }, (_, index) => index % 2
+    ? other.exportReport({ ref: otherRef }) : f.provider.exportReport({ ref })));
+  assert.equal(new Set(results.map(result => result.folder)).size, 10);
+  assert.ok(results.every(result => result.warning === undefined));
+  assert.equal((await readdir(f.reportsRoot)).length, 10);
+  const { recent } = await f.provider.savedReports();
+  assert.equal(recent.length, 10);
+  for (const entry of recent) assert.equal((await f.provider.openRecentReport({ id: entry.id })).title, 'Concurrent exports');
+});
+
+test('an exported pair remains available when the Recent index cannot be updated', async t => {
+  const f = await fixture(t);
+  const rows = (await f.provider.sessions({})).sessions;
+  const keys = ['baseline', 'strict-review'].map(name => rows.find(row => row.profile === name).key);
+  const { ref } = await f.provider.compareSessions({ left: keys[0], right: keys[1] });
+  const index = join(f.store.directory, 'ui-saved-reports.json');
+  await writeFile(index, 'broken index');
+  const result = await f.provider.exportReport({ ref });
+  assert.match(result.warning, /Both files were saved/);
+  assert.equal(await readFile(index, 'utf8'), 'broken index');
+  const folders = await readdir(f.reportsRoot);
+  const json = await readFile(join(f.reportsRoot, folders[0], result.files.find(name => name.endsWith('.json'))), 'utf8');
+  assert.ok((await f.provider.openReport({ fileName: 'saved.audit.json', text: json })).ref);
+});
+
+test('session client filtering finds matches older than the unfiltered limit and searches project paths', async t => {
+  const f = await fixture(t);
+  const native = (await f.store.read()).profiles.find(profile => profile.name === 'baseline').native;
+  const home = join(native.root, 'codex-home');
+  const oldId = id(600);
+  await seedSession(home, oldId, { title: 'Old desktop task', model: 'model', turn: id(601), originator: 'Codex Desktop', source: 'vscode' });
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(join(home, 'state_5.sqlite'));
+  const insert = db.prepare('INSERT INTO threads (id,cwd,title,created_at,updated_at,archived,source) VALUES(?,?,?,?,?,0,?)');
+  for (let i = 0; i < 120; i++) insert.run(id(700 + i), '/workspace/new-project', `New CLI task ${i}`, i + 10, i + 10, 'cli');
+  db.close();
+  assert.equal((await f.provider.sessions({ profile: 'baseline' })).sessions.length, 100);
+  const desktop = await f.provider.sessions({ profile: 'baseline', client: 'desktop' });
+  assert.deepEqual(desktop.sessions.map(row => row.title), ['Old desktop task']);
+  assert.equal(desktop.truncated, false);
+  const byProject = await f.provider.sessions({ profile: 'baseline', query: 'new-project' });
+  assert.equal(byProject.sessions.length, 100);
+  assert.equal(byProject.truncated, true);
+});

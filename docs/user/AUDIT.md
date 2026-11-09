@@ -451,16 +451,17 @@ The repository must be an absolute normalized path to a Git repository.
 clearest reproducibility. A branch name such as `develop` is resolved once to a
 full commit ID at experiment preflight, and all run workspaces use that pinned
 object even if the branch later moves. The report records the selected commit,
-source HEAD, and whether the source worktree was dirty. Dirty tracked changes and
-untracked files are context only: they are not included in the experiment input,
-and the original worktree and index are left untouched. Ignored files are also
+source HEAD, and committed tree. New comparisons record worktree cleanliness as
+unknown because checking it can execute configured Git filters. Dirty tracked
+changes and untracked files are excluded from the experiment input, and the
+original worktree and index are preserved. Ignored files are also
 excluded. Xenoflux materializes the selected committed tree into a private,
 separate checkout. It refuses submodules, Git LFS pointer files, unsupported Git
 objects, and trees over its size limits (50,000 entries, 1 GiB total, 64 MiB per
 blob). Source Git configuration and credentials are not copied. The task therefore
 runs at a different absolute path from the source checkout, which can affect
-project path-specific configuration or trust. Review the resolved baseline and
-source-dirty flag before interpreting results.
+project path-specific configuration or trust. Review the resolved commit and tree before interpreting results. Existing reports
+retain their recorded source-dirty flag.
 
 Select between two and eight sides. Distinct profiles can be selected by name.
 To use one profile more than once, give every selection sharing that home a

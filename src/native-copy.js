@@ -1,17 +1,13 @@
 // Selective configuration copies. Credentials and native runtime data are never copied.
-import { lstat, realpath, readdir, open, mkdir, writeFile, rename, unlink } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { lstat, realpath, unlink } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import { join, dirname, relative, isAbsolute } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { parse, stringify } from 'smol-toml';
 import { resolveHome } from './homes.js';
 import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { acquire, release, globalLock, privateDirectory, readJSON, record, exists } from './metadata.js';
 import { createDesktopRuntime } from './desktop-runtime.js';
-import { redactText, redactValue } from './redact.js';
-import { AGENT_KEYS, CONFIG_KEYS, MAX_COPIED_NATIVE_CONFIG_BYTES, supportsNativeProvider } from './native-config.js';
 import { buildAdvancedCopy, selectAdvancedComponents, validateAdvancedSelection, persistAdvancedFiles, validateAdvancedFiles,
   writeAdvanced, matchesAdvanced, snapshotAdvanced, cleanupAdvancedDirectories, matchesAdvancedPackages,
   applyAdvancedPackageDirectories } from './advanced-copy.js';
@@ -21,15 +17,12 @@ export { fingerprintAdvancedSelection as fingerprintCopySource } from './advance
 
 export const COPY_COMPONENTS = Object.freeze(['config', 'instructions', 'agents']);
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const MAX_FILE = MAX_COPIED_NATIVE_CONFIG_BYTES, MAX_FILES = 64;
+const MAX_FILES = 64;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const digest = value => hash(JSON.stringify(value));
 const rootPath = store => join(store.directory, 'native-copies');
 const pendingPath = store => join(rootPath(store), 'pending.json');
-const relativeFile = path => ['config.toml', 'AGENTS.md', 'AGENTS.override.md'].includes(path)
-  || /^agents\/[a-zA-Z0-9_-]+\.toml$/.test(path);
 const equal = (a, b) => isDeepStrictEqual(a, b);
-const bytes = value => Buffer.byteLength(value ?? '');
 function overlap(a, b) {
   const inside = (x, y) => { const r = relative(x, y); return !r || (!r.startsWith('../') && r !== '..' && !isAbsolute(r)); };
   return inside(a, b) || inside(b, a);
@@ -53,40 +46,11 @@ function selection(include) {
     throw new Error('Choose --include config,instructions,agents (any subset, including empty). Other components are not supported.');
   return COPY_COMPONENTS.filter(x => list.includes(x));
 }
-// Shared by the read-only settings comparison.  Keeping component selection
-// beside copy makes the supported comparison surface exactly the copy/undo
-// surface rather than a claim about all effective Codex discovery.
-export function selectNativeSettingsComponents(include) { return selection(include); }
 async function directory(path, privateOnly = false) {
   const s = await lstat(path);
   if (!s.isDirectory() || s.isSymbolicLink() || await realpath(path) !== path || s.uid !== process.getuid()
     || (s.mode & (privateOnly ? 0o077 : 0o022))) throw new Error('Expected a canonical owned directory: ' + path);
   return { path, device: s.dev, inode: s.ino };
-}
-async function textFile(path, limit = MAX_FILE) {
-  let handle;
-  try { await directory(dirname(path)); }
-  catch (e) { if (e.code === 'ENOENT') return null; throw e; }
-  try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-  catch (e) { if (e.code === 'ENOENT') return null; throw new Error('Unsafe or unreadable settings file: ' + path); }
-  try {
-    const s = await handle.stat();
-    if (!s.isFile() || s.nlink !== 1 || s.uid !== process.getuid() || (s.mode & 0o022) || s.size > limit)
-      throw new Error('Expected a bounded owned settings file: ' + path);
-    const buffer = await handle.readFile();
-    if (buffer.length > limit || buffer.includes(0)) throw new Error('Invalid settings text: ' + path);
-    let content;
-    try { content = new TextDecoder('utf-8', { fatal: true }).decode(buffer); }
-    catch { throw new Error('Invalid UTF-8 settings file: ' + path); }
-    return { content, mode: s.mode & 0o777 };
-  } finally { await handle.close(); }
-}
-function toml(text, name) {
-  try { return parse(text ?? ''); } catch { throw new Error('Invalid TOML in ' + name); }
-}
-function noSecrets(content, path) {
-  if (content !== null && redactText(content, path) !== content)
-    throw new Error('Credential-like content in selected settings; copy refused: ' + path);
 }
 async function endpoint(store, name, defaultUserHome, target = false) {
   if (typeof name !== 'string' || !name) throw new Error('Choose a source and destination');
@@ -103,55 +67,12 @@ async function endpoint(store, name, defaultUserHome, target = false) {
 export async function resolveNativeSettingsHome(store, name, { defaultUserHome = homedir() } = {}) {
   return endpoint(store, name, defaultUserHome);
 }
-async function agentFiles(home) {
-  const dir = join(home, 'agents');
-  if (!await exists(dir)) return [];
-  await directory(dir);
-  const names = (await readdir(dir)).filter(n => n.endsWith('.toml')).sort();
-  if (names.length > MAX_FILES || names.some(n => !relativeFile('agents/' + n))) throw new Error('Unsupported agent file name or count');
-  return names.map(n => 'agents/' + n);
-}
-export async function nativeSettingsAgentFiles(home) { return agentFiles(home); }
-export async function readNativeSettingsFile(home, path) { return textFile(join(home, path)); }
 async function safeStore(store, create = false) {
   await directory(store.directory, true);
   const canonical = await realpath(store.directory);
   if (canonical.split('/').some(p => ['.codex', '.agents'].includes(p))) throw new Error('Copy backups must be outside native discovery paths');
   if (create) await privateDirectory(rootPath(store), true);
   else if (await exists(rootPath(store))) await privateDirectory(rootPath(store));
-}
-function scalar(value) {
-  return ['string', 'number', 'boolean'].includes(typeof value)
-    || (Array.isArray(value) && value.every(x => typeof x === 'string'));
-}
-function projected(value, keys, name) {
-  const result = {};
-  for (const k of keys) if (Object.hasOwn(value, k)) {
-    if (!scalar(value[k])) throw new Error('Unsupported value for ' + name + '.' + k);
-    result[k] = value[k];
-  }
-  if (!equal(redactValue(result), result)) throw new Error('Credential-like content in selected ' + name);
-  return result;
-}
-/** Project the native configuration fields that copy/undo can represent. */
-export function projectNativeSettingsConfig(content, components) {
-  const config = toml(content, 'native configuration');
-  if (!supportsNativeProvider(config))
-    throw new Error('Custom model providers are outside the supported settings comparison surface');
-  const selected = Array.isArray(components) ? components : selection(components);
-  const result = {};
-  if (selected.includes('config')) Object.assign(result, projected(config, CONFIG_KEYS, 'config'));
-  if (selected.includes('agents')) {
-    const agents = projected(config.agents ?? {}, AGENT_KEYS, 'agents');
-    if (Object.keys(config.agents ?? {}).some(k => !AGENT_KEYS.includes(k)))
-      throw new Error('Unsupported agent settings are outside the supported settings comparison surface');
-    if (Object.keys(agents).length) result.agents = agents;
-    if (Object.hasOwn(config.features ?? {}, 'multi_agent')) {
-      if (typeof config.features.multi_agent !== 'boolean') throw new Error('Invalid multi_agent setting');
-      result.features = { multi_agent: config.features.multi_agent };
-    }
-  }
-  return redactValue(result);
 }
 async function build(store, sourceName, targetName, { include, selection: selectedItems, defaultUserHome = homedir() } = {}) {
   if (selectedItems !== undefined) {
@@ -306,8 +227,15 @@ async function clearPending(store, id) {
     await unlink(pendingPath(store));
   }
 }
+function assertReviewedCopy(report, options) {
+  if (options.expectedEndpointFingerprint && report.endpointFingerprint !== options.expectedEndpointFingerprint)
+    throw new Error('Copy profile identity changed; preview again');
+  if (options.expectedItemFingerprints && report.items.some(item => item.fingerprint !== options.expectedItemFingerprints[item.id]))
+    throw new Error('Copy selected contents changed; preview again');
+}
 export async function applyCopy(store, source, target, options = {}) {
   const initial = await build(store, source, target, options);
+  assertReviewedCopy(initial.report, options);
   if (options.expectedHash && initial.report.hash !== options.expectedHash) throw new Error('Copy preview changed; preview again');
   if (options.expectedSourceFingerprints) {
     const current = initial.plan.sourceFingerprints ?? {};
@@ -321,6 +249,7 @@ export async function applyCopy(store, source, target, options = {}) {
   const verifyInputs = async () => {
     if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
     const current = await build(store, source, target, options);
+    assertReviewedCopy(current.report, options);
     if (current.report.hash !== initial.report.hash) throw new Error('Copy inputs changed; preview again');
     if (options.expectedSourceFingerprints) {
       const fingerprints = current.plan.sourceFingerprints ?? {};

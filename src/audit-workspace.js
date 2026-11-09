@@ -20,7 +20,7 @@ const MAX_COMMAND_MS = 120_000;
 function run(command, args, { cwd, input, maxBuffer = 8 * 1024 * 1024, env = {}, timeoutMs = MAX_COMMAND_MS } = {}) {
   return new Promise((resolvePromise, reject) => {
     const minimal = Object.fromEntries(['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL'].filter(key => process.env[key]).map(key => [key, process.env[key]]));
-    const child = spawn(command, args, { cwd, detached: true, env: { ...minimal, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { cwd, detached: true, env: { ...minimal, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_NO_REPLACE_OBJECTS: '1', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     const stdout = []; let outSize = 0, timedOut = false, overflow = false, settled = false;
     const killGroup = signal => { if (!child.pid) return; try { process.kill(-child.pid, signal); } catch {} };
     const timer = setTimeout(() => { timedOut = true; killGroup('SIGTERM'); setTimeout(() => killGroup('SIGKILL'), 500).unref(); }, timeoutMs);
@@ -158,10 +158,9 @@ async function inspectTree(repository, commit) {
 }
 
 /** Resolve a committed source snapshot without changing the source repository.
- * The worktree status is recorded as context only; execution input always comes
- * from the resolved commit object, never from the working tree or index.
+ * Execution input comes from commit objects, never the working tree or index.
  */
-export async function inspectAuditRepository(repository, revision = 'HEAD') {
+export async function resolveAuditRepositoryCommit(repository, revision = 'HEAD') {
   const canonical = await getRepository(repository);
   if (typeof revision !== 'string' || !revision.trim() || /[\0\r\n]/.test(revision)) throw new Error('Choose an explicit Git revision');
   let commit, sourceHead;
@@ -172,8 +171,12 @@ export async function inspectAuditRepository(repository, revision = 'HEAD') {
     sourceHead = (await git(canonical, 'rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}')).toString('utf8').trim();
   }
   catch { throw new Error('Audit revision must resolve to a Git commit'); }
-  const status = await git(canonical, 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignore-submodules=all', { maxBuffer: 16 * 1024 * 1024 });
-  const clean = status.length === 0;
+  return { repository: canonical, selectedRevision: revision, commit, sourceHead };
+}
+
+export async function inspectAuditRepository(repository, revision = 'HEAD') {
+  const baseline = await resolveAuditRepositoryCommit(repository, revision);
+  const { repository: canonical, commit } = baseline;
   let tree;
   try { tree = await inspectTree(canonical, commit); }
   catch (error) {
@@ -182,8 +185,8 @@ export async function inspectAuditRepository(repository, revision = 'HEAD') {
   }
   // `git archive` and checkout filters are intentionally avoided. Tree capture
   // uses Git blobs directly and therefore never reads ignored/untracked files.
-  return { repository: canonical, selectedRevision: revision, commit, tree: tree.tree,
-    sourceHead, clean, sourceDirty: !clean, files: tree.entries.length, bytes: tree.bytes,
+  return { ...baseline, tree: tree.tree,
+    clean: null, sourceDirty: null, files: tree.entries.length, bytes: tree.bytes,
     sourceIdentity: { dev: String((await lstat(canonical)).dev), gitDirectory: (await git(canonical, 'rev-parse', '--absolute-git-dir')).toString('utf8').trim() } };
 }
 
@@ -237,28 +240,60 @@ async function authority(directory, owner) {
     baselineCommit: insideMarker.privateCommit };
 }
 
-async function materialize(repository, commit, entries, directory) {
+async function validateWorkspaceLink(directory, path) {
+  const remaining = relative(directory, path).split('/');
+  const resolved = [];
+  let hops = 0;
+  while (remaining.length) {
+    const part = remaining.shift();
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!resolved.length) throw new Error('Audit commit contains an escaping symlink');
+      resolved.pop();
+      continue;
+    }
+    const candidate = join(directory, ...resolved, part);
+    let info;
+    try { info = await lstat(candidate); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (info?.isSymbolicLink()) {
+      if (++hops > 40) throw new Error('Audit commit contains a cyclic or excessive symlink chain');
+      const target = await readlink(candidate);
+      if (!target || isAbsolute(target)) throw new Error('Audit commit contains an escaping symlink');
+      remaining.unshift(...target.split('/'));
+    } else resolved.push(part);
+  }
+  if (!resolved.length) throw new Error('Audit commit contains a symlink to the workspace root');
+}
+
+async function materialize(repository, entries, directory) {
+  const links = [];
   for await (const blobs of blobBatches(repository, entries)) {
     for (const { entry, bytes } of blobs) {
       const target = resolve(directory, ...entry.path.split('/'));
       if (!inside(directory, target)) throw new Error('Audit commit contains a path outside the workspace');
       await mkdir(dirname(target), { recursive: true, mode: 0o700 });
       if (entry.mode === '120000') {
+        if (bytes.length > 4096) throw new Error('Audit commit contains an oversized symlink target');
         const link = bytes.toString('utf8');
-        if (!link || isAbsolute(link) || !inside(directory, resolve(dirname(target), link))) throw new Error('Audit commit contains an escaping symlink');
-        await symlink(link, target);
+        if (!link || isAbsolute(link)) throw new Error('Audit commit contains an escaping symlink');
+        links.push({ target, link });
       } else {
         await writeFile(target, bytes, { mode: entry.mode === '100755' ? 0o700 : 0o600, flag: 'wx' });
       }
     }
   }
+  // Install links after ordinary writes, then resolve every component before Git or task execution.
+  for (const { target, link } of links) await symlink(link, target);
+  for (const { target } of links) await validateWorkspaceLink(directory, target);
 }
 
 /** Create a detached private repository containing exactly the selected tree. */
-export async function createAuditWorkspace({ repository, commit, directory, owner } = {}) {
+export async function createAuditWorkspace({ repository, commit, expectedTree, directory, owner } = {}) {
   const ids = ownerIds(owner);
   const source = await inspectAuditRepository(repository, commit);
   if (source.commit !== commit) throw new Error('Workspace commit must be the resolved full commit ID');
+  if (expectedTree !== undefined && source.tree !== expectedTree) throw new Error('Workspace tree changed after preview');
   if (typeof directory !== 'string' || !directory.trim()) throw new Error('Choose a workspace directory');
   const requested = resolve(directory), parent = await canonicalDirectory(dirname(requested), 'Audit run directory');
   if (basename(requested) !== 'workspace') throw new Error('Audit workspace must be the workspace child of its authorized run directory');
@@ -273,7 +308,9 @@ export async function createAuditWorkspace({ repository, commit, directory, owne
   await mkdir(resolved, { mode: 0o700 });
   const createdIdentity = identity(await lstat(resolved));
   try {
-    await materialize(source.repository, source.commit, (await inspectTree(source.repository, source.commit)).entries, resolved);
+    const tree = await inspectTree(source.repository, source.commit);
+    if (tree.tree !== source.tree) throw new Error('Workspace tree changed during preparation');
+    await materialize(source.repository, tree.entries, resolved);
     await run('git', ['init', '--quiet', '--template=', resolved]);
     const stagedIndex = join(parent.canonical, `.xfx-audit-index-${randomUUID()}`);
     const env = { GIT_INDEX_FILE: stagedIndex, GIT_AUTHOR_NAME: 'xfx-audit', GIT_AUTHOR_EMAIL: 'xfx-audit@invalid', GIT_COMMITTER_NAME: 'xfx-audit', GIT_COMMITTER_EMAIL: 'xfx-audit@invalid', GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z' };

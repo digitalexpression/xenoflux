@@ -4,7 +4,7 @@ import { test, expect } from './fixtures.js';
 
 async function choosePair(page) {
   if (!page.url().includes('/compare/sessions')) await page.goto(new URL('/compare/sessions', page.url()).toString());
-  const search = page.getByRole('searchbox', { name: 'Search task text or project' });
+  const search = page.getByRole('searchbox', { name: 'Search title or project' });
   await search.fill('Fix the date test');
   const baseline = page.getByRole('checkbox', { name: /Fix the date test, baseline, Codex CLI/ });
   await expect(baseline).toBeVisible();
@@ -165,7 +165,7 @@ test('export report files and reopen JSON after source histories are removed', a
 
 test('find and carry an older session beyond the latest hundred into comparison', async ({ page }) => {
   await page.goto(`${new URL(page.url()).origin}/sessions`);
-  await page.getByRole('searchbox', { name: 'Search task text or project' }).fill('Rare older task');
+  await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Rare older task');
   const compare = page.getByRole('link', { name: 'Compare Rare older task (baseline) with another session' });
   await compare.click();
   await expect(page.getByRole('heading', { name: 'Choose two sessions' })).toBeVisible();
@@ -174,9 +174,9 @@ test('find and carry an older session beyond the latest hundred into comparison'
   await expect(page.getByText('Rare older task', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Untick Rare older task (baseline)' }).click();
   await expect(page.getByRole('button', { name: 'Untick Rare older task (baseline)' })).toHaveCount(0);
-  await page.getByRole('searchbox', { name: 'Search task text or project' }).fill('Rare older task');
+  await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Rare older task');
   await page.getByRole('checkbox', { name: /Rare older task, baseline, Codex CLI/ }).check();
-  await page.getByRole('searchbox', { name: 'Search task text or project' }).fill('Fix the date test');
+  await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Fix the date test');
   const newer = page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop/ });
   await expect(newer).toBeVisible();
   await newer.check();

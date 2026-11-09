@@ -273,7 +273,7 @@ export async function previewAuditExperiment(store, input, context = {}) {
   }
   return { schemaVersion: 1, kind: 'audit-experiment-preview', status: failures.length ? 'blocked' : 'ready',
     baseline: repository ? { repository: repository.repository, commit: repository.commit, tree: repository.tree,
-      selectedRevision: spec.revision, sourceHead: repository.sourceHead ?? null, sourceDirty: repository.sourceDirty ?? repository.clean === false } : null,
+      selectedRevision: spec.revision, sourceHead: repository.sourceHead ?? null, sourceDirty: repository.sourceDirty ?? (typeof repository.clean === 'boolean' ? !repository.clean : null) } : null,
     repository: repository ? { path: repository.repository, commit: repository.commit, tree: repository.tree,
       files: repository.files, bytes: repository.bytes, clean: repository.clean } : null,
     profiles, taskCount: spec.profiles.length, executionOrder: spec.profiles.map(p => p.sideId ?? p.name),
@@ -457,7 +457,7 @@ export async function runAuditExperiment(store, input, context = {}) {
         await deps.writeState(store, runRecord.id, { status: 'running', phase: 'workspace-creating',
           coordinator: await coordinatorIdentity(), reservation: { root: profile.reservationRoot, owner, status: 'held' },
           workspace: workspaceIntent, process: null, startedAt: runResult.timestamps.startedAt });
-        workspace = await deps.createWorkspace({ repository: repository.repository, commit: repository.commit,
+        workspace = await deps.createWorkspace({ repository: repository.repository, commit: repository.commit, expectedTree: repository.tree,
           directory: intendedWorkspaceDirectory, owner: workspaceOwner });
         runResult.sourceWorkspace = { directory: workspace.directory, sourceCommit: workspace.sourceCommit, sourceTree: workspace.sourceTree };
         // createAuditWorkspace creates the owned active marker atomically.

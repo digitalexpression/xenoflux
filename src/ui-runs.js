@@ -7,7 +7,7 @@ import { privateDirectory, readJSON, record } from './metadata.js';
 import { listHomes } from './homes.js';
 import { validateAuditSpec } from './audit-spec.js';
 import { previewAuditExperiment, runAuditExperiment } from './audit-runner.js';
-import { inspectAuditRepository } from './audit-workspace.js';
+import { resolveAuditRepositoryCommit } from './audit-workspace.js';
 import { resolveAuditExecutionProfile, snapshotAuditProfileSettings, compareAuditProfileSettings } from './audit-profile.js';
 import { readAuditRecord } from './audit-experiment-store.js';
 import { showAuditRecord, recoverAuditExperiment } from './audit-experiment.js';
@@ -98,7 +98,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const homes = await listHomes(store), data = await store.read();
     const paths = [...new Set(data.profiles.flatMap(profile => profile.repositories.map(repo => repo.path)))];
     const repositories = await Promise.all(paths.map(async path => {
-      try { const repo = await inspectAuditRepository(path, 'HEAD'); return { path, commit: repo.commit }; }
+      try { const repo = await resolveAuditRepositoryCommit(path, 'HEAD'); return { path, commit: repo.commit }; }
       catch { return { path, commit: 'HEAD' }; }
     }));
     const profiles = homes.map(home => ({ name: home.name, ready: home.state === 'ready',
@@ -199,11 +199,16 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
   }
 
   async function load(id) {
-    const saved = await receipt(id);
+    const work = active.get(id) ?? finished.get(id);
+    let saved;
+    try { saved = await receipt(id); }
+    catch (error) {
+      if (!work) throw error;
+      saved = work;
+    }
     let current = null;
     try { current = await readAuditRecord(store, id); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const work = active.get(id) ?? finished.get(id);
     return { saved, current, work };
   }
   async function run({ id }) {
@@ -300,7 +305,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     return run({ id });
   }
   async function cancelRun({ id }) {
-    await receipt(id);
+    checkedId(id);
     const work = active.get(id);
     if (!work || work.done) return run({ id });
     work.controller.abort('user-cancelled');
@@ -343,11 +348,16 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     await Promise.allSettled([...starts.values()]);
     const working = [...active.values()].filter(entry => !entry.done);
     for (const work of working) {
-      const saved = await receipt(work.id);
-      await record(join(root, `${work.id}.json`), { ...saved, stoppedAt: new Date().toISOString() });
+      work.stoppedAt = new Date().toISOString();
       work.controller.abort('server-stopped');
     }
+    const receipts = await Promise.allSettled(working.map(async work => {
+      const saved = await receipt(work.id);
+      await record(join(root, `${work.id}.json`), { ...saved, stoppedAt: work.stoppedAt });
+    }));
     await Promise.allSettled(working.map(work => work.promise));
+    const failures = receipts.filter(result => result.status === 'rejected').map(result => result.reason);
+    if (failures.length) throw new AggregateError(failures, 'Owned comparisons stopped; some shutdown receipts could not be saved');
   }
   return { runOptions, runPreview, startRun, run, respondRun, cancelRun, recoverRun, comparison, activeJobs, activeRun, recent, close };
 }

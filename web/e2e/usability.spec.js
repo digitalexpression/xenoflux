@@ -36,7 +36,7 @@ test('keep keyboard focus through session replay, export, and saved reopen', asy
   await tabTo(page, existing);
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'Choose two sessions' })).toBeFocused();
-  const search = page.getByRole('searchbox', { name: 'Search task text or project' });
+  const search = page.getByRole('searchbox', { name: 'Search title or project' });
   await tabTo(page, search);
   await search.fill('Fix the date test');
   const strict = page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop/ });
@@ -107,7 +107,7 @@ test('keep keyboard focus through session replay, export, and saved reopen', asy
 
 test('saved report summary stays within viewport at narrow and enlarged text sizes', async ({ page }) => {
   await page.getByRole('link', { name: /^Use existing sessions/ }).click();
-  await page.getByRole('searchbox', { name: 'Search task text or project' }).fill('Fix the date test');
+  await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Fix the date test');
   await page.getByRole('checkbox', { name: /Fix the date test, baseline, Codex CLI/ }).check();
   await page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop/ }).check();
   await page.getByRole('button', { name: 'Compare sessions', exact: true }).click();

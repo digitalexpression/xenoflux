@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, writeFile, readFile, stat, chmod, symlink, lstat, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, stat, chmod, symlink, lstat, realpath, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { authorizeAuditWorkspaceParent, cleanupAuditWorkspace, createAuditWorkspace, inspectAuditRepository, setAuditWorkspaceActive, snapshotAuditWorkspace } from '../src/audit-workspace.js';
+import { Store, create } from '../src/profiles.js';
+import { createEngineProvider } from '../src/ui-engine.js';
 import { compareAuditWorkspaceDelta } from '../src/audit-runner.js';
 
 function command(bin, args, cwd, input) {
@@ -42,18 +44,18 @@ async function fixture(t) {
   return { root, base, runDirectory, owner, repository, baseCommit: commit, commit: resolvedCommit, workspace: join(runDirectory, 'workspace') };
 }
 
-test('inspect pins the selected commit and records dirty source state without using it as input', async t => {
+test('inspect pins the selected commit and leaves source cleanliness unknown', async t => {
   const f = await fixture(t);
   const result = await inspectAuditRepository(f.repository, f.commit);
-  assert.equal(result.clean, true); assert.equal(result.repository, await realpath(f.repository)); assert.equal(result.commit, f.commit);
-  assert.equal(result.sourceHead, f.commit); assert.equal(result.selectedRevision, f.commit); assert.equal(result.sourceDirty, false);
+  assert.equal(result.clean, null); assert.equal(result.repository, await realpath(f.repository)); assert.equal(result.commit, f.commit);
+  assert.equal(result.sourceHead, f.commit); assert.equal(result.selectedRevision, f.commit); assert.equal(result.sourceDirty, null);
   assert.equal(result.files, 5); // README, executable, binary, deletion fixture, .gitignore
   await writeFile(join(f.repository, 'untracked.txt'), 'dirty');
   const untracked = await inspectAuditRepository(f.repository, f.commit);
-  assert.equal(untracked.clean, false); assert.equal(untracked.sourceDirty, true); assert.equal(untracked.commit, f.commit);
+  assert.equal(untracked.clean, null); assert.equal(untracked.sourceDirty, null); assert.equal(untracked.commit, f.commit);
   await writeFile(join(f.repository, 'README.md'), 'edited');
   const tracked = await inspectAuditRepository(f.repository, f.commit);
-  assert.equal(tracked.clean, false); assert.equal(tracked.commit, f.commit);
+  assert.equal(tracked.clean, null); assert.equal(tracked.commit, f.commit);
 });
 
 test('inspects an explicitly selected non-HEAD commit while preserving dirty tracked and untracked work', async t => {
@@ -65,8 +67,8 @@ test('inspects an explicitly selected non-HEAD commit while preserving dirty tra
   assert.equal(result.selectedRevision, 'baseline');
   assert.equal(result.commit, f.baseCommit);
   assert.notEqual(result.sourceHead, result.commit);
-  assert.equal(result.clean, false);
-  assert.equal(result.sourceDirty, true);
+  assert.equal(result.clean, null);
+  assert.equal(result.sourceDirty, null);
   assert.equal(result.tree, (await command('git', ['-C', f.repository, 'rev-parse', `${f.baseCommit}^{tree}`], f.root)));
   assert.equal(await readFile(join(f.repository, 'README.md'), 'utf8'), 'uncommitted change\n');
   assert.equal(await readFile(join(f.repository, 'untracked-secret.txt'), 'utf8'), 'must not enter workspace');
@@ -294,4 +296,94 @@ test('rejects Git LFS pointers and submodule entries with explicit reasons', asy
   await command('git', ['-C', f.repository, 'update-index', '--add', '--cacheinfo', `160000,${treeish},vendor/sub`], f.root);
   await command('git', ['-C', f.repository, 'commit', '-qm', 'submodule entry'], f.root);
   await assert.rejects(inspectAuditRepository(f.repository), /unsupported submodule/);
+});
+
+test('repository inspection and the Runs picker never execute configured filters', async t => {
+  const f = await fixture(t), marker = join(f.root, 'filter-executed');
+  await writeFile(join(f.repository, '.gitattributes'), '*.md filter=fixture\n');
+  await command('git', ['-C', f.repository, 'add', '.gitattributes'], f.root);
+  await command('git', ['-C', f.repository, 'commit', '-qm', 'filter attributes'], f.root);
+  await command('git', ['-C', f.repository, 'config', 'filter.fixture.clean', `printf fired > '${marker}'; cat`], f.root);
+  await writeFile(join(f.repository, 'README.md'), 'edit\n');
+  await utimes(join(f.repository, 'README.md'), new Date(0), new Date(0));
+  const store = new Store(join(f.root, 'controller'));
+  await store.update(data => { create(data, 'fixture').repositories.push({ path: f.repository }); });
+  const provider = createEngineProvider({ store, defaultUserHome: join(f.root, 'no-default') });
+  const options = await provider.runOptions();
+  const preview = await inspectAuditRepository(f.repository);
+  assert.equal(options.repositories[0].commit, preview.commit);
+  assert.equal(preview.sourceDirty, null);
+  await createAuditWorkspace({ repository: f.repository, commit: preview.commit, expectedTree: preview.tree, directory: f.workspace, owner: f.owner });
+  assert.equal(await readFile(join(f.workspace, 'README.md'), 'utf8'), 'base\n');
+  assert.equal(await readFile(join(f.repository, 'README.md'), 'utf8'), 'edit\n');
+  await assert.rejects(stat(marker), { code: 'ENOENT' });
+});
+
+test('replacement refs cannot substitute a pinned commit or its materialized tree', async t => {
+  const f = await fixture(t);
+  const original = await inspectAuditRepository(f.repository, f.commit);
+  await writeFile(join(f.repository, 'README.md'), 'replacement\n');
+  await command('git', ['-C', f.repository, 'add', '-A'], f.root);
+  await command('git', ['-C', f.repository, 'commit', '-qm', 'replacement'], f.root);
+  await command('git', ['-C', f.repository, 'replace', f.commit, 'HEAD'], f.root);
+  const pinned = await inspectAuditRepository(f.repository, f.commit);
+  assert.equal(pinned.tree, original.tree);
+  const created = await createAuditWorkspace({ repository: f.repository, commit: f.commit, expectedTree: original.tree, directory: f.workspace, owner: f.owner });
+  assert.equal(created.sourceCommit, f.commit);
+  assert.equal(created.sourceTree, original.tree);
+  assert.equal(await readFile(join(f.workspace, 'README.md'), 'utf8'), 'base\n');
+});
+
+test('workspace creation refuses a tree that differs from the reviewed baseline', async t => {
+  const f = await fixture(t);
+  await assert.rejects(createAuditWorkspace({ repository: f.repository, commit: f.commit, expectedTree: '0'.repeat(40), directory: f.workspace, owner: f.owner }), /tree changed/);
+  await assert.rejects(stat(f.workspace), { code: 'ENOENT' });
+});
+
+test('workspace links resolve their full chain before any task can follow them', async t => {
+  for (const escaping of [false, true]) await t.test(escaping ? 'escaping chain' : 'internal chain and dangling link', async subtest => {
+    const f = await fixture(subtest);
+    await mkdir(join(f.repository, 'deep'));
+    await mkdir(join(f.repository, 'target'));
+    await writeFile(join(f.repository, 'target', 'keep'), 'internal\n');
+    await symlink('../target', join(f.repository, 'deep', 'shallow'));
+    await symlink(escaping ? 'deep/shallow/../../outside' : 'deep/shallow/keep', join(f.repository, 'b'));
+    await symlink('not-created-yet', join(f.repository, 'dangling'));
+    await command('git', ['-C', f.repository, 'add', '-A'], f.root);
+    await command('git', ['-C', f.repository, 'commit', '-qm', 'links'], f.root);
+    const pinned = await inspectAuditRepository(f.repository);
+    const outside = join(f.runDirectory, 'outside');
+    await writeFile(outside, 'preserved\n');
+    const create = () => createAuditWorkspace({ repository: f.repository, commit: pinned.commit, directory: f.workspace, owner: f.owner });
+    if (escaping) {
+      await assert.rejects(create(), /escaping symlink/);
+      await assert.rejects(stat(f.workspace), { code: 'ENOENT' });
+    } else {
+      await create();
+      assert.equal(await readFile(join(f.workspace, 'b'), 'utf8'), 'internal\n');
+      assert.equal((await lstat(join(f.workspace, 'dangling'))).isSymbolicLink(), true);
+    }
+    assert.equal(await readFile(outside, 'utf8'), 'preserved\n');
+  });
+});
+
+test('workspace creation rejects cyclic symlinks and cleans its partial checkout', async t => {
+  const f = await fixture(t);
+  await symlink('b', join(f.repository, 'a'));
+  await symlink('a', join(f.repository, 'b'));
+  await command('git', ['-C', f.repository, 'add', '-A'], f.root);
+  await command('git', ['-C', f.repository, 'commit', '-qm', 'cycle'], f.root);
+  const pinned = await inspectAuditRepository(f.repository);
+  await assert.rejects(createAuditWorkspace({ repository: f.repository, commit: pinned.commit, directory: f.workspace, owner: f.owner }), /cyclic/);
+  await assert.rejects(stat(f.workspace), { code: 'ENOENT' });
+});
+
+test('oversized committed link targets are refused before links accumulate in memory', async t => {
+  const f = await fixture(t);
+  const oid = await command('git', ['-C', f.repository, 'hash-object', '-w', '--stdin'], f.root, 'a'.repeat(4097));
+  await command('git', ['-C', f.repository, 'update-index', '--add', '--cacheinfo', `120000,${oid},oversized`], f.root);
+  await command('git', ['-C', f.repository, 'commit', '-qm', 'oversized link'], f.root);
+  const pinned = await inspectAuditRepository(f.repository);
+  await assert.rejects(createAuditWorkspace({ repository: f.repository, commit: pinned.commit, directory: f.workspace, owner: f.owner }), /oversized symlink/);
+  await assert.rejects(stat(f.workspace), { code: 'ENOENT' });
 });

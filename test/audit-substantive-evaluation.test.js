@@ -14,8 +14,20 @@ const repo = dirname(dirname(fileURLToPath(import.meta.url)));
 
 test('substantive evaluation prepares twelve blocked slots and verifies starter/reference, scope and review boundaries offline', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-substantive-test-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const output = join(root, 'prepared'), manifest = await prepareEvaluation(output), manifestPath = join(output, 'campaign.json');
+  const output = join(root, 'prepared'), base = join(root, 'audits'), exported = [];
+  t.after(async () => {
+    try {
+      await rm(output, { recursive: true, force: true });
+      await rm(base, { recursive: true, force: true });
+      for (const receipt of exported) {
+        const reopened = await readAuditReport(receipt.evidencePath);
+        assert.equal(reopened.source.kind, 'fixture-only-no-model');
+        assert.equal(reopened.quality.status, 'incomplete');
+        assert.equal(reopened.quality.rubric.status, 'pending-review');
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  const manifest = await prepareEvaluation(output), manifestPath = join(output, 'campaign.json');
   assert.equal(manifest.paidExecutionAuthorized, false);
   assert.equal(manifest.executionApprovalRequired.model, null);
   assert.equal(manifest.design.plannedRuns, 12);
@@ -34,8 +46,7 @@ test('substantive evaluation prepares twelve blocked slots and verifies starter/
   assert.equal(launcher.status, 78); assert.match(launcher.stderr, /not authorized/);
   await assert.rejects(prepareEvaluation(output), { code: 'EEXIST' });
 
-  const base = join(root, 'audits'); await mkdir(base, { mode: 0o700 });
-  const exported = [];
+  await mkdir(base, { mode: 0o700 });
   for (const task of manifest.tasks) await t.test(task.id, async () => {
     const spec = JSON.parse(await readFile(task.specPath));
     assert.equal(auditQualityFingerprint(spec.quality, spec.checks), task.qualityFingerprint);
@@ -88,10 +99,5 @@ test('substantive evaluation prepares twelve blocked slots and verifies starter/
       assert.doesNotMatch(await readFile(receipt.output, 'utf8'), /REQUIRES_HUMAN_REVIEWER/);
     }
   });
-  await rm(output, { recursive: true, force: true }); await rm(base, { recursive: true, force: true });
-  for (const receipt of exported) {
-    const reopened = await readAuditReport(receipt.evidencePath);
-    assert.equal(reopened.source.kind, 'fixture-only-no-model');
-    assert.equal(reopened.quality.status, 'incomplete'); assert.equal(reopened.quality.rubric.status, 'pending-review');
-  }
+
 });

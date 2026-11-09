@@ -18,7 +18,7 @@ export function BrowseSessions() {
   const [message, setMessage] = useState<{ status: StatusKind; text: string } | null>(null);
   const searchId = useId(), profileId = useId();
   useEffect(() => { const timer = window.setTimeout(() => setDebounced(query), 250); return () => window.clearTimeout(timer); }, [query]);
-  const view = useResource(() => apiGet<SessionsView>('/api/sessions', { query: debounced, profile }), `${debounced}|${profile}`);
+  const view = useResource(() => apiGet<SessionsView>('/api/sessions', { query: debounced, profile }), JSON.stringify([debounced, profile]));
 
   async function resume(key: string, profileName: string, client: string) {
     try {
@@ -38,7 +38,7 @@ export function BrowseSessions() {
       ) : null}
       <div className="flex flex-wrap items-end gap-4">
         <div className="flex-1 min-w-[220px]">
-          <label htmlFor={searchId} className="field-label">Search task text or project</label>
+          <label htmlFor={searchId} className="field-label">Search title or project</label>
           <input id={searchId} type="search" className="input" value={query} onChange={event => setQuery(event.target.value)} />
         </div>
         <div className="min-w-[180px]">
