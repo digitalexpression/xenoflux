@@ -20,3 +20,6 @@ node_modules
 
 # Private task comparison recovery details are not public source.
 /HANDOVER-macos-task-comparison.md
+
+# Internal knowledge notes stay local and outside release history.
+/docs/knowledge/

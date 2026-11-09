@@ -1,6 +1,6 @@
 {
   "name": "xenoflux",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Codex profile manager for macOS",
   "type": "module",
   "bin": {
@@ -34,6 +34,7 @@
     "docs/developer/DESKTOP-IMPLEMENTATION.md",
     "docs/developer/AUDIT-ACCEPTANCE.md",
     "docs/developer/RELEASE-3.0.1.md",
+    "docs/developer/RELEASE-3.1.1.md",
     "docs/developer/RELEASE-3.1.0.md",
     "docs/developer/RELEASE-3.0.0.md",
     "docs/developer/RELEASE-2.1.0.md",

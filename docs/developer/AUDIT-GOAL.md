@@ -6,7 +6,8 @@ determine authorization. A goal or historical grant does not authorize operation
 
 ## Current release boundary
 
-Deliver **3.1.0**, extending the locally bundled browser UI for **Codex
+Prepare **3.1.1**, a reliability and privacy follow-up to 3.1.0, for the locally
+bundled browser UI for **Codex
 on macOS**, launched with `xfx ui`. Users can:
 
 1. Create an empty profile or one from selected supported parts of another.

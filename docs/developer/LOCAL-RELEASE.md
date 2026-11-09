@@ -5,6 +5,7 @@ to obtain a published npm package or offline bundle.
 
 Version 1.0.0 was the first stable release. Xenoflux 3.1.0 is published;
 the [3.1.0 release record](RELEASE-3.1.0.md) binds final verification.
+The [3.1.1 candidate](RELEASE-3.1.1.md) is the next local patch preparation.
 The stable npm tag is `latest`. Publication and changes to installed user state
 require the applicable explicit request; building a bundle or passing checks
 does not authorize either action.
@@ -81,6 +82,9 @@ their originals before producing explicitly sanitized summaries. Public summarie
 retain outcomes, failed controls and coverage limits without personal paths, private
 project identities, native session identifiers, full prompts or runtime state.
 Credential redaction alone does not remove ordinary identifying metadata.
+
+`docs/knowledge/` contains local engineering notes. Keep it untracked, ignored,
+absent from outgoing public commit history and excluded from the package.
 
 The package manifest includes reviewed documentation paths explicitly. Do not
 replace this with the entire documentation directory: ignored or newly added

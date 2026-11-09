@@ -31,7 +31,7 @@ interrupted sign-in. Use `xfx --help` for all commands.
 
 ## Open the app
 
-The **3.0.0** local browser app supports:
+The local browser app supports:
 
 ```sh
 xfx ui
