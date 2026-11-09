@@ -4,17 +4,9 @@
 const desktopStub = `export function createDesktopRuntime() {
   return { assertExternal: async () => {}, assertIdle: async () => {}, inspectApp: async () => null };
 }`;
-const logsStub = `export function createLogStorage() {
-  return {
-    ensureMounted: async () => '/test/RAM',
-    prepareHome: async ({ home, key }) => ({ kind: 'ram', home, key, target: '/test/RAM/logs_2.sqlite', persistent: false }),
-    inspect: async ({ home, key }) => ({ kind: 'ram', home, key, mounted: true, available: true, linked: true, state: 'ready', persistent: false }),
-  };
-}
-export async function readLogSettings() { return { enabled: false }; }`;
 const urls = new Map([
   ['./desktop-runtime.js', `data:text/javascript,${encodeURIComponent(desktopStub)}`],
-  ['./log-storage.js', `data:text/javascript,${encodeURIComponent(logsStub)}`],
+  ['./log-storage.js', new URL('./log-storage-fixture.js', import.meta.url).href],
 ]);
 
 export async function resolve(specifier, context, nextResolve) {

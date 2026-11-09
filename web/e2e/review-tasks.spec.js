@@ -127,6 +127,31 @@ test('runs one native review, answers its approval, and reopens frozen response 
   expect(JSON.parse(await readFile(`${app.executable}.starts`, 'utf8'))).toBe(1);
 });
 
+test('a missing review response remains visible with its frozen evidence', async ({ app, page }) => {
+  test.setTimeout(60000);
+  await openReview(page, app);
+  await prepare(page);
+  await page.getByRole('button', { name: 'Start review' }).click();
+  await expect(page.getByRole('region', { name: 'Native request' })).toBeVisible({ timeout: 20000 });
+  await page.getByRole('button', { name: 'Allow once' }).click();
+  await expect(page.getByRole('region', { name: 'Native request' })).toContainText('Review a changed report citation');
+  await page.getByRole('button', { name: 'Allow once' }).click();
+  await expect(page.getByRole('region', { name: 'Native request' })).toContainText('Allow report lookup');
+  await page.getByRole('button', { name: 'Allow for this turn' }).click();
+  await expect(page.getByRole('region', { name: 'Native request' })).toContainText('Allow optional network follow-up');
+  await page.getByRole('button', { name: 'Decline permissions' }).click();
+  await page.getByLabel('Should the review include a detailed explanation?').selectOption({ label: 'Yes, include detail' });
+  await page.getByRole('button', { name: 'Send answers' }).click();
+  await expect(page.getByText(/this is a task-scoped review\./i)).toBeVisible({ timeout: 20000 });
+  const taskId = new URL(page.url()).searchParams.get('task');
+  await rm(`${app.store.directory}/review-tasks/${taskId}/response.txt`);
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Response unavailable' })).toBeVisible();
+  await expect(page.getByText(/The captured response is missing, unreadable, or changed/).first()).toBeVisible();
+  await page.getByRole('link', { name: 'Open its comparison and evidence' }).click();
+  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+});
+
 test('cancels while waiting for native approval, retains partial response, and never starts again on refresh', async ({ app, page }) => {
   await openReview(page, app);
   await prepare(page);

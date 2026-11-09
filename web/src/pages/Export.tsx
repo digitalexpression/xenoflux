@@ -98,6 +98,7 @@ export function Export() {
                 <div ref={saved} tabIndex={-1} className="alert-success flex flex-col gap-2" role="status" aria-label="Report saved">
                   <StatusBadge status="success">Saved</StatusBadge>
                   <p className="text-ui" style={{ color: 'var(--color-text)' }}>Both files are in the folder above. Setup file text: {result.contentIncluded}. Replay content: {result.replayContentIncluded ?? 'not included'}.</p>
+                  {result.warning ? <WarningAlert title="Recent could not be updated"><p>{result.warning}</p></WarningAlert> : null}
                   {result.reviewPacketFingerprint ? <p className="hint">Review packet fingerprint: <span className="font-mono">{result.reviewPacketFingerprint}</span>. The packet matches this exported content choice.</p> : null}
                   <div className="flex flex-wrap gap-2"><CopyButton text={result.folder} label="Copy folder location" />
                     {result.reviewPacketRef ? <Link className="btn btn-primary" to={`/reports/${encodeURIComponent(result.reviewPacketRef)}/reviews`}>Return to this review packet</Link> : <Link className="btn" to={`/reports/${encodeURIComponent(ref)}`}>Back to the report</Link>}</div>

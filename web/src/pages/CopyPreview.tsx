@@ -36,13 +36,13 @@ export function CopyPreview({ mode }: { mode: 'copy' | 'create' }) {
       </Page>
     );
   }
-  return <PlanView key={`${mode}|${target}|${from}|${item}|${newName}`} mode={mode} target={target} from={from} item={item} skill={skill} newName={newName} />;
+  return <PlanView key={JSON.stringify([mode, target, from, item, newName])} mode={mode} target={target} from={from} item={item} skill={skill} newName={newName} />;
 }
 
 function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' | 'create'; target: string; from: string; item?: string; skill?: string; newName: string }) {
   const plan = useResource(() => mode === 'copy'
     ? apiGet<CopyPlan>(`/api/profiles/${encodeURIComponent(target)}/copy`, { from, item, skill })
-    : apiGet<CopyPlan>('/api/profiles/new', { name: newName, from }), `${mode}|${target}|${from}|${item}|${newName}`);
+    : apiGet<CopyPlan>('/api/profiles/new', { name: newName, from }), JSON.stringify([mode, target, from, item, newName]));
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CopyResult | null>(null);

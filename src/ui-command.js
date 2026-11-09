@@ -61,13 +61,18 @@ export async function runUi({ store, provider, demo = false, port = 0, openBrows
   const closed = new Promise(done => { finish = done; });
   let stopping;
   const stop = () => stopping ??= (async () => {
-    await provider.close?.();
-    await server.close();
-    const current = await readState(stateFile);
-    if (current?.pid === process.pid && current.port === server.port) await unlink(stateFile).catch(() => {});
-    finish();
+    try { await provider.close?.(); }
+    finally {
+      try {
+        await server.close();
+        const current = await readState(stateFile);
+        if (current?.pid === process.pid && current.port === server.port) await unlink(stateFile).catch(() => {});
+      } finally { finish(); }
+    }
   })();
-  if (signals) for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { stop().then(() => process.exit(0)); });
+  if (signals) for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => {
+    stop().then(() => process.exit(0), error => { process.stderr.write(`${error.message}\n`); process.exit(1); });
+  });
 
   out(`Xenoflux${demo ? ' (demo data)' : ''} is running at ${server.origin}/\n`
     + 'Keep this window open while you use the app. Press Ctrl+C to stop it; running tasks keep their own records.\n');

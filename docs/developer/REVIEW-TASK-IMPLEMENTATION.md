@@ -216,6 +216,10 @@ live/unknown ownership stays uncertain. Never signal a saved PID blindly, replay
 pending decisions, resend a turn or automatically resume/retry. A deliberate new
 attempt requires a new preview token; it cannot replace or erase the old one.
 
+A missing, unreadable or hash-mismatched response remains visible as unavailable
+in both task summaries and detail. Retain the saved lifecycle status and link to
+verified frozen evidence, and never display altered response bytes.
+
 A readable response is a task result, not a structured evaluation or fabricated
 rating. Keep the source comparison unchanged. Existing structured external import
 remains an optional supported path; ordinary review never requires it. The task

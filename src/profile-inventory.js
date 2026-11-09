@@ -9,13 +9,7 @@ import { parse } from 'smol-toml';
 import { find } from './profiles.js';
 import { resolveNativeSettingsHome } from './native-copy.js';
 import { redactValue } from './redact.js';
-
-const CONFIG_KEYS = ['model', 'model_reasoning_effort', 'plan_mode_reasoning_effort', 'model_verbosity',
-  'model_context_window', 'model_auto_compact_token_limit', 'personality', 'service_tier',
-  'approval_policy', 'approvals_reviewer', 'sandbox_mode', 'project_doc_max_bytes', 'project_doc_fallback_filenames'];
-const AGENT_KEYS = ['max_threads', 'max_concurrent_threads_per_session', 'max_depth', 'job_max_runtime_seconds',
-  'default_subagent_model', 'default_subagent_reasoning_effort'];
-const ROLE_KEYS = ['name', 'description', 'model', 'model_reasoning_effort', 'sandbox_mode', 'nickname_candidates', 'developer_instructions'];
+import { AGENT_KEYS, CONFIG_KEYS, ROLE_KEYS, supportsNativeProvider } from './native-config.js';
 const MAX_DEPTH = 5, MAX_ENTRIES = 256, MAX_PROJECTS = 256, MAX_FILE = 384 * 1024;
 const MAX_PLUGIN_ENTRIES = 512;
 const INVENTORY_METADATA = new Set(['.DS_Store', '.git', '.tmp']);
@@ -95,7 +89,7 @@ async function settings(home, items, scope, origin) {
     try {
       const content=await safeText(configPath); if(content===null) throw new Error('unsafe config');
       const config = parse(content);
-      if ((config.model_provider ?? 'openai') !== 'openai' || Object.hasOwn(config.model_providers ?? {}, 'openai')) throw new Error('custom model provider is unsupported');
+      if (!supportsNativeProvider(config)) throw new Error('custom model provider is unsupported');
       for (const key of CONFIG_KEYS) if (Object.hasOwn(config, key)) {
         const value = safeConfigValue(config[key]);
         const eligible=['profile','user'].includes(scope);

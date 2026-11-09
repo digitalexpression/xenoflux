@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile, chmod } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createUiReviewTasks } from '../src/ui-review-tasks.js';
@@ -174,6 +174,21 @@ test('cancel stops an active task and replaying the same token against another r
   assert.equal(cancelled.shutdown.groupTerminated, true);
 });
 
+test('closing waits for active review shutdown and its durable cancellation record', async t => {
+  const app = await fixture(t, { delayed: true });
+  const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict' });
+  const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
+  await waitFor(async () => app.calls.capture, count => count === 1, 'Capture did not start');
+
+  await app.service.close();
+
+  const task = JSON.parse(await readFile(join(app.store.directory, 'review-tasks', id, 'task.json'), 'utf8'));
+  assert.equal(task.status, 'cancelled');
+  assert.equal(task.cancellation.reason, 'coordinator-shutdown');
+  assert.equal(task.shutdown.groupTerminated, true);
+  assert.equal(task.reservation.status, 'released');
+});
+
 
 test('a blank or mismatched assistant response is never marked complete', async t => {
   for (const [name, response] of [
@@ -312,4 +327,26 @@ test('an unknown task stays unavailable without starting or recreating work', as
   const app = await fixture(t);
   await assert.rejects(app.service.reviewTask({ id: '10000000-0000-0000-0000-000000000001' }), { status: 404, code: 'review-task-not-found' });
   assert.equal(app.calls.capture, 0);
+});
+
+test('missing or changed response bytes keep the review and frozen evidence available', async t => {
+  for (const damage of ['missing', 'changed', 'unreadable']) await t.test(damage, async subtest => {
+    const app = await fixture(subtest);
+    const preview = await app.service.previewReviewTask({ ref: 's.fixture', profile: 'Strict' });
+    const started = await app.service.startReviewTask({ ref: 's.fixture', previewToken: preview.previewToken });
+    const completed = await waitFor(() => app.service.reviewTask(started), task => task.status === 'completed', 'Review did not complete');
+    const path = join(app.directory, 'review-tasks', started.id, 'response.txt');
+    if (damage === 'missing') await rm(path);
+    else if (damage === 'changed') await writeFile(path, 'Changed response');
+    else await chmod(path, 0o644);
+    const detail = await app.service.reviewTask(started);
+    assert.equal(detail.status, completed.status);
+    assert.equal(detail.response.status, 'unavailable');
+    assert.equal(detail.response.text, null);
+    assert.match(detail.response.reason, /missing, unreadable, or changed/);
+    const summary = await app.service.taskSummaries(detail.sourceEvidenceFingerprint);
+    assert.equal(summary.tasks.length, 1);
+    assert.match(summary.tasks[0].summary, /missing, unreadable, or changed/);
+    assert.equal((await app.service.frozenComparison(started.id)).value.kind, 'audit-comparison');
+  });
 });

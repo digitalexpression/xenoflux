@@ -316,7 +316,9 @@ test('sanitizes terminal controls, escapes Markdown fields, and bounds event out
   assert.match(terminal, /run-a/);
   assert.match(terminal, /tool=Read, callId=call-1, itemType=command_execution, status=completed/);
   assert.match(terminal, /additional events omitted \(of 55 total\)/);
-  assert.match(renderAudit(run, { format: 'markdown' }), /\\\[link\\\]\\\(javascript:bad\\\)/);
+  const markdown = renderAudit(run, { format: 'markdown' });
+  assert.match(markdown, /\\\[link\\\]\\\(javascript:bad\\\)/);
+  assert.equal(renderAudit(run), terminal, 'a Markdown render does not change later terminal escaping');
 });
 
 test('renders broad setup resource comparison and preserves unavailable coverage', () => {
@@ -348,12 +350,17 @@ test('renders public setup values, event operations, and child source provenance
     left: { profile: { profileName: 'A' }, coverage: {} },
     right: { profile: { profileName: 'B' }, coverage: {} },
     comparison: { resources: { added: [], removed: [], unchanged: [], unavailable: [], changed: [
-      { name: 'model', category: 'config', left: { value: 'model-a' }, right: { value: 'model-b' } },
+      { name: 'model', category: 'config', left: { value: 'model-a' }, right: { value: 'model-b' },
+        value: { '[label]': '[link](javascript:bad)\u001b' } },
     ] } },
   };
   const setupReport = renderAudit(setup);
   assert.match(setupReport, /value="model-a"/);
   assert.match(setupReport, /value="model-b"/);
+  const markdownSetup = renderAudit(setup, { format: 'markdown' });
+  assert.match(markdownSetup, /(?<!\\)\\\[link(?<!\\)\\\]\\\(javascript:bad\\\)/);
+  assert.match(markdownSetup, /(?<!\\)\\\[label(?<!\\)\\\]/);
+  assert.doesNotMatch(markdownSetup, /\u001b/);
 
   const run = structuredClone(complete);
   run.agents[1].source = { path: '/private/child.jsonl', fingerprint: 'child-fingerprint' };

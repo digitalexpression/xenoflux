@@ -1,11 +1,22 @@
 # Xenoflux roadmap
 
-**3.1.0 released. Updated 2026-11-05.** This is the active delivery/status
+**3.1.1 local candidate. Updated 2026-11-09.** This is the active delivery/status
 record. The [goal](AUDIT-GOAL.md#current-release-boundary) owns scope and
 [acceptance](AUDIT-GOAL.md#observable-acceptance); the
 [review specification](REVIEW-TASK-IMPLEMENTATION.md) owns implementation details.
 
 ## Current work and stop condition
+
+**3.1.1 is the current local patch candidate.** The [candidate record](RELEASE-3.1.1.md)
+owns changes, verification and limits. The audit corrections are implemented and
+verified on Node 22.15.0 and 24.0.0. Public candidate history starts from public
+main and contains the reviewed refactor and fixes. Knowledge notes remain local,
+ignored and outside the outgoing history and package.
+
+The local stop condition is a committed candidate, passing package-boundary and
+documentation checks, and a detached bundle whose generated manifest records
+`smoke.status: passed`, exact source revision and artifact hashes. Public CI,
+merge, publication and installed updates are separate operations.
 
 **The authorized 3.1.0 release batch is complete.** The
 [3.1.0 record](RELEASE-3.1.0.md#published-identity-and-verification) binds the
@@ -48,8 +59,8 @@ The UI release sequence, 3.0.1 hotfix and 3.1.0 concurrency batch are complete:
 | 3.1.0 | Concurrent same-profile comparisons/reviews, per-job execution settings, independent native controls, signed-vendor shortcuts and guarded recovery. | [3.1.0 release record](RELEASE-3.1.0.md). |
 | 3.0.1 hotfix | Managed copier includes bundled UI; replay keyboard-open focus follows the dialog mount lifecycle. | [3.0.1 release record](RELEASE-3.0.1.md). |
 
-The authorized 3.1.0 publication is complete. No next release batch or installed
-update is authorized; this checkpoint and historical grants provide no additional
+The 3.1.0 publication is complete. The current request covers local 3.1.1
+preparation; this checkpoint and historical grants provide no additional
 operational authorization.
 
 ## Verification and release gates

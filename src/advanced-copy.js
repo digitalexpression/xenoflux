@@ -9,6 +9,7 @@ import { parse, stringify } from 'smol-toml';
 import { inspectProfile } from './profile-inventory.js';
 import { resolveNativeSettingsHome } from './native-copy.js';
 import { redactText, redactValue } from './redact.js';
+import { supportsNativeProvider } from './native-config.js';
 import { privateDirectory } from './metadata.js';
 
 const MAX_FILES = 256, MAX_FILE = 4 * 1024 * 1024, MAX_TOTAL = 32 * 1024 * 1024;
@@ -145,7 +146,7 @@ async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint)
   if (t.kind === 'config') {
     const f = await readSafe(expected, { text: true }); if (!f) throw new Error('Selected config source is missing');
     const config = parse(f.content), key = t.key;
-    if ((config.model_provider ?? 'openai') !== 'openai' || Object.hasOwn(config.model_providers ?? {}, 'openai'))
+    if (!supportsNativeProvider(config))
       throw new Error('Config copy does not support custom model providers in the source');
     if (typeof key !== 'string' || !/^(?:[A-Za-z_][\w-]*|agents\.[A-Za-z_][\w-]*|features\.multi_agent)$/.test(key)) throw new Error('Unsupported config key');
     const value = key.includes('.') ? key.split('.').reduce((o,k) => o?.[k], config) : config[key];
@@ -200,7 +201,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     await parentSafe(targetEndpoint.home,targetPath);
     const current = await readSafe(targetPath,{text:true}); if (!current) throw new Error('Destination configuration is missing');
     const destinationConfig=parse(current.content);
-    if((destinationConfig.model_provider??'openai')!=='openai'||Object.hasOwn(destinationConfig.model_providers??{},'openai'))
+    if(!supportsNativeProvider(destinationConfig))
       throw new Error('Config copy does not support custom model providers in the destination');
     const sourceValues = new Map();
     for(const item of configItems) {
@@ -229,7 +230,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     for (const item of configItems) {
       const before=getKey(beforeObj,item.transfer.key), after=getKey(afterObj,item.transfer.key);
       item._status=JSON.stringify(before)===JSON.stringify(after)?'identical':before===undefined?'new':'conflict';
-      item._before=before; item._after=after;
+      item._before=before; item._after=after; item._configMode=current.mode;
     }
     configItems[0]._enforcedSymlink=enforcedSymlink;
   }
@@ -283,14 +284,27 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
   }
   if (payloads.length > MAX_FILES || payloads.reduce((n,f)=>n+(f.before?.length??0)+(f.after?.length??0),0)>MAX_TOTAL) throw new Error('Advanced copy exceeds its bounded payload limit');
   const reports = items.map(item => {
-    if(item.transfer.kind==='config') return {id:item.id,label:item.label,origin:item.origin,scope:item.scope,sourcePath:item.transfer.sourcePath,status:item._status,changes:[{path:'config.toml:'+item.transfer.key,action:item._status,before:previewValue(item._before),after:previewValue(item._after)}]};
+    if (item.transfer.kind === 'config') {
+      const fingerprint = sha(Buffer.from(JSON.stringify({
+        key: item.transfer.key, before: item._before, after: item._after, mode: item._configMode,
+        enforcedSymlink: configItems.some(configItem => configItem._enforcedSymlink === true),
+      })));
+      return { fingerprint, id: item.id, label: item.label, origin: item.origin, scope: item.scope,
+        sourcePath: item.transfer.sourcePath, status: item._status,
+        changes: [{ path: 'config.toml:' + item.transfer.key, action: item._status,
+          before: previewValue(item._before), after: previewValue(item._after) }] };
+    }
     const prefix = item.transfer.path;
     const changes = payloads.filter(f => f.path === prefix || f.path.startsWith(prefix + '/'));
     const identical = changes.length > 0 && changes.every(f => f.before && f.after && f.before.equals(f.after) && f.beforeMode === f.afterMode) && !(item._package?.directoryChanges.length);
     const conflict = changes.some(f => f.before && (!f.after||!f.before.equals(f.after) || f.beforeMode !== f.afterMode)) || Boolean(item._package?.directoryChanges.length);
     const reportChanges=changes.map(f=>({path:f.path,action:f.after===null?'remove':f.before===null?'add':f.before.equals(f.after)&&f.beforeMode===f.afterMode?'identical':'replace',before:preview(f.before,f.path),after:preview(f.after,f.path),beforeMode:f.beforeMode,afterMode:f.afterMode}));
     for(const d of item._package?.directoryChanges??[]) reportChanges.push({path:d.path,action:d.after===null?'remove-directory':d.before===null?'add-directory':'mode',beforeMode:d.before,afterMode:d.after});
-    return {id:item.id,label:item.label,origin:item.origin,scope:item.scope,sourcePath:item.transfer.sourcePath,status:identical?'identical':conflict?'conflict':'new',changes:reportChanges};
+    const fingerprint = sha(Buffer.from(JSON.stringify({
+      files: changes.map(file => ({ path: file.path, before: file.before && sha(file.before), after: file.after && sha(file.after), beforeMode: file.beforeMode, afterMode: file.afterMode })),
+      package: item._package ?? null,
+    })));
+    return {fingerprint,id:item.id,label:item.label,origin:item.origin,scope:item.scope,sourcePath:item.transfer.sourcePath,status:identical?'identical':conflict?'conflict':'new',changes:reportChanges};
   });
   const createdDirectories=[];
   for(const f of payloads) {
@@ -315,7 +329,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     ...(item.reason?{reason:item.reason}:{})}));
   const plan={source:sourceEndpoint,target:targetEndpoint,selection:items.map(x=>x.id),sourceFingerprints,files:payloads,packages,createdDirectories:[...new Set(createdDirectories)]};
   const hash=createHash('sha256').update(JSON.stringify({source:plan.source,target:plan.target,selection:plan.selection,packages,createdDirectories:plan.createdDirectories,files:payloads.map(f=>({path:f.path,before:f.before&&sha(f.before),beforeMode:f.beforeMode,after:f.after&&sha(f.after),afterMode:f.afterMode}))})).digest('hex');
-  return {plan,report:{status:'preview',hash,source:inventory.profile,target:{name:targetEndpoint.name,home:targetEndpoint.home},items:reports,kept,destinationLimitations:destinationInventory.limitations,changes:[
+  return {plan,report:{status:'preview',hash,endpointFingerprint:sha(Buffer.from(JSON.stringify({source:sourceEndpoint,target:targetEndpoint}))),source:inventory.profile,target:{name:targetEndpoint.name,home:targetEndpoint.home},items:reports,kept,destinationLimitations:destinationInventory.limitations,changes:[
     ...payloads.filter(f=>f.before===null||f.after===null||!f.before.equals(f.after)||f.beforeMode!==f.afterMode).map(f=>({path:f.path,action:f.after===null?'remove':f.before===null?'add':'replace',beforeSha256:f.before&&sha(f.before),afterSha256:f.after&&sha(f.after),beforeMode:f.beforeMode,afterMode:f.afterMode})),
     ...packages.flatMap(p=>p.directoryChanges.map(d=>({path:d.path,action:d.after===null?'remove-directory':d.before===null?'add-directory':'directory-mode',beforeMode:d.before,afterMode:d.after})))
   ],notes:['Selected skill packages are replaced exactly; destination-only package files are removed.',...(configItems.some(i=>i._enforcedSymlink)?['Config copy enables the required allow_symlinked_codex_home flag.']:[])]}};

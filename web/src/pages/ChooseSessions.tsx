@@ -33,7 +33,7 @@ export function ChooseSessions() {
   const searchId = useId(), profileId = useId(), taskId = useId();
 
   useEffect(() => { const timer = window.setTimeout(() => setDebounced(query), 250); return () => window.clearTimeout(timer); }, [query]);
-  const view = useResource(() => apiGet<SessionsView>('/api/sessions', { query: debounced, profile, client }), `${debounced}|${profile}|${client}`);
+  const view = useResource(() => apiGet<SessionsView>('/api/sessions', { query: debounced, profile, client }), JSON.stringify([debounced, profile, client]));
 
   // Browse carries the selected row because it may be outside this list's latest 100.
   const preset = params.get('left');
@@ -114,7 +114,7 @@ export function ChooseSessions() {
       ) : null}
       <div className="flex flex-wrap items-end gap-4">
         <div className="flex-1 min-w-[220px]">
-          <label htmlFor={searchId} className="field-label">Search task text or project</label>
+          <label htmlFor={searchId} className="field-label">Search title or project</label>
           <input id={searchId} type="search" className="input" value={query} onChange={event => setQuery(event.target.value)} />
         </div>
         <div className="min-w-[180px]">

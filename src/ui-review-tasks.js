@@ -211,11 +211,13 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       if (!UUID.test(name)) continue;
       try {
         const { task } = await readTask(name);
-        if (task.sourceEvidenceFingerprint === evidenceFingerprint)
+        if (task.sourceEvidenceFingerprint === evidenceFingerprint) {
+          const response = await responseView(join(root, task.id), task.response);
           tasks.push({ id: task.id, status: task.status, createdAt: task.createdAt, profile: task.profile?.name ?? 'Unknown profile',
             execution: task.execution, observedModel: typeof task.nativeSettings?.model === 'string' ? task.nativeSettings.model : null,
             observedEffort: typeof task.nativeSettings?.reasoningEffort === 'string' ? task.nativeSettings.reasoningEffort : null,
-            summary: (await responseText(join(root, task.id), task.response))?.trim().slice(0, 200) ?? task.error ?? 'Review has not returned a response.' });
+            summary: response?.reason ?? response?.text?.trim().slice(0, 200) ?? task.error ?? 'Review has not returned a response.' });
+        }
       } catch { /* A corrupt attempt remains in place and is never reused. */ }
     }
     return { tasks: tasks.sort((a, b) => b.createdAt.localeCompare(a.createdAt)) };
@@ -334,7 +336,9 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     catch (error) { await Promise.resolve(admission.release(id)).catch(() => {}); admissionHeld = false; throw error; }
     let reserved = false, reservationAttempted = false, captureCalled = false;
     const controller = new AbortController();
-    const work = { id, controller, done: false, pendingRequests: new Map(), owner, directory: taskRoot, task: info };
+    let finish;
+    const completed = new Promise(resolve => { finish = resolve; });
+    const work = { id, controller, completed, done: false, pendingRequests: new Map(), owner, directory: taskRoot, task: info };
     active.set(id, work); pending.set(id, work.pendingRequests);
     try {
       if (closing) throw new UiError(409, 'The app is stopping. Start it again before reviewing.', 'stopping');
@@ -485,10 +489,12 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       if (error.code === 'review-workspace-busy') throw new UiError(409, errorMessage(error), error.code);
       throw error;
     } finally {
-      active.delete(id); work.done = true;
+      active.delete(id);
       for (const value of work.pendingRequests.values()) value.reject(new Error('Review task stopped'));
       work.pendingRequests.clear(); pending.delete(id);
       if (admissionHeld) await Promise.resolve(admission.release(id)).catch(() => {});
+      work.done = true;
+      finish();
     }
   }
   async function startReviewTask(arguments_) {
@@ -598,15 +604,19 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     }
     return publicTask(task);
   }
-  async function responseText(directory, response, maxChars = 8 * 1024 * 1024) {
+  async function responseView(directory, response) {
     if (!response) return null;
-    if (response.path !== 'response.txt' || !Number.isSafeInteger(response.bytes) || response.bytes > 8 * 1024 * 1024)
-      throw new UiError(409, 'The captured review response is invalid.', 'review-response-changed');
-    const bytes = await safeRead(join(directory, response.path), 8 * 1024 * 1024);
-    if (bytes.length !== response.bytes || digest(bytes) !== response.sha256)
-      throw new UiError(409, 'The captured review response is missing or changed.', 'review-response-changed');
-    const text = bytes.toString('utf8');
-    return maxChars < 8 * 1024 * 1024 ? text.slice(0, maxChars) : text;
+    const identity = { threadId: response.threadId ?? null, turnId: response.turnId ?? null };
+    try {
+      if (response.path !== 'response.txt' || !Number.isSafeInteger(response.bytes) || response.bytes < 0 || response.bytes > 8 * 1024 * 1024)
+        throw new Error('Invalid captured response');
+      const bytes = await safeRead(join(directory, response.path), 8 * 1024 * 1024);
+      if (bytes.length !== response.bytes || digest(bytes) !== response.sha256) throw new Error('Captured response changed');
+      return { status: response.status, text: bytes.toString('utf8'), ...identity };
+    } catch {
+      return { status: 'unavailable', text: null, ...identity,
+        reason: 'The captured response is missing, unreadable, or changed. Open the comparison to check its frozen evidence.' };
+    }
   }
   async function publicTask(task, directory = join(root, task.id)) {
     const terminal = ['completed', 'failed', 'cancelled', 'interrupted', 'uncertain'].includes(task.status);
@@ -614,8 +624,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       ? await safeRead(join(directory, 'prompt.md'), MAX_PROMPT_BYTES).catch(() => null) : null;
     return { id: task.id, status: task.status, phase: task.phase, createdAt: task.createdAt, updatedAt: task.updatedAt,
       profile: task.profile?.name ?? 'Unknown profile', cwd: task.cwd, threadId: task.threadId ?? null, turnId: task.turnId ?? null, reportRef: `r.${task.id}`, title: task.sourceTitle ?? 'Task comparison',
-      response: task.response ? { status: task.response.status, text: await responseText(directory, task.response),
-        threadId: task.response.threadId ?? null, turnId: task.response.turnId ?? null } : null,
+      response: await responseView(directory, task.response),
       pendingRequests: (task.pendingRequests ?? []).map(item => ({ requestId: item.requestId, method: item.method, params: item.params, item: item.item ?? null })),
       sourceRef: task.sourceRef ?? null, sourceEvidenceFingerprint: task.sourceEvidenceFingerprint ?? null,
       inputFingerprint: task.inputFingerprint ?? null, promptSha256: task.promptSha256 ?? null,
@@ -634,10 +643,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     task.task.cancellation ??= { reason: 'user-cancel', requestedAt: new Date().toISOString() };
     try { await save(task.directory, task.task); } catch { /* Abort remains authoritative; completion writes the reason again. */ }
     task.controller.abort('user-cancel');
-    await new Promise(resolve => {
-      const poll = () => task.done ? resolve() : setTimeout(poll, 20);
-      poll();
-    });
+    await task.completed;
     return reviewTask({ id: taskId });
   }
   async function frozenComparison(id) {
@@ -683,10 +689,6 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       item.controller.abort('coordinator-shutdown');
     }
     await Promise.allSettled([...operations.values()]);
-    await Promise.allSettled([...active.values()].map(item => new Promise(resolve => {
-      const poll = () => item.done ? resolve() : setTimeout(poll, 20);
-      poll();
-    })));
   }
 
   return { reviewTaskOptions, taskSummaries, previewReviewTask, startReviewTask, reviewTask, cancelReviewTask,

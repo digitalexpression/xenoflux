@@ -1,6 +1,7 @@
 // History discovery is read-only. Actual resume may normalize one validated
 // alias-recorded path in the source index. Only explicit turn inspection scans a
-// selected rollout; it returns whitelisted metadata, never conversation content.
+// selected rollout. Client filtering reads a bounded header; only whitelisted
+// metadata is returned.
 import { lstat, realpath, open } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
@@ -8,6 +9,7 @@ import { join, relative, sep, resolve } from 'node:path';
 import { find } from './profiles.js';
 import { resolveHome } from './homes.js';
 import { redactText } from './redact.js';
+import { recordedClient as classifyRecordedClient } from './audit-session.js';
 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const validUUID = value => typeof value === 'string' && uuid.test(value);
@@ -73,7 +75,27 @@ async function checkedDatabase(home) {
   return database;
 }
 
-async function rows(database, { limit, archived, query, threadId, turns = false }) {
+/** Bounded read of a rollout's first record for its recorded client; never reads content beyond it. */
+export async function recordedHistoryClient(path, indexSource) {
+  if (typeof path !== 'string' || !path.startsWith('/')) return 'unknown';
+  let handle;
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) return 'unknown';
+    handle = await open(path, 'r');
+    // The first record can be long (it embeds instructions); the originator
+    // sits near its start, so read a bounded prefix and match that one field.
+    const buffer = Buffer.alloc(8192);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const prefix = buffer.subarray(0, bytesRead).toString('utf8').split('\n')[0];
+    if (!/^\{"timestamp":"[^"]*",(?:"ordinal":\d+,)?"type":"session_meta"/.test(prefix)) return 'unknown';
+    const originator = /"originator":"([^"\\]{1,64})"/.exec(prefix)?.[1] ?? '';
+    return classifyRecordedClient(originator, indexSource).client;
+  } catch { return 'unknown'; }
+  finally { await handle?.close(); }
+}
+
+async function rows(database, { limit, archived, query, threadId, turns = false, acceptRow }) {
   // One connection/transaction sees a consistent WAL snapshot. SQLite may
   // create its coordination sidecars, but readOnly forbids database writes.
   // Load lazily so non-history commands do not initialize SQLite.
@@ -96,10 +118,16 @@ async function rows(database, { limit, archived, query, threadId, turns = false 
       // and canonical normalization so titles such as ȘEDINȚĂ remain searchable.
       const fold = value => typeof value === 'string' ? value.normalize('NFC').toLowerCase() : '';
       db.function('xfx_fold', { deterministic: true, directOnly: true }, fold);
-      clauses.push('instr(xfx_fold(title), ?) > 0');
-      params.push(fold(query));
+      clauses.push('(instr(xfx_fold(title), ?) > 0 OR instr(xfx_fold(cwd), ?) > 0)');
+      params.push(fold(query), fold(query));
     }
-    const result = db.prepare(`SELECT substr(id, 1, 37) AS id, substr(cwd, 1, 4097) AS cwd, substr(title, 1, 501) AS title, created_at, updated_at, archived${rollout}${nativeSource} FROM threads${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY updated_at DESC, created_at DESC, id ASC LIMIT ?`).all(...params, threadId ? 1 : limit + 1);
+    const statement = db.prepare(`SELECT substr(id, 1, 37) AS id, substr(cwd, 1, 4097) AS cwd, substr(title, 1, 501) AS title, created_at, updated_at, archived${rollout}${nativeSource} FROM threads${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY updated_at DESC, created_at DESC, id ASC${acceptRow ? '' : ' LIMIT ?'}`);
+    const result = [];
+    const arguments_ = acceptRow ? params : [...params, threadId ? 1 : limit + 1];
+    for (const row of statement.iterate(...arguments_)) {
+      if (!acceptRow || await acceptRow(row)) result.push(row);
+      if (result.length >= (threadId ? 1 : limit + 1)) break;
+    }
     if (turns && threadId && nativeSource) for (const row of result) {
       const parent = nativeChildParent(row.native_source, row.id);
       if (parent && !parent.error && !db.prepare('SELECT id FROM threads WHERE id = ? LIMIT 1').get(parent.id))
@@ -131,7 +159,11 @@ async function oneHome(store, profile, options, defaultUserHome) {
     } else ({ environment } = await resolveHome(store, profile.id));
     const database = await checkedDatabase(environment.home);
     if (!database) return { ...origin, environmentId: environment.id, home: environment.home, status: 'empty', count: 0, reason: 'The native home has no thread index.' };
-    const result = await rows(database, options);
+    const acceptRow = options.client ? async row => {
+      const selected = await entry(row, { ...origin, environmentId: environment.id, home: environment.home });
+      return selected !== null && await recordedHistoryClient(selected.rolloutPath, selected.indexSource) === options.client;
+    } : undefined;
+    const result = await rows(database, { ...options, acceptRow });
     if (!Array.isArray(result)) throw new Error('Native history database returned invalid metadata');
     return { ...origin, environmentId: environment.id, home: environment.home,
       status: 'ready', count: result.length, reason: null, rows: result };
@@ -179,13 +211,14 @@ function report(home) {
 }
 
 /** List thread metadata from explicitly bound homes only. */
-export async function listHistory(store, { profile, query, limit = 50, archived = false, defaultUserHome = homedir() } = {}) {
+export async function listHistory(store, { profile, query, limit = 50, archived = false, defaultUserHome = homedir(), client } = {}) {
   const maximum = boundedLimit(limit), needle = boundedQuery(query);
+  if (client !== undefined && !['cli', 'desktop', 'unknown'].includes(client)) throw new Error('Choose a recorded session client');
   if (typeof archived !== 'boolean') throw new Error('History archived must be true or false');
   const data = await store.read();
   const profiles = profile === undefined ? data.profiles
     : [typeof profile === 'string' && profile.toLowerCase() === 'default' ? { id: 'default', name: 'Default' } : find(data, profile)];
-  const homes = await Promise.all(profiles.map(item => oneHome(store, item, { limit: maximum, archived, query: needle }, defaultUserHome)));
+  const homes = await Promise.all(profiles.map(item => oneHome(store, item, { limit: maximum, archived, query: needle, client }, defaultUserHome)));
   const grouped = await Promise.all(homes.map(async home => ({ home, entries: home.status === 'ready' ? await Promise.all(home.rows.map(row => entry(row, home))) : [] })));
   for (const group of grouped) {
     if (group.home.status === 'ready' && group.entries.some(item => item === null)) {

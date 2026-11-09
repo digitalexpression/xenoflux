@@ -3,12 +3,11 @@
 // models in web/src/api/types.ts. Task execution requires a reviewed run token.
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareAuditProfiles, compareAuditSessions } from './audit.js';
-import { recordedClient as classifyRecordedClient } from './audit-session.js';
 import { auditSelectionOptions } from './audit-selection.js';
 import { canonicalAuditChecks } from './audit-explanation.js';
 import { exportAuditReport, readAuditReport } from './audit-store.js';
@@ -23,7 +22,7 @@ import { nativeClient } from './profile-command.js';
 import { bind, renameProfile as renameInData } from './profiles.js';
 import { editProfileRegistry, removeProfile as removeFromStore } from './profile-removal.js';
 import { privateDirectory } from './metadata.js';
-import { findHistory, listHistory } from './history.js';
+import { findHistory, listHistory, recordedHistoryClient } from './history.js';
 import { listHomes, registerHome } from './homes.js';
 import { focusDesktopInstance, listDesktopInstances, openDesktopInstance } from './desktop-instances.js';
 import { applyCopy, planCopy, planUndo, resolveNativeSettingsHome, undoCopy, fingerprintCopySource } from './native-copy.js';
@@ -53,25 +52,6 @@ function when(seconds) {
   return date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', ...(date.getFullYear() !== now.getFullYear() ? { year: 'numeric' } : {}) });
 }
 
-/** Bounded read of a rollout's first record for its recorded client; never reads content beyond it. */
-async function recordedClient(path, indexSource) {
-  if (typeof path !== 'string' || !path.startsWith('/')) return 'unknown';
-  let handle;
-  try {
-    const info = await lstat(path);
-    if (!info.isFile() || info.isSymbolicLink()) return 'unknown';
-    handle = await open(path, 'r');
-    // The first record can be long (it embeds instructions); the originator
-    // sits near its start, so read a bounded prefix and match that one field.
-    const buffer = Buffer.alloc(8192);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const prefix = buffer.subarray(0, bytesRead).toString('utf8').split('\n')[0];
-    if (!/^\{"timestamp":"[^"]*",(?:"ordinal":\d+,)?"type":"session_meta"/.test(prefix)) return 'unknown';
-    const originator = /"originator":"([^"\\]{1,64})"/.exec(prefix)?.[1] ?? '';
-    return classifyRecordedClient(originator, indexSource).client;
-  } catch { return 'unknown'; }
-  finally { await handle?.close(); }
-}
 const CLIENT_TEXT = { cli: 'Codex CLI', desktop: 'Codex Desktop', unknown: 'client not recorded' };
 
 function replayCitationTopics(topics, subject, ref) {
@@ -146,7 +126,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   const titles = new Map();         // session ref → task title shown to the user
   const privateSelections = new Map();
   const plans = new Map();          // plan token → what the person reviewed
-  const setups = new Map();         // "a|b" → { at, value } short-lived setup snapshots
+  const setups = new Map();         // encoded profile pair → { at, value } short-lived setup snapshots
   const reviewDrafts = new Map();   // one-use, short-lived preview token → validated frozen submission
   const savedFile = join(store.directory, 'ui-saved-reports.json');
 
@@ -156,8 +136,12 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   }
 
   async function savedList() {
-    try { const value = JSON.parse(await readFile(savedFile, 'utf8')); return Array.isArray(value) ? value : []; }
-    catch { return []; }
+    try {
+      const value = JSON.parse(await readFile(savedFile, 'utf8'));
+      if (!Array.isArray(value) || value.some(entry => !entry || ['id', 'title', 'savedAt', 'folder', 'jsonPath'].some(key => typeof entry[key] !== 'string')))
+        throw new Error('The saved report index is invalid');
+      return value;
+    } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
   }
   function savedIdentity(value) {
     const subject = value?.kind === 'audit-evaluation-report' ? value.subject : value;
@@ -177,8 +161,21 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   async function writeSaved(entries) {
     await mkdir(store.directory, { recursive: true, mode: 0o700 });
     const temporary = join(store.directory, `.ui-saved-${randomUUID()}.tmp`);
-    await writeFile(temporary, `${JSON.stringify(entries.slice(0, MAX_SAVED), null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-    await rename(temporary, savedFile);
+    try {
+      await writeFile(temporary, `${JSON.stringify(entries.slice(0, MAX_SAVED), null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+      await rename(temporary, savedFile);
+    } finally { await rm(temporary, { force: true }); }
+  }
+
+  async function saveRecent(entry) {
+    const deadline = Date.now() + 5000;
+    while (true) {
+      try { return await store.withLock(async () => writeSaved([entry, ...await savedList()])); }
+      catch (error) {
+        if (!error.message.startsWith('Store is locked:') || Date.now() >= deadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    }
   }
 
   async function profileRecords() {
@@ -189,22 +186,23 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     return { homes, data, defaultHome };
   }
 
-  async function sessionRows({ query, profile } = {}) {
+  async function sessionRows({ query, profile, client } = {}) {
     const needle = typeof query === 'string' && query.trim() ? query.trim().slice(0, 200) : undefined;
     const lists = [];
-    if (!profile || profile === 'Default') lists.push(listHistory(store, { profile: 'Default', query: needle, limit: 100, defaultUserHome }).catch(error => ({ entries: [], homes: [{ profileName: 'Default', status: 'unavailable', reason: error.message }] })));
-    if (!profile) lists.push(listHistory(store, { query: needle, limit: 100, defaultUserHome }));
-    else if (profile !== 'Default') lists.push(listHistory(store, { profile, query: needle, limit: 100, defaultUserHome }));
+    if (!profile || profile === 'Default') lists.push(listHistory(store, { profile: 'Default', query: needle, limit: 100, defaultUserHome, client }).catch(error => ({ entries: [], homes: [{ profileName: 'Default', status: 'unavailable', reason: error.message }] })));
+    if (!profile) lists.push(listHistory(store, { query: needle, limit: 100, defaultUserHome, client }));
+    else if (profile !== 'Default') lists.push(listHistory(store, { profile, query: needle, limit: 100, defaultUserHome, client }));
     const results = await Promise.all(lists);
-    const entries = results.flatMap(result => result.entries).sort((x, y) => y.updatedAt - x.updatedAt).slice(0, 100);
+    const candidates = results.flatMap(result => result.entries).sort((x, y) => y.updatedAt - x.updatedAt || y.createdAt - x.createdAt || x.profileId.localeCompare(y.profileId) || x.id.localeCompare(y.id));
+    const entries = candidates.slice(0, 100);
     const homes = results.flatMap(result => result.homes);
     const rows = await Promise.all(entries.map(async entry => {
-      const client = await recordedClient(entry.rolloutPath, entry.indexSource);
+      const client = await recordedHistoryClient(entry.rolloutPath, entry.indexSource);
       return { key: `${entry.profileId}:${entry.id}`, title: entry.title || 'Untitled task', profile: entry.profileName, client, clientText: CLIENT_TEXT[client],
         project: basename(entry.cwd) || entry.cwd, recordedAt: when(entry.updatedAt), turns: entry.archived ? 'archived' : '', history: 'unknown', historyText: 'Checked when compared',
         updatedAt: entry.updatedAt };
     }));
-    return { rows, homes, truncated: results.some(result => result.truncated) };
+    return { rows, homes, truncated: candidates.length > 100 || results.some(result => result.truncated) };
   }
 
   /** One session's row, looked up within its own profile's history. */
@@ -213,7 +211,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     const found = await findHistory(store, profile, id, { defaultUserHome }).catch(() => null);
     const entry = found?.entry;
     if (!entry) return null;
-    const client = await recordedClient(entry.rolloutPath, entry.indexSource);
+    const client = await recordedHistoryClient(entry.rolloutPath, entry.indexSource);
     return { key, title: entry.title || 'Untitled task', profile: entry.profileName, client, clientText: CLIENT_TEXT[client],
       project: basename(entry.cwd) || entry.cwd, recordedAt: when(entry.updatedAt), turns: entry.archived ? 'archived' : '', history: 'unknown', historyText: 'Checked when compared' };
   }
@@ -257,7 +255,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   }
 
   async function setupFor(a, b) {
-    const key = `${a}|${b}`, cached = setups.get(key);
+    const key = JSON.stringify([a, b]), cached = setups.get(key);
     if (cached && Date.now() - cached.at < 30000) return cached.value;
     let value;
     try { value = await compareAuditProfiles(store, a, b, { defaultUserHome, client: 'cli', includeSourceValues: true }); }
@@ -306,9 +304,13 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     } catch (error) { throw new UiError(422, `Couldn’t read ${from}: ${error.message}`, 'inventory-failed'); }
     const copyable = inventory.items.filter(entry => entry.copyable !== false && entry.status !== 'unsupported'
       && entry.scope !== 'project' && !['project', 'db', 'runtime', 'docs'].includes(entry.category));
+    let endpointFingerprint = null;
     let planned = copyable.map(entry => ({ id: entry.id, label: entry.label, category: entry.category, status: 'new', changes: [] }));
     if (target && copyable.length) {
-      try { planned = (await planCopy(store, from, target, { selection: copyable.map(entry => entry.id), defaultUserHome })).items ?? []; }
+      try {
+        const plan = await planCopy(store, from, target, { selection: copyable.map(entry => entry.id), defaultUserHome });
+        planned = plan.items ?? []; endpointFingerprint = plan.endpointFingerprint;
+      }
       catch (error) { throw new UiError(422, `Couldn’t prepare the preview: ${error.message}`, 'plan-failed'); }
     }
     const items = planned.filter(entry => !['identical', 'unchanged', 'kept'].includes(entry.status)).map(entry => {
@@ -317,12 +319,12 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       return { id: entry.id, name: entry.label ?? source?.label ?? entry.id, kind: described.kind, change: described.change, details: described.details,
         _category: source?.category, _scope: source?.scope,
         note: entry.status === 'conflict' ? `Differs in ${target}; ticking it replaces ${target}’s version.` : source?.category === 'skill' ? 'External tools it calls aren’t installed by copying.' : '',
-        fingerprint: JSON.stringify(entry.changes ?? []) };
+        fingerprint: entry.fingerprint };
     });
     const manual = (guidance.items ?? []).filter(entry => entry.destinationStatus !== 'same').slice(0, 8)
       .map(entry => `${entry.label}: ${(entry.steps ?? [])[0] ?? 'Set it up in Codex if you want it there.'}`);
     if (!manual.length) manual.push('Plugins, MCP servers and hooks are never copied. Set them up in Codex if you want them in this profile.');
-    return { items, manual };
+    return { items, manual, endpointFingerprint };
   }
 
   async function targetBlocked(target) {
@@ -420,7 +422,11 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     reviewTask: reviewTasks.reviewTask,
     cancelReviewTask: reviewTasks.cancelReviewTask,
     respondReviewTask: reviewTasks.respondReviewTask,
-    async close() { await Promise.all([runs.close(), reviewTasks.close()]); },
+    async close() {
+      const results = await Promise.allSettled([runs.close(), reviewTasks.close()]);
+      const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (failures.length) throw new AggregateError(failures, failures.map(error => error.message).join('\n'));
+    },
     async info() {
       return { mode: 'engine', version, activeJobs: [...runs.activeJobs(), ...reviewTasks.activeJobs()], maxActiveJobs, activeRun: await runs.activeRun(),
         features: { runs: true, copy: true, create: true, clientControls: true, profileEdits: true } };
@@ -477,11 +483,11 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     },
 
     async sessions({ query, profile, client }) {
-      const { rows, homes, truncated } = await sessionRows({ query, profile: plain(profile) ? profile : undefined });
+      const { rows, homes, truncated } = await sessionRows({ query, profile: plain(profile) ? profile : undefined, client: client || undefined });
       const unreadable = homes.filter(home => home.status !== 'ready');
       const { data, defaultHome } = await profileRecords();
       return {
-        sessions: rows.filter(row => !client || row.client === client).map(({ updatedAt, ...row }) => row),
+        sessions: rows.map(({ updatedAt, ...row }) => row),
         profiles: [...(defaultHome ? ['Default'] : []), ...data.profiles.map(p => p.name)],
         partial: unreadable.length ? { text: `${unreadable.map(home => `${home.profileName}’s history couldn’t be read${home.reason ? ` (${home.reason})` : ''}`).join('; ')}. Sessions from the other profiles are listed.`,
           help: 'macOS asks before an app reads some folders. If a profile lives in Documents, Desktop or Downloads, allow access for the terminal that runs xfx ui in System Settings › Privacy & Security › Files and Folders, then reload.' } : null,
@@ -526,7 +532,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         ...(item.actions.guidance ? { guidance: item.actions.guidance } : {}),
       } })) }));
       return { a: { name: a, meta: 'Codex CLI' }, b: { name: b, meta: 'Codex CLI' }, project: null,
-        readAt: `Today’s setup, read ${new Date(setups.get(`${a}|${b}`).at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`,
+        readAt: `Today’s setup, read ${new Date(setups.get(JSON.stringify([a, b])).at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`,
         counts: view.counts, limits: view.limits, groups };
     },
 
@@ -546,7 +552,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       if (!plain(target) || !plain(from)) throw new UiError(400, 'Choose the two profiles.', 'invalid-selection');
       if (target.toLowerCase() === 'default') throw new UiError(400, 'Default can be copied from, not into.', 'invalid-target');
       if (target === from) throw new UiError(400, 'Choose a different profile to copy from.', 'invalid-selection');
-      const { items, manual } = await copyCandidates(from, target);
+      const { items, manual, endpointFingerprint } = await copyCandidates(from, target);
       const identity = originIdentity(item);
       const wanted = identity?.name ?? skill ?? null;
       const matches = wanted ? items.filter(entry => entry.name === wanted
@@ -555,7 +561,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       const preselect = matches.length === 1 ? matches[0] : null;
       const blocked = await targetBlocked(target);
       const token = randomUUID();
-      plans.set(token, { mode: 'copy', from, target, changes: new Map(items.map(entry => [entry.id, entry.fingerprint])) });
+      plans.set(token, { mode: 'copy', from, target, endpointFingerprint, changes: new Map(items.map(entry => [entry.id, entry.fingerprint])) });
       return { mode: 'copy', source: from, target, title: `Copy from ${from} into ${target}`,
         intro: `Only what you tick changes in ${target}. Everything else stays as it is, and nothing is deleted just because ${from} doesn’t have it.`,
         origin: preselect ? `Started from ${preselect.name} in the setup comparison. Tick more items if you want them too.`
@@ -567,14 +573,15 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
 
     async copyApply({ target, from, items = [], planToken }) {
       const reviewed = plans.get(planToken);
-      if (!reviewed || reviewed.target !== target || reviewed.from !== from) throw new UiError(409, 'This preview has expired. Review it again before applying.', 'changed');
+      if (!reviewed || reviewed.mode !== 'copy' || reviewed.target !== target || reviewed.from !== from) throw new UiError(409, 'This preview has expired. Review it again before applying.', 'changed');
       if (!Array.isArray(items) || !items.length) throw new UiError(400, 'Choose at least one item.', 'nothing-selected');
       if (items.some(id => !reviewed.changes.has(id))) throw new UiError(400, 'Choose items from the preview.', 'invalid-selection');
       const current = await planCopy(store, from, target, { selection: items, defaultUserHome });
-      for (const entry of current.items ?? []) if (items.includes(entry.id) && reviewed.changes.get(entry.id) !== JSON.stringify(entry.changes ?? []))
+      for (const entry of current.items ?? []) if (items.includes(entry.id) && reviewed.changes.get(entry.id) !== entry.fingerprint)
         throw new UiError(409, `${entry.label} changed since you reviewed it. Nothing was changed; review the preview again.`, 'changed');
       let result;
-      try { result = await applyCopy(store, from, target, { selection: items, defaultUserHome, expectedHash: current.hash, runtime: copyRuntime(), ...lockOptions }); }
+      try { result = await applyCopy(store, from, target, { selection: items, defaultUserHome, expectedHash: current.hash, expectedEndpointFingerprint: reviewed.endpointFingerprint,
+        expectedItemFingerprints: Object.fromEntries(items.map(id => [id, reviewed.changes.get(id)])), runtime: copyRuntime(), ...lockOptions }); }
       catch (error) { throw copyError(error); }
       plans.delete(planToken);
       setups.clear();
@@ -798,14 +805,14 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       const plan = await this.exportPlan({ ref });
       const { value } = await comparisonFor(ref);
       const base = plan.folder.replace(/^~/, homedir()).replace(/\/$/, '');
-      // Never overwrite: a taken folder gets a numbered sibling.
-      let folder = base;
-      for (let n = 2; ; n++) {
-        try { await lstat(folder); folder = `${base} (${n})`; }
-        catch (error) { if (error.code === 'ENOENT') break; throw error; }
-        if (n > 50) throw new UiError(409, 'Too many exports with this name already exist. Rename or move some first.', 'folder-taken');
+      await mkdir(dirname(base), { recursive: true, mode: 0o700 });
+      let folder;
+      for (let n = 1; n <= 50; n++) {
+        const candidate = n === 1 ? base : `${base} (${n})`;
+        try { await mkdir(candidate, { mode: 0o700 }); folder = candidate; break; }
+        catch (error) { if (error.code !== 'EEXIST') throw error; }
       }
-      await mkdir(folder, { recursive: true, mode: 0o700 });
+      if (!folder) throw new UiError(409, 'Too many exports with this name already exist. Rename or move some first.', 'folder-taken');
       let result;
       let reviewPacket = null;
       let reviewPacketReport = null;
@@ -826,15 +833,17 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         result = await exportAuditReport(exportValue, { output: join(folder, plan.files[0]), format: 'markdown', includeReplayContent });
       }
       catch (error) {
-        await rm(folder, { recursive: false }).catch(() => {});
-        throw new UiError(500, `${error.message}. Nothing was left behind.`, 'export-failed');
+        await rmdir(folder).catch(() => {});
+        throw new UiError(500, error.message, 'export-failed');
       }
       const savedAt = new Date().toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-      const entries = await savedList();
-      await writeSaved([{ id: randomUUID(), title: plan.title, savedAt, folder, jsonPath: result.evidencePath }, ...entries]);
+      let warning;
+      try { await saveRecent({ id: randomUUID(), title: plan.title, savedAt, folder, jsonPath: result.evidencePath }); }
+      catch { warning = 'Both files were saved, but Recent could not be updated. Use the folder location below to reopen them.'; }
       const reviewPacketRef = reviewPacketReport
         ? register(reviewPacketReport, { title: plan.title, savedAt, path: result.evidencePath }).ref : undefined;
       return { folder: `${tilde(folder)}/`, files: [basename(result.output), basename(result.evidencePath)], contentIncluded: 'not included',
+        ...(warning ? { warning } : {}),
         replayContentIncluded: includeReplayContent && plan.replayAvailable ? 'included where available, with known secret patterns redacted' : 'not included',
         ...(reviewPacket ? { reviewPacketFingerprint: reviewPacket.evidenceFingerprint, reviewPacketRef } : {}) };
     },

@@ -194,7 +194,7 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
       {unavailableRequests.length ? <InfoNotice title="Native request unavailable"><p>This request is no longer active. No response was submitted; it cannot be replayed.</p></InfoNotice> : null}
       {task.response ? <section className="rounded-control p-3 flex flex-col gap-2" aria-labelledby="review-task-response" style={{ border: '1px solid var(--color-divider)' }}>
         <h3 id="review-task-response" className="text-body font-semibold">{task.response.status === 'complete' ? 'Captured response' : task.response.status === 'partial' ? 'Partial response' : 'Response unavailable'}</h3>
-        {task.response.text ? <div className="text-ui whitespace-pre-wrap break-words">{task.response.text}</div> : <p className="text-ui">No response text was captured.</p>}
+        {task.response.text ? <div className="text-ui whitespace-pre-wrap break-words">{task.response.text}</div> : <p className="text-ui">{task.response.reason ?? 'No response text was captured.'}</p>}
         <p className="hint">Natural-language output is shown as captured; it does not create ratings or a verdict.</p>
       </section> : null}
       {task.error ? <ErrorPanel title="Review task did not complete">{task.error}</ErrorPanel> : null}
