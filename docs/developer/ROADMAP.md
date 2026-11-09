@@ -1,22 +1,24 @@
 # Xenoflux roadmap
 
-**3.1.1 local candidate. Updated 2026-11-09.** This is the active delivery/status
+**3.1.1 released. Updated 2026-11-09.** This is the active delivery/status
 record. The [goal](AUDIT-GOAL.md#current-release-boundary) owns scope and
 [acceptance](AUDIT-GOAL.md#observable-acceptance); the
 [review specification](REVIEW-TASK-IMPLEMENTATION.md) owns implementation details.
 
 ## Current work and stop condition
 
-**3.1.1 is the current local patch candidate.** The [candidate record](RELEASE-3.1.1.md)
-owns changes, verification and limits. The audit corrections are implemented and
-verified on Node 22.15.0 and 24.0.0. Public candidate history starts from public
-main and contains the reviewed refactor and fixes. Knowledge notes remain local,
-ignored and outside the outgoing history and package.
+**The authorized 3.1.1 release batch is complete.** The
+[release record](RELEASE-3.1.1.md#published-identity-and-verification) owns the
+CI-tested head, merged source, npm/latest and stable GitHub release, asset hashes,
+public artifact verification and isolated install/uninstall result. All eleven
+audit corrections and the CI-discovered replay focus correction are included.
+Both public macOS jobs passed on Node 22.15 and 24. The record preserves the first
+failed CI run and controlled focus regression separately from the passing runs.
 
-The local stop condition is a committed candidate, passing package-boundary and
-documentation checks, and a detached bundle whose generated manifest records
-`smoke.status: passed`, exact source revision and artifact hashes. Public CI,
-merge, publication and installed updates are separate operations.
+Public source history starts from public main. Knowledge files and private
+commits remain excluded; local notes are untracked, ignored and preserved.
+Source, tags and assets retain their original identities. No existing installed
+application or live Codex state was changed.
 
 **The authorized 3.1.0 release batch is complete.** The
 [3.1.0 record](RELEASE-3.1.0.md#published-identity-and-verification) binds the
@@ -56,12 +58,13 @@ The UI release sequence, 3.0.1 hotfix and 3.1.0 concurrency batch are complete:
 | A–B: native execution and durable review tasks/API | Selected-profile settings, native requests, exact session association, single Start, frozen inputs, cancellation and recovery. | [Review contract](REVIEW-TASK-IMPLEMENTATION.md) and [3.0.0 verification](RELEASE-3.0.0.md#integrated-development-verification). |
 | C–D: Reviews UI and legacy removal | Report-to-review flow, captured responses and citations, labelled demo and removal of the retired isolated reviewer campaign. | [3.0.0 acceptance and limits](RELEASE-3.0.0.md#retained-verification-and-limits). |
 | E: verification and release | Source/package parity, bundled UI, required checks, detached smoke, stable publication and isolated installed-package verification. | [3.0.0 closeout](RELEASE-3.0.0.md#published-identity-and-verification). |
+| 3.1.1 | Audit reliability/privacy corrections, regression coverage and deferred replay focus repair. | [3.1.1 release record](RELEASE-3.1.1.md). |
 | 3.1.0 | Concurrent same-profile comparisons/reviews, per-job execution settings, independent native controls, signed-vendor shortcuts and guarded recovery. | [3.1.0 release record](RELEASE-3.1.0.md). |
 | 3.0.1 hotfix | Managed copier includes bundled UI; replay keyboard-open focus follows the dialog mount lifecycle. | [3.0.1 release record](RELEASE-3.0.1.md). |
 
-The 3.1.0 publication is complete. The current request covers local 3.1.1
-preparation; this checkpoint and historical grants provide no additional
-operational authorization.
+The 3.1.1 publication and verification are complete. No further release batch or
+installed update is active; this checkpoint and historical grants provide no
+additional operational authorization.
 
 ## Verification and release gates
 

@@ -38,9 +38,8 @@ not a required reading sequence; use relevant sections as needed.
 
 ## Developer records
 
-The [3.1.1 candidate record](developer/RELEASE-3.1.1.md) describes the prepared
-audit and privacy corrections, verification, compatibility changes and bundle
-manifest.
+The [3.1.1 release record](developer/RELEASE-3.1.1.md) owns the audit and privacy
+corrections, published identities, artifact checksums and verification.
 
 The [3.1.0 record](developer/RELEASE-3.1.0.md) binds the published
 same-profile concurrency release and its verification. Its [native validation summary](developer/SAME-PROFILE-NATIVE-VALIDATION.md)

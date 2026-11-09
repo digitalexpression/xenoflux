@@ -108,7 +108,7 @@ active work. Follow only the references needed for that slice:
 - [Review implementation](REVIEW-TASK-IMPLEMENTATION.md): ordinary execution,
   durable task/API/recovery and selected legacy removal.
 - [Profile copy policy](PROFILE-COPY-POLICY.md): transfer behavior and eligibility.
-- [3.1.1 candidate](RELEASE-3.1.1.md): current local audit/privacy patch preparation.
+- [3.1.1 release](RELEASE-3.1.1.md): audit/privacy patch and publication evidence.
 - [3.0.0 record](RELEASE-3.0.0.md): source-bound results, performance limits
   and remaining evidence. [Release process](LOCAL-RELEASE.md): packaging/publication.
 - [Audit acceptance](AUDIT-ACCEPTANCE.md): immutable release records, including

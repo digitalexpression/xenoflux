@@ -25,7 +25,7 @@ goal and roadmap supersede all broader proposed release gates below. This record
 does not replace the released 2.1.0 observations or turn older profile acceptance
 into proof of the review flow.
 
-The [3.1.1 candidate](RELEASE-3.1.1.md) records subsequent reliability and privacy
+The [3.1.1 release](RELEASE-3.1.1.md) records subsequent reliability and privacy
 corrections. Its fixture evidence remains separate from the historical native
 observations below.
 

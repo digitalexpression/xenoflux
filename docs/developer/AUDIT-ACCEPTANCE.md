@@ -3,8 +3,8 @@
 This index points to version-specific release records. Published records are
 immutable; each record states its evidence scope and limits.
 
-- [Xenoflux 3.1.1 candidate](RELEASE-3.1.1.md): local audit corrections, private
-  knowledge boundary and detached bundle preparation.
+- [Xenoflux 3.1.1](RELEASE-3.1.1.md): audit corrections, private knowledge
+  boundary, published identities and artifact/installation verification.
 - [Xenoflux 3.1.0](RELEASE-3.1.0.md): same-profile concurrent comparisons/reviews,
   signed-vendor Desktop shortcuts, native recovery limits and verified publication.
 - [Xenoflux 3.0.1](RELEASE-3.0.1.md): published managed-installer and replay-focus

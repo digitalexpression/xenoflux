@@ -6,7 +6,7 @@ determine authorization. A goal or historical grant does not authorize operation
 
 ## Current release boundary
 
-Prepare **3.1.1**, a reliability and privacy follow-up to 3.1.0, for the locally
+Deliver **3.1.1**, a reliability and privacy follow-up to 3.1.0, for the locally
 bundled browser UI for **Codex
 on macOS**, launched with `xfx ui`. Users can:
 
