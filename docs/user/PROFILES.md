@@ -54,7 +54,8 @@ xfx pick
 ```
 
 Replace `TASK_ID` with a task from that profile's history. Different profiles can run
-concurrently, but one profile cannot run in the managed CLI and desktop together.
+concurrently. Standalone `launch`/`resume` require exclusive use of the profile;
+in-app comparisons and reviews use [shared execution](APP.md#review-a-comparison).
 
 Exact history lookup requires `--profile` and a UUID task ID. It reads metadata only
 from that profile's native home, including archived tasks, and reports the
@@ -150,6 +151,6 @@ xfx profile delete NAME
 
 Replace the uppercase placeholders with real values. `unbind NAME REPOSITORY`
 removes that repository binding; `unbind NAME` removes the native binding. Rename,
-delete and unbind change registry metadata while preserving native files. Delete
-and native unbind refuse an active desktop or unfinished operation. Use
+delete and unbind change registry metadata while preserving native files. Registry
+changes refuse active native work or unfinished setup/copy operations. Use
 `xfx --help` for the full command list and options.

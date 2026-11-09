@@ -6,9 +6,8 @@ determine authorization. A goal or historical grant does not authorize operation
 
 ## Current release boundary
 
-Deliver **3.1.1**, a reliability and privacy follow-up to 3.1.0, for the locally
-bundled browser UI for **Codex
-on macOS**, launched with `xfx ui`. Users can:
+The locally bundled browser UI supports **Codex on macOS**, launched with
+`xfx ui`. Users can:
 
 1. Create an empty profile or one from selected supported parts of another.
 2. Run the same task on two comparison sides and read the report. Both sides may use one profile.
@@ -116,7 +115,7 @@ counts or simulations do not prove the whole journey. A fresh coding pair is nee
 only if applicable comparison proof is missing, not before implementing review.
 VoiceOver and uncoached participant studies remain excluded. Required commands
 are in the [developer guide](README.md#checkout-and-checks); retained results and
-performance limits live in the [candidate record](RELEASE-3.0.0.md).
+performance limits live in the [release summaries](AUDIT-ACCEPTANCE.md).
 
 ## Evidence and privacy contracts
 
@@ -155,6 +154,7 @@ assess existing exact-version guards when relevant rather than extending them.
 
 Reuse existing code and normal local permissions. Containers, VMs, whole-client
 isolation and generic recovery platforms are not dependencies. Keep original user
-data, published records and old artifact identities intact. Live profile/client
+data, raw receipts and published artifact identities intact; full record originals
+remain private when summaries are shortened. Live profile/client
 operations and model runs need current authorization covering effects and budget;
 do not re-request covered steps. Publication and installed updates remain separate.

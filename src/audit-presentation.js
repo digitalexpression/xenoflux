@@ -1,5 +1,5 @@
 // Shared plain-language wording for comparisons (DESIGN.md › Comparison,
-// review and run labels; UI handoff §6). The local app, the Markdown export and
+// review and run labels). The local app, the Markdown export and
 // the demo data use these functions so one engine state always reads the same
 // way. Presentation never re-derives eligibility: it reads the explanation the
 // engine already built.

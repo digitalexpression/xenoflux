@@ -3,46 +3,19 @@
 Audience: maintainers. Users should follow [Installation](../user/INSTALLATION.md)
 to obtain a published npm package or offline bundle.
 
-Version 1.0.0 was the first stable release. Xenoflux 3.1.1 is the current release;
-the [3.1.1 record](RELEASE-3.1.1.md) binds its publication and final verification.
-The [3.1.0 record](RELEASE-3.1.0.md) retains that earlier release's evidence.
+The [roadmap](ROADMAP.md#current-work-and-stop-condition) links current release evidence;
+the [package manifest](../../package.json) owns the checkout version.
 The stable npm tag is `latest`. Publication and changes to installed user state
 require the applicable explicit request; building a bundle or passing checks
 does not authorize either action.
 
-## UI major release
+## Release policy
 
-The UI major release is **3.0.0**. Update package and lockfile versions together
-for each new candidate. Retained candidate branches/bundles keep their original
-identities; do not rename or relabel them as new verification. The
-[3.0.0 record](RELEASE-3.0.0.md) and [3.0.1 record](RELEASE-3.0.1.md) track their
-separate source-bound evidence.
-
-Breaking changes, legacy removal and cleanup are allowed. Release notes must
-state removed commands/features/formats and any fresh-start requirement.
-Migration tools, compatibility layers and support for previous formats are not
-release gates. Preserve original user data and historical artifacts, and verify
-safe behavior for the new contract. The [goal](AUDIT-GOAL.md#evolution-and-provider-version-policy)
-owns this policy; this procedure does not reintroduce compatibility obligations.
-
-## Acceptance and documentation ownership
-
-The [shared product goal](AUDIT-GOAL.md) owns stable outcomes and acceptance.
-The [active roadmap](ROADMAP.md) owns current delivery scope and stop condition.
-The [capability assessment](PROFILE-AUDIT-ASSESSMENT.md) owns versioned
-capabilities and evidence limits. The [acceptance index](AUDIT-ACCEPTANCE.md)
-links immutable versioned records, each owning that release's source,
-publication, installation and product evidence. Keep behavior
-contracts beside the code changes they govern, especially the
-[profile copy policy](PROFILE-COPY-POLICY.md).
-
-Keep the current public goal, roadmap, assessment, acceptance index, versioned
-release record and necessary linked history in the explicit package
-documentation allowlist. Verify
-actual packed-file membership and local inline Markdown links. Private handovers and raw
-receipts remain excluded. Record source revision, published npm/GitHub identities,
-artifact checksums and installed executable identity separately. Preserve
-versioned acceptance records and artifacts unchanged after release.
+The [goal](AUDIT-GOAL.md#evolution-and-provider-version-policy) owns breaking-change
+and compatibility policy. Release notes must name removed commands, features,
+formats and any fresh-start requirement. Preserve original user data and historical
+artifacts; do not relabel earlier candidates as new verification. The
+[roadmap](ROADMAP.md#current-work-and-stop-condition) links current release evidence.
 
 ## Prepare the launcher and source
 
@@ -60,6 +33,8 @@ npm ci
 npm run check
 npm run check:native
 npm run check:docs
+npx playwright install chromium
+npm run check:ui
 npm test
 npm run local-release -- --output /absolute/new/release-directory --smoke
 ```
@@ -96,22 +71,17 @@ shared history is a separate boundary and is not rewritten by local preparation.
 
 ## Documentation ownership and release closeout
 
-Keep one active roadmap. The shared goal owns acceptance outcomes, the roadmap
-owns delivery order and stop conditions, the capability assessment owns
-versioned support/limits, and the release record owns the immutable source,
-publication, artifact and installation evidence for that version. Archive
-superseded public plans with a dated historical wrapper; do not let their old
-instructions read as active authorization. Update the documentation index when
-adding or moving a public guide. Put behavior rules beside the feature's code
-changes and link them from the relevant developer guide.
+Keep one active roadmap for status, the goal for behavior/acceptance, feature
+contracts for implementation and versioned release records for source-bound
+results. Dated assessments and plans remain historical. Update the documentation
+index and explicit package allowlist when public guides move; verify membership
+and local inline links in the actual packed files with `npm run check:docs`.
 
-At release closeout, identify the merged source revision, the tested/public
-artifact checksum, the npm version/tag, GitHub tag/assets, and any installed
-executable separately. Verify source/package parity and package boundary,
-review links in the actual packed file list, and retain the accepted receipts
-and artifacts unchanged. Keep the existing syntax, native-helper, full-suite,
-package-smoke and applicable CI checks; `npm run check:docs` additionally
-checks packed documentation membership and local inline Markdown links.
+At closeout, keep a compact summary: date/outcome, merged/tested revision, artifact
+checksums, npm/GitHub identities, any installed executable, final checks, failed
+controls and limits. Preserve full originals/raw receipts privately; tags and
+published artifacts remain unchanged. Keep required syntax, native-helper,
+full-suite, package-smoke and applicable CI checks.
 
 ## Test global npm installation in isolation
 

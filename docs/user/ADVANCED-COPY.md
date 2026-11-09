@@ -1,7 +1,6 @@
 # Inspect and selectively copy profile contents
 
-Audience: users. This guide describes inspection, selective copying and undo in
-Xenoflux 1.0.0. For profile setup, see [Profiles](PROFILES.md).
+Audience: users. This guide covers inspection, selective copying and undo. For profile setup, see [Profiles](PROFILES.md).
 
 Use `xfx profile inspect Default` or `xfx profile inspect Research --json` to inspect a profile. The inventory reports discovered contents and their origin. It does not prove that Codex loaded every item into a particular task.
 

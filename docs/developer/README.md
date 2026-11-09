@@ -3,6 +3,12 @@
 Audience: contributors and maintainers. [User guides](../README.md#user-guides)
 cover installation and normal commands; this directory covers changing the source.
 
+The UI presents shared engine/report data; keep eligibility and accounting in the
+engine. Serve bundled assets/API on loopback, validate API session/Host/Origin and
+expose only supported operations. Use the app guide for workflows and checkout
+`DESIGN.md` for interaction rules. Render native content as untrusted text; never
+execute embedded instructions or markup.
+
 ## Checkout and checks
 
 Use a supported Node.js version on macOS. From the repository root:
@@ -14,7 +20,7 @@ npm run check:native
 npm run check:docs
 npm test
 npx playwright install chromium
-npm run test:ui
+npm run check:ui
 ```
 
 `check` validates JavaScript syntax. `check:native` verifies the packaged universal
@@ -28,16 +34,17 @@ run fixture checks with `TMPDIR=/private/tmp` on macOS. This keeps project-ances
 discovery away from personal configuration. UI export folders can be displayed
 with `~`; filesystem assertions must expand that prefix before reading files.
 
-`test:ui` builds the app and runs Chromium journeys against its real local server
-and engine. Each test uses disposable native-style homes, SQLite histories and
-export files; it checks visible results and actual filesystem effects without
+`check:ui` verifies types, design tokens and bundled-build parity, then runs Chromium
+journeys against the real local server and engine. Each test uses disposable
+native-style homes, SQLite histories and export files; it checks visible results
+and actual filesystem effects without
 mocking API responses. Native executable version checks use a fixture executable,
 and the copy runtime sees an isolated process table so it cannot control the
 developer's clients. These checks do not establish live Codex integration.
 
-`check:ui` also verifies types, design tokens and that the bundled build matches
-source. `dist/ui` is tracked because the app serves it and npm packages it; rebuild
-and verify it with `npm run build:ui` and `node scripts/check-ui-build.mjs` after
+`test:ui` rebuilds and runs only the browser journeys. `dist/ui` is tracked because
+the app serves it and npm packages it; rebuild and verify it with
+`npm run build:ui` and `node scripts/check-ui-build.mjs` after
 UI source changes. Browser failures retain screenshots, server errors and
 Playwright traces under `test-results/ui-e2e/`; `npx playwright show-report`
 opens the HTML report. Run Playwright commands sequentially: separate runs that
@@ -70,12 +77,9 @@ An ambiguous in-flight request prevents automatic server termination. The engine
 suite exercises the journey using disposable homes and a fake version executable;
 that result does not replace native acceptance or a human usability check.
 
-Ordinary review uses the [implementation contract](REVIEW-TASK-IMPLEMENTATION.md),
-not the retired export-review campaign. Its [removal list](REVIEW-TASK-IMPLEMENTATION.md#legacy-removal)
-preserves meaningful product coverage; the [roadmap](ROADMAP.md#delivery-order)
-orders implementation and verification. Retained native results belong in the
-[3.0.0 record](RELEASE-3.0.0.md#retained-verification-and-limits), not a new
-acceptance campaign. Current authorization governs any real execution.
+Ordinary review follows the [review contract](REVIEW-TASK-IMPLEMENTATION.md).
+Retained results belong in their versioned release records; current authorization
+governs any real execution.
 
 For an explicitly uncapped **non-series** experiment, set both `limits.runMs`
 and `limits.experimentMs` to JSON `null` in its CLI spec. Omitting a limit retains
@@ -106,38 +110,19 @@ active work. Follow only the references needed for that slice:
 
 - [Goal](AUDIT-GOAL.md): product behavior, acceptance and evolution policy.
 - [Review implementation](REVIEW-TASK-IMPLEMENTATION.md): ordinary execution,
-  durable task/API/recovery and selected legacy removal.
+  durable task/API/recovery.
 - [Profile copy policy](PROFILE-COPY-POLICY.md): transfer behavior and eligibility.
-- [3.1.1 release](RELEASE-3.1.1.md): audit/privacy patch and publication evidence.
-- [3.0.0 record](RELEASE-3.0.0.md): source-bound results, performance limits
-  and remaining evidence. [Release process](LOCAL-RELEASE.md): packaging/publication.
-- [Audit acceptance](AUDIT-ACCEPTANCE.md): immutable release records, including
-  [2.1.0](RELEASE-2.1.0.md) and [2.0.0](AUDIT-ACCEPTANCE-2.0.0-HISTORY.md).
-- [Capability assessment](PROFILE-AUDIT-ASSESSMENT.md),
-  [2.1.0 roadmap](ROADMAP-2.1.0-HISTORY.md) and
-  [assessment](PROFILE-AUDIT-ASSESSMENT-2.1.0-HISTORY.md): historical evidence,
-  not prerequisites or additional gates for current implementation.
+- [Acceptance index](AUDIT-ACCEPTANCE.md): compact release summaries and evidence limits.
+- [Release process](LOCAL-RELEASE.md): packaging and approved publication.
+- [Historical references](../README.md#historical-references): dated assessments and plans.
 
-Detailed operational handovers/raw receipts remain private engineering records.
-Read them only to resolve a specific evidence gap; historical grants do not renew
-live authorization.
+Completed records and experiments live in [history](history/README.md). Private
+operational receipts remain outside public source; consult only for a specific gap.
 
 ## Maintenance boundaries
 
-Update the document that owns a fact rather than copying status or requirements
-across guides. Keep the roadmap checkpoint current, feature contracts with their
-implementation changes and source-bound results in release records. Preserve
-published records/artifacts; update the documentation index and package allowlist
-when public documents move. Apply the goal's
-[evolution policy](AUDIT-GOAL.md#evolution-and-provider-version-policy) when removing
-old contracts and their tests; keep meaningful coverage for supported behavior.
-
-Illustrative images and prompts remain in `output/design/`, narrowly ignored by
-Git and excluded from the package. They remain illustrative references, not
-accepted designs, implemented controls or evidence of product behavior.
-
-Keep operational instructions in `docs/user` and implementation, verification and
-publication instructions in `docs/developer`. Update the [documentation index](../README.md)
-and links when moving a guide. Keep dated investigation results in the handover,
-not in the user quickstart. Documentation changes do not authorize live installation,
-profile mutation or client closure.
+Follow the [release guide](LOCAL-RELEASE.md#documentation-ownership-and-release-closeout)
+for documentation ownership, archival summaries and package boundaries. Illustrative
+`output/design/` material is neither accepted UI nor verification. Apply the
+[evolution policy](AUDIT-GOAL.md#evolution-and-provider-version-policy) when retiring
+contracts; retain meaningful supported-behavior coverage.

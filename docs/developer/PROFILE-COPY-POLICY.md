@@ -1,170 +1,42 @@
 # Profile creation and copy policy
 
-Accepted: 2026-10-02. Scope: profile creation, comparison, copy, and their user flows.
-Audience: developers and reviewers. This is the current development and review
-contract, originally established for 1.0.0. The 2026-11-02 major-release policy
-removes the requirement to keep older recovery readers or provide migrations. See the [user copy guide](../user/ADVANCED-COPY.md)
-for commands and the evidence boundary below for historical verification.
+Current transfer contract; [user commands](../user/ADVANCED-COPY.md). The [goal](AUDIT-GOAL.md#evolution-and-provider-version-policy) owns compatibility policy. Discovery may inspect more than copying supports; observation never authorizes transfer or activation.
 
 ## Purpose
 
-Optimize first for creating a new profile, either fresh or from selected parts of
-another profile. Once activated, profiles evolve independently. A later copy is a
-reviewed update with a clear source/destination diff, not synchronization or a clone
-of effective runtime state. Prefer a new profile or a small reliable update over
-complex migration of integrations and internal state. Do not maintain ongoing
-profile relationships, a synchronization baseline, or a generic migration framework.
-
-Audit and experiment observation has its own scope. Copy eligibility and the
-supported transfer surface do not limit discovery or analysis of existing setup
-and execution evidence, including project, system, plugin-provided, or otherwise
-non-copyable skills. This policy still governs any creation/copy mutation an
-experiment actually performs; observing a resource does not authorize transferring
-or activating it. See the [audit acceptance summary](AUDIT-ACCEPTANCE.md) for
-bounded evidence and limitations.
+Create fresh profiles or seed explicitly selected parts; profiles then evolve independently. Later copies are reviewed updates, not synchronization, effective-state clones, shared storage or a migration framework. Default is a source only.
 
 ## Rules
 
-1. **One preservation policy across all entry points.** Creation from a source and
-   subsequent copies use explicit selections and the same preservation semantics.
-   Unselected settings and destination-only items remain unchanged. Category options
-   may select supported items but must not implicitly delete destination-only items.
-   `Default` remains a source, not a copy target.
-
-2. **Show the diff before changing an existing profile.** Identify the source,
-   destination, item origin, and proposed additions, changes, removals, identical
-   items, and items kept at the destination. Show before/after supported config
-   values and reviewable file changes without exposing secrets. Identify limitations,
-   missing dependencies, manual setup, and unknown state separately. Apply only
-   selected operations whose effects and recovery are understood and verified;
-   otherwise provide guidance or omit the operation with a reason. Do not infer
-   deletions from absence in the source. Identical selections are no-ops.
-
-3. **Replace selected skill packages exactly, never overlay them.** A selected
-   standalone skill includes its supported files, resources, scripts, and relevant
-   modes. For a differing existing package, offer keep/skip or explicit replacement.
-   Replacement makes the destination package match the source: preview and remove
-   destination-only files inside that package, while preserving everything outside
-   it. Refuse unsafe, unsupported, or partial packages before mutation. Do not resolve
-   ambiguous same-name sources silently. If exact replacement and recovery cannot
-   be guaranteed, refuse replacement rather than falling back to an overlay.
-
-4. **Use native/manual setup for plugins, hooks, and MCP.** Xenoflux must not copy,
-   install, enable, connect, or migrate their definitions or internal state as part
-   of profile copying, including through a broad config copy. Print only necessary,
-   conditional setup steps for integrations the user wants. Identify the actual
-   source/marketplace and version when known; distinguish installation, enablement,
-   trust, dependencies, and account connection. Group plugin-provided skills, hooks,
-   and MCP definitions under their parent plugin. Do not turn them into standalone
-   copies. Do not generate installation tasks from cache presence alone. Automating
-   these operations later requires an explicit revision of this policy.
-
-5. **Respect ownership and isolation.** Keep project resources in the project and
-   rely on existing native sharing only where the effective roots and scope support
-   it. Do not add cross-profile symlinks or a shared-storage manager. Do not transfer
-   credentials, granted permissions, cached authorizations, project/hook trust,
-   generated memory, conversation stores, databases, or runtime caches. Explicitly
-   selected supported policy settings and rule files are definitions, not migrated
-   grants; their effects must be visible in the preview. Preserve destination storage
-   and authentication routing. Human-reviewed durable guidance may be transferred as
-   instructions or a handover, not as a bulk memory migration.
-
-6. **State only what the evidence establishes.** Presence, configuration,
-   installation, enablement, discovery, and runtime availability are separate facts.
-   A publisher, path, manifest, or cache entry alone does not prove personal ownership
-   or built-in status. Keep unknown origin/state explicit. Report bounded discovery
-   and unavailable paths rather than claiming completeness. Do not promise that
-   copied files install dependencies or rewrite external references. A resumed or
-   forked conversation is not a clean destination context; recommend a fresh
-   conversation with a user-reviewed handover when that is the desired outcome.
-
-7. **Keep the flow and recovery small.** Reuse the existing preview, transaction,
-   conflict, journal, undo, and recovery mechanisms. Bind copy previews to stable source/destination identities and fingerprints of
-   selected before/after contents and modes. Revalidate these under the copy lock
-   before applying. Undo must restore replaced and removed package files and relevant modes,
-   and refuse to overwrite subsequent user edits. Preserve original recovery records.
-   Recovery and Undo must work for supported current-format operations; older journal
-   readers and migration are not required under the [major-release policy](AUDIT-GOAL.md#evolution-and-provider-version-policy).
-   Refuse unsupported old records clearly without changing them or guessing recovery.
-   Manual setup is outside copy undo. End with
-   a concise result and conditional setup guide, not a persistent todo database.
-   Preparation, copying, sign-in, and activation remain distinct outcomes; a later
-   setup failure must not silently discard a completed copy.
-
-8. **Verify the promised path.** Use fixture-backed checks for exact changes,
-   preservation, conflicts, interruption, and undo. Native discovery and actual
-   execution/enforcement require their own evidence for the relevant client version
-   and interface. Neither a passing file-copy test nor a discovery listing proves
-   runtime behavior. Retain required repository checks; add checks for meaningful
-   uncovered behavior, not implementation mirrors. Documentation or fixture work
-   does not authorize live profile mutation, client shutdown, installation, or release.
+1. **Preserve unselected state.** All entry points share one planner/policy. Category selection cannot delete source-absent destination settings/items. Identical selections are no-ops.
+2. **Preview exact effects.** Identify stable source/destination, origin, additions/changes/removals/identical/kept items, before/after supported values and file changes without secrets. Show unknowns, exclusions, dependencies and manual setup. Refuse unsupported/unsafe/ambiguous effects rather than guessing.
+3. **Replace selected standalone skills exactly.** Include supported resources/scripts/modes; explicit keep/skip/replace on conflict. Preview obsolete destination files inside that package, preserve everything outside it, and support exact Undo. Never use partial overlays. Refuse unsupported packages, unsafe contents/type transitions or directories without required owner permissions before mutation.
+4. **Integrations stay native/manual.** No copy/install/enable/connect/migration of plugin/hook/MCP definitions, grants or internal state, including broad config copies. Group plugin components under the parent. Only selected integrations receive guidance; name actual marketplace/identity/version when known and distinguish installation/enablement/trust/dependencies/account connection. Cache presence is not installation; check first and avoid duplicate actions. Automation requires a policy change.
+5. **Respect ownership.** Project resources and built-ins remain with their owner; native sharing requires supported roots/scope and may differ by CLI/Desktop environment. No cross-profile symlinks or transferred credentials, permissions, cached authorization, project/hook trust, generated memory, conversations, databases or caches. Preserve authentication/storage routing. Supported selected policy/rule definitions are not migrated grants; preview their effects. Use reviewed durable guidance/fresh conversations instead of bulk memory/history transfer.
+6. **Bound claims.** Presence/configuration/installation/enablement/discovery/use differ. Paths/manifests/publishers do not prove ownership; partial discovery stays explicit. Copying installs no external dependencies and rewrites no arbitrary references. Resume/fork does not erase old instruction context.
+7. **Keep transactions and recovery exact.** Bind preview to source/destination identity and selected before/after content/mode fingerprints; recheck under the copy lock. Reuse journal/conflict/Undo/recovery mechanisms. Restore replacements/deletions/modes, refuse intervening edits, and preserve original recovery records. Current v3 journals only; reject unsupported older formats unchanged, without guessing/migrations. Manual setup is outside Undo. Preparation/copy/sign-in/opening remain separate; later setup failure cannot discard a successful copy.
+8. **Verify behavior.** Fixtures cover preservation, exact replacement, conflicts, interruption and Undo; meaningful native loading/execution needs client-specific evidence. Keep required checks and add uncovered behavior tests, not implementation mirrors. Documentation/fixtures grant no live or publication authority.
 
 ## Action boundary
 
-| Item | Copy policy |
+| Item | Allowed action |
 | --- | --- |
-| Supported config keys, global instructions, agent definitions, rule files | Selected reliable changes with a diff, explicit conflict decisions, and undo. No arbitrary whole-config migration. |
-| Standalone skills, including self-contained third-party skills | Add, no-op, skip, or exact package replacement under rule 3. Ownership and external dependency uncertainty remain visible. |
-| Plugins, standalone hooks, MCP definitions/connections | Native/manual setup guide only. No automatic definition or activation transfer. |
-| Plugin-provided components | Handle once through the parent plugin. |
-| Project resources and client-provided built-ins | Leave with their existing owner. Shared availability must not be assumed across different CLI/desktop environments. |
-| Generated memory and conversations | No copy/import. Retain native resume in the owning profile; use a reviewed handover for a fresh destination conversation. |
-| Unknown artifacts, caches, credentials, trust, runtime state | No automatic transfer. Explain relevant unknowns without exposing private contents. |
+| Supported config/global instructions/agents/rules | Selected changes with diff, explicit conflicts and Undo; no arbitrary whole-config migration. |
+| Standalone skills | Add/no-op/skip/exact replacement under rule 3. |
+| Plugins/hooks/MCP | Conditional native/manual guidance only; parent owns plugin components. |
+| Project/built-in resources | Keep existing ownership; do not assume shared runtime availability. |
+| Memory/history/credentials/trust/caches/runtime/unknown state | No automatic transfer; explain unknowns without disclosing private contents. |
 
 ## Concrete acceptance cases
 
-- Creating from another profile copies only the selected supported items. Inspection
-  and preview do not create a profile, close clients, or activate integrations.
-- After activation, changing a supported config value in the destination produces a
-  clear before/after diff on the next copy. Applying that selected key preserves
-  other settings and destination-only agents across every copy entry point.
-- Replacing `skills/review-helper` lists an obsolete destination-only script for
-  removal. The resulting package matches the source; another skill remains untouched.
-  Undo restores the old package, including that script and its mode. An intervening
-  edit causes a safe refusal, not silent data loss.
-- A changed plugin or MCP entry produces a conditional native setup instruction,
-  not a config write. Exact identity prevents duplicate plugin/component todos;
-  known existing destination state suppresses redundant actions. When that state
-  cannot be established, say "check first; install only if absent." Do not claim a
-  complete integration diff from partial metadata.
-- A source conversation or generated memory file cannot be selected for transfer.
-  A continuation guide does not claim that destination instructions erase history.
+- Preview/cancel creates nothing, closes no clients and activates no integration.
+- Selected-key copy preserves other settings and source-absent destination agents across all entry points.
+- Exact skill replacement removes a previewed obsolete script; Undo restores it and its mode. Another package stays untouched; an intervening edit refuses Undo.
+- Plugin/MCP differences yield necessary conditional instructions, not config writes or duplicate component tasks. Memory/conversations cannot be selected.
 
 ## Implementation and evidence boundary
 
-Baseline: Xenoflux `0.3.0-rc.6`, commit `96a90204`, inspected 2026-10-02.
-The implementation released in 1.0.0 changes that historical baseline as follows:
+Selected and category copying use the shared planner; bounded selection avoids project/history/memory/plugin-cache scans, while diagnostic inventory remains broader. Empty/identical selections create no transaction or client preparation. Metadata versions describe sources, not installed/runtime state.
 
-- [Selected skill copy](../../src/advanced-copy.js) replaces supported packages exactly,
-  including removals and supported directory modes. Its v3 journal supports undo and
-  interruption recovery; all copy journal reads require v3. File/directory
-  type transitions, unsafe contents and directories without owner read/write/execute
-  permissions are refused before mutation.
-- [Category copy](../../src/native-copy.js) selects items through the same planner and
-  preserves source-absent destination settings, instructions and agents. An identical
-  or empty selection does not prepare clients or create a transaction.
-- [Copy selection](../../src/advanced-command.js) uses bounded settings/standalone
-  inventory and separate [manual setup guidance](../../src/setup-guidance.js). It does
-  not scan conversations, memory, project contents or plugin caches. Full diagnostic
-  inspection retains its broader scope. Local plugin manifest versions describe the
-  source package only; installed versions and runtime availability remain unknown.
-- Fixture and package checks establish transfer/preservation behavior only. On
-  2026-10-02, candidate `2074a34` passed a disposable native CLI `0.157.1` check:
-  the destination skill appeared in native context, its resource was read, its
-  executable ran, and the copied rule rejected its harmless marker command. Undo
-  restored the prior package and removed the rule; a fresh session then ran the
-  same marker successfully. Copy used the candidate planner/executor with isolated
-  locks; this does not verify live desktop client coordination.
-- The subsequent desktop check passed on app `26.930.21537` (12776), backend
-  `0.159.0-alpha.12.1`: Comparison profile was observed active, native context discovered
-  the synthetic profile skill, its resource/script produced the expected tool
-  outputs, and a separate task received the exact native rule denial. Default
-  restoration and guarded fixture cleanup passed. Tasks used desktop-created
-  folders under Documents/Codex. Fixtures were staged directly; this establishes
-  native profile loading in those contexts, not arbitrary project precedence or
-  another interactive copy test. Existing profile data and sign-in were preserved.
-
-Record candidate-specific results in private operational records. The published
-[audit acceptance](AUDIT-ACCEPTANCE.md) summarizes reviewed public evidence. Do not
-present historical candidates or fixture evidence as complete native acceptance
-for a released client version.
+[Historical copy/loading controls](history/README.md#profile-transfer-controls) and
+[release summaries](AUDIT-ACCEPTANCE.md) retain source-bound results and limits.

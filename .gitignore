@@ -12,7 +12,6 @@ node_modules
 # Internal audit records retain private paths, prompts and runtime identities.
 /docs/developer/HANDOVER-macos-audit-*.md
 /docs/developer/evidence/audit-*.json
-!/docs/developer/evidence/audit-2.0.0-summary.json
 
 /local/
 /test-results/
@@ -23,3 +22,6 @@ node_modules
 
 # Internal knowledge notes stay local and outside release history.
 /docs/knowledge/
+
+# Private historical handovers remain local after documentation reorganization.
+/docs/developer/history/private/

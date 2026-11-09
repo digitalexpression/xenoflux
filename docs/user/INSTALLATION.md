@@ -17,11 +17,9 @@ Audience: users. Building and publishing packages is covered in the
 
 Xenoflux does not bundle Node.js. Its prebuilt launcher supports Apple Silicon and
 Intel Macs; users do not need a Swift compiler or Xcode Command Line Tools.
-The 2.1.0 Node minimum includes the Zstandard decoder needed for compressed
-Codex Desktop history. When updating from 2.0.0, check `node --version` first;
-update Node separately if it is below this requirement. Profile data needs no
-migration for this runtime requirement change.
-Version 1.0.0 is the first stable release. Migration from older previews is unsupported.
+The Node minimum includes the Zstandard decoder needed for compressed Desktop
+history. Check `node --version` and update Node separately if needed. Older saved
+formats may be unsupported; preserve originals and check the release notes.
 
 ## Install globally with npm
 

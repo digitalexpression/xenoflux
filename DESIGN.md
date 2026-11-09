@@ -4,7 +4,7 @@
 
 **Theme:** light + dark, following the system preference.
 
-**Status:** adopted design direction, 2026-10-27. This standalone guide covers Xenoflux's local web app. The [roadmap](docs/developer/ROADMAP.md#current-verification-and-limits) owns current implementation and built-app verification status; this design specification is not proof that its behavior has been verified.
+**Status:** adopted design direction, 2026-10-27. This standalone guide covers Xenoflux's local web app. The [roadmap](docs/developer/ROADMAP.md#current-work-and-stop-condition) owns current implementation and built-app verification status; this design specification is not proof that its behavior has been verified.
 
 Xenoflux combines IBM Plex Sans, compact rounded controls and opaque layered surfaces. Cobalt identifies actions and links; Soft Mint supports the identity without implying success. Dark mode uses Obsidian `#0a0d16`, raised navy surfaces and lighter cobalt interaction cues. Content stays calm and readable, with technical character concentrated in typography and small header accents.
 
@@ -86,7 +86,7 @@ Violet (side A) and teal (side B) say **which profile** something belongs to, ne
 - Always pair the color with the profile name; the colors are close for some color-vision deficiencies, so they never carry meaning alone.
 - Use side colors only on Different items. Same and Could not compare items keep secondary text so the differences stand out.
 - Do not use side colors for status, buttons, links or selection, and do not use them outside a two-profile comparison.
-- Do not add more profile colors. Every first-release comparison has exactly two sides, including a new task run, which takes exactly two profiles; repeated-comparison tables use the same two.
+- Do not add more profile colors. Each UI task comparison has two sides, which may select the same profile; setup comparisons require two distinct profiles.
 - Show the colors as soon as the two profiles are chosen (for a new task, in the profile pickers and the pre-start review), so the run visibly leads to its report.
 
 ### Comparison, review and run labels
@@ -115,11 +115,17 @@ Success, warning and error are reserved for named operations and checks. Compari
 
 Setup and content diffs use `+` / `−` gutter marks and an "only in [profile]" label. Lines only in side A use the side A surface with a 3px side A leading edge; lines only in side B use side B. Changed-in-place lines use the raised surface. Do not use green/red diff colors; they would read as better/worse.
 
+Token composition bars use dedicated uncached-input, cached-input, other-output
+and reasoning measurement tokens. Keep one textual legend and a common scale
+across both sides and all actors. Cached input is part of input, and reasoning
+is part of output: subtract these subsets before drawing disjoint bar segments.
+Exact counts remain available beside the bars.
+
 ## Tokens — Typography
 
 ### IBM Plex Sans · `--font-ui`
 
-Use locally bundled **IBM Plex Sans** at weights 400, 500 and 600, with a system sans fallback. Use the existing/system monospace stack for code, paths and identifiers. During implementation, obtain the font assets with their license and retain required notices; normal use must not fetch fonts from a remote service. Font files are not supplied by this document.
+Use the bundled **IBM Plex Sans** at weights 400, 500 and 600, with a system sans fallback. Retain its license notices; normal use must not fetch remote fonts. Use the existing/system monospace stack for code, paths and identifiers.
 
 ### Type Scale
 
@@ -210,7 +216,7 @@ Use surface fill, primary text, control boundary and 8px corners. Keep a persist
 
 **Role:** Select two recorded sessions for comparison.
 
-Show task title, profile, client, project, recorded date and state, with identifiers in details. Use one grouped list with separators, visible checkboxes, selected background/foreground tokens and a 3px link/focus-colored leading edge on selected rows. Preserve keyboard operation and selection across filters and responsive layouts. Selection never starts or resumes a session.
+Show task title, profile, client, project, recorded date and state, with identifiers in details. Use one grouped list with separators, visible checkboxes, selected background/foreground tokens and a 3px link/focus-colored leading edge on selected rows. Preserve keyboard operation and selection across filters and responsive layouts. Selection never starts or resumes a session; same-task declarations are never prechecked.
 
 Below the list, a selection summary names the comparison sides: **Left** and **Right**, each with its profile name and task title, plus a **Swap sides** button. The first ticked session fills Left and the second fills Right; unticking one frees that side for the next tick. The summary is the only place sides are assigned, so the report's column order is always visible before Compare.
 
@@ -302,10 +308,10 @@ Use a compact header with direct access to Profiles and saved reports. Add navig
 Use this navigation and report structure:
 
 - Confirmation screens such as the pre-start review lead with a ready summary (a success badge naming what was checked, the two profiles, the run size) plus the primary action and any consequential choice, such as no verification checks, as an informational notice. Details follow below.
-- Lead every comparison screen with its answer: a summary strip of Different / Same / Could not compare counts, with Different largest. The counts filter the list. Show the compared profiles as one compact line of side-colored chips with Swap and Change, not as a form, once both are chosen. Put any reading limit in an informational notice right below the summary.
+- Lead setup comparisons with a summary strip of Different / Same / Could not compare counts, with Different largest. The counts filter the list. Show the compared profiles as one compact line of side-colored chips with Swap and Change once both are chosen. Put any reading limit in an informational notice right below the summary.
 - Give **Compare a task** and **Compare setups** equal prominence. Equal choices use equal visual weight; do not make one a filled primary action and the other a faint link.
 - Within task comparison, give **Use existing sessions** and **Run a new task** equal prominence. Once a path is chosen, emphasize its next meaningful action.
-- Task comparison target (2026-10-29): short conditions/coverage context, side-by-side timeline and compact chat conversations using shadcn/ui AI Elements, preserving expandable session/turn lineage. Show selected event detail in a persistent nonmodal side sheet while the reader continues browsing. Preserve independent event order, delegation and supported timing; keep missing evidence visible. The shared goal and UI handoff define the replay contract. The earlier findings-first order remains a legacy report layout, not the redesign target.
+- Task comparison leads with conditions/coverage, closing responses and checks, then side-by-side timeline and compact conversations using shadcn/ui AI Elements. Keep expandable session/turn lineage, independent order and a persistent nonmodal event inspector. Preserve delegation, supported timing and missing evidence; the shared goal owns the replay contract.
 - Keep Export report discoverable and technical inspection available on demand. Use profile names and task titles as primary labels; identifiers remain in details.
 
 Use a fluid layout with a 1152px content maximum, 24px page gutters, and 16px gutters below 800px. Below 800px, stack landing choices, search/filter controls and paired observations; repeat profile labels. Wrap navigation and action groups without changing their reading order or hiding essential actions. Let content pressure trigger stacking earlier when needed.
@@ -320,93 +326,26 @@ Use brief 120–200ms transitions to explain state changes, without moving contr
 
 Use WCAG 2.2 AA as the web accessibility target. Check normal text contrast of at least 4.5:1, qualifying large text at least 3:1, and essential control/graphic contrast at least 3:1. Support keyboard operation, visible unobscured focus, accessible names, status announcements and errors that do not rely on color. Check 200% text resizing and reflow at 320 CSS pixels, with appropriate exceptions for genuinely two-dimensional content. AA pointer targets are at least 24×24 CSS pixels or meet a permitted exception; the 40px control height above provides a more comfortable default for pointer use on macOS. These are selected checks, not a complete conformance checklist. See the [W3C reference](https://www.w3.org/WAI/WCAG22/quickref/).
 
-Static opaque-color calculations for the adopted tokens:
+Use named header/navigation/breadcrumb/main landmarks and labelled supporting asides. Keep one `h1` per page, `h2` sections and `h3` cards; report heading order follows its reading order. Menus support arrows, Home/End and Escape; native controls or equivalent accessible components retain their keyboard semantics.
 
-| Pair | Contrast |
-| --- | --- |
-| Pale mint text on cobalt action, both themes | 7.03:1 |
-| Light-theme cobalt link on white / canvas | 7.52:1 / 7.39:1 |
-| Dark-theme lighter cobalt link on surface | 7.76:1 |
-| Light-theme secondary text on canvas | 6.93:1 |
-| Dark-theme secondary text on raised surface | 8.17:1 |
-| Dark-theme action boundary against Obsidian canvas | 6.25:1 |
-| Light / dark control boundary against raised surface | 4.71:1 / 4.52:1 |
-| Light / dark selected foreground against selected background | 6.59:1 / 11.88:1 |
-| Dark-theme checkmark on lighter cobalt checkbox | 8.67:1 |
-| Light / dark checked checkbox fill against surface | 7.52:1 / 7.76:1 |
-| Light / dark secondary text on informational surface | 6.29:1 / 8.25:1 |
-| Light / dark informational leading edge against informational surface | 6.71:1 / 6.99:1 |
-| Light / dark neutral badge outline against raised surface | 4.71:1 / 4.52:1 |
-| Light / dark selected-row leading edge against selected background | 6.59:1 / 5.79:1 |
-| Dark-theme primary text on Obsidian canvas | 17.79:1 |
-| Light side A / side B text on surface | 7.10:1 / 5.36:1 |
-| Light side A / side B text on its own tint | 6.48:1 / 5.15:1 |
-| Light side B text on raised / selected surface | 4.87:1 / 4.70:1 |
-| Dark side A / side B text on surface | 9.40:1 / 11.97:1 |
-| Dark side A / side B text on its own tint | 8.26:1 / 9.40:1 |
-| Filled Different badge, light / dark | 15.64:1 / 15.91:1 |
+Focus mounted page headings and export/opened-report summaries; in-page selection retains focus. Nonmodal inspectors receive focus only on explicit open and restore their trigger; delayed callbacks respect newer focus choices. Announce selection/filter/save/progress/apply/undo politely, not per event; alerts identify user-action errors.
 
-Ratios were recalculated from the selected themes' opaque sRGB tokens on 2026-10-27. Soft Mint is not a light-theme link color; use cobalt for readable interaction text. These calculations do not validate generated image pixels, actual rendering, hover states, gradients, overlays or a complete accessible interface.
+Static opaque-token checks (2026-10-27) met the selected text/status/action
+contrast thresholds and checked control/focus boundaries. They do not establish
+rendered accessibility, every state or image contrast. Full calculations remain
+in the private original.
 
-Some pairs are deliberately close and must not carry meaning by fill alone: selected and hover backgrounds (1.04:1 light), canvas and surface (1.02:1 light), and the informational and raised surfaces. The leading edges, outlines, icons and text above carry the distinction.
-
-The dark-theme cobalt action fill is only 2.31:1 against the dark surface; the lighter action boundary (`#668cff`) is what keeps the button's edge visible, so never omit it in dark mode.
-
-The eight status text/background pairs and seven primary/destructive action-state text pairs also pass 4.5:1; their minimum is 6.47:1. Error outlines, focus colors and the dark action boundary pass 3:1 on the checked field/raised surfaces. Verify these again on actual rendered components, including composition, focus placement and disabled/busy behavior.
-
-Validate representative landing, session selection, paired report, setup preview and export states in both themes. Include long names, missing evidence, failure, interruption and empty results. Check keyboard traversal, focus restoration, labels, approximately 800px width and 200% zoom, subject to roadmap deferrals. Exercise understandable choices, visible evidence limits and completion of the supported flow in the built app. The shared product goal and active roadmap own acceptance criteria. Record the environment, tasks, observations and remaining limitations. A style document or a passing contrast calculation does not establish a usable interface.
-
-## Agent Prompt Guide
-
-### Quick Color Reference
-
-- **Light:** canvas `#fcfdff`, surface `#ffffff`, cobalt action `#2447c6`, pale mint action text `#dcfff1`, Soft Mint accent `#9de7cc`.
-- **Dark:** Obsidian canvas `#0a0d16`, surface `#121a2c`, cobalt action `#2447c6`, lighter cobalt links and checked controls `#8cabff`, Soft Mint `#9de7cc` for header accents only.
-- Keep success, warning, error and unknown roles independent of the brand accents.
-- For token composition bars, use dedicated **uncached input** blue,
-  **cached input** cyan, **other output** violet and **reasoning** orange
-  measure tokens. These are measurement categories, not profile identities or
-  outcomes. The one textual legend names each category; exact counts stay
-  available beside the bars. Use the same scale across both compared profiles
-  and all displayed actors. Cached input is part of input, and reasoning is
-  part of output; split each into disjoint segments before drawing the bar.
-- Comparison labels and review verdicts never use success, warning or error. Different is the one filled ink badge; Same and Could not compare are outlined.
-- Profile identity: side A violet `#6d28d9` / `#c4b5fd`, side B teal `#0e7490` / `#67e8f9`, always with the profile name.
-
-### Example Component Prompts
-
-1. **Landing:** Create a Xenoflux landing in the selected theme. Use IBM Plex Sans, a compact header, 32px title, 24px spacing and two equally prominent 12px panels: Compare a task and Compare setups. Give Use existing sessions and Run a new task equal treatment. Keep Profiles and Open saved report accessible; omit metrics and marketing decoration.
-2. **Session picker:** Show a searchable, labeled list of recorded sessions with profile/client/project/date/state. Select exactly two using checkboxes, selected surface tokens and a cobalt leading edge on selected rows. Below the list, name the Left and Right sessions with a Swap sides button. Keep the task-association basis explicit. At narrow widths, wrap metadata into labeled rows without losing information. Do not precheck a user declaration or start sessions through selection.
-3. **Evidence panel:** Show a plain-language finding, its important limit and labeled observations for both profiles. Use readable 16px prose, neutral surfaces, 12px corners only where needed, and a labeled disclosure for details. Use the neutral Different / Same / Could not compare badges; keep unknown evidence explicit and put limits in the cobalt-tinted informational notice.
+Selected/hover fills (1.04:1 light) and canvas/surface (1.02:1 light) cannot carry
+meaning alone; retain text, icons, outlines and leading edges. Dark action fill
+is only 2.31:1 against its surface: its lighter boundary is required. Soft Mint
+is not a light-theme text link. Test actual composition, focus and disabled/busy
+states, including keyboard, long/empty/error/partial states, narrow reflow and
+200% zoom in both themes. Record results/limits in release summaries.
 
 ## Quick Start
 
-### Token Setup
-
-1. Declare each color table token once per theme, including four semantic measurement category tokens. System preference selects the default; an explicit Light or Dark choice overrides it. Keep both themes' semantic names identical.
-2. Declare the typography, spacing and shape tokens above once. Text-size tokens contain only the font size; apply the listed line height and weight separately. Use 14px for code by default, with 13px for compact identifiers. Use relative font sizes with 16px as the reference base. Set `--font-ui` to `'IBM Plex Sans', system-ui, sans-serif` and `--font-mono` to the listed monospace stack.
-3. Below 800px, set page gutter and panel padding to 16px and title size to 28px. Use the Layout rules for reflow rather than reducing text further.
-4. Map tokens into the existing component stack. Keep the same token source for CSS and Tailwind; do not maintain duplicate palette blocks.
-
-### CSS Usage Example
-
-This documentation example consumes the declared tokens; it is not a complete stylesheet or an app implementation.
-
-```css
-.primary-action {
-  background: var(--color-action);
-  color: var(--color-on-action);
-  border: 1px solid var(--color-action-border);
-  border-radius: var(--radius-control);
-  min-height: var(--control-height);
-  padding: var(--space-8) var(--space-16);
-  font: 500 var(--text-ui) / 1.5 var(--font-ui);
-}
-
-.primary-action:focus-visible {
-  outline: 2px solid var(--color-link-focus);
-  outline-offset: 2px;
-}
-```
-
-Apply the hover, pressed, disabled and busy treatments from Components. Keep the focus gap backed by the surrounding surface, and test actual rendering before claiming accessibility. This reference is repository-only, not an npm package input.
+Declare each semantic token once per theme and map that same source into CSS and
+Tailwind. System preference is default; explicit Light/Dark overrides it. Text-size
+tokens hold size only; apply documented weight/line-height separately. Use relative
+font sizes, the documented font stacks and layout breakpoint. Consume the existing
+components/tokens instead of maintaining another palette or stylesheet example.

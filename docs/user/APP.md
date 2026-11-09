@@ -1,14 +1,8 @@
 # The Xenoflux app
 
-This guide describes the local browser app in **Xenoflux 3.0.0**. It supports
-ordinary AI review from a comparison report, alongside optional external review
-import. Consult the versioned release record and package manifest for the exact
-source and supported formats; older commands, workflows or saved formats may not
-be compatible.
-
 `xfx ui` opens a local web app for comparing Codex profiles and sessions. It runs
 on this Mac only: the server listens on `127.0.0.1`, opens your default browser,
-and answers only the page it opened.
+and requires its launch link to establish a browser session.
 
 ```sh
 xfx ui
@@ -100,8 +94,8 @@ server is running. Export the report to keep the declaration after stopping it.
 
 ## What the app never does
 
-- Close Codex or Terminal sessions. Copying and undoing need the destination
-  profile's Codex closed; the app tells you and waits for you to close it.
+- Close Codex or Terminal sessions. Copying and undoing require idle affected
+  clients; the app reports blockers for you to close manually.
 - Sign in for you, transfer credentials, conversation history or memory between profiles, or install,
   enable or connect plugins and MCP servers.
 - Start or resume a session when you only browse or compare.
@@ -194,10 +188,9 @@ choice cannot silently strip evidence from an existing review: prepare a separat
 packet from the original unreviewed comparison when a different disclosure is
 needed.
 
-## Not in this version yet
+## CLI workflows
 
-Constructing repeated comparisons remains a CLI workflow and is outside this
-release’s required UI outcomes.
+Construct repeated comparisons with the [series/cohort commands](AUDIT-REVIEWS.md).
 
 ## Progress, cancellation and interruption
 
@@ -218,8 +211,8 @@ stay untouched. The report and its exports keep failures and unavailable evidenc
 xfx ui --demo
 ```
 
-Demo mode shows synthetic examples for every screen and simulates every action.
-It never reads or changes your profiles, sessions or clients.
+Demo mode uses synthetic examples and marks simulated actions; external review
+import is not simulated. It never reads or changes your profiles, sessions or clients.
 
 ## If something goes wrong
 

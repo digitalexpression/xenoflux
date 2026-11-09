@@ -16,11 +16,11 @@ prerequisites. The goal and roadmap grant no operational authorization.
 
 | Work | Read when relevant |
 | --- | --- |
-| Ordinary review execution, API/persistence or legacy removal | Corresponding section of the [review implementation contract](docs/developer/REVIEW-TASK-IMPLEMENTATION.md). |
-| UI composition | Relevant screen in [UI-HANDOFF.md](docs/developer/UI-HANDOFF.md), [DESIGN.md](DESIGN.md) for visual/interaction rules and the repository [shadcn skill](.agents/skills/shadcn/SKILL.md). The screen inventory does not add release requirements. |
+| Ordinary review execution, API/persistence or recovery | Corresponding section of the [review implementation contract](docs/developer/REVIEW-TASK-IMPLEMENTATION.md). |
+| UI composition | [App guide](docs/user/APP.md) for supported workflows, [DESIGN.md](DESIGN.md) for visual/interaction rules and the repository [shadcn skill](.agents/skills/shadcn/SKILL.md). |
 | Profile creation, copying or setup comparison | [Profile copy policy](docs/developer/PROFILE-COPY-POLICY.md); its implementation gaps are not exceptions to preserve. |
 | Checks/build/browser verification | [Developer guide](docs/developer/README.md#checkout-and-checks). |
-| Candidate evidence or packaging | [Candidate record](docs/developer/RELEASE-3.0.0.md) and relevant [release procedure](docs/developer/LOCAL-RELEASE.md) section. |
+| Candidate evidence or packaging | Current release record linked from the [roadmap checkpoint](docs/developer/ROADMAP.md#current-work-and-stop-condition) and relevant [release procedure](docs/developer/LOCAL-RELEASE.md) section. |
 
 ## Keep context current
 
@@ -34,3 +34,11 @@ decisions, source ranges or failures; inspect raw evidence only for a specific g
 Preserve original data/evidence and others' edits. Live profile/client operations,
 model runs, publication and installed updates need current authorization covering
 their effects; do not re-request steps already covered by an explicit grant.
+
+## Documentation budget
+
+Keep one owner per fact. Prefer a short rule or lookup table over repeated narrative.
+Release summaries retain date, outcome, source/artifact identities, final checks,
+failed controls and material limits. Historical summaries belong in `docs/developer/history/` and retain outcome/limit
+and an evidence locator, not old plans or turn logs. Preserve full originals privately
+before shortening them; do not alter raw receipts, tags or published artifacts.
