@@ -83,12 +83,16 @@ current authorization covering their effects.
 
 ## Branch cleanup and historical records
 
-`main` contains the released application and reconciled public release records.
-The private `ui/implementation` history is archived locally as a self-contained
-Git bundle with a checksum and verified restore. Its branch name is retired;
-private history is not merged into public source. Candidate worktrees retain
-their exact detached commits, and release tags and raw evidence are preserved.
-The archive manifest records the original development head and restore command.
+`main` is the only remaining local and remote branch, and the primary checkout
+is the only registered worktree. Private development and knowledge history,
+historical candidate commits and the old negative-control test edit are preserved
+in private, self-contained Git bundles and patches. Restore checks verified commit
+and tree identities, the edited test bytes and full Git integrity.
+
+Obsolete release branches and worktrees were removed after archiving their
+evidence and dependencies. Release tags, assets, raw receipts and local knowledge
+notes remain preserved; private history is not merged into public source.
+Archive manifests record source identities, checksums and restore commands.
 
 Historical development plans and operational receipts remain private. The
 [2.1.0 roadmap](ROADMAP-2.1.0-HISTORY.md) and
