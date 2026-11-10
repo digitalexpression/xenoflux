@@ -115,6 +115,10 @@ test('completed response survives release contention and a later read retries cl
   assert.equal(app.calls.profileReleased, 1);
   assert.equal(pending.response.status, 'complete');
   assert.equal(pending.shutdown.groupTerminated, true);
+  await waitFor(() => app.service.activeJobs(), jobs => !jobs.some(job => job.id === id),
+    'Review did not leave the active job list');
+  // Start clears its pending entry in the launch promise's finalizer.
+  await new Promise(resolve => setImmediate(resolve));
   const retried = await app.service.reviewTask({ id });
   assert.equal(retried.status, 'completed');
   assert.equal(retried.response.text, 'Scoped review response');
