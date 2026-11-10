@@ -15,6 +15,8 @@ test('registry creates, renames, binds, unbinds, and removes native-home records
   const f = await fixture(t), repository = join(f.root, 'repository');
   await mkdir(repository, { mode: 0o700 });
   const created = await f.store.update(data => create(data, 'daily', 'native only'));
+  assert.equal(created.client, 'codex');
+  assert.equal((await f.store.read()).profiles[0].client, 'codex');
   const renamed = await f.store.update(data => renameProfile(data, created.id, 'research'));
   assert.equal(renamed.id, created.id); assert.equal(renamed.revision, 2);
   await f.store.update(data => bind(data, 'research', repository));
@@ -74,5 +76,35 @@ test('stored reserved names and IDs fail without rewriting the store', async t =
     await assert.rejects(f.store.read(), /Default is reserved/);
     await assert.rejects(f.store.update(records => remove(records, 'research')), /Default is reserved/);
     assert.equal(await readFile(f.store.file, 'utf8'), bytes);
+  }
+});
+
+
+test('legacy profiles without a client remain readable and edits do not invent attribution', async t => {
+  const f = await fixture(t);
+  await mkdir(f.store.directory, { mode: 0o700 });
+  const data = { schemaVersion: 1, profiles: [{ id: 'legacy-profile', name: 'legacy', description: '', revision: 1, repositories: [] }] };
+  const original = `${JSON.stringify(data)}\n`;
+  await writeFile(f.store.file, original, { mode: 0o600 });
+  const loaded = await f.store.read();
+  assert.equal(Object.hasOwn(loaded.profiles[0], 'client'), false);
+  assert.equal(await readFile(f.store.file, 'utf8'), original);
+  await f.store.update(records => renameProfile(records, 'legacy', 'renamed'));
+  assert.equal(Object.hasOwn((await f.store.read()).profiles[0], 'client'), false);
+});
+
+test('unsupported or malformed profile clients fail before registry actions without changing the store', async t => {
+  const f = await fixture(t);
+  await mkdir(f.store.directory, { mode: 0o700 });
+  for (const client of ['claude-code', 'copilot', '', 'CODEX', 'codex\n', null, false, {}, []]) {
+    const data = { schemaVersion: 1, profiles: [] };
+    create(data, 'research').client = client;
+    const original = `${JSON.stringify(data)}\n`;
+    await writeFile(f.store.file, original, { mode: 0o600 });
+    await assert.rejects(f.store.read(), /Only Codex profiles/);
+    let actionCalled = false;
+    await assert.rejects(f.store.update(() => { actionCalled = true; }), /Only Codex profiles/);
+    assert.equal(actionCalled, false);
+    assert.equal(await readFile(f.store.file, 'utf8'), original);
   }
 });

@@ -3,6 +3,7 @@
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { selectionKey, validateAuditSpec } from './audit-spec.js';
 import { inspectAuditRepository, authorizeAuditWorkspaceParent, createAuditWorkspace,
   snapshotAuditWorkspace, setAuditWorkspaceActive } from './audit-workspace.js';
@@ -10,7 +11,7 @@ import { createExperiment, createExperimentRun, writeAuditState, finalizeAuditRe
   reserveAuditProfile, releaseAuditProfileReservation, writeAuditCaptureCheckpoint } from './audit-experiment-store.js';
 import { resolveAuditExecutionProfile, observeAuditProfileAccess, snapshotAuditProfileSettings,
   compareAuditProfileSettings, inspectAuditExecutable } from './audit-profile.js';
-import { runAuditCapture } from './audit-capture.js';
+import { createClientRuntime } from './client-runtime.js';
 import { runAuditProcess, getAuditProcessIdentity } from './audit-process.js';
 import { compareAuditRuns, auditExitCode } from './audit-report.js';
 import { probeAuditVersion } from './audit-native-version.js';
@@ -26,6 +27,8 @@ const safeProfile = profile => ({
   ...(profile.sideId ? { sideId: profile.sideId } : {}),
   ...(profile.execution ? { execution: profile.execution } : {}), id: profile.profileId, name: profile.profileName,
   profileId: profile.profileId, profileName: profile.profileName, home: profile.home,
+  client: profile.client ?? 'codex', surface: profile.surface ?? 'cli',
+  executionLocation: profile.executionLocation ?? 'local', rootMode: profile.rootMode ?? 'explicit',
   userHome: profile.userHome, executable: profile.executable, executableIdentity: profile.executableIdentity,
   nativeRoot: profile.nativeRoot ?? null, environmentId: profile.environmentId ?? null,
   executableSource: profile.executableSource, version: profile.version, versionSource: profile.versionSource,
@@ -90,7 +93,7 @@ function dependencies(context) {
     snapshotSettings: context.snapshotSettings ?? snapshotAuditProfileSettings,
     compareSettings: context.compareSettings ?? compareAuditProfileSettings,
     probeVersion: context.probeVersion ?? probeAuditVersion,
-    capture: context.capture ?? runAuditCapture,
+    capture: createClientRuntime({ capture: context.capture }).capture,
     readReplay: context.readReplay ?? ((_store, profile, id, options) => auditRetainedNativeSession(profile, id, options)),
     process: context.process ?? runAuditProcess,
     createExperiment: context.createExperiment ?? createExperiment,
@@ -304,7 +307,7 @@ function compareProfileAccess(before, after, experimentId) {
 }
 
 function reservationOwner(experimentId, runId, profile, store) {
-  return { kind: 'audit-experiment', membershipVersion: 1, host: hostname(), pid: process.pid, runId, experimentId,
+  return { kind: 'audit-experiment', membershipVersion: 1, generation: randomUUID(), host: hostname(), pid: process.pid, runId, experimentId,
     storePath: store.directory, profileId: profile.profileId, home: profile.home };
 }
 
@@ -504,9 +507,13 @@ export async function runAuditExperiment(store, input, context = {}) {
         const taskTimeout = remainingLimits.length ? Math.max(1, Math.min(...remainingLimits)) : null;
         const selectedSkills = selection.skills ?? [];
         let capturing = true;
+        const captureState = async patch => {
+          if (!capturing || controller.signal.aborted) return;
+          return deps.writeState(store, runRecord.id, patch, { owner, signal: controller.signal });
+        };
         const captured = await deps.capture({ executionMode: 'audit', profile, execution: selection.execution, workspace: workspace.directory, task: spec.task, selectedSkills,
           requiredContext: spec.captureRequirements?.context,
-          onProcessReady: async info => deps.writeState(store, runRecord.id, {
+          onProcessReady: async info => captureState({
             process: { pid: info.pid, processIdentity: info.processIdentity, host: hostname() } }),
           ...(context.onNativeRequest ? { onNativeRequest: (request, details) => {
             if (!capturing || controller.signal.aborted) throw new Error('Comparison leg stopped');
@@ -515,20 +522,22 @@ export async function runAuditExperiment(store, input, context = {}) {
           processOptions: { env: profile.env, timeoutMs: taskTimeout, outputLimitBytes: spec.limits.outputBytes,
             stdoutPath: join(runRecord.directory, 'codex.stdout'), stderrPath: join(runRecord.directory, 'codex.stderr'),
             signal: controller.signal,
-          onSpawn: async info => deps.writeState(store, runRecord.id, { status: 'running', phase: 'task',
+          onSpawn: async info => captureState({ status: 'running', phase: 'task',
             coordinator: await coordinatorIdentity(), reservation: { root: profile.reservationRoot, owner, status: 'held' },
             process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname() },
             workspace: { ...workspaceIntent, active: true } }) },
           limits: { id: runRecord.id },
           sandbox: spec.sandbox,
-          onPhase: async phase => deps.writeState(store, runRecord.id, { phase }),
+          onPhase: async phase => captureState({ phase }),
           onTaskEnd: async evidence => {
+            if (!capturing) return;
             // Capture calls this only after owned process-group shutdown, before
             // checks. Missing native child evidence still makes the boundary partial.
             const snapshot = await deps.snapshotWorkspace({ directory: workspace.directory, owner: workspaceOwner,
               outputDirectory: dirs.artifacts, label: 'task-end', retainPatchContent: true,
               sourceBaselineCommit: workspace.sourceCommit, sourceBaselineTree: workspace.sourceTree,
               baselineFingerprint: initialSnapshot?.fingerprint });
+            if (!capturing) return;
             taskEndSnapshot = snapshot;
             const changeCount = compareAuditWorkspaceDelta(initialSnapshot, snapshot);
             const changeInventory = compareAuditWorkspaceInventory(initialSnapshot, snapshot);
@@ -547,11 +556,12 @@ export async function runAuditExperiment(store, input, context = {}) {
             runResult.artifacts.push({ kind: 'workspace-snapshot', label: snapshot.label, fingerprint: snapshot.fingerprint,
               status: snapshot.status, files: snapshot.files.length, patchPath: snapshot.patchPath, metadataPath: snapshot.metadataPath,
               captureComplete: taskEndCaptureComplete, timing: runResult.taskEnd.timing });
-            await deps.writeState(store, runRecord.id, { phase: 'checks', taskEnd: runResult.taskEnd,
+            await captureState({ phase: 'checks', taskEnd: runResult.taskEnd,
               workspace: { ...workspaceIntent, active: true, finalFingerprint: snapshot.fingerprint } });
           },
           onSession: async (session, captureRecord) => {
-            await deps.writeCaptureCheckpoint(store, runRecord.id, { run: session, capture: captureRecord });
+            if (!capturing || controller.signal.aborted) return;
+            await deps.writeCaptureCheckpoint(store, runRecord.id, { run: session, capture: captureRecord, owner, signal: controller.signal });
             await deps.writeState(store, runRecord.id, { phase: 'capture',
             nativeSessionId: session?.source?.threadId ?? null,
             captureCheckpoint: { capturedAt: now(), status: session?.status ?? 'unknown',
@@ -560,7 +570,7 @@ export async function runAuditExperiment(store, input, context = {}) {
               skillCount: Array.isArray(session?.skills) ? session.skills.length : null,
               skillInvocationCount: Array.isArray(session?.skillInvocations) ? session.skillInvocations.length : null,
               toolInvocationCount: Array.isArray(session?.toolInvocations) ? session.toolInvocations.length : null,
-              coverage: session?.coverage ?? null, captureStatus: captureRecord?.status ?? 'unknown' } });
+              coverage: session?.coverage ?? null, captureStatus: captureRecord?.status ?? 'unknown' } }, { owner, signal: controller.signal });
           } }).finally(() => { capturing = false; });
         const taskProcessUnsafe = captured?.process?.shutdown?.groupTerminated === false || captured?.process?.status === 'shutdown-failed';
         if (!taskProcessUnsafe) await deps.writeState(store, runRecord.id, { phase: 'capture', process: null });

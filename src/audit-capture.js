@@ -22,6 +22,8 @@ import { evaluateRequiredContext, validateRequiredContextRules } from './audit-c
 import { prepareAuditStartup } from './audit-startup.js';
 import { validateExecution, validateAuditNativeConfig } from './audit-spec.js';
 import { captureAuditChildDiscovery } from './audit-session.js';
+import { createSettingsEvidence } from './client-contracts.js';
+import { readCodexModels, validateCatalogSelection } from './client-catalog.js';
 
 const MAX_SKILLS = 5000;
 const MAX_EVENTS = 20000;
@@ -263,6 +265,11 @@ export async function runAuditCapture(options = {}) {
   };
   let response = ordinary ? { status: 'unavailable', threadId: null, turnId: null, source: null, items: [], text: null } : null;
   const capture = { status: 'partial', capabilities: { appServerV2: 'unknown', skillsList: 'unknown', runtimeEvents: 'unknown', childHydration: 'unknown', skillUseObservability: 'partial' }, errors: [], byAgent: {}, byOrigin: {} };
+  capture.settingsEvidence = createSettingsEvidence({
+    requested: { source: 'frozen-execution-selection', ...execution },
+    sent: { source: 'process-local-native-config',
+      model: nativeConfig.model ?? null, reasoningEffort: nativeConfig.model_reasoning_effort ?? null },
+  });
   const provenance = createResourceProvenance({ workspace, profileHome: profile.home, userHome: profile.userHome });
   const updateProvenance = () => {
     run.resourceProvenance = provenance.snapshot();
@@ -529,6 +536,15 @@ export async function runAuditCapture(options = {}) {
         if (!existing.observedCompletedAt) existing.status = safeText(params.turn.status, 60) ?? 'in-progress';
       } else run.turns.push({ agentId: tid, turnId: params.turn.id, status: safeText(params.turn.status, 60) ?? 'in-progress', observedStartedAt: new Date(observedAtMs ?? Date.now()).toISOString() });
     }
+    if (['turn/started', 'turn/completed'].includes(method) && validId(params?.turn?.id)) {
+      const fields = Object.fromEntries(['model', 'modelProvider', 'reasoningEffort']
+        .filter(key => params.turn[key] !== undefined).map(key => [key, safeText(params.turn[key], 100) ?? null]));
+      if (Object.keys(fields).length) {
+        capture.settingsEvidence.observed ??= { source: 'native-turn-event', turns: [] };
+        if (capture.settingsEvidence.observed.turns.length < maxEvents)
+          capture.settingsEvidence.observed.turns.push({ threadId: tid, turnId: params.turn.id, sourceLine: sourceLine ?? null, ...fields });
+      }
+    }
     if (method === 'turn/completed' && validId(params?.turn?.id)) {
       if (tid === rootThreadId) threadMap.get(tid).terminal = true;
       const turn = run.turns.find(t => t.agentId === tid && t.turnId === params.turn.id);
@@ -731,6 +747,10 @@ export async function runAuditCapture(options = {}) {
       }
       capture.capabilities.appServerV2 = initialized ? 'available' : 'partial';
       pushOutgoing(JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} }) + '\n');
+      if (execution?.model !== undefined || execution?.reasoningEffort !== undefined) {
+        const models = await readCodexModels(request, { signal: processOptions.signal });
+        capture.selectionValidation = validateCatalogSelection({ status: 'ready', models }, execution);
+      }
       await onPhase?.('discovery');
       let skillsResult;
       try { skillsResult = await request('skills/list', { cwds: [workspace], forceReload: false }); }
@@ -751,12 +771,12 @@ export async function runAuditCapture(options = {}) {
       }
       const structuredSelections = names.map(name => run.skills.find(s => s.name === name && s.enabled));
       await onPhase?.('task');
-      // The owned app-server already runs in this private checkout. An explicit
+      // The owned app-server already runs in the verified workspace. An explicit
       // thread/start cwd makes native writable startup persist project trust in
       // the saved profile. Inherit the process cwd instead, preserving native
       // trust/config/managed-policy decisions, and verify it before any task.
       const started = await request('thread/start', { ephemeral: false, experimentalRawEvents: false,
-        ...(ordinary ? { cwd: workspace } : { sandbox, approvalPolicy: auditApprovalPolicy, historyMode: 'paginated' }) });
+        ...(!ordinary ? { sandbox, approvalPolicy: auditApprovalPolicy, historyMode: 'paginated' } : {}) });
       const nativeCwds = [started?.cwd, started?.thread?.cwd].filter(cwd => cwd !== undefined);
       if (!nativeCwds.length || nativeCwds.some(cwd => nativePath(cwd) !== nativePath(workspace))) {
         recordWarning('native-workspace-mismatch');
@@ -769,6 +789,7 @@ export async function runAuditCapture(options = {}) {
       if (ordinary) response.threadId = rootThreadId;
       capture.effectiveSettings = Object.fromEntries(['model', 'modelProvider', 'reasoningEffort', 'approvalPolicy', 'sandbox']
         .map(key => [key, ordinary ? started[key] ?? null : safeText(started[key], 100)]));
+      capture.settingsEvidence.confirmed = { source: 'thread/start', ...capture.effectiveSettings };
       if ((execution?.model !== undefined && started.model !== execution.model)
         || (execution?.reasoningEffort !== undefined && started.reasoningEffort !== execution.reasoningEffort))
         throw Object.assign(new Error('Native app-server did not confirm the requested model or reasoning effort'), { code: 'requested-execution-unconfirmed' });
@@ -849,6 +870,7 @@ export async function runAuditCapture(options = {}) {
         ...(ordinary ? {} : { sandboxPolicy, approvalPolicy: auditApprovalPolicy }), input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, ordinary ? 30000 : timeoutMs);
       rootTurnId = turnResponse?.turn?.id;
       if (!validId(rootTurnId)) throw new Error('turn-start-missing-id');
+      capture.nativeReference = { sessionId: rootThreadId, turnId: rootTurnId };
       if (ordinary) response.turnId = rootTurnId;
       if (rootTerminalTurn?.id !== rootTurnId) { endedTaskAt = null; run.outcome = { status: 'unknown', acceptance: 'not-checked' }; }
       threadMap.get(rootThreadId).currentTurnId = rootTurnId;
@@ -1278,6 +1300,7 @@ export async function runAuditCapture(options = {}) {
   if (!ordinary && (!processOptions.args || telemetryFactory !== startAuditTelemetry)) {
     if (!processOptions.args) {
       runtime = await privateRuntimeDirectory(processOptions.stdoutPath, processOptions.runtimeDirectory);
+      capture.runtimeRoots = { mode: 'per-job-private', config: profile.home, ...runtime };
       const isolated = isolatedNativeOptions(processOptions.env, runtime);
       nativeArgs = [...executionArgs, ...isolated.args];
       nativeEnv = isolated.env;

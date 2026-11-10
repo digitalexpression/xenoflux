@@ -26,11 +26,11 @@ const execFile = promisify(execFileCallback);
  */
 export async function createUiRunsFixture({
   staticRoot = join(process.cwd(), 'dist', 'ui'),
-  mode = {}, reviewContext = {}, beforeCapture,
+  mode = {}, reviewContext = {}, catalogContext = {}, copilotImportContext = {}, beforeCapture,
 } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-runs-')));
   let server, provider;
-  const calls = { captures: [], checks: [] };
+    const calls = { captures: [], checks: [], catalogs: [] };
   let delayedRelease;
   let releaseRequested = false;
   try {
@@ -166,7 +166,19 @@ export async function createUiRunsFixture({
     };
     const reportsRoot = join(root, 'reports');
     const serverLogs = [];
-    const makeProvider = () => createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'), runContext, reviewContext,
+    const makeProvider = () => createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'), runContext, reviewContext, copilotImportContext,
+      catalogContext: { discover: async ({ profile, workspace, signal }) => {
+        calls.catalogs.push({ profile: profile.profileName, workspace });
+        const models = [['fixture-left', ['low', 'max']], ['fixture-right', ['medium', 'high']]].map(([model, efforts], index) => ({
+          id: model, model, displayName: model, hidden: false, isDefault: index === 0,
+          supportedReasoningEfforts: efforts.map(reasoningEffort => ({ reasoningEffort, description: reasoningEffort })),
+          defaultReasoningEffort: efforts[0] }));
+        if (mode.catalog === 'delayed') await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        return { status: signal.aborted ? 'cancelled' : 'ready', source: 'codex-model/list', models: signal.aborted ? [] : models,
+          scope: { environmentBinding: profile.environmentBinding, workspace, account: { status: 'unverified', type: null, id: null } },
+          discoveredAt: new Date().toISOString(), capabilities: { models: 'supported', effort: 'supported' },
+          process: { status: signal.aborted ? 'cancelled' : 'exited', exitCode: 0, shutdown: { groupTerminated: true } } };
+      }, ...catalogContext },
       lockOptions: { lockPath: join(root, 'global.lock'), concurrentLockPath: join(root, 'desktop.lock') },
       copyRuntime: () => createDesktopRuntime({ concurrentLockPath: join(root, 'desktop.lock'),
         processSnapshot: async () => [{ pid: globalThis.process.pid, ppid: 1, uid: globalThis.process.getuid(), startedAt: 'fixture', executable: globalThis.process.execPath }] }),

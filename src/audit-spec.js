@@ -23,9 +23,9 @@ export const selectionKey = selection => selection.sideId ?? selection.name.toLo
 export function validateExecution(value) {
   if (value === undefined) return undefined;
   allowed(value, ['model', 'reasoningEffort'], 'execution settings');
-  if (value.model !== undefined && (typeof value.model !== 'string' || !/^[a-z0-9][a-z0-9._:/-]{0,99}$/i.test(value.model))) throw new Error('Model must be a plain model ID');
-  if (value.reasoningEffort !== undefined && !NATIVE_REASONING_EFFORTS.has(value.reasoningEffort))
-    throw new Error('Choose a supported reasoning effort');
+  if (value.model !== undefined && !plain(value.model, 1024)) throw new Error('Model must be a bounded native model ID');
+  if (value.reasoningEffort !== undefined && !plain(value.reasoningEffort, 1024))
+    throw new Error('Reasoning effort must be a bounded native option');
   return { ...(value.model !== undefined ? { model: value.model } : {}),
     ...(value.reasoningEffort !== undefined ? { reasoningEffort: value.reasoningEffort } : {}) };
 }

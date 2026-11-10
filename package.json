@@ -29,6 +29,7 @@
     "docs/developer/README.md",
     "docs/developer/LOCAL-RELEASE.md",
     "docs/developer/AUDIT-GOAL.md",
+    "docs/developer/CLIENT-SUPPORT-PLAN.md",
     "docs/developer/ROADMAP.md",
     "docs/developer/REVIEW-TASK-IMPLEMENTATION.md",
     "docs/developer/history/NATIVE-VALIDATION-3.1.0.md",
@@ -40,6 +41,13 @@
     "docs/developer/history/DESKTOP-HISTORY.md",
     "docs/developer/history/RELEASE-3.0.1.md",
     "docs/developer/history/RELEASE-3.1.1.md",
+    "docs/developer/history/MULTI-CLIENT-2026-11-09.md",
+    "docs/developer/history/MULTI-CLIENT-2026-11-10.md",
+    "docs/developer/history/CLIENT-ROUTES-2026-11-10.md",
+    "docs/developer/history/CLAUDE-COPILOT-QUALIFICATION-2026-11-10.md",
+    "docs/developer/history/CLIENT-FOLLOWUP-2026-11-10.md",
+    "docs/developer/history/CODEX-QUALIFICATION-2026-11-09.md",
+    "docs/developer/history/CODEX-APPROVAL-QUALIFICATION-2026-11-09.md",
     "docs/developer/history/RELEASE-3.1.0.md",
     "docs/developer/history/RELEASE-3.0.0.md",
     "docs/developer/history/RELEASE-2.1.0.md",
@@ -64,6 +72,8 @@
     "test:ui": "npm run build:ui && playwright test"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.322",
+    "@github/copilot-sdk": "1.0.29",
     "smol-toml": "1.9.0"
   },
   "author": "Digital Expression",

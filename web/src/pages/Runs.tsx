@@ -111,7 +111,7 @@ function RunForm() {
                     <option value="">Choose a profile</option>
                         {data.profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
                       </select>
-                      <ExecutionFields value={execution[side]} onChange={value => setExecution(old => ({ ...old, [side]: value }))} />
+                      <ExecutionFields profile={value} workspace={repository} value={execution[side]} onChange={value => setExecution(old => ({ ...old, [side]: value }))} />
                       {readiness ? <span className="text-ui" style={{ color: readiness.ready ? 'var(--color-text-muted)' : 'var(--color-warning)' }}>{readiness.readiness}</span> : null}
                     </div>
                   );

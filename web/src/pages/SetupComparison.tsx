@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { ArrowLeftRight } from 'lucide-react';
 import { apiGet } from '@/api/client';
@@ -15,6 +15,7 @@ import { useResource } from '@/lib/useResource';
 import { cn } from '@/lib/cn';
 
 const TILE_LABEL: Record<TileKey, SetupItem['label']> = { different: 'different', same: 'same', cannotCompare: 'cannot-compare' };
+const FILTER_LABEL: Record<TileKey, string> = { different: 'Different only', same: 'Same only', cannotCompare: 'Could not compare only' };
 
 export function SetupComparison() {
   const [params, setParams] = useSearchParams();
@@ -93,8 +94,8 @@ function ComparisonView({ a, b, onChange }: { a: string; b: string; onChange: (a
       (only ? item.label === TILE_LABEL[only] : effectivePreset === 'all' || item.label !== 'same' || showSame[group.id])
       && (!q || `${item.name} ${item.scope} ${item.category}`.toLowerCase().includes(q))) }));
   }, [data, only, effectivePreset, query, showSame]);
-  const all = data?.groups.flatMap(g => g.items) ?? [];
-  const current = all.find(item => item.id === selected) ?? visible.flatMap(g => g.items)[0] ?? null;
+  const items = visible.flatMap(g => g.items);
+  const current = items.find(item => item.id === selected) ?? items[0] ?? null;
   const total = visible.reduce((n, g) => n + g.items.length, 0);
 
   return (
@@ -133,25 +134,25 @@ function ComparisonView({ a, b, onChange }: { a: string; b: string; onChange: (a
           <div className="flex flex-wrap items-end gap-4">
             <div className="flex-1 min-w-[220px] max-w-[420px]">
               <label htmlFor={searchId} className="field-label">Find an item</label>
-              <input id={searchId} type="search" className="input" value={query} onChange={event => setQuery(event.target.value)} />
+              <input id={searchId} type="search" className="input" value={query} onChange={event => { setQuery(event.target.value); setSelected(null); }} />
             </div>
-            {!noDifferences ? <SegmentedControl label="Which items to list" value={only ? 'all' : preset} onChange={value => { setPreset(value); setOnly(null); }}
+            {!noDifferences ? <SegmentedControl label="Which items to list" value={only ? null : effectivePreset} onChange={value => { setPreset(value); setOnly(null); setSelected(null); }}
               options={[{ value: 'attention', label: 'Needs attention' }, { value: 'all', label: 'Everything' }]} /> : null}
-            <p className="hint" role="status">{total} {total === 1 ? 'item' : 'items'} in this view</p>
+            <p className="hint" role="status">{total} {total === 1 ? 'item' : 'items'} in this view{only ? ` · ${FILTER_LABEL[only]}` : ''}</p>
           </div>
           {noDifferences ? <p className="text-body font-medium">No differences within what was read. {data.counts.cannotCompare ? `${data.counts.cannotCompare} couldn’t be compared, so these setups aren’t confirmed identical.` : ''}</p> : null}
           {total === 0 ? (
             <div className="panel flex flex-col gap-2 items-start">
               <p>Nothing matches this view.</p>
-              <Button onClick={() => { setQuery(''); setOnly(null); setPreset('all'); }}>Clear filters</Button>
+              <Button onClick={() => { setQuery(''); setOnly(null); setPreset('all'); setSelected(null); }}>Clear filters</Button>
             </div>
           ) : (
-            <div className="flex flex-wrap gap-6 items-start">
+            <div className="@container flex flex-wrap gap-6 items-start">
               <div className="flex flex-col gap-4" style={{ flex: '999 1 540px', minWidth: 0 }}>
-                {visible.filter(group => group.items.length || (effectivePreset === 'attention' && !only && group.counts.same)).map(group => (
+                {visible.filter(group => group.items.length || (!query.trim() && effectivePreset === 'attention' && !only && group.counts.same)).map(group => (
                   <GroupPanel key={group.id} group={group} full={data.groups.find(g => g.id === group.id)!} selectedId={current?.id ?? null}
                     onSelect={setSelected} showingSame={Boolean(showSame[group.id]) || effectivePreset === 'all'} canShowSame={!only && effectivePreset === 'attention'}
-                    onShowSame={() => setShowSame(value => ({ ...value, [group.id]: !value[group.id] }))} />
+                    onShowSame={() => { setShowSame(value => ({ ...value, [group.id]: !value[group.id] })); setSelected(null); }} />
                 ))}
               </div>
               {current ? <DetailPanel item={current} a={a} b={b} /> : null}
@@ -208,7 +209,7 @@ function ItemRow({ item, selected, onSelect }: { item: SetupItem; selected: bool
   const different = item.label === 'different';
   return (
     <li className="border-b last:border-b-0" style={{ borderColor: 'var(--color-divider)' }}>
-      <button type="button" onClick={onSelect} aria-current={selected ? 'true' : undefined}
+      <button id={selected ? 'selected-setup-item' : undefined} type="button" onClick={onSelect} aria-current={selected ? 'true' : undefined}
         className={cn('row-select w-full text-left border-0 flex-wrap items-center')} data-selected={selected}
         style={{ background: selected ? undefined : 'transparent', minHeight: 52 }}>
         <span className="w-[160px] flex-none"><ComparisonBadge label={item.label} exactState={item.exactState} /></span>
@@ -218,21 +219,23 @@ function ItemRow({ item, selected, onSelect }: { item: SetupItem; selected: bool
           {item.reason && !different ? item.reason : <SummaryText parts={item.summary} colored={different} />}
         </span>
       </button>
+      {selected ? <div className="px-4 pb-3 @min-[944px]:hidden">
+        <a className="btn" href="#detail-title" aria-label={`View details for ${item.name}`}>View details</a>
+      </div> : null}
     </li>
   );
 }
 
 function DetailPanel({ item, a, b }: { item: SetupItem; a: string; b: string }) {
-  const heading = useRef<HTMLHeadingElement>(null);
-  useEffect(() => { /* Selecting a row doesn't move focus (handoff §9). */ }, [item.id]);
   return (
     <aside aria-labelledby="detail-title" className="panel flex flex-col gap-4" style={{ flex: '1 1 380px', borderTop: '3px solid var(--color-link-focus)', minWidth: 0 }}>
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap gap-2 items-center"><ComparisonBadge label={item.label} exactState={item.exactState} /><span className="text-ui font-medium">{item.exactText}</span></div>
-        <h2 id="detail-title" ref={heading} tabIndex={-1} className="font-mono text-body font-semibold wrap-anywhere">{item.name}</h2>
+        <h2 id="detail-title" tabIndex={-1} className="font-mono text-body font-semibold wrap-anywhere scroll-mt-4">{item.name}</h2>
         <p className="meta">{item.category} · {item.scope}</p>
         {item.reason ? <p className="text-ui">{item.reason}</p> : null}
       </div>
+      <a className="btn self-start @min-[944px]:hidden" href="#selected-setup-item">Back to selected item</a>
       {item.detail.values ? (
         <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(160px, 100%), 1fr))' }}>
           {item.detail.values.map(box => (

@@ -3,6 +3,15 @@
 Execution, persistence, API and recovery rules. [Goal](AUDIT-GOAL.md#ai-review): product
 behavior; [roadmap](ROADMAP.md): status; [app guide](../user/APP.md#review-a-comparison): workflow.
 
+This contract describes current Codex execution. The
+[client support plan](CLIENT-SUPPORT-PLAN.md#architecture-and-interfaces) owns
+the planned runtime boundary and qualification for other clients and surfaces.
+Its [execution/evidence invariants](CLIENT-SUPPORT-PLAN.md#execution-and-evidence-invariants)
+own the extension's fenced checkpoints, exact stored-request identity,
+requested/sent/confirmed/observed settings and separate cancellation/join evidence.
+Apply those through the existing review entry point when each client slice is
+implemented; the shared job/report lifecycle below remains the baseline.
+
 ## Execution with the selected profile's settings
 
 Use the selected profile's home, executable, sign-in and normal environment.
@@ -13,8 +22,9 @@ provider, permissions, sandbox, instructions, skills, integrations, hooks and me
 
 | Boundary | Rule |
 | --- | --- |
-| Shared capture | `audit-capture.js`/`audit-process.js` serve both modes: comparisons use `audit`, reviews use `profile` directly. Reuse transport/session/result handling. |
-| Native launch | Launch the native executable with explicit prompt/cwd/fresh session; omit thread/turn `sandbox`, `sandboxPolicy`, `approvalPolicy` and general config overrides. Reject audit-only options. No `prepareAuditStartup`, `sandbox-exec`, audit-private SQLite/log/TMP, no-op sandbox probe or injected telemetry. Preserve ordinary launcher routing, including SQLite; normal history/auth refresh writes are expected. |
+| Shared capture | `client-runtime.js` routes both entry points to `audit-capture.js`/`audit-process.js`: comparisons use `audit`, reviews use `profile`. Validate environment/job/native binding before durable callbacks. |
+| Explicit model choices | Preview validates cached context; explicit Refresh separately owns initialization with no task or policy mutation. Start validates advertised model/effort on its initialized connection before thread/task submission, then requires native settings confirmation. Missing turn observations stay unknown. |
+| Native launch | Launch the native executable in the selected cwd with an explicit prompt and fresh session. Let `thread/start` inherit the process cwd, verify its reported cwd before any turn, and send that verified cwd to `turn/start`; explicit thread cwd can persist native project trust and invalidate other previews. Omit thread/turn `sandbox`, `sandboxPolicy`, `approvalPolicy` and general config overrides. Reject audit-only options. No `prepareAuditStartup`, `sandbox-exec`, audit-private SQLite/log/TMP, no-op sandbox probe or injected telemetry. Preserve ordinary launcher routing, including SQLite; normal history/auth refresh writes are expected. |
 | Preparation | Read-only profile/workspace resolution runs no native version probe. Never close clients, sign in, change bindings/trust/settings, borrow another account, copy source, provision isolation or grant extra reads. Missing prerequisites use existing setup guidance; unsafe access/ownership is refused. |
 | Workspace | Named profile: saved cwd or explicitly selected bound repository; report repository only if available/bound. Default: explicitly selected trusted repository and existing executable discovery. No silent historical checkout. Show cwd/executable and private input paths before Start. |
 | Start recheck | Recheck profile/home, executable identity, cwd and metadata-only settings identity, including after serialization. Refuse changed previews before model work; versions are provenance. |
@@ -29,7 +39,7 @@ provider, permissions, sandbox, instructions, skills, integrations, hooks and me
 ### Internal capture interface
 
 Resolve with `resolveProfileExecutionProfile`, recheck at Start with
-`recheckProfileExecutionProfile`, then call `runAuditCapture` using `executionMode: 'profile'`,
+`recheckProfileExecutionProfile`, then call `createClientRuntime().capture` (implemented by `runAuditCapture`) using `executionMode: 'profile'`,
 `profile.cwd`/`profile.env` and private output paths. The caller owns admission/durable tasks.
 
 - `onSession`: durable thread checkpoint before dispatch.

@@ -115,7 +115,8 @@ Do not invent customers, testimonials, comparative benchmarks or quality claims.
 ## Accessibility & Inclusion
 
 Support keyboard operation, visible focus, meaningful labels, focus restoration,
-reflow at applicable narrow widths and 200% zoom in both themes. Color alone
+reflow at applicable narrow widths in both themes. Color alone
 must not identify a comparison side, status or result. The
 [DESIGN.md](DESIGN.md#accessibility) owns detailed interaction and visual requirements;
-the product goal owns acceptance and recorded verification limits.
+the [product goal](docs/developer/AUDIT-GOAL.md#observable-acceptance) owns
+acceptance, verification exclusions and recorded limits.

@@ -125,8 +125,11 @@ lines.on('line', line => {
   if (method === 'initialized') return;
   if (method === 'skills/list') return result({ data: [{ cwd: params.cwds[0], skills: [], errors: [] }] });
   if (method === 'thread/start') {
-    result({ cwd: params.cwd, model: 'gpt-6-luna', reasoningEffort: 'medium', thread: { id: threadId, sessionId, cwd: params.cwd } });
-    send({ jsonrpc: '2.0', method: 'thread/started', params: { thread: { id: threadId, sessionId, cwd: params.cwd } } });
+    if (Object.hasOwn(params, 'cwd')) return send({ jsonrpc: '2.0', id,
+      error: { code: -32602, message: 'Ordinary thread/start must inherit the process cwd' } });
+    const cwd = process.cwd();
+    result({ cwd, model: 'gpt-6-luna', reasoningEffort: 'medium', thread: { id: threadId, sessionId, cwd } });
+    send({ jsonrpc: '2.0', method: 'thread/started', params: { thread: { id: threadId, sessionId, cwd } } });
     return;
   }
   if (method === 'turn/start') {

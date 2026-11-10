@@ -30,6 +30,7 @@ Read other references only as needed.
 | --- | --- |
 | [Development](developer/README.md) | Set up the checkout and run checks. |
 | [Product goal](developer/AUDIT-GOAL.md) | Check supported behavior, acceptance and evidence boundaries. |
+| [Multi-client support plan](developer/CLIENT-SUPPORT-PLAN.md) | Implement the architecture-first refactor, dynamic catalogs and native client support for release 4.0.0 against package checks. |
 | [Review implementation](developer/REVIEW-TASK-IMPLEMENTATION.md) | Change review execution, persistence and recovery. |
 | [Release process](developer/LOCAL-RELEASE.md) | Build, verify and publish approved artifacts. |
 | [Desktop implementation](developer/DESKTOP-IMPLEMENTATION.md) | Understand signing, ownership, isolation and native verification. |

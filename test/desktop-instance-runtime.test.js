@@ -420,6 +420,33 @@ test('resource inspection treats absent paths as idle and incomplete lsof eviden
     && /process snapshot for \/fixture\/home: holder PID 999 was absent/.test(e.message));
 });
 
+test('exit-1 directory listings identify blockers without ever proving idle from partial rows', async () => {
+  const home = '/fixture/home';
+  const holder = { ...ownMain, executable: '/fixture/Code Helper (Plugin)' };
+  let stdout = `p${holder.pid}\ncCode Helper (Plugin)\nu501\nfcwd\nn${home}\n`, stderr = '';
+  const rt = createDesktopInstanceRuntime(opts({
+    lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }), realpath: async path => path,
+    processSnapshot: async () => [self, holder],
+    execFile: async () => { throw Object.assign(new Error(), { code: 1, stdout, stderr }); },
+  }));
+  await assert.rejects(rt.assertResourcesIdle([home]), e => {
+    assert.equal(e.code, 'RESOURCE_BUSY');
+    assert.match(e.message, /then retry/);
+    assert.ok(e.message.includes(`Code Helper (Plugin) (PID ${holder.pid})`));
+    assert.deepEqual(e.remainingProcesses, [holder]);
+    return true;
+  });
+  await assert.rejects(rt.assertResourcesIdle([home], { allowedProcesses: [holder] }), { code: 'RESOURCE_INSPECTION_FAILED' });
+  stdout = `p${holder.pid}\ncCode Helper (Plugin)\nu501\nfcwd\nn/fixture/sibling\n`;
+  await assert.rejects(rt.assertResourcesIdle([home]), { code: 'RESOURCE_INSPECTION_FAILED' });
+  stdout = 'p30x\ncCode\nu501\nn/fixture/home\n';
+  await assert.rejects(rt.assertResourcesIdle([home]), { code: 'RESOURCE_INSPECTION_FAILED' });
+  stdout = '';
+  assert.deepEqual(await rt.assertResourcesIdle([home]), { idle: true, processes: [] });
+  stderr = 'lsof: permission denied';
+  await assert.rejects(rt.assertResourcesIdle([home]), { code: 'RESOURCE_INSPECTION_FAILED' });
+});
+
 test('resource inspection diagnostics identify path validation and malformed lsof fields safely', async () => {
   const home = '/fixture/home';
   const base = { lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }), realpath: async path => path };

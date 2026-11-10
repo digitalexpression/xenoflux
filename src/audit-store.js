@@ -19,6 +19,7 @@ import { redactText } from './redact.js';
 import { normalizeSessionReplay } from './audit-session-replay.js';
 import { normalizeAuditCheckEvidence } from './audit-check-evidence.js';
 import { projectAuditWorkspacePatch } from './audit-workspace-patch.js';
+import { createEnvironmentBinding, createNativeReference } from './client-contracts.js';
 
 const KINDS = new Set(['audit-run', 'audit-comparison', 'audit-profile', 'audit-profile-comparison', 'audit-experiment-report', 'audit-series-report', 'audit-evaluation-report']);
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
@@ -48,9 +49,36 @@ function normalizeInvocationSummary(summary) {
     ...(Array.isArray(out.incomplete) ? { incomplete: out.incomplete.map(item => normalizeSourceTimeRow(item)) } : {}) };
 }
 
+// Validate optional attribution without manufacturing facts for older reports.
+function validateRunClientIdentity(run) {
+  const identity = run.clientIdentity;
+  if (Object.hasOwn(run, 'clientIdentity')) {
+    if (!identity || typeof identity !== 'object' || Array.isArray(identity)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(identity))) throw new Error('Invalid frozen report client identity');
+    for (const [key, values] of Object.entries({ client: ['codex', 'claude-code', 'copilot'],
+      surface: ['cli', 'desktop'], executionLocation: ['local', 'ssh', 'cloud'] }))
+      if (identity[key] != null && !values.includes(identity[key])) throw new Error(`Invalid frozen report client identity ${key}`);
+  }
+  const native = Object.hasOwn(run, 'nativeReference') ? createNativeReference(run.nativeReference) : null;
+  const binding = Object.hasOwn(run, 'environmentBinding') ? createEnvironmentBinding(run.environmentBinding) : null;
+  if (!identity && !native && !binding) return;
+  for (const key of ['client', 'surface', 'executionLocation']) {
+    const known = [identity, native, binding, run.profile].map(value => value?.[key]).filter(value => value != null);
+    if (known.some(value => value !== known[0])) throw new Error(`Frozen report ${key} attribution does not match`);
+  }
+  const profileIds = [run.profileId, run.profile?.profileId,
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(run.profile?.id ?? '') ? run.profile.id : null,
+    native?.profileId, binding?.profileId].filter(value => value != null);
+  if (profileIds.some(value => value !== profileIds[0])) throw new Error('Frozen report profile identity does not match');
+  if (native && run.id != null && native.jobId !== run.id) throw new Error('Frozen report native job identity does not match');
+  if (native?.sessionId != null && run.source?.threadId != null && native.sessionId !== run.source.threadId)
+    throw new Error('Frozen report native session identity does not match');
+}
+
 // Normalize only documented report locations; arbitrary nested user data is never traversed.
 function normalizeRun(run, { comparison = false } = {}) {
   if (!run || typeof run !== 'object' || Array.isArray(run)) return run;
+  validateRunClientIdentity(run);
   let out = projectRunSkillSourceTimes(run);
   if (run.workspace?.taskEnd?.patchContent !== undefined) {
     const taskEnd = run.workspace.taskEnd;

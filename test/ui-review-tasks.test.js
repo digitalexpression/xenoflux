@@ -15,7 +15,7 @@ const waitFor = async (fn, predicate, message) => {
 };
 
 async function fixture(t, { delayed = false, nativeRequest = false, responseOverride, observeProcess, releaseFailures = 0,
-  realReservations = false } = {}) {
+  realReservations = false, onRequest, onCapture } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-review-task-')));
   await mkdir(join(directory, 'profile'), { mode: 0o700 });
   const store = { directory };
@@ -39,11 +39,13 @@ async function fixture(t, { delayed = false, nativeRequest = false, responseOver
       ...reservationOverrides, lockOptions, observeProcess: observeProcess ?? (async () => ({ status: 'unknown' })),
       capture: async input => {
         calls.capture++;
+        onCapture?.(input);
         await input.processOptions.onSpawn({ pid: 1234, processIdentity: { pid: 1234, started: 'fixture', host: 'fixture' } });
         await input.onTurn({ threadId: 'fixture-thread', turnId: 'fixture-turn' });
         if (nativeRequest) {
           const request = { method: 'item/tool/requestUserInput', id: 'fixture-request', params: { threadId: 'fixture-thread', turnId: 'fixture-turn',
             itemId: 'fixture-item', questions: [{ id: 'confirm', header: 'Confirm', question: 'May I proceed?', options: [{ label: 'Yes', description: 'Proceed once.' }] }] } };
+          onRequest?.(request);
           await input.onNativeRequest(request, { signal: input.processOptions.signal, item: { id: 'fixture-item', kind: 'user-input' } });
         }
         if (delayed && !releaseRequested && !input.processOptions.signal?.aborted) await new Promise(resolve => {
@@ -155,6 +157,9 @@ test('native requests remain explicit and persist as answered before the capture
   const answered = await app.service.respondReviewTask({ id, requestId: waiting.pendingRequests[0].requestId,
     response: { answers: { confirm: { answers: ['Yes'] } } } });
   assert.deepEqual(answered.pendingRequests, []);
+  const decided = JSON.parse(await readFile(join(app.directory, 'review-tasks', id, 'task.json'), 'utf8'));
+  assert.equal(decided.nativeDecisions[0].request.id, 'fixture-request');
+  assert.deepEqual(decided.nativeDecisions[0].response, { answers: { confirm: { answers: ['Yes'] } } });
   await assert.rejects(app.service.respondReviewTask({ id, requestId: waiting.pendingRequests[0].requestId,
     response: { answers: { confirm: { answers: ['Yes'] } } } }), { code: 'stale-review-request' });
   const done = await waitFor(() => app.service.reviewTask({ id }), task => task.status === 'completed', 'Review did not complete after explicit response');
@@ -349,4 +354,72 @@ test('missing or changed response bytes keep the review and frozen evidence avai
     assert.match(summary.tasks[0].summary, /missing, unreadable, or changed/);
     assert.equal((await app.service.frozenComparison(started.id)).value.kind, 'audit-comparison');
   });
+});
+
+
+test('review approvals retain exact native identity and reject changed arguments', async t => {
+  let nativeRequest;
+  const app = await fixture(t, { nativeRequest: true, onRequest: request => { nativeRequest = request; } });
+  const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict' });
+  const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
+  const waiting = await waitFor(() => app.service.reviewTask({ id }), task => task.status === 'waiting-for-user', 'No request');
+  const durable = JSON.parse(await readFile(join(app.directory, 'review-tasks', id, 'task.json'), 'utf8'));
+  assert.equal(durable.pendingRequests[0].nativeRequestId, 'fixture-request');
+  assert.equal(durable.pendingRequests[0].generation, durable.reservation.owner.generation);
+  nativeRequest.params.questions[0].question = 'Changed action';
+  await assert.rejects(app.service.respondReviewTask({ id, requestId: waiting.pendingRequests[0].requestId,
+    response: { answers: { confirm: { answers: ['Yes'] } } } }), { code: 'stale-review-request' });
+  await app.service.cancelReviewTask({ id });
+});
+
+test('late review checkpoints and requests cannot change a cancelled task', async t => {
+  let callbacks;
+  const app = await fixture(t, { delayed: true, onCapture: input => { callbacks = input; } });
+  const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict' });
+  const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
+  await waitFor(() => app.service.reviewTask({ id }), task => task.status === 'running', 'No running turn');
+  await app.service.cancelReviewTask({ id });
+  const path = join(app.directory, 'review-tasks', id, 'task.json');
+  const before = await readFile(path, 'utf8');
+  await callbacks.onSession({ source: { threadId: 'stale-thread' }, events: [] }, {});
+  await callbacks.onTurn({ threadId: 'stale-thread', turnId: 'stale-turn' });
+  await assert.rejects(callbacks.onNativeRequest({ id: 'stale', params: {} }), /stopped/);
+  assert.equal(await readFile(path, 'utf8'), before);
+});
+
+
+test('review approval rejects a changed native resource grant', async t => {
+  let nativeRequest;
+  const app = await fixture(t, { nativeRequest: true, onRequest: request => {
+    request.method = 'item/permissions/requestApproval';
+    request.params = { threadId: 'fixture-thread', turnId: 'fixture-turn', itemId: 'fixture-item', startedAtMs: 1,
+      cwd: '/fixture', permissions: { fileSystem: { write: ['/fixture/approved'] } } };
+    nativeRequest = request;
+  } });
+  const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict' });
+  const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
+  const waiting = await waitFor(() => app.service.reviewTask({ id }), task => task.status === 'waiting-for-user', 'No permission request');
+  nativeRequest.params.permissions.fileSystem.write = ['/fixture/replaced'];
+  await assert.rejects(app.service.respondReviewTask({ id, requestId: waiting.pendingRequests[0].requestId,
+    response: { permissions: { fileSystem: { write: ['/fixture/replaced'] } } } }), { code: 'stale-review-request' });
+  const saved = JSON.parse(await readFile(join(app.directory, 'review-tasks', id, 'task.json'), 'utf8'));
+  assert.equal(saved.nativeDecisions?.length ?? 0, 0);
+});
+
+test('review reply cannot publish over a replacement durable owner', async t => {
+  const app = await fixture(t, { nativeRequest: true });
+  const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict' });
+  const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
+  const waiting = await waitFor(() => app.service.reviewTask({ id }), task => task.status === 'waiting-for-user', 'No request');
+  const path = join(app.directory, 'review-tasks', id, 'task.json');
+  const replacement = JSON.parse(await readFile(path, 'utf8'));
+  replacement.reservation.owner.generation = 'replacement-generation';
+  await writeFile(path, JSON.stringify(replacement), { mode: 0o600 });
+  await assert.rejects(app.service.respondReviewTask({ id, requestId: waiting.pendingRequests[0].requestId,
+    response: { answers: { confirm: { answers: ['Yes'] } } } }), { code: 'stale-review-request' });
+  await app.service.close();
+  const retained = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(retained.reservation.owner.generation, 'replacement-generation');
+  assert.equal(retained.pendingRequests.length, 1);
+  assert.equal(retained.nativeDecisions?.length ?? 0, 0);
 });

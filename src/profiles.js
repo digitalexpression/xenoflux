@@ -25,6 +25,7 @@ function recognizableVersion(value) {
 }
 export function validateProfile(p) {
   namedProfileValue(p.id, 'Profile ID'); namedProfileValue(p.name, 'Profile name');
+  if (p.client !== undefined && p.client !== 'codex') throw new Error('Only Codex profiles are currently supported');
   if (typeof p.description !== 'string' || !Number.isInteger(p.revision) || p.revision < 1) throw new Error('Invalid profile metadata');
   if (p.native !== undefined) {
     const h = p.native;
@@ -101,7 +102,7 @@ function revised(profile) { profile.revision += 1; return profile; }
 export function create(data, name, description = '') {
   unique(data, name);
   const profile = {
-    id: randomUUID(), name, description, revision: 1,
+    id: randomUUID(), name, description, revision: 1, client: 'codex',
     unboundRepository: 'keep-existing', repositories: [],
   };
   data.profiles.push(profile); return profile;

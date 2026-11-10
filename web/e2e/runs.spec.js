@@ -441,8 +441,12 @@ test('one profile can use separate model settings on both sides of a comparison'
   await page.getByRole('link', { name: 'Run a new task' }).click();
   await page.getByRole('textbox', { name: 'What should both profiles do?' }).fill('Compare the two fixture settings.');
   await page.getByLabel(/right side of the report/i).selectOption('baseline');
-  await page.getByLabel('Model ID').nth(0).fill('fixture-left');
-  await page.getByLabel('Model ID').nth(1).fill('fixture-right');
+  await page.getByRole('button', { name: 'Refresh models', exact: true }).nth(0).click();
+  await expect(page.getByLabel('Model ID').nth(0).getByRole('option', { name: /fixture-left/ })).toHaveCount(1);
+  await page.getByLabel('Model ID').nth(0).selectOption('fixture-left');
+  await page.getByRole('button', { name: 'Refresh models', exact: true }).nth(1).click();
+  await expect(page.getByLabel('Model ID').nth(1).getByRole('option', { name: /fixture-right/ })).toHaveCount(1);
+  await page.getByLabel('Model ID').nth(1).selectOption('fixture-right');
   await page.getByLabel('Reasoning effort').nth(0).selectOption('low');
   await page.getByLabel('Reasoning effort').nth(1).selectOption('high');
   await page.getByRole('button', { name: 'Review before starting' }).click();

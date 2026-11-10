@@ -348,7 +348,7 @@ export function createDesktopInstanceRuntime({
       if (stat.isSymbolicLink?.()) throw resourceInspectionFailure('lstat', path, 'path is a symbolic link');
       present.push({ path, directory: stat.isDirectory?.() === true });
     }
-    const holders = new Set();
+    const holders = new Set(), partialPaths = [];
     for (const item of present) {
       let result;
       const args = ['-nP', '-Fpcun', '-u', String(uid), '-a', ...(item.directory ? ['+D', item.path] : ['--', item.path])];
@@ -357,7 +357,12 @@ export function createDesktopInstanceRuntime({
           maxBuffer: 4 * 1024 * 1024, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' } });
       } catch (e) {
         if (e.code === 1 && e.stdout === '' && e.stderr === '') continue;
-        throw resourceInspectionFailure('lsof', item.path, safeResourceErrorReason(e));
+        // macOS +D can return 1 with real holders. These prove activity,
+        // but cannot prove the absence of additional holders.
+        if (e.code !== 1 || typeof e.stdout !== 'string' || !e.stdout || e.stderr !== '')
+          throw resourceInspectionFailure('lsof', item.path, safeResourceErrorReason(e));
+        result = { stdout: e.stdout, stderr: '' };
+        partialPaths.push(item.path);
       }
       if (!result || typeof result.stdout !== 'string') throw resourceInspectionFailure('lsof output', item.path, 'stdout was not text');
       if (result.stderr) {
@@ -397,14 +402,22 @@ export function createDesktopInstanceRuntime({
       }
       finishProcess();
     }
-    if (!holders.size) return { idle: true, processes: [] };
+    const assertComplete = () => {
+      if (partialPaths.length) throw resourceInspectionFailure('lsof', partialPaths.join(', '), 'exit status 1 with incomplete resource evidence');
+    };
+    if (!holders.size) { assertComplete(); return { idle: true, processes: [] }; }
     const rows = await snapshot();
     const byPid = new Map(rows.map(row => [row.pid, row]));
     const processes = [...holders].map(pid => byPid.get(pid));
     const missingPid = [...holders].find(pid => !byPid.has(pid));
     if (missingPid !== undefined) throw resourceInspectionFailure('process snapshot', present.map(item => item.path).join(', '), `holder PID ${missingPid} was absent`);
     const unexpected = processes.filter(row => !allowedProcesses.some(expected => matchesProcessIdentity(row, expected)));
-    if (unexpected.length) throw fail('RESOURCE_BUSY', unexpected);
+    if (unexpected.length) {
+      const error = fail('RESOURCE_BUSY', unexpected);
+      error.message = `RESOURCE_BUSY: Profile resources are still open in ${unexpected.map(row => `${basename(row.executable)} (PID ${row.pid})`).join(', ')}. Close those apps or sessions, including terminals or editors using the profile directory, then retry.`;
+      throw error;
+    }
+    assertComplete();
     return { idle: true, processes };
   }
   async function control(flag, main, helperExecutable) {

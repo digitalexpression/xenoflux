@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { ApiError, apiGet, apiPost } from '@/api/client';
-import type { ClientAction, ClientActionResult, MenuAction, ProfileCard, ProfilesView, StatusKind } from '@/api/types';
+import type { ClientAction, ClientActionResult, MenuAction, NativeAppEntry, NativeAppOpenResult, NativeAppsView, ProfileCard, ProfilesView, StatusKind } from '@/api/types';
 import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
 import { ErrorPanel, SimulatedNote, WarningAlert } from '@/components/notices';
 import { StatusBadge } from '@/components/badges';
@@ -76,6 +76,8 @@ export function Profiles() {
       ) : null}
       {view.data?.notes.length ? <ul className="hint list-disc pl-5">{view.data.notes.map(note => <li key={note}>{note}</li>)}</ul> : null}
 
+      <NativeApps />
+
       <ConflictDialog state={dialog?.kind === 'conflict' ? dialog : null} onClose={close}
         onCheck={async name => { await apiPost(`/api/profiles/${encodeURIComponent(name)}/clients`, { action: 'check' }); view.reload(); close(); }} />
       <CreateDialog open={dialog?.kind === 'create'} onClose={close} profiles={names.filter(n => n)}
@@ -85,6 +87,63 @@ export function Profiles() {
         onClose={close} onDone={(text, status) => { setMessage({ status, text }); view.reload(); close(); }} />
     </Page>
   );
+}
+
+function NativeApps() {
+  const apps = useResource(() => apiGet<NativeAppsView>('/api/apps'), 'native-apps');
+  const [busy, setBusy] = useState<NativeAppEntry['client'] | null>(null);
+  const pending = useRef(false);
+  const sessionInputId = useId();
+  const [sessionId, setSessionId] = useState('');
+  const [openingSession, setOpeningSession] = useState(false);
+  const sessionValid = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(sessionId);
+  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null);
+  const available = apps.data?.apps.filter(app => app.status === 'available' && app.appKey) ?? [];
+
+  async function open(app: NativeAppEntry, session?: string) {
+    if (pending.current || !app.appKey || (session !== undefined
+      && (app.client !== 'copilot' || app.sessionNavigation !== 'available' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(session)))) return;
+    pending.current = true;
+    setBusy(app.client); setOpeningSession(session !== undefined); setMessage(null);
+    try {
+      const result = await apiPost<NativeAppOpenResult>('/api/apps/open', { client: app.client, appKey: app.appKey, ...(session !== undefined ? { sessionId: session } : {}) });
+      setMessage({ error: false, text: result.message });
+    } catch (error) {
+      setMessage({ error: true, text: `${(error as Error).message} Check apps again before retrying.` });
+      apps.reload();
+    } finally { pending.current = false; setBusy(null); setOpeningSession(false); }
+  }
+
+  if (!available.length && !apps.error && !message) return null;
+  return <section className="panel flex flex-col gap-3" aria-labelledby="native-apps-heading">
+    <h2 id="native-apps-heading" className="text-heading">Native apps</h2>
+    <p className="text-ui">Open an app with its existing account. Managed profiles and automated tasks for these apps have not been qualified.</p>
+    {available.length ? <ul className="flex flex-col gap-3">
+      {available.map(app => <li key={app.client} className="flex min-w-0 flex-col gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0"><p className="font-medium">{app.name}</p>
+            {app.version || app.build ? <p className="hint">{app.version ? `Version ${app.version}` : ''}{app.build ? ` · Build ${app.build}` : ''}</p> : null}</div>
+          <Button onClick={() => void open(app)} disabled={busy !== null} busy={busy === app.client && !openingSession} busyLabel={`Opening ${app.name}…`}>Open {app.name}</Button>
+        </div>
+        {app.client === 'copilot' && app.sessionNavigation === 'available' ? <details>
+          <summary className="text-ui cursor-pointer">Open an existing Copilot session</summary>
+          <form className="mt-3 flex min-w-0 flex-col gap-3" onSubmit={event => { event.preventDefault(); if (sessionValid) void open(app, sessionId); }}>
+            <div>
+              <label className="field-label" htmlFor={sessionInputId}>Copilot app-local session ID</label>
+              <input id={sessionInputId} className="input font-mono" value={sessionId} onChange={event => setSessionId(event.target.value)}
+                required pattern="[A-Za-z0-9]([A-Za-z0-9_]|-){0,127}" autoComplete="off" spellCheck={false}
+                disabled={busy !== null} aria-invalid={sessionId.length > 0 && !sessionValid ? true : undefined} aria-describedby={`${sessionInputId}-hint`} />
+              <p id={`${sessionInputId}-hint`} className="hint">Use the app-local ID. GitHub task and runtime IDs aren’t interchangeable. Use up to 128 letters, numbers, underscores or hyphens; start with a letter or number.</p>
+            </div>
+            <Button type="submit" className="self-start max-w-full" disabled={busy !== null} busy={busy === app.client && openingSession}
+              busyLabel="Opening existing session link…">Open existing session link</Button>
+          </form>
+        </details> : null}
+      </li>)}
+    </ul> : null}
+    {message ? <p className={message.error ? 'alert-error' : 'notice'} role={message.error ? 'alert' : 'status'}>{message.text}</p> : null}
+    {apps.error ? <LoadError error={apps.error} onRetry={apps.reload} /> : <div><Button onClick={apps.reload} disabled={apps.loading || busy !== null}>Check apps again</Button></div>}
+  </section>;
 }
 
 function ProfileCardView({ profile, canCompare, onClient, onMenu, onCompare }:

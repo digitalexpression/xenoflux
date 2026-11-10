@@ -109,6 +109,8 @@ Use the [roadmap checkpoint](ROADMAP.md#current-work-and-stop-condition) to star
 active work. Follow only the references needed for that slice:
 
 - [Goal](AUDIT-GOAL.md): product behavior, acceptance and evolution policy.
+- [Client support plan](CLIENT-SUPPORT-PLAN.md) defines the planned architecture,
+  client/surface interfaces and slice acceptance.
 - [Review implementation](REVIEW-TASK-IMPLEMENTATION.md): ordinary execution,
   durable task/API/recovery.
 - [Profile copy policy](PROFILE-COPY-POLICY.md): transfer behavior and eligibility.

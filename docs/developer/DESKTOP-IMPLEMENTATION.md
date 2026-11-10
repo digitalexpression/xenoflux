@@ -4,6 +4,26 @@ Current launcher/ownership contract. Commands: [Desktop guide](../user/DESKTOP.m
 Build/update procedure: [developer guide](README.md#change-the-native-launcher).
 Dated observations and legacy mechanisms: [history](history/DESKTOP-HISTORY.md).
 
+For the planned Claude and Copilot surfaces, follow the
+[desktop implementation checks](CLIENT-SUPPORT-PLAN.md#desktop-surfaces-and-implementation-checks).
+Those checks own app/config/data/callback bindings, independent surface
+capabilities and source/build-bound acceptance. Launcher or CLI fixtures cannot
+qualify another vendor's desktop isolation or exact-session handoff. The rules
+below describe current Codex Desktop behavior.
+
+Planned desktop delivery is incremental: proven opening/handoff/import may ship
+before isolation or automation. The [goal](AUDIT-GOAL.md#planned-multi-client-scope)
+requires native subscription login and independent accounts before a surface can
+claim managed-profile support; CLI qualification does not establish that boundary.
+
+Ordinary stock Claude/Copilot opening is independent of managed profiles. The
+`stock-desktop-apps.js` boundary checks fixed canonical app paths, bundle IDs,
+vendor signing teams, executable identity and app build before `open -a`.
+An updated/replaced app invalidates the reviewed identity. It sends no prompt,
+selects no account or logical surface, and exposes no import, session-control or
+cloud-cancellation operation. The [roadmap](ROADMAP.md) and its source record own
+qualification; finding an installed app establishes no account isolation.
+
 ## Signed Desktop execution
 
 - The controller opens the verified OpenAI-signed vendor app through LaunchServices

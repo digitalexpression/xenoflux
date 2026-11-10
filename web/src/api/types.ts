@@ -52,6 +52,12 @@ export interface ProfileCard {
 export interface ClientAction { id: string; label: string; kind?: 'primary' | 'secondary'; conflict?: ClientConflict }
 export interface ClientConflict { title: string; body: string }
 export interface MenuAction { id: 'copy' | 'binding' | 'rename' | 'remove'; label: string; detail?: string; disabledReason?: string }
+export interface NativeAppEntry {
+  client: 'claude' | 'copilot'; name: string; status: 'available' | 'unavailable';
+  appKey?: string; version?: string; build?: string; reason?: string; sessionNavigation?: 'available' | 'unavailable';
+}
+export interface NativeAppsView { apps: NativeAppEntry[] }
+export interface NativeAppOpenResult { status: 'opened' | 'link-opened'; message: string }
 export interface ProfilesView { profiles: ProfileCard[]; notes: string[]; simulated: boolean }
 export interface ClientActionResult { status: StatusKind; message: string; profile?: ProfileCard }
 
@@ -316,6 +322,16 @@ export interface ReviewTaskOptions {
   includeRecordedContent: boolean;
   defaults: { timeoutMs: number | null };
 }
+export interface ModelCatalogModel {
+  id: string; model: string; displayName: string; hidden: boolean; isDefault: boolean;
+  supportedReasoningEfforts: null | { reasoningEffort: string; description: string }[];
+  defaultReasoningEffort: string | null;
+}
+export interface ModelCatalogSnapshot {
+  status: 'ready' | 'unavailable' | 'cancelled'; source: 'codex-model/list';
+  models: ModelCatalogModel[]; scope: Record<string, unknown> | null;
+  discoveredAt: string | null; expiresAt: string | null; reason?: string; generation?: number;
+}
 export interface ExecutionSelection { model?: string; reasoningEffort?: string }
 export interface ReviewTaskRequest {
   execution?: ExecutionSelection;
@@ -410,6 +426,7 @@ export interface ExportPlan {
 }
 export interface ExportResult { warning?: string; folder: string; files: string[]; contentIncluded: string; replayContentIncluded?: string; reviewPacketFingerprint?: string; reviewPacketRef?: string }
 export interface SavedSummary {
+  origin?: 'claude-code-import' | 'copilot-import';
   id: string;
   title: string;
   recordedAt: string;

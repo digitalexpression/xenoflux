@@ -132,6 +132,16 @@ test('ordinary execution resolves the saved profile without a version probe and 
   assert.equal(profile.bindingRepository, f.repository);
   assert.equal(profile.env.CODEX_SQLITE_HOME, f.native.home);
   assert.equal(profile.settingsSnapshot.status, 'ready');
+  assert.equal(profile.client, 'codex');
+  assert.equal(profile.surface, 'cli');
+  assert.equal(profile.executionLocation, 'local');
+  assert.equal(profile.rootMode, 'explicit');
+  assert.deepEqual(profile.environmentBinding, {
+    client: 'codex', surface: 'cli', executionLocation: 'local', profileId: profile.profileId, rootMode: 'explicit',
+    roots: { config: profile.home, runtime: profile.home, user: profile.userHome, reservation: profile.reservationRoot },
+    workspace: f.repository, executable: { path: profile.executable, identity: profile.executableIdentity, version: profile.version },
+    settingsIdentity: profile.settingsIdentity,
+  });
   assert.deepEqual(profile.launchArgs, ['-c', `sqlite_home=${JSON.stringify(profile.home)}`]);
   const fresh = await recheckProfileExecutionProfile(f.store, profile, { repository: f.repository,
     terminalEnvironment: { PATH: '/usr/bin:/bin', TERM: 'xterm-256color' }, accessOptions });
@@ -203,6 +213,11 @@ test('Default ordinary execution discovers its PATH binary without probing it', 
   assert.equal(profile.executableSource, 'path');
   assert.equal(profile.env.CODEX_HOME, home);
   assert.equal(profile.env.CODEX_SQLITE_HOME, undefined);
+  assert.equal(profile.rootMode, 'explicit');
+  assert.equal(profile.environmentBinding.profileId, 'default');
+  assert.equal(profile.environmentBinding.roots.config, home);
+  assert.equal(profile.environmentBinding.roots.runtime, null);
+  assert.equal(profile.environmentBinding.executable.version, null);
   assert.equal(profile.launchArgs, undefined);
   const accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
   await writeFile(runtimeFile, 'changed runtime output', { mode: 0o600 });
@@ -563,4 +578,18 @@ test('access inspection retries a vanished resource holder using a fresh complet
   });
   assert.equal(result.status, 'ready');
   assert.equal(observations, 2);
+});
+
+
+test('ordinary Start rejects changed environment bindings before observing profile access', async t => {
+  const f = await fixture(t);
+  const profile = await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository });
+  for (const change of [binding => { binding.client = 'copilot'; }, binding => { binding.profileId = 'other'; },
+    binding => { binding.rootMode = 'implicit'; }, binding => { binding.workspace = '/other'; },
+    binding => { binding.executable.identity = 'replaced'; }, binding => { binding.settingsIdentity.digest = 'b'.repeat(64); }]) {
+    const preview = structuredClone(profile);
+    change(preview.environmentBinding);
+    await assert.rejects(recheckProfileExecutionProfile(f.store, preview, { repository: f.repository,
+      accessOptions: { inspectResources: async () => assert.fail('must reject before access') } }), { code: 'profile-preview-changed' });
+  }
 });

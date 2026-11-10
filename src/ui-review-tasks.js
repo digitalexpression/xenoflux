@@ -1,6 +1,7 @@
 // Durable ordinary review tasks over the selected profile's native app-server.
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { lstat, mkdir, open, readFile, readdir, realpath, rm, mkdtemp } from 'node:fs/promises';
 import { homedir, tmpdir, hostname } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -15,7 +16,7 @@ import { parse } from 'smol-toml';
 import { resolveProfileExecutionProfile, recheckProfileExecutionProfile } from './audit-profile.js';
 import { buildAuditReviewPacket } from './audit-review.js';
 import { exportAuditReport, readAuditReport } from './audit-store.js';
-import { runAuditCapture } from './audit-capture.js';
+import { createClientRuntime } from './client-runtime.js';
 import { getAuditProcessIdentity, observeAuditProcess } from './audit-process.js';
 import { validateExecution } from './audit-spec.js';
 import { validateNativeResponse } from './native-requests.js';
@@ -80,7 +81,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
   if (!store?.directory || typeof resolveComparison !== 'function') throw new TypeError('Review task service requires a store and comparison resolver');
   let root = join(store.directory, 'review-tasks'), canonicalStoreDirectory = null;
   const previews = new Map(), starting = new Map(), operations = new Map(), active = new Map(), pending = new Map(), saveChains = new Map();
-  const capture = context.capture ?? runAuditCapture;
+  const capture = createClientRuntime({ capture: context.capture }).capture;
   const resolveProfile = context.resolveProfile ?? resolveProfileExecutionProfile;
   const recheckProfile = context.recheckProfile ?? recheckProfileExecutionProfile;
   const reserve = context.reserve ?? (({ root: profileRoot, owner, profile, options }) =>
@@ -131,13 +132,24 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         && (task.reservation.owner?.membershipVersion !== 1 || task.reservation.owner.cwd === task.cwd)));
     return { directory, task: valid ? task : incompleteTask(id) };
   }
-  async function save(directory, task) {
+  async function save(directory, task, afterWrite) {
     task.updatedAt = new Date().toISOString();
     const snapshot = structuredClone(task);
     const previous = saveChains.get(directory) ?? Promise.resolve();
     const current = previous.catch(() => {}).then(async () => {
       if (Buffer.byteLength(JSON.stringify(snapshot)) > MAX_RECORD_BYTES) throw new Error('Review task record exceeds its size limit');
-      await record(join(directory, 'task.json'), snapshot);
+      await withProfileOperation(store, snapshot.id, { lockPath: join(directory, '.mutation-lock'), waitMs: 5000, recovery: true }, async () => {
+        let current;
+        try { current = JSON.parse((await safeRead(join(directory, 'task.json'), MAX_RECORD_BYTES)).toString('utf8')); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        if (current?.reservation?.owner && !isDeepStrictEqual(current.reservation.owner, snapshot.reservation?.owner))
+          throw new Error('Review task owner changed; preserving the current checkpoint');
+        if (current?.cancellation && !snapshot.cancellation) throw new Error('Review task was cancelled; preserving its checkpoint');
+        if (['completed', 'failed', 'cancelled', 'interrupted'].includes(current?.status) && current.status !== snapshot.status)
+          throw new Error('Review task is terminal; preserving its checkpoint');
+        await record(join(directory, 'task.json'), snapshot);
+        afterWrite?.();
+      });
     });
     saveChains.set(directory, current);
     try { await current; } finally { if (saveChains.get(directory) === current) saveChains.delete(directory); }
@@ -230,6 +242,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       throw new UiError(400, 'Choose an available workspace path.', 'invalid-review-workspace');
     try { execution = validateExecution(execution) ?? {}; }
     catch (error) { throw new UiError(400, error.message, 'invalid-review-execution'); }
+    await context.validateSelection?.({ profile: profileName, workspace: cwd }, execution);
     prompt = normalizePrompt(prompt); timeoutMs = normalizeTimeout(timeoutMs);
     if (typeof includeRecordedContent !== 'boolean') throw new UiError(400, 'Choose whether recorded session content is supplied.', 'invalid-review-content-choice');
     const source = await resolveSource(ref);
@@ -328,7 +341,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         settingsIdentity: freshProfile.settingsIdentity, reservationRoot: freshProfile.reservationRoot }, cwd: freshProfile.cwd, timeoutMs: preview.timeoutMs, execution: preview.execution,
       threadId: null, turnId: null, process: null, shutdown: null, nativeSettings: null,
       response: null, pendingRequests: [], error: null };
-    const owner = { kind: 'review-task', membershipVersion: 1, cwd: freshProfile.cwd, runId: id, host: hostname(), pid: process.pid,
+    const owner = { kind: 'review-task', membershipVersion: 1, generation: randomUUID(), cwd: freshProfile.cwd, runId: id, host: hostname(), pid: process.pid,
       storePath: canonicalStoreDirectory, profileId: freshProfile.profileId, home: freshProfile.home,
       coordinatorIdentity: await getAuditProcessIdentity(process.pid) };
     info.reservation = { root: freshProfile.reservationRoot, owner, status: 'acquiring' };
@@ -338,7 +351,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     const controller = new AbortController();
     let finish;
     const completed = new Promise(resolve => { finish = resolve; });
-    const work = { id, controller, completed, done: false, pendingRequests: new Map(), owner, directory: taskRoot, task: info };
+    const work = { generation: owner.generation, id, controller, completed, done: false, pendingRequests: new Map(), owner, directory: taskRoot, task: info };
     active.set(id, work); pending.set(id, work.pendingRequests);
     try {
       if (closing) throw new UiError(409, 'The app is stopping. Start it again before reviewing.', 'stopping');
@@ -353,9 +366,12 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       }
       info.phase = 'starting'; info.updatedAt = new Date().toISOString(); await save(taskRoot, info);
       const taskPrompt = preview.effectivePrompt;
+      let capturing = true;
+      const ownsCapture = () => capturing && active.get(id) === work && !controller.signal.aborted && !info.cancellation;
       const processOptions = { env: freshProfile.env, timeoutMs: preview.timeoutMs,
         outputLimitBytes: 8 * 1024 * 1024, stdoutPath: join(taskRoot, 'native.stdout'), stderrPath: join(taskRoot, 'native.stderr'), signal: controller.signal,
         onSpawn: async processIdentity => {
+          if (!ownsCapture()) throw new Error('Review task stopped');
           info.process = processIdentity;
           if (!context.capture) {
             info.process.nativeIdentity = (await createDesktopInstanceRuntime().snapshot()).find(row => row.pid === processIdentity.pid);
@@ -363,10 +379,11 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
           }
           info.status = 'starting'; info.phase = 'starting'; await save(taskRoot, info);
         } };
-      let capturing = true;
       const onNativeRequest = async (request, { signal, item } = {}) => {
         if (signal?.aborted || controller.signal.aborted) throw new Error('Review task stopped');
-        if (!capturing) throw new Error('Review capture stopped');
+        if (!ownsCapture()) throw new Error('Review capture stopped');
+        if ((info.threadId && request.params?.threadId !== info.threadId) || (info.turnId && request.params?.turnId !== info.turnId))
+          throw new Error('Native request does not match the owned review turn');
         const requestId = randomUUID();
         let resolveWaiter, rejectWaiter;
         const waiter = new Promise((resolve, reject) => { resolveWaiter = resolve; rejectWaiter = reject; });
@@ -374,12 +391,13 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         void waiter.catch(() => {});
         const abort = () => rejectWaiter(new Error('Review task stopped'));
         controller.signal.addEventListener('abort', abort, { once: true });
-        work.pendingRequests.set(requestId, { request, item,
+        work.pendingRequests.set(requestId, { request: structuredClone(request), item: structuredClone(item ?? null),
+          sourceRequest: request, sourceItem: item ?? null, generation: work.generation,
           resolve: value => { controller.signal.removeEventListener('abort', abort); resolveWaiter(value); },
           reject: error => { controller.signal.removeEventListener('abort', abort); rejectWaiter(error); } });
         let persisted = false;
         try {
-          info.pendingRequests = [...work.pendingRequests].map(([key, value]) => ({ requestId: key, method: value.request.method,
+          info.pendingRequests = [...work.pendingRequests].map(([key, value]) => ({ requestId: key, nativeRequestId: value.request.id, generation: value.generation, method: value.request.method,
             params: value.request.params, item: value.item ?? null }));
           info.status = 'waiting-for-user'; info.phase = 'waiting-for-user';
           await save(taskRoot, info); persisted = true;
@@ -387,7 +405,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         } finally {
           if (!persisted) rejectWaiter(new Error('Native request could not be persisted'));
           work.pendingRequests.delete(requestId);
-          info.pendingRequests = [...work.pendingRequests].map(([key, value]) => ({ requestId: key, method: value.request.method,
+          info.pendingRequests = [...work.pendingRequests].map(([key, value]) => ({ requestId: key, nativeRequestId: value.request.id, generation: value.generation, method: value.request.method,
             params: value.request.params, item: value.item ?? null }));
           if (!work.pendingRequests.size && !controller.signal.aborted && info.status === 'waiting-for-user') {
             info.status = 'running'; info.phase = 'running';
@@ -396,15 +414,19 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         }
       };
       const onSession = async (session, captureRecord) => {
-        if (!capturing) return;
+        if (!ownsCapture()) return;
         info.threadId = session?.source?.threadId ?? info.threadId;
         info.nativeSettings = captureRecord?.effectiveSettings ?? info.nativeSettings;
+        info.environmentBinding = session?.environmentBinding ?? freshProfile.environmentBinding ?? info.environmentBinding;
+        info.clientIdentity = session?.clientIdentity ?? info.clientIdentity;
+        info.nativeReference = session?.nativeReference ?? info.nativeReference;
+        info.settingsEvidence = captureRecord?.settingsEvidence ?? info.settingsEvidence;
         info.captureCheckpoint = { status: session?.status ?? 'unknown', checkpoint: captureRecord?.checkpoint ?? null,
           eventCount: session?.events?.length ?? null, turnCount: session?.turns?.length ?? null };
         await save(taskRoot, info);
       };
       const onTurn = async ({ threadId, turnId }) => {
-        if (!capturing) return;
+        if (!ownsCapture()) return;
         info.threadId = threadId; info.turnId = turnId;
         info.status = work.pendingRequests.size ? 'waiting-for-user' : 'running'; info.phase = info.status;
         await save(taskRoot, info);
@@ -418,9 +440,10 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       info.captureIntent = true; await save(taskRoot, info);
       onDurableStart();
       captureCalled = true;
-      const captureResult = await capture({ executionMode: 'profile', profile: freshProfile, execution: preview.execution, workspace: freshProfile.cwd,
+      const captureResult = await capture({ jobId: info.id, executionMode: 'profile', profile: freshProfile, execution: preview.execution, workspace: freshProfile.cwd,
         task: taskPrompt, processOptions, onSession, onNativeRequest, onTurn,
         onProcessReady: async processIdentity => {
+          if (!ownsCapture()) throw new Error('Review task stopped');
           info.process = processIdentity;
           info.process.nativeIdentity = (await createDesktopInstanceRuntime().snapshot()).find(row => row.pid === processIdentity.pid);
           if (!info.process.nativeIdentity) throw new Error('Initialized review process identity could not be checkpointed');
@@ -431,6 +454,10 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         groupTerminated: captureResult.process.shutdown?.groupTerminated ?? false,
         processStatus: captureResult.process.status, exitCode: captureResult.process.exitCode };
       info.nativeSettings = captureResult.capture?.effectiveSettings ?? info.nativeSettings;
+      info.environmentBinding = freshProfile.environmentBinding ?? info.environmentBinding;
+      info.clientIdentity = captureResult.run?.clientIdentity ?? info.clientIdentity;
+      info.nativeReference = captureResult.run?.nativeReference ?? info.nativeReference;
+      info.settingsEvidence = captureResult.capture?.settingsEvidence ?? info.settingsEvidence;
       info.capture = { status: captureResult.capture?.status ?? 'unavailable', checkpoint: captureResult.capture?.checkpoint ?? null,
         errors: captureResult.capture?.errors ?? [], warnings: captureResult.run?.warnings ?? [] };
       const nativeResponse = captureResult.response;
@@ -527,28 +554,53 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     if (typeof requestId !== 'string' || !UUID.test(requestId)) throw new UiError(400, 'Native request ID is invalid.', 'invalid-review-request');
     const request = pending.get(id)?.get(requestId);
     if (!request || !active.has(id) || active.get(id).controller.signal.aborted) throw new UiError(409, 'This native request is no longer waiting for an answer.', 'stale-review-request');
-    try { validateNativeResponse(request.request, response); }
+    const work = active.get(id), task = work?.task;
+    const requestIsCurrent = () => active.get(id) === work && !work.controller.signal.aborted && !task.cancellation
+      && request.generation === work.generation && isDeepStrictEqual(request.request, request.sourceRequest)
+      && isDeepStrictEqual(request.item, request.sourceItem)
+      && (!task.threadId || request.request.params.threadId === task.threadId)
+      && (!task.turnId || request.request.params.turnId === task.turnId);
+    if (!requestIsCurrent()) {
+      request.reject(new Error('The native request identity or action changed'));
+      throw new UiError(409, 'The native request identity or action changed.', 'stale-review-request');
+    }
+    const answer = structuredClone(response);
+    try { validateNativeResponse(request.request, answer); }
     catch (error) { throw new UiError(400, errorMessage(error), 'invalid-review-request'); }
     const requests = pending.get(id);
-    const work = active.get(id), task = work?.task;
     const previousPending = task?.pendingRequests;
     const previousStatus = task?.status, previousPhase = task?.phase;
+    const previousDecisions = task?.nativeDecisions;
     request.answering = true;
     requests.delete(requestId);
     if (!task) { requests.set(requestId, request); request.answering = false; throw new UiError(409, 'This native request is no longer active.', 'stale-review-request'); }
-    task.pendingRequests = [...requests].map(([key, value]) => ({ requestId: key, method: value.request.method,
+    task.pendingRequests = [...requests].map(([key, value]) => ({ requestId: key, nativeRequestId: value.request.id, generation: value.generation, method: value.request.method,
       params: value.request.params, item: value.item ?? null }));
+    task.nativeDecisions = [...(task.nativeDecisions ?? []), { requestId, generation: request.generation,
+      request: request.request, item: request.item, response: answer, selectedAt: new Date().toISOString() }];
     if (!requests.size && task.status === 'waiting-for-user') { task.status = 'running'; task.phase = 'running'; }
-    try { await save(join(root, id), task); }
-    catch (error) { requests.set(requestId, request); request.answering = false; task.pendingRequests = previousPending; task.status = previousStatus; task.phase = previousPhase; throw error; }
-    if (active.get(id) !== work || work.controller.signal.aborted) throw new UiError(409, 'This review task was cancelled before the answer was sent.', 'stale-review-request');
-    request.resolve(response);
+    try { await save(join(root, id), task, () => {
+      if (!requestIsCurrent()) {
+        request.reject(new Error('Review request is no longer current'));
+        throw new UiError(409, 'This review request changed or was cancelled before the answer was sent.', 'stale-review-request');
+      }
+      request.resolve(answer);
+    }); }
+    catch (error) {
+      if (error.code === 'stale-review-request' || /owner changed|task was cancelled|task is terminal/.test(error.message)) {
+        request.reject(new Error('Review request no longer belongs to the current owner'));
+        throw new UiError(409, 'This native request is no longer owned by this review task.', 'stale-review-request');
+      }
+      requests.set(requestId, request); request.answering = false;
+      task.pendingRequests = previousPending; task.status = previousStatus; task.phase = previousPhase; task.nativeDecisions = previousDecisions;
+      throw error;
+    }
     return publicTask(task, join(root, id));
   }
   async function reviewTask({ id } = {}) {
     // Completion may remove active ownership while the atomic record read yields.
     // A snapshot read during owned work must not be treated as coordinator loss.
-    const ownedAtRead = active.has(id) || starting.has(id);
+    let ownedAtRead = active.has(id) || starting.has(id);
     let task;
     try { ({ task } = await readTask(id)); }
     catch (error) {
@@ -556,6 +608,13 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       throw error;
     }
     if (task.incomplete) return publicTask(task);
+    const finishing = active.get(id);
+    if (finishing && task.shutdown?.groupTerminated === true
+      && ['completed', 'failed', 'cancelled', 'interrupted'].includes(task.status)) {
+      await finishing.completed;
+      ({ task } = await readTask(id));
+      ownedAtRead = active.has(id) || starting.has(id);
+    }
     // A completed response survives transient lifecycle contention. Cleanup can
     // be retried after confirmed shutdown without rerunning or signalling Codex.
     if (!ownedAtRead && task.shutdown?.groupTerminated === true
@@ -641,8 +700,8 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     if (!task) return reviewTask({ id: taskId });
     if (task.done || ['completed', 'failed', 'cancelled', 'interrupted'].includes(task.task.status)) return reviewTask({ id: taskId });
     task.task.cancellation ??= { reason: 'user-cancel', requestedAt: new Date().toISOString() };
-    try { await save(task.directory, task.task); } catch { /* Abort remains authoritative; completion writes the reason again. */ }
     task.controller.abort('user-cancel');
+    try { await save(task.directory, task.task); } catch { /* Abort remains authoritative; completion writes the reason again. */ }
     await task.completed;
     return reviewTask({ id: taskId });
   }
@@ -685,8 +744,8 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     for (const item of active.values()) {
       if (['completed', 'failed', 'cancelled', 'interrupted'].includes(item.task.status)) continue;
       item.task.cancellation ??= { reason: 'coordinator-shutdown', requestedAt: new Date().toISOString() };
-      try { await save(item.directory, item.task); } catch { /* Always abort; later checkpoints retry this durable reason. */ }
       item.controller.abort('coordinator-shutdown');
+      try { await save(item.directory, item.task); } catch { /* Always abort; later checkpoints retry this durable reason. */ }
     }
     await Promise.allSettled([...operations.values()]);
   }

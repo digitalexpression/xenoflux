@@ -792,3 +792,22 @@ test('a clean app-server exit cannot turn a failed native turn into a successful
   assert.ok(report.failures.some(failure => failure.code === 'task-failed'));
   assert.equal(h.calls.some(call => call.startsWith('check:')), false);
 });
+
+test('late comparison capture callbacks cannot overwrite finalized runs or save stale checkpoints', async t => {
+  const callbacks = [], checkpoints = [];
+  const h = await harness(t, { writeCaptureCheckpoint: async (...args) => { checkpoints.push(args); } });
+  h.context.capture = async input => { callbacks.push(input); return h.captureFixture(input); };
+  const report = await runAuditExperiment(h.store, spec(h.repository), h.context);
+  assert.equal(report.status, 'complete');
+  const before = structuredClone([...h.states]), snapshots = h.calls.filter(call => call.startsWith('snapshot:')).length;
+  for (const input of callbacks) {
+    await input.onSession({ id: input.limits.id, source: { threadId: 'stale-thread' } }, { status: 'ready' });
+    await input.onPhase('stale-phase');
+    await input.onProcessReady({ pid: 999 });
+    await input.processOptions.onSpawn({ pid: 999 });
+    await input.onTaskEnd({ complete: true });
+  }
+  assert.deepEqual([...h.states], before);
+  assert.equal(checkpoints.length, 0);
+  assert.equal(h.calls.filter(call => call.startsWith('snapshot:')).length, snapshots);
+});

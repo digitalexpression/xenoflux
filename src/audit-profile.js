@@ -18,6 +18,7 @@ import { observeAuditProcess } from './audit-process.js';
 import { profileOwners } from './profile-reservations.js';
 import { probeAuditVersion } from './audit-native-version.js';
 import { validateAuditNativeConfig } from './audit-spec.js';
+import { createEnvironmentBinding, assertEnvironmentBinding } from './client-contracts.js';
 
 const execFile = promisify(nodeExecFile);
 const VERSION = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 100
@@ -156,6 +157,7 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
     }
   }
   const result = { profileId: profile.profileId, profileName: profile.profileName,
+    client: 'codex', surface: 'cli', executionLocation: 'local', rootMode: 'explicit',
     home: profile.home, userHome: profile.userHome, nativeRoot: profile.nativeRoot,
     reservationRoot: profile.reservationRoot, environmentId: profile.environmentId,
     executable: binary.executable, executableIdentity: binary.executableIdentity, version,
@@ -213,6 +215,19 @@ export async function resolveProfileExecutionProfile(store, input, {
     { code: workspaceUnavailable ? 'profile-workspace-unavailable' : 'profile-settings-unavailable' });
   }
   profile.settingsIdentity = auditSettingsIdentity(profile.settingsSnapshot);
+  profile.client = 'codex';
+  profile.surface = 'cli';
+  profile.executionLocation = 'local';
+  // Default also sends CODEX_HOME explicitly; identical paths do not imply implicit routing.
+  profile.rootMode = 'explicit';
+  profile.environmentBinding = createEnvironmentBinding({
+    client: profile.client, surface: profile.surface, executionLocation: profile.executionLocation,
+    profileId: profile.profileId, rootMode: profile.rootMode,
+    roots: { config: profile.home, runtime: isDefault ? null : profile.home,
+      user: profile.userHome, reservation: profile.reservationRoot },
+    workspace: profile.cwd, executable: { path: profile.executable,
+      identity: profile.executableIdentity, version: profile.version }, settingsIdentity: profile.settingsIdentity,
+  });
   return profile;
 }
 
@@ -220,7 +235,7 @@ export async function resolveProfileExecutionProfile(store, input, {
 export async function recheckProfileExecutionProfile(store, preview, options = {}) {
   const fresh = await resolveProfileExecutionProfile(store, preview?.profileName, options);
   const fields = ['profileId', 'home', 'userHome', 'nativeRoot', 'reservationRoot', 'environmentId',
-    'executable', 'executableIdentity', 'cwd', 'bindingRepository'];
+    'executable', 'executableIdentity', 'cwd', 'bindingRepository', 'client', 'surface', 'executionLocation', 'rootMode'];
   if (!preview || fields.some(key => preview[key] !== fresh[key])
     || !isDeepStrictEqual(preview.env, fresh.env) || !isDeepStrictEqual(preview.launchArgs, fresh.launchArgs))
     throw Object.assign(new Error('Selected profile or launch environment changed after preview'), { code: 'profile-preview-changed' });
@@ -232,6 +247,11 @@ export async function recheckProfileExecutionProfile(store, preview, options = {
     throw Object.assign(new Error(settings.status === 'changed'
       ? 'Selected profile settings changed after preview' : 'Selected profile settings could not be rechecked'),
     { code: settings.status === 'changed' ? 'profile-settings-changed' : 'profile-settings-unavailable' });
+  try { assertEnvironmentBinding(preview.environmentBinding, fresh.environmentBinding); }
+  catch (cause) {
+    throw Object.assign(new Error('Selected environment binding changed after preview', { cause }),
+      { code: 'profile-preview-changed' });
+  }
   const access = await observeAuditProfileAccess(fresh, { store, ...(options.accessOptions ?? {}) });
   if (access.status !== 'ready') {
     const unavailable = access.status === 'unavailable';

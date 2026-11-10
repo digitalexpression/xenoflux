@@ -24,12 +24,17 @@ import { editProfileRegistry, removeProfile as removeFromStore } from './profile
 import { privateDirectory } from './metadata.js';
 import { findHistory, listHistory, recordedHistoryClient } from './history.js';
 import { listHomes, registerHome } from './homes.js';
-import { focusDesktopInstance, listDesktopInstances, openDesktopInstance } from './desktop-instances.js';
+import { createCodexDesktopSurface } from './desktop-surface.js';
 import { applyCopy, planCopy, planUndo, resolveNativeSettingsHome, undoCopy, fingerprintCopySource } from './native-copy.js';
 import { observeProfileClients } from './ui-clients.js';
 import { UiError } from './ui-server.js';
 import { createUiRuns } from './ui-runs.js';
 import { createUiReviewTasks } from './ui-review-tasks.js';
+import { createUiCatalog } from './ui-catalog.js';
+import { createStockDesktopApps } from './stock-desktop-apps.js';
+import { importClaudeTranscript } from './claude-transcript.js';
+import { importCopilotTranscript } from './copilot-transcript.js';
+import { compareAuditRuns } from './audit-report.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const plain = value => typeof value === 'string' && value.trim() !== '' && value.length <= 200 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
@@ -78,14 +83,14 @@ const appleString = value => `"${String(value).replace(/\\/g, '\\\\').replace(/"
 const run = (file, args) => new Promise((resolve, reject) => execFile(file, args, { timeout: 15000 }, error => error ? reject(error) : resolve()));
 
 /** Explicit client operations, each started by a person in the app. Replaceable in tests. */
-export function defaultClientOps(store) {
+export function defaultClientOps(store, desktopSurface = createCodexDesktopSurface(store)) {
   const xfx = args => [process.execPath, XFX, '--store', store.directory, ...args].map(shellQuote).join(' ');
   return {
     openTerminal: args => run('/usr/bin/osascript', ['-e', `tell application "Terminal" to do script ${appleString(xfx(args))}`, '-e', 'tell application "Terminal" to activate']),
     showTerminal: () => run('/usr/bin/open', ['-a', 'Terminal']),
-    openDefaultDesktop: () => run('/usr/bin/open', ['-b', DESKTOP_APP.bundleId]),
-    openDesktop: name => openDesktopInstance(store, name),
-    focusDesktop: name => focusDesktopInstance(store, name),
+    openDefaultDesktop: () => desktopSurface.openDefault(),
+    openDesktop: name => desktopSurface.open(name),
+    focusDesktop: name => desktopSurface.focus(name),
   };
 }
 
@@ -101,10 +106,12 @@ function copyError(error) {
 const MAX_SAVED = 20;
 
 export function createEngineProvider({ store, version = 'unknown', reportsRoot = join(homedir(), 'Xenoflux reports'), defaultUserHome = homedir(),
-  observeClients = observeProfileClients, clientOps = defaultClientOps(store), copyRuntime = () => createDesktopRuntime({ closeClients: false }),
-  resolveClient = signal => nativeClient(store, {}, signal), profilesBase = join(dirname(store.directory), 'profiles'), lockOptions = {}, runContext = {}, reviewContext = {}, maxActiveJobs = 8 }) {
+  observeClients = observeProfileClients, desktopSurface = createCodexDesktopSurface(store), stockApps = createStockDesktopApps(), clientOps = defaultClientOps(store, desktopSurface), copyRuntime = () => createDesktopRuntime({ closeClients: false }),
+  resolveClient = signal => nativeClient(store, {}, signal), profilesBase = join(dirname(store.directory), 'profiles'), lockOptions = {}, runContext = {}, reviewContext = {}, catalogContext = {}, copilotImportContext = {}, maxActiveJobs = 8 }) {
   if (!Number.isSafeInteger(maxActiveJobs) || maxActiveJobs < 1) throw new Error('Invalid active job capacity');
   const admitted = new Set();
+  const activeImports = new Set();
+  let closing = false;
   const admission = {
     async acquire(id) {
       if (admitted.size >= maxActiveJobs) throw new UiError(409, `This controller can run ${maxActiveJobs} jobs at once. Try again after one finishes.`, 'job-capacity');
@@ -112,8 +119,10 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     },
     release(id) { admitted.delete(id); },
   };
-  const runs = createUiRuns({ store, defaultUserHome, context: runContext, admission });
-  const reviewTasks = createUiReviewTasks({ store, defaultUserHome, context: reviewContext, admission,
+  const catalogs = createUiCatalog({ store, defaultUserHome, context: { lockOptions, ...catalogContext } });
+  const validateSelection = (input, execution) => catalogs.validate(input, execution);
+  const runs = createUiRuns({ store, defaultUserHome, context: { validateSelection, ...runContext }, admission });
+  const reviewTasks = createUiReviewTasks({ store, defaultUserHome, context: { validateSelection, ...reviewContext }, admission,
     resolveComparison: async ref => {
       // A Start rechecks current session evidence, not a previously cached view.
       if (ref.startsWith('s.') || ref.startsWith('p.')) cache.delete(ref);
@@ -331,7 +340,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     const home = (await listHomes(store)).find(item => item.name === target);
     if (!home?.home || home.state !== 'ready') return null;
     let instance = null;
-    try { instance = (await listDesktopInstances(store, { ...lockOptions, observe: true })).instances.find(item => item.profileId === home.id) ?? null; } catch { /* unknown */ }
+    try { instance = (await desktopSurface.list({ ...lockOptions, observe: true })).instances.find(item => item.profileId === home.id) ?? null; } catch { /* unknown */ }
     const card = await observeClients(home.home, { desktopRunning: instance ? instance.observed?.status === 'running' : null });
     if (card.cli.state === 'running') return { title: `${target} is open in Codex CLI.`, body: `Changes can only be applied while it’s closed. Close ${target}’s Terminal session, then check again. Xenoflux never closes Codex or Terminal sessions for you.` };
     if (card.desktop.state === 'running') return { title: `${target} is open in Codex Desktop.`, body: `Changes can only be applied while it’s closed. Quit ${target}’s Codex Desktop, then check again.` };
@@ -410,6 +419,17 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   }
 
   const provider = {
+    apps: async () => {
+      const result = await stockApps.list();
+      return Array.isArray(result) ? { apps: result } : result;
+    },
+    async openApp(input) {
+      try { return await stockApps.open(input); }
+      catch (error) { throw new UiError(409, error.message, 'stock-app-unavailable'); }
+    },
+    catalog: catalogs.get,
+    refreshCatalog: catalogs.refresh,
+    cancelCatalog: catalogs.cancel,
     runOptions: runs.runOptions,
     runPreview: runs.runPreview,
     startRun: runs.startRun,
@@ -423,12 +443,16 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     cancelReviewTask: reviewTasks.cancelReviewTask,
     respondReviewTask: reviewTasks.respondReviewTask,
     async close() {
-      const results = await Promise.allSettled([runs.close(), reviewTasks.close()]);
+      closing = true;
+      const results = await Promise.allSettled([runs.close(), reviewTasks.close(), catalogs.close(), Promise.allSettled([...activeImports])]);
       const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
       if (failures.length) throw new AggregateError(failures, failures.map(error => error.message).join('\n'));
     },
     async info() {
+      let desktop = { status: 'unavailable', nativeAcceptance: 'pending' };
+      try { desktop = await desktopSurface.inspect(); } catch { /* Missing vendor app remains unavailable. */ }
       return { mode: 'engine', version, activeJobs: [...runs.activeJobs(), ...reviewTasks.activeJobs()], maxActiveJobs, activeRun: await runs.activeRun(),
+        desktop,
         features: { runs: true, copy: true, create: true, clientControls: true, profileEdits: true } };
     },
 
@@ -451,7 +475,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     async profiles() {
       const { homes, data, defaultHome } = await profileRecords();
       let instances = [];
-      try { instances = (await listDesktopInstances(store, { ...lockOptions, observe: true })).instances; } catch { /* reported as unknown below */ }
+      try { instances = (await desktopSurface.list({ ...lockOptions, observe: true })).instances; } catch { /* reported as unknown below */ }
       const byId = new Map(data.profiles.map(profile => [profile.id, profile]));
       const card = async ({ name, isDefault, home, root, state, reason, profile }) => {
         const instance = instances.find(item => item.profileId === profile?.id);
@@ -525,9 +549,10 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       const value = await setupFor(a, b);
       const view = presentSetupComparison(value, { home: homedir() });
       const target = a === 'Default' ? b : a, source = a === 'Default' ? a : b;
+      const missingSourceState = source === a ? 'added' : 'removed';
       const href = id => `/profiles/${encodeURIComponent(target)}/copy?from=${encodeURIComponent(source)}&item=${encodeURIComponent(id)}`;
       const groups = view.groups.map(group => ({ ...group, items: group.items.map(item => ({ ...item, actions: {
-        ...(item.actions.copyable && target !== 'Default' ? { copy: { from: source === a ? 'a' : 'b', label: `Copy from ${source} into ${target}…`, href: href(item.id) } } : {}),
+        ...(item.actions.copyable && item.exactState !== missingSourceState && target !== 'Default' ? { copy: { from: source === a ? 'a' : 'b', label: `Copy from ${source} into ${target}…`, href: href(item.id) } } : {}),
         ...(item.actions.package ? { packageHref: `/compare/setups/skills/${encodeURIComponent(item.actions.package)}?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&item=${encodeURIComponent(item.id)}` } : {}),
         ...(item.actions.guidance ? { guidance: item.actions.guidance } : {}),
       } })) }));
@@ -882,6 +907,73 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         throw new UiError(422, error.message.startsWith('Unsupported') ? error.message : 'This file isn’t a readable saved Xenoflux report. Choose the file ending in .audit.json.', 'unreadable');
       } finally { await rm(temporary, { force: true }); }
       return register(value, { title: name.replace(/\.md\.audit\.json$|\.audit\.json$|\.json$/i, '') || 'Saved report', savedAt: null, path: null });
+    },
+    async importCopilotComparison({ left, right } = {}) {
+      if (closing) throw new UiError(409, 'The app is stopping. Start it again before importing.', 'stopping');
+      if ([left, right].some(selected => !selected || typeof selected !== 'object' || Array.isArray(selected)
+        || Object.keys(selected).some(key => key !== 'sessionId') || typeof selected.sessionId !== 'string' || !UUID.test(selected.sessionId)))
+        throw new UiError(422, 'Enter both existing Copilot session UUIDs.', 'invalid-copilot-import');
+      const operation = (async () => {
+        const id = randomUUID(), directories = [];
+        await admission.acquire(id);
+        try {
+          await privateDirectory(store.directory, true);
+          const parent = join(store.directory, 'ui-imports');
+          await privateDirectory(parent, true);
+          const imported = [];
+          for (const selected of [left, right]) {
+            const directory = join(parent, randomUUID());
+            imported.push(await importCopilotTranscript(selected, { ...copilotImportContext, directory,
+              onArtifactCreated: artifact => directories.push(artifact) }));
+          }
+          const value = compareAuditRuns(imported[0], imported[1]);
+          return { ...register(value, { title: 'Imported Copilot conversations', savedAt: null, path: null }), origin: 'copilot-import' };
+        } catch {
+          for (const artifact of directories) {
+            const current = await lstat(artifact.directory).catch(() => null);
+            if (current?.dev === artifact.dev && current.ino === artifact.ino)
+              await rm(artifact.directory, { recursive: true, force: true });
+          }
+          throw new UiError(422, 'These local Copilot conversations could not be imported. No new session or model task was requested.', 'invalid-copilot-import');
+        } finally { admission.release(id); }
+      })();
+      activeImports.add(operation);
+      try { return await operation; }
+      finally { activeImports.delete(operation); }
+    },
+    async importClaudeComparison({ left, right } = {}) {
+      if (closing) throw new UiError(409, 'The app is stopping. Start it again before importing.', 'stopping');
+      if (!left || !right || typeof left !== 'object' || typeof right !== 'object')
+        throw new UiError(422, 'Choose both Claude Code transcript files.', 'invalid-claude-import');
+      const operation = (async () => {
+        const id = randomUUID(), directories = [];
+        await admission.acquire(id);
+        try {
+          await privateDirectory(store.directory, true);
+          const parent = join(store.directory, 'ui-imports');
+          await privateDirectory(parent, true);
+          const imported = [];
+          for (const selected of [left, right]) {
+            const directory = join(parent, randomUUID());
+            imported.push(await importClaudeTranscript(selected, { directory,
+              onArtifactCreated: artifact => directories.push(artifact) }));
+          }
+          const value = compareAuditRuns(imported[0], imported[1]);
+          const summary = register(value, { title: 'Imported Claude Code conversations', savedAt: null, path: null });
+          return { ...summary, origin: 'claude-code-import' };
+        } catch {
+          // Nothing is published until both bounded, isolated reads succeed.
+          for (const artifact of directories) {
+            const current = await lstat(artifact.directory).catch(() => null);
+            if (current?.dev === artifact.dev && current.ino === artifact.ino)
+              await rm(artifact.directory, { recursive: true, force: true });
+          }
+          throw new UiError(422, 'These files could not be imported as bounded Claude Code transcripts. No agent or model task was started.', 'invalid-claude-import');
+        } finally { admission.release(id); }
+      })();
+      activeImports.add(operation);
+      try { return await operation; }
+      finally { activeImports.delete(operation); }
     },
   };
   return provider;

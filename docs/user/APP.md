@@ -24,13 +24,43 @@ it. Running `xfx ui` again while it is running reopens the same app.
   is labelled **Different**, **Same**, **Could not compare** (with the reason) or
   **Not applicable**. Comparing only reads files; it never copies, activates or
   signs in anything.
+- **Open native apps.** When installed signed Claude or GitHub Copilot apps are
+  available, Profiles offers separate **Open** buttons. These use each app's
+  existing account and submit no task. They do not create managed profiles,
+  select a Chat/Code/Cowork surface or automate model work. Copilot can also open
+  an existing app-local session ID. A successful link dispatch does not confirm
+  that the session exists; the native app reports missing sessions. This creates
+  no new task.
 - **Compare a task from existing sessions.** Tick two sessions you ran in Codex CLI
   or Desktop. The first one you tick is the left side of the report; **Swap sides**
   changes that. Choosing sessions only reads their recorded history.
+- **Import Claude Code conversations.** On **Open saved report**, select two
+  native UTF-8 UUID-named `.jsonl` transcripts, up to 8 MiB each, then choose
+  **Compare stored conversations**. This reads private snapshots through the official
+  stored-session reader without starting an agent. The partial report retains
+  public user/assistant text; tools, thinking and system content are omitted.
+  Account/profile, usage, original surface and execution location remain unknown.
+  Export the report to reopen it independently of the selected files. Raw
+  transcripts stay private; recorded text still needs inspection before sharing.
+- **Import Copilot conversations.** On **Open saved report**, enter two existing
+  local session UUIDs from Copilot CLI or the app, then choose **Compare Copilot
+  conversations**. Xenoflux uses the existing native Copilot CLI connection to
+  read stored history; `copilot` must be installed on PATH. It starts no new session
+  or model task. The current reader
+  supports the implicit native sign-in route and refuses token/custom-root overrides.
+  Only selected user/assistant text enters the partial report. Reasoning, tools and
+  system content are omitted; original account, surface/location, usage and task
+  completion stay unknown. Export to retain the conversation independently of native
+  history. Raw evidence remains private; inspect recorded text before sharing it.
 - **Run a new task.** Describe one task, choose a profile for each side and a
   repository, then review the pinned commit, limits and any commands you add.
   Both sides can use the same profile. Each side can select its own model ID and
-  reasoning effort; blank fields inherit saved profile settings. Nothing starts
+  reasoning effort from its profile's advertised catalog; blank fields inherit saved settings.
+  **Refresh models** initializes the native client without submitting a task or
+  changing model policy. It may use sign-in, write native state or run configured
+  startup hooks. Browsing uses cached metadata. Changing model clears explicit
+  effort; Start checks explicit choices again. Advertised models do not prove
+  account entitlement or settings observed in a turn. Nothing starts
   until **Start 2 model runs**. The sides run sequentially in
   separate copies of the committed source; uncommitted, untracked and ignored
   files are excluded. Setup and check commands are ordinary programs outside

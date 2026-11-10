@@ -3,7 +3,7 @@ import type { Counts } from '@/api/types';
 import { cn } from '@/lib/cn';
 
 export function SegmentedControl<T extends string>({ label, options, value, onChange }:
-  { label: string; options: { value: T; label: string }[]; value: T; onChange: (value: T) => void }) {
+  { label: string; options: { value: T; label: string }[]; value: T | null; onChange: (value: T) => void }) {
   return (
     <div role="group" aria-label={label} className="segmented">
       {options.map(option => (

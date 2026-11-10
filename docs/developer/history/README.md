@@ -6,6 +6,11 @@ Completed releases, dated assessments and earlier experiments. No historical pla
 | --- | --- |
 | Releases 2.0.0–3.1.1 | [Acceptance index](../AUDIT-ACCEPTANCE.md) links source, artifact, verification and limit summaries. |
 | Native concurrency evidence | [3.1.0 validation](NATIVE-VALIDATION-3.1.0.md); development observations, not fresh packaged-candidate proof. |
+| November 10 client follow-up | [Native stops, positive navigation and stored Copilot import](CLIENT-FOLLOWUP-2026-11-10.md); current accounts cannot qualify isolation. |
+| November 10 Claude/Copilot live batch | [Claude pass and Copilot guarded stop](CLAUDE-COPILOT-QUALIFICATION-2026-11-10.md); three initial prompts, no retry, remaining gates explicit. |
+| November 10 native routes | [Subscription initialization and Auto-catalog diagnosis](CLIENT-ROUTES-2026-11-10.md); no inference or new sign-in. |
+| November 10 Claude/Copilot development | [Read-only import, app navigation and remaining gates](MULTI-CLIENT-2026-11-10.md). |
+| November 9 Codex qualification | [Dispatch/capture batches](CODEX-QUALIFICATION-2026-11-09.md) and [approval stop](CODEX-APPROVAL-QUALIFICATION-2026-11-09.md); each retains source, outcomes and native limits. |
 | Earlier capability/UI assessments | [Profile/UI assessment](PROFILE-UI-ASSESSMENT.md), [2.1.0 assessment](PROFILE-ASSESSMENT-2.1.0.md), [2.1.0 roadmap](ROADMAP-2.1.0.md). |
 | Sanitized evidence | [2.0.0](evidence/audit-2.0.0-summary.json), [October 14 comparison](evidence/profile-comparison-2026-10-14-summary.json). |
 | Desktop/launcher development | [Dated checks and legacy mechanisms](DESKTOP-HISTORY.md); no blanket isolation claim. Current [Desktop contract](../DESKTOP-IMPLEMENTATION.md) owns behavior. |

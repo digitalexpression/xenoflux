@@ -21,8 +21,8 @@ const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const errorText = reason => reason instanceof Error ? reason.message : String(reason);
 const minutes = value => value === null ? 'No time cap' : Number.isFinite(value) ? `${Math.ceil(value / 60000)} min` : 'not recorded';
-const identity = profile => ['profileId', 'home', 'nativeRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository']
-  .map(key => profile[key] ?? null);
+const IDENTITY_FIELDS = ['profileId', 'home', 'nativeRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository', 'client', 'surface', 'rootMode'];
+const identity = profile => IDENTITY_FIELDS.map(key => profile[key] ?? null);
 const checkedId = id => { if (!UUID.test(id ?? '')) throw new UiError(400, 'Choose a saved task run.', 'invalid-run'); return id; };
 
 function requestSpec(request) {
@@ -87,11 +87,43 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     }
   }
   async function inspect(spec) {
+    for (const selection of spec.profiles)
+      await context.validateSelection?.({ profile: selection.name, workspace: spec.repository }, selection.execution);
     const profiles = [], snapshots = [];
     const preview = await previewAuditExperiment(store, spec, { ...baseContext,
       resolveProfile: async (...args) => { const value = await baseContext.resolveProfile(...args); profiles.push(identity(value)); return value; },
       snapshotSettings: async profile => { const value = await snapshot(profile); snapshots.push(value); return value; } });
     return { preview, profiles, snapshots };
+  }
+
+  function previewChanges(reviewed, fresh) {
+    const changes = [];
+    if (fresh.preview.status !== 'ready') changes.push({ reason: 'readiness-changed', status: fresh.preview.status,
+      failures: fresh.preview.failures.map(({ code, scope, profile }) => ({ code, scope, ...(profile ? { profile } : {}) })),
+      profiles: fresh.preview.profiles.map((profile, index) => ({ side: reviewed.spec.profiles[index].sideId,
+        profile: profile.profileName, checks: (profile.checks ?? [])
+          .filter(check => ['profile-access', 'settings-snapshot'].includes(check.name) && check.status !== 'ready')
+          .map(({ name, status, reason }) => ({ name, status, ...(reason ? { reason } : {}) })) }))
+        .filter(profile => profile.checks.length) });
+    if (!same(fresh.preview.baseline, reviewed.preview.baseline)) changes.push({ reason: 'baseline-changed',
+      fields: [...new Set([...Object.keys(reviewed.preview.baseline ?? {}), ...Object.keys(fresh.preview.baseline ?? {})])]
+        .filter(key => !same(reviewed.preview.baseline?.[key], fresh.preview.baseline?.[key])) });
+    if (!same(fresh.profiles, reviewed.profiles)) {
+      if (fresh.profiles.length !== reviewed.profiles.length) changes.push({ reason: 'profile-identity-changed', fields: ['resolved-profile-count'] });
+      else for (const [index, before] of reviewed.profiles.entries()) {
+        const fields = IDENTITY_FIELDS.filter((_, field) => !same(before[field], fresh.profiles[index]?.[field]));
+        if (fields.length) changes.push({ reason: 'profile-identity-changed', side: reviewed.spec.profiles[index].sideId,
+          profile: reviewed.spec.profiles[index].name, fields });
+      }
+    }
+    for (const [index, before] of reviewed.snapshots.entries()) {
+      const compared = compareSettings(before, fresh.snapshots[index]);
+      if (compared.status !== 'unchanged') changes.push({
+        reason: compared.status === 'changed' ? 'profile-settings-changed' : 'profile-settings-unavailable',
+        side: reviewed.spec.profiles[index].sideId, profile: reviewed.spec.profiles[index].name,
+        changedPaths: compared.changedPaths ?? [] });
+    }
+    return changes;
   }
 
   async function runOptions() {
@@ -145,9 +177,9 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     try {
       if (admission) { await admission.acquire(token); admitted = true; }
       const fresh = await inspect(reviewed.spec);
-      const changed = fresh.preview.status !== 'ready' || !same(fresh.preview.baseline, reviewed.preview.baseline)
-        || !same(fresh.profiles, reviewed.profiles) || reviewed.snapshots.some((before, index) => compareSettings(before, fresh.snapshots[index]).status !== 'unchanged');
-      if (changed) throw new UiError(409, 'The commit, profile setup or access changed after review. Nothing started; refresh the preview.', 'preview-stale');
+      const changes = previewChanges(reviewed, fresh);
+      if (changes.length) throw new UiError(409, 'The commit, profile setup or access changed after review. Nothing started; refresh the preview.',
+        'preview-stale', { changes });
       if (closing) throw new UiError(409, 'Xenoflux stopped while checking the preview. No task started.', 'stopping');
       await privateDirectory(store.directory, true); await privateDirectory(root, true);
       const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.spec.profiles.map(profile => profile.name), sideIds: reviewed.spec.profiles.map(profile => profile.sideId) };

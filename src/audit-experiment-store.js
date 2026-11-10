@@ -9,8 +9,11 @@ import { acquire, privateDirectory, readJSON, release } from './metadata.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { acquireProfileParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
 import { projectReportResourceProvenance } from './audit-store.js';
+import { assertNativeReference, createNativeReference } from './client-contracts.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const nativeId = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 1024
+  && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
 const MAX_BYTES = 16 * 1024 * 1024;
 const TRANSIENT_LINK_RETRIES = 30;
 const TRANSIENT_LINK_DELAY_MS = 2;
@@ -263,6 +266,24 @@ export async function createExperimentRun(store, { experimentId, profile, task =
   return { id, directory, record, state };
 }
 
+// Optional attribution extends v1 without relabeling older Codex checkpoints.
+function captureAttribution(record, threadId, run, reference) {
+  const client = record.profile?.client ?? 'codex';
+  if (run?.id && run.id !== record.id || run?.source?.threadId !== undefined && run.source.threadId !== threadId
+    || run?.clientIdentity !== undefined && (!run.clientIdentity || run.clientIdentity.client !== client))
+    throw new Error('Audit capture checkpoint native identity does not match its record');
+  const scope = { client, jobId: record.id, profileId: record.profile?.profileId ?? record.profile?.id, sessionId: threadId };
+  const checked = value => {
+    const native = createNativeReference(value);
+    // Older supported manifests may omit profile ID; validate every available immutable scope.
+    return assertNativeReference(native, { ...scope, profileId: scope.profileId ?? native.profileId });
+  };
+  const nested = run?.nativeReference === undefined ? null : checked(run.nativeReference);
+  const saved = reference === undefined ? null : checked(reference);
+  if (nested && saved && !equal(nested, saved)) throw new Error('Audit capture checkpoint native references disagree');
+  return nested ?? saved;
+}
+
 /** Read one experiment or run by exact UUID, without scanning an index. */
 export async function readAuditRecord(store, id) {
   const directory = await recordDirectory(store, id);
@@ -295,9 +316,10 @@ export async function readAuditRecord(store, id) {
     throw new Error('Audit recovery receipt is invalid; preserving it');
   if (captureCheckpoint && (record.kind !== 'audit-experiment-run' || captureCheckpoint.id !== id
     || captureCheckpoint.experimentId !== record.experimentId || captureCheckpoint.kind !== 'audit-capture-checkpoint'
-    || captureCheckpoint.schemaVersion !== 1 || !UUID.test(captureCheckpoint.threadId ?? '')
+    || captureCheckpoint.schemaVersion !== 1 || !nativeId(captureCheckpoint.threadId)
     || typeof captureCheckpoint.profileHome !== 'string' || !captureCheckpoint.profileHome.startsWith('/')))
     throw new Error('Audit capture checkpoint identity is invalid; preserving it');
+  if (captureCheckpoint) captureAttribution(record, captureCheckpoint.threadId, captureCheckpoint.run, captureCheckpoint.nativeReference);
   if (record.kind === 'audit-evaluation' && !report) throw new Error('Audit evaluation report is missing; preserving its directory');
   if (record.kind === 'audit-series') {
     if (!Array.isArray(record.plan) || !Array.isArray(state.trials) || record.plan.length !== state.trials.length
@@ -311,53 +333,82 @@ export async function readAuditRecord(store, id) {
   return projectReportResourceProvenance({ id, directory, record, state, report, cleanup, recovery, captureCheckpoint, finalized: report !== null });
 }
 
+// Share the existing recoverable cross-process metadata gate, scoped to this record.
+async function mutateAuditRecord(store, id, action) {
+  const directory = await recordDirectory(store, id);
+  return withProfileOperation(store, id, { lockPath: join(directory, '.mutation-lock'), waitMs: 5000, recovery: true }, action);
+}
+
+function assertCaptureOwner(current, owner, signal) {
+  if (signal?.aborted || ['complete', 'completed', 'failed', 'cancelled', 'interrupted', 'recovery-required'].includes(current.state.status)
+    || ((owner || current.state.reservation?.owner) && !equal(owner, current.state.reservation?.owner)))
+    throw new Error('Audit capture owner is stale or stopped');
+}
+
 /** Persist the latest normalized in-memory capture under the run's immutable identity. */
-export async function writeAuditCaptureCheckpoint(store, id, { run, capture } = {}) {
-  const current = await readAuditRecord(store, id);
-  if (current.record.kind !== 'audit-experiment-run' || current.finalized)
-    throw new Error('Capture checkpoints require an unfinished audit run');
-  if (!run || typeof run !== 'object' || Array.isArray(run) || !capture || typeof capture !== 'object' || Array.isArray(capture))
-    throw new Error('Audit capture checkpoint needs normalized run and capture objects');
-  const threadId = run.source?.threadId;
-  const profileHome = run.profile?.home ?? run.profile?.userHome;
-  if (run.id && run.id !== id) throw new Error('Audit capture run ID does not match its record');
-  if (!UUID.test(threadId ?? '') || typeof profileHome !== 'string' || !profileHome.startsWith('/'))
-    throw new Error('Audit capture checkpoint is missing its native thread or profile-home identity');
-  const expectedHome = current.record.profile?.home ?? current.record.profile?.userHome;
-  if (expectedHome && expectedHome !== profileHome) throw new Error('Audit capture profile-home identity changed; preserving checkpoint');
-  if (current.captureCheckpoint && (current.captureCheckpoint.threadId !== threadId || current.captureCheckpoint.profileHome !== profileHome))
-    throw new Error('Audit capture checkpoint identity changed; preserving checkpoint');
-  const value = projectReportResourceProvenance({ schemaVersion: 1, kind: 'audit-capture-checkpoint', id,
-    experimentId: current.record.experimentId, threadId, profileHome,
-    capturedAt: new Date().toISOString(), run, capture });
-  assertJsonRecord(value, 'Audit capture checkpoint');
-  await atomicWrite(current.directory, 'capture-checkpoint.json', value);
-  return value;
+export async function writeAuditCaptureCheckpoint(store, id, { run, capture, owner, signal } = {}) {
+  return mutateAuditRecord(store, id, async () => {
+    const current = await readAuditRecord(store, id);
+    if (current.record.kind !== 'audit-experiment-run' || current.finalized)
+      throw new Error('Capture checkpoints require an unfinished audit run');
+    assertCaptureOwner(current, owner, signal);
+    if (!run || typeof run !== 'object' || Array.isArray(run) || !capture || typeof capture !== 'object' || Array.isArray(capture))
+      throw new Error('Audit capture checkpoint needs normalized run and capture objects');
+    const threadId = run.source?.threadId;
+    const profileHome = run.profile?.home ?? run.profile?.userHome;
+    if (run.id && run.id !== id) throw new Error('Audit capture run ID does not match its record');
+    if (!nativeId(threadId) || typeof profileHome !== 'string' || !profileHome.startsWith('/'))
+      throw new Error('Audit capture checkpoint is missing its native thread or profile-home identity');
+    const nativeReference = captureAttribution(current.record, threadId, run);
+    const previousReference = current.captureCheckpoint?.nativeReference ?? current.captureCheckpoint?.run?.nativeReference;
+    if (previousReference && !nativeReference)
+      throw new Error('Audit capture checkpoint native reference is missing; preserving checkpoint');
+    if (previousReference && ['client', 'jobId', 'profileId', 'sessionId'].some(key => previousReference[key] !== nativeReference?.[key]))
+      throw new Error('Audit capture checkpoint native identity changed; preserving checkpoint');
+    if (previousReference?.turnId != null && previousReference.turnId !== nativeReference?.turnId)
+      throw new Error('Audit capture checkpoint native root turn changed; preserving checkpoint');
+    const expectedHome = current.record.profile?.home ?? current.record.profile?.userHome;
+    if (expectedHome && expectedHome !== profileHome) throw new Error('Audit capture profile-home identity changed; preserving checkpoint');
+    if (current.captureCheckpoint && (current.captureCheckpoint.threadId !== threadId || current.captureCheckpoint.profileHome !== profileHome))
+      throw new Error('Audit capture checkpoint identity changed; preserving checkpoint');
+    const value = projectReportResourceProvenance({ schemaVersion: 1, kind: 'audit-capture-checkpoint', id,
+      experimentId: current.record.experimentId, threadId, profileHome, ...(owner ? { owner } : {}),
+      ...(nativeReference ? { nativeReference } : {}),
+      capturedAt: new Date().toISOString(), run, capture });
+    assertJsonRecord(value, 'Audit capture checkpoint');
+    await atomicWrite(current.directory, 'capture-checkpoint.json', value);
+    return value;
+  });
 }
 
 /** Replace only mutable state, preserving the record identity and finalized report. */
-export async function writeAuditState(store, id, patch) {
-  const current = await readAuditRecord(store, id);
-  if (current.finalized) throw new Error('Finalized audit state is immutable');
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Audit state update must be an object');
-  const state = { ...current.state, ...patch, schemaVersion: 1, id, updatedAt: new Date().toISOString() };
-  assertJsonRecord(state, 'Audit state');
-  await atomicWrite(current.directory, 'state.json', state);
-  return state;
+export async function writeAuditState(store, id, patch, { owner, signal } = {}) {
+  return mutateAuditRecord(store, id, async () => {
+    const current = await readAuditRecord(store, id);
+    if (current.finalized) throw new Error('Finalized audit state is immutable');
+    if (owner || signal) assertCaptureOwner(current, owner, signal);
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Audit state update must be an object');
+    const state = { ...current.state, ...patch, schemaVersion: 1, id, updatedAt: new Date().toISOString() };
+    assertJsonRecord(state, 'Audit state');
+    await atomicWrite(current.directory, 'state.json', state);
+    return state;
+  });
 }
 
 /** Write one final normalized report. Existing final reports are never replaced. */
 export async function finalizeAuditRecord(store, id, report) {
-  const current = await readAuditRecord(store, id);
-  if (current.finalized) throw new Error('Final audit report is immutable and already exists');
-  const kind = { 'audit-experiment': 'audit-experiment-report', 'audit-experiment-run': 'audit-run',
-    'audit-series': 'audit-series-report', 'audit-evaluation': 'audit-evaluation-report' }[current.record.kind];
-  if (!kind) throw new Error('Unsupported audit record kind');
-  if (report?.kind && report.kind !== kind) throw new Error(`Expected final report kind ${kind}`);
-  const value = projectReportResourceProvenance({ ...report, schemaVersion: 1, kind, id });
-  assertJsonRecord(value, 'Final audit report');
-  await atomicWrite(current.directory, 'report.json', value, { exclusive: true });
-  return value;
+  return mutateAuditRecord(store, id, async () => {
+    const current = await readAuditRecord(store, id);
+    if (current.finalized) throw new Error('Final audit report is immutable and already exists');
+    const kind = { 'audit-experiment': 'audit-experiment-report', 'audit-experiment-run': 'audit-run',
+      'audit-series': 'audit-series-report', 'audit-evaluation': 'audit-evaluation-report' }[current.record.kind];
+    if (!kind) throw new Error('Unsupported audit record kind');
+    if (report?.kind && report.kind !== kind) throw new Error(`Expected final report kind ${kind}`);
+    const value = projectReportResourceProvenance({ ...report, schemaVersion: 1, kind, id });
+    assertJsonRecord(value, 'Final audit report');
+    await atomicWrite(current.directory, 'report.json', value, { exclusive: true });
+    return value;
+  });
 }
 
 /** Persist an immutable, bounded cleanup/recovery receipt without changing a final report. */

@@ -93,6 +93,11 @@ export function uiRoutes(provider) {
   const q = ({ query }) => Object.fromEntries(query);
   return [
     route('GET', '/api/info', call('info', () => ({}))),
+    route('GET', '/api/catalog', call('catalog', q)),
+    route('GET', '/api/apps', call('apps', () => ({}))),
+    route('POST', '/api/apps/open', call('openApp', ({ body }) => body)),
+    route('POST', '/api/catalog/refresh', call('refreshCatalog', ({ body }) => body)),
+    route('POST', '/api/catalog/cancel', call('cancelCatalog', ({ body }) => body)),
     route('GET', '/api/overview', call('overview', () => ({}))),
     route('GET', '/api/profiles', call('profiles', () => ({}))),
     route('POST', '/api/profiles/:name/clients', call('clientAction', ({ params, body }) => ({ name: params.name, ...body }))),
@@ -111,6 +116,8 @@ export function uiRoutes(provider) {
     route('POST', '/api/compare/sessions', call('compareSessions', ({ body }) => body)),
     route('GET', '/api/reports/recent', call('savedReports', () => ({}))),
     route('POST', '/api/reports/open', call('openReport', ({ body }) => body), { bodyLimit: 64 << 20 }),
+    route('POST', '/api/reports/import/copilot', call('importCopilotComparison', ({ body }) => body), { bodyLimit: 2 << 10 }),
+    route('POST', '/api/reports/import/claude-code', call('importClaudeComparison', ({ body }) => body), { bodyLimit: 40 << 20 }),
     route('POST', '/api/reports/recent/:id/open', call('openRecentReport', ({ params }) => ({ id: params.id }))),
     route('GET', '/api/reports/:ref', call('report', ({ params }) => ({ ref: params.ref }))),
     route('GET', '/api/reports/:ref/reviews', call('reviews', ({ params }) => ({ ref: params.ref }))),

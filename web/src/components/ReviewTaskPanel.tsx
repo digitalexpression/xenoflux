@@ -232,7 +232,7 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
         <option value="">Profile default workspace</option>{options.workspaces.filter(item => !item.profile || item.profile === profile).map(item => <option key={`${item.profile ?? ''}:${item.path}`} value={item.path} disabled={!item.available}>{item.path}{item.available ? '' : ' · unavailable'}</option>)}
       </select></div>
       <p className="hint">Choose a separate workspace for each simultaneous review.</p>
-      <ExecutionFields value={execution} disabled={busy} onChange={value => { setExecution(value); inputChanged(); }} />
+      <ExecutionFields profile={profile} workspace={cwd} value={execution} disabled={busy} onChange={value => { setExecution(value); inputChanged(); }} />
       <div><label htmlFor="review-prompt" className="field-label">Review prompt</label><textarea id="review-prompt" className="input" rows={6} value={prompt} disabled={busy} onChange={event => { setPrompt(event.target.value); inputChanged(); }} /></div>
       <label className="flex gap-2 items-start text-ui"><input type="checkbox" checked={includeContent} disabled={busy} onChange={event => { setIncludeContent(event.target.checked); inputChanged(); }} />Include recorded report content</label>
       <fieldset className="flex flex-col gap-2"><legend className="field-label">Model turn time limit</legend>
