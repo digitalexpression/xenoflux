@@ -1,4 +1,4 @@
-// Selected-session import via the public SDK; no native execution adapter is enabled.
+// Selected-session import reads the durable SDK journal without opening it.
 import { constants } from 'node:fs';
 import { access, lstat, mkdir, open, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -7,8 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { privateDirectory } from './metadata.js';
 import { runAuditProcess } from './audit-process.js';
 import { normalizeSessionReplay, REPLAY_LIMITS } from './audit-session-replay.js';
+import { assertCopilotEnvironment, COPILOT_SESSION_ID as UUID } from './copilot-profile.js';
+import { assertCopilotSessionSelection, createCopilotRuntime } from './copilot-runtime.js';
 import { assertCopilotImplicitEnvironment, COPILOT_IMPORT_BYTES as MAX_BYTES, COPILOT_READER, readCopilotJournal } from './copilot-transcript-reader.mjs';
-const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const opaque = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
 const failure = () => new Error('The Copilot stored-session reader could not import this local session. Check the session ID, native sign-in, persisted-reading support and import limits.');
@@ -28,6 +29,7 @@ async function capturedFile(path, expected) {
 }
 async function readNativeJournal({ sessionId, directory, signal }) {
   assertCopilotImplicitEnvironment(process.env);
+  assertCopilotEnvironment(process.env);
   let executable, executableIdentity;
   for (const path of (process.env.PATH ?? '').split(':').filter(path => path.startsWith('/'))) {
     const candidate = join(path, 'copilot');
@@ -68,13 +70,19 @@ function publicMessages(pages, sessionId) {
   return { messages, omittedEvents, omittedBodies, observedModels: [...observedModels] };
 }
 /** readJournal is a fixture seam; production uses only the isolated public-SDK reader. */
-export async function importCopilotTranscript({ sessionId } = {}, { directory, onArtifactCreated, readJournal = readNativeJournal, signal } = {}) {
+export async function importCopilotTranscript({ sessionId, selection } = {}, { directory, profile, onArtifactCreated, readJournal, signal } = {}) {
+  let binding;
+  if (selection !== undefined || profile !== undefined) {
+    if (!selection || !profile || selection.sessionId !== sessionId) throw failure();
+    try { binding = assertCopilotSessionSelection(selection, profile); } catch { throw failure(); }
+  }
+  const read = readJournal ?? (binding ? createCopilotRuntime().readJournal : readNativeJournal);
   if (typeof sessionId !== 'string' || !UUID.test(sessionId) || typeof directory !== 'string' || !isAbsolute(directory) || resolve(directory) !== directory) throw failure();
   await privateDirectory(dirname(directory)); await mkdir(directory, { mode: 0o700 });
   const owned = await lstat(directory);
   try {
     onArtifactCreated?.({ directory, dev: owned.dev, ino: owned.ino }); signal?.throwIfAborted();
-    const result = await readJournal({ sessionId, directory, signal }); signal?.throwIfAborted();
+    const result = await read({ sessionId, directory, signal, ...(binding ? { selection, profile } : {}) }); signal?.throwIfAborted();
     const current = await lstat(directory); if (current.dev !== owned.dev || current.ino !== owned.ino) throw failure();
     if (result?.complete !== true || result.sessionId !== undefined && result.sessionId !== sessionId
       || result.decoder !== undefined && result.decoder !== COPILOT_READER || result.schemaVersion !== undefined && result.schemaVersion !== 1
@@ -117,6 +125,7 @@ export async function importCopilotTranscript({ sessionId } = {}, { directory, o
       profile: { profileName: 'Imported Copilot' }, clientIdentity: { client: 'copilot' },
       source: { kind: 'copilot-sdk-persisted-import', nativeSessionId: sessionId, rawSourceSha256: rawHash, decoder: COPILOT_READER, projectionSha256: fingerprint,
         readerRuntime: { version: result.runtime.version, protocolVersion: result.runtime.protocolVersion },
+        ...(binding ? { readContext: { profileId: binding.profileId, rootMode: binding.rootMode, client: binding.client, authType: selection.authType, accountScope: selection.accountScope } } : {}),
         ...(/^[a-f0-9]{64}$/.test(result.readerExecutableIdentitySha256 ?? '') ? { readerExecutableIdentitySha256: result.readerExecutableIdentitySha256 } : {}),
         observedModels: projected.observedModels, sourceLineBasis: 'sanitized-sdk-message-snapshot-ordinal',
         projectionBasis: 'Public data.content text from SDK durable-event pages; not a native execution capture' }, sessionReplay };

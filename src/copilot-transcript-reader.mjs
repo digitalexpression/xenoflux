@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { userInfo } from 'node:os';
+import { assertCopilotEnvironment } from './copilot-profile.js';
 export const COPILOT_READER = '@github/copilot-sdk@1.0.29';
 export const COPILOT_IMPORT_BYTES = 8 * 1024 * 1024;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -49,6 +50,7 @@ async function main() {
   const config = JSON.parse(process.argv[2]), { sessionId, directory, executable } = config;
   if (!opaque(sessionId) || resolve(directory) !== directory || resolve(executable) !== executable) throw new Error('Invalid reader request');
   assertCopilotImplicitEnvironment(process.env);
+  assertCopilotEnvironment(process.env);
   const stat = await fsp.lstat(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid() || stat.mode & 0o077 || await fsp.realpath(directory) !== directory) throw new Error('Unsafe reader directory');
   const controller = new AbortController(), closes = [], children = [], originalSpawn = childProcess.spawn;
