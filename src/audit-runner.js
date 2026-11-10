@@ -9,6 +9,8 @@ import { inspectAuditRepository, authorizeAuditWorkspaceParent, createAuditWorks
   snapshotAuditWorkspace, setAuditWorkspaceActive } from './audit-workspace.js';
 import { createExperiment, createExperimentRun, writeAuditState, finalizeAuditRecord,
   reserveAuditProfile, releaseAuditProfileReservation, writeAuditCaptureCheckpoint } from './audit-experiment-store.js';
+import { COPILOT_PERMISSION_MODES } from './copilot-catalog.js';
+import { normalizeSessionReplay } from './audit-session-replay.js';
 import { resolveAuditExecutionProfile, observeAuditProfileAccess, snapshotAuditProfileSettings,
   compareAuditProfileSettings, inspectAuditExecutable, auditSettingsIdentity } from './audit-profile.js';
 import { createClientRuntime } from './client-runtime.js';
@@ -39,6 +41,7 @@ const safeProfile = profile => ({
   ...(profile.nativeConfig !== undefined ? { nativeConfig: { ...profile.nativeConfig } } : {}) });
 const SAFE_ERROR_TEXT = {
   'repository-limit': 'The source repository exceeds the supported Git tree or capture bounds.',
+  'copilot-account-unverified': 'This Copilot profile needs a verified native account scope before it can start.',
   'profile-repository-unbound': 'The selected repository is not already bound to this profile; no binding was changed.',
   'profile-access-blocked': 'A selected profile has an untrusted or mutating reservation.',
   'profile-access-unavailable': 'Safe access to a selected profile could not be verified.',
@@ -58,6 +61,7 @@ const SAFE_ERROR_TEXT = {
   'capture-incomplete': 'Required capture evidence is incomplete.',
   'required-context-unavailable': 'Required loaded context was not verified in the audit workspace.',
   'task-failed': 'The Codex task process did not complete successfully.',
+  'copilot-task-failed': 'The Copilot task did not record a completed response.',
   'setup-failed': 'A setup command failed.',
   'process-shutdown-failed': 'A process group could not be confirmed stopped.',
 };
@@ -128,6 +132,13 @@ export async function captureFrozenSessionReplay(deps, store, profile, capturedR
   const validId = typeof id === 'string' && (client === 'codex'
     ? /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)
     : id.trim().length > 0 && id.length <= 1024 && !/[\p{Cc}\p{Cf}]/u.test(id));
+  if (validId && client === 'copilot' && capturedRun.replayCapture?.boundary === 'owned-copilot-live-message-projection') {
+    const sessionReplay = normalizeSessionReplay(capturedRun.sessionReplay);
+    const [root] = sessionReplay.sessions;
+    if (sessionReplay.sessions.length === 1 && root.id === id && root.parentId === null
+      && root.source.fingerprint === capturedRun.replayCapture.sourceFingerprint)
+      return { sessionReplay, replayCapture: capturedRun.replayCapture };
+  }
   const readReplay = client === 'codex' ? deps.readReplay : deps.clientRuntimes?.[client]?.readReplay;
   const unavailable = reason => ({ sessionReplay: { schemaVersion: 1, kind: 'session-replay', sessions: [{
     id, parentId: null, depth: 0, status: 'unavailable', reason, source: { fingerprint: null }, events: [],
@@ -237,8 +248,11 @@ export async function previewAuditExperiment(store, input, context = {}) {
       const resolvedProfile = await deps.resolveProfile(store, selection, { repository: repository?.repository ?? spec.repository });
       const profile = { ...resolvedProfile, sideId: selection.sideId, execution: selection.execution, ...(selection.version !== undefined ? { requestedVersion: selection.version } : {}) };
       const requested = selection, codex = (profile.client ?? 'codex') === 'codex';
-      if (requested.execution?.permissionMode && profile.client !== 'claude-code')
-        throw new Error('The selected client does not support this permission override');
+      if (requested.execution?.permissionMode && !(profile.client === 'claude-code'
+        ? ['default', 'acceptEdits', 'plan'].includes(requested.execution.permissionMode)
+        : profile.client === 'copilot' && COPILOT_PERMISSION_MODES.includes(requested.execution.permissionMode))
+        || requested.execution?.route && profile.client !== 'copilot')
+        throw new Error('The selected client does not support this execution override');
       if (!codex && spec.captureRequirements?.context)
         throw new Error('The selected client does not support Codex context verification');
       const checks = [];
@@ -329,7 +343,8 @@ function compareProfileAccess(before, after, experimentId) {
 
 function reservationOwner(experimentId, runId, profile, store) {
   return { kind: 'audit-experiment', membershipVersion: 1, generation: randomUUID(), host: hostname(), pid: process.pid, runId, experimentId,
-    storePath: store.directory, profileId: profile.profileId, home: profile.home };
+    storePath: store.directory, profileId: profile.profileId, home: profile.home,
+    ...(profile.client === 'copilot' || profile.client === 'claude-code' ? { binding: profile.environmentBinding } : {}) };
 }
 
 async function ensureDirs(directory) {
@@ -430,7 +445,7 @@ export async function runAuditExperiment(store, input, context = {}) {
       const prepared = bySelection.get(selectionKey(selection)), { profile } = prepared;
       const fresh = await deps.resolveProfile(store, selection, { repository: repository.repository });
       const keys = ['profileId', 'profileName', 'home', 'nativeRoot', 'reservationRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository', 'client', 'rootMode', 'surface'];
-      if (keys.some(key => fresh[key] !== profile[key]))
+      if (keys.some(key => fresh[key] !== profile[key]) || JSON.stringify(fresh.accountQualification) !== JSON.stringify(profile.accountQualification))
         throw Object.assign(new Error('The selected profile binding changed before its reservation was held.'), { code: 'profile-binding-changed' });
       const executable = await deps.inspectExecutable(profile.executable);
       if (executable.executableIdentity !== profile.executableIdentity)
@@ -545,6 +560,8 @@ export async function runAuditExperiment(store, input, context = {}) {
           executionProfile.environmentBinding = createEnvironmentBinding({ ...profile.environmentBinding,
             workspace: workspace.directory, settingsIdentity: executionProfile.settingsIdentity });
         }
+        if (profile.client === 'copilot')
+          await deps.writeState(store, runRecord.id, { nativeShutdownPending: true }, { owner, signal: controller.signal });
         const captured = await deps.capture({ executionMode: 'audit', profile: executionProfile, execution: selection.execution, workspace: workspace.directory, task: spec.task, selectedSkills,
           requiredContext: spec.captureRequirements?.context,
           onProcessReady: async info => captureState({
@@ -606,9 +623,18 @@ export async function runAuditExperiment(store, input, context = {}) {
               skillInvocationCount: Array.isArray(session?.skillInvocations) ? session.skillInvocations.length : null,
               toolInvocationCount: Array.isArray(session?.toolInvocations) ? session.toolInvocations.length : null,
               coverage: session?.coverage ?? null, captureStatus: captureRecord?.status ?? 'unknown' } }, { owner, signal: controller.signal });
-          } }).finally(() => { capturing = false; });
-        const taskProcessUnsafe = captured?.process?.shutdown?.groupTerminated === false || captured?.process?.status === 'shutdown-failed';
-        if (!taskProcessUnsafe) await deps.writeState(store, runRecord.id, { phase: 'capture', process: null });
+          } }).catch(async error => {
+            if (profile.client === 'copilot') {
+              if (error.process?.shutdown?.groupTerminated === true)
+                await deps.writeState(store, runRecord.id, { process: null, nativeShutdownPending: false });
+              else recoveryRequired = true;
+            }
+            throw error;
+          }).finally(() => { capturing = false; });
+        const taskProcessUnsafe = profile.client === 'copilot' && captured?.process?.shutdown?.groupTerminated !== true
+          || captured?.process?.shutdown?.groupTerminated === false || captured?.process?.status === 'shutdown-failed';
+        if (!taskProcessUnsafe) await deps.writeState(store, runRecord.id, { phase: 'capture', process: null,
+          ...(profile.client === 'copilot' ? { nativeShutdownPending: false } : {}) });
         const taskElapsedMs = duration(taskStart);
         runResult.metrics = { ...(captured?.run?.metrics ?? {}), ...runResult.metrics,
           taskMs: taskElapsedMs, captureMs: captured?.run?.metrics?.wallMs ?? taskElapsedMs };
@@ -690,8 +716,10 @@ export async function runAuditExperiment(store, input, context = {}) {
           throw Object.assign(new Error(SAFE_ERROR_TEXT.timeout), { code: 'timeout' });
         if (processStatus === 'cancelled' || controller.signal.aborted)
           throw Object.assign(new Error(SAFE_ERROR_TEXT.cancelled), { code: 'cancelled' });
-        if (taskStatus === 'failed') throw Object.assign(new Error('Codex task process did not complete successfully.'), {
-          code: captured?.process?.status === 'timeout' ? 'timeout' : captured?.process?.status === 'cancelled' ? 'cancelled' : 'task-failed' });
+        if (taskStatus === 'failed') {
+          const code = profile.client === 'copilot' ? 'copilot-task-failed' : 'task-failed';
+          throw Object.assign(new Error(SAFE_ERROR_TEXT[code]), { code });
+        }
         const checkStart = Date.now();
         for (let cmd = 0; cmd < spec.checks.length; cmd++) {
           if (controller.signal.aborted || (runDeadline !== null && Date.now() >= runDeadline)) { runResult.checks.push({ name: spec.checks[cmd].name, status: controller.signal.aborted ? 'cancelled' : 'timeout', exitCode: null }); break; }
@@ -817,7 +845,7 @@ export async function runAuditExperiment(store, input, context = {}) {
           const processState = (await import('./audit-experiment-store.js')).readAuditRecord;
           const persisted = await processState(store, runRecord.id).catch(() => null);
           const processInfo = persisted?.state?.process;
-          if (processInfo?.pid) { recoveryRequired = true; runResult.status = 'recovery-required'; }
+          if ((profile.client === 'copilot' && recoveryRequired) || processInfo?.pid) { recoveryRequired = true; runResult.status = 'recovery-required'; }
           else {
             // Preserve a final state for cleanup even when setup failed before
             // the task-end checkpoint. This is explicitly not task-end evidence.

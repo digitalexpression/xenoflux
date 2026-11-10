@@ -85,6 +85,31 @@ not assume an absent main process proves the observed job's descendants stopped.
 Keep a matching terminal assistant response separate from capture gaps, advisory
 child heartbeats and shutdown. Missing native turn IDs remain unknown.
 
+### Copilot CLI ordinary review
+
+Run the selected installed CLI through the pinned `@github/copilot-sdk@1.0.29`
+stdio connection. Preserve native HOME, USER and LOGNAME. Supply the public
+`baseDirectory` option for an explicit root and refuse ambient authentication,
+provider or root overrides. An explicit root requires current account scope
+evidence for its selected executable, runtime build and native sign-in type.
+Preparation reads file metadata and never starts the client.
+
+The process inherits the selected cwd. Verify the session's native cwd before
+submission and leave native trust unchanged. Revalidate explicit model, effort
+and Auto tier on the owned connection, then checkpoint the fresh session before
+the single send. Each native turn reports its own identity and may report an
+actual routed model. Retain requested, sent, confirmed and observed settings
+independently. Reviews inherit native permissions.
+
+Show the exact owned `copilot/permission` request, including its action and native
+handle. Separate path and command handles can refer to one tool call. The
+matching live handle accepts only `{kind:'approve-once'}` or `{kind:'reject'}`.
+Abort invalidates unanswered handles before the owned SDK session is torn down.
+Record abort acknowledgement, native aborted idle, SDK stop and observed
+process ancestry separately. An uncertain join keeps the ownership claims and
+permits no rerun. Normal idle with an absent `aborted` field can close an owned
+terminal assistant response. Child and skill coverage can remain incomplete.
+
 ## Durable record, API and lifecycle
 
 `ui-review-tasks.js` owns staging/state/results; capture owns native execution. Reuse

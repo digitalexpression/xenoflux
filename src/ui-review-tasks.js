@@ -20,8 +20,7 @@ import { createClientRuntime } from './client-runtime.js';
 import { getAuditProcessIdentity, observeAuditProcess } from './audit-process.js';
 import { validateExecution } from './audit-spec.js';
 import { assertNativeReference } from './client-contracts.js';
-import { CLAUDE_REQUEST, validateClaudeDecision } from './claude-decoder.js';
-import { validateNativeResponse } from './native-requests.js';
+import { validateClientNativeResponse } from './native-requests.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_PROMPT_BYTES = 64 * 1024;
@@ -88,7 +87,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
   const recheckProfile = context.recheckProfile ?? recheckProfileExecutionProfile;
   const reserve = context.reserve ?? (({ root: profileRoot, owner, profile, options }) =>
     withProfileOperation(store, owner.profileId, { waitMs: 5000, recovery: true, ...context.lockOptions }, async () => {
-      if (profile.nativeRoot && (profile.client ?? 'codex') === 'codex') await reconcileDesktopInstance(store, profile.profileId, { ...context.lockOptions, guarded: true });
+      if (profile.nativeRoot && profile.client !== 'copilot') await reconcileDesktopInstance(store, profile.profileId, { ...context.lockOptions, guarded: true });
       const current = await recheckProfile(store, profile, options);
       await acquireReviewReservation(profileRoot, owner, current.desktopOwner);
     }));
@@ -228,8 +227,9 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         if (task.sourceEvidenceFingerprint === evidenceFingerprint) {
           const response = await responseView(join(root, task.id), task.response);
           tasks.push({ id: task.id, status: task.status, createdAt: task.createdAt, profile: task.profile?.name ?? 'Unknown profile',
-            execution: task.execution, observedModel: typeof task.nativeSettings?.model === 'string' ? task.nativeSettings.model : null,
-            observedEffort: typeof task.nativeSettings?.reasoningEffort === 'string' ? task.nativeSettings.reasoningEffort : null,
+            execution: task.execution, observedModel: task.profile?.client === 'copilot' ? task.settingsEvidence?.observed?.model ?? null
+              : typeof task.nativeSettings?.model === 'string' ? task.nativeSettings.model : null,
+            observedEffort: task.profile?.client === 'copilot' ? task.settingsEvidence?.observed?.reasoningEffort ?? null : typeof task.nativeSettings?.reasoningEffort === 'string' ? task.nativeSettings.reasoningEffort : null,
             summary: response?.reason ?? response?.text?.trim().slice(0, 200) ?? task.error ?? 'Review has not returned a response.' });
         }
       } catch { /* A corrupt attempt remains in place and is never reused. */ }
@@ -264,6 +264,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     try { profile = await resolveProfile(store, client ? { name: profileName, client } : profileName, { ...(repositorySelection ? { repository: repositorySelection } : {}),
       terminalEnvironment: context.terminalEnvironment ?? process.env, defaultUserHome, profileResolvers: context.profileResolvers }); }
     catch (error) { throw new UiError(422, `This profile and workspace cannot start a review: ${errorMessage(error)}`, 'review-profile-unavailable'); }
+    if (execution.route && profile.client !== 'copilot') throw new UiError(400, 'Auto routes require Copilot CLI.', 'invalid-review-execution');
     canonicalStoreDirectory ??= await realpath(store.directory);
     root = join(canonicalStoreDirectory, 'review-tasks');
     const token = randomUUID(), now = Date.now();
@@ -462,7 +463,10 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         onSpawn: processOptions.onSpawn }).finally(() => { capturing = false; });
       info.shutdown = { status: captureResult.process.shutdown?.groupTerminated === true ? 'confirmed' : 'uncertain',
         groupTerminated: captureResult.process.shutdown?.groupTerminated ?? false,
-        processStatus: captureResult.process.status, exitCode: captureResult.process.exitCode };
+        processStatus: captureResult.process.status, exitCode: captureResult.process.exitCode,
+        ...(freshProfile.client === 'copilot' ? { nativeAbortedIdle: captureResult.process.shutdown?.nativeAbortedIdle ?? false,
+          abortAcknowledged: captureResult.process.shutdown?.abortAcknowledged ?? false,
+          sdkStopJoined: captureResult.process.shutdown?.sdkStopJoined ?? false } : {}) };
       info.nativeSettings = captureResult.capture?.effectiveSettings ?? info.nativeSettings;
       info.environmentBinding = freshProfile.environmentBinding ?? info.environmentBinding;
       info.clientIdentity = captureResult.run?.clientIdentity ?? info.clientIdentity;
@@ -514,7 +518,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       work.result = info;
       return { id };
     } catch (error) {
-      if (!info.shutdown) info.shutdown = captureCalled
+      if (!info.shutdown) info.shutdown = captureCalled && !(freshProfile.client === 'copilot' && error.process?.shutdown?.groupTerminated === true)
         ? { status: 'uncertain', groupTerminated: false } : { status: 'not-spawned', groupTerminated: true };
       if (reservationAttempted && info.shutdown?.groupTerminated === true) {
         try { await release({ root: freshProfile.reservationRoot, owner }); reserved = false; info.reservation = { root: freshProfile.reservationRoot, owner, status: 'released' }; }
@@ -575,7 +579,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       throw new UiError(409, 'The native request identity or action changed.', 'stale-review-request');
     }
     const answer = structuredClone(response);
-    try { (request.request.method === CLAUDE_REQUEST ? validateClaudeDecision : validateNativeResponse)(request.request, answer); }
+    try { validateClientNativeResponse(task.profile?.client ?? 'codex', request.request, answer); }
     catch (error) { throw new UiError(400, errorMessage(error), 'invalid-review-request'); }
     const requests = pending.get(id);
     const previousPending = task?.pendingRequests;
@@ -701,6 +705,11 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     return { id: task.id, status: task.status, phase: task.phase, createdAt: task.createdAt, updatedAt: task.updatedAt,
       profile: task.profile?.name ?? 'Unknown profile', client: task.profile ? task.profile.client ?? 'codex' : null, nativeReference, cwd: task.cwd, threadId: task.threadId ?? null, turnId: task.turnId ?? null, reportRef: `r.${task.id}`, title: task.sourceTitle ?? 'Task comparison',
       response: await responseView(directory, task.response),
+      ...(task.profile?.client === 'copilot' && task.settingsEvidence ? { settingsEvidence: Object.fromEntries(
+        ['requested', 'sent', 'confirmed', 'observed'].map(stage => [stage, task.settingsEvidence[stage] == null ? null
+          : Object.fromEntries(['source', 'model', 'reasoningEffort', 'route', 'permissionMode'].map(key => [
+            key, typeof task.settingsEvidence[stage][key] === 'string' ? task.settingsEvidence[stage][key] : null,
+          ]))])) } : {}),
       pendingRequests: (task.pendingRequests ?? []).map(item => ({ requestId: item.requestId, method: item.method, params: item.params, item: item.item ?? null })),
       sourceRef: task.sourceRef ?? null, sourceEvidenceFingerprint: task.sourceEvidenceFingerprint ?? null,
       inputFingerprint: task.inputFingerprint ?? null, promptSha256: task.promptSha256 ?? null,

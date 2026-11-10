@@ -4,7 +4,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareAuditProfiles, compareAuditSessions } from './audit.js';
@@ -21,7 +21,7 @@ import { createHome, planHomeCreation } from './home-create.js';
 import { nativeClient } from './profile-command.js';
 import { bind, renameProfile as renameInData } from './profiles.js';
 import { editProfileRegistry, removeProfile as removeFromStore } from './profile-removal.js';
-import { privateDirectory } from './metadata.js';
+import { acquire, privateDirectory, record, release } from './metadata.js';
 import { findHistory, listHistory, recordedHistoryClient } from './history.js';
 import { listHomes, registerHome } from './homes.js';
 import { createCodexDesktopSurface } from './desktop-surface.js';
@@ -32,6 +32,9 @@ import { createUiRuns } from './ui-runs.js';
 import { createUiReviewTasks } from './ui-review-tasks.js';
 import { createUiCatalog } from './ui-catalog.js';
 import { createStockDesktopApps } from './stock-desktop-apps.js';
+import { withProfileOperation } from './desktop-instances.js';
+import { assertEnvironmentBinding } from './client-contracts.js';
+import { createCopilotRuntime } from './copilot-runtime.js';
 import { resolveProfileExecutionProfile } from './audit-profile.js';
 import { importClaudeSession, listClaudeSessions } from './claude-sessions.js';
 import { importClaudeTranscript } from './claude-transcript.js';
@@ -113,7 +116,45 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   if (!Number.isSafeInteger(maxActiveJobs) || maxActiveJobs < 1) throw new Error('Invalid active job capacity');
   const admitted = new Set();
   const activeImports = new Set();
-  const claudeSelections = new Map();
+  const claudeSelections = new Map(), copilotSelections = new Map();
+  const copilotRuntime = createCopilotRuntime();
+  const resolveCopilotSource = name => resolveProfileExecutionProfile(store, { name, client: 'copilot' }, {
+    defaultUserHome, sessionOnly: true, terminalEnvironment: runContext.terminalEnvironment ?? process.env,
+    profileResolvers: runContext.profileResolvers,
+  });
+  async function withCopilotMetadata(name, profile, directory, read) {
+    const guard = action => withProfileOperation(store, profile.profileId, { waitMs: 5000, recovery: true, ...lockOptions }, action);
+    const lock = join(profile.reservationRoot, '.run-lock'), id = randomUUID();
+    const owner = { kind: 'copilot-session-read', runId: id, profileId: profile.profileId,
+      home: profile.home, host: hostname(), pid: process.pid, storePath: await realpath(store.directory) };
+    const receipt = join(directory, 'session-read.json');
+    const state = { schemaVersion: 1, kind: owner.kind, owner, binding: profile.environmentBinding, shutdown: null };
+    let held = false;
+    try {
+      await record(receipt, state);
+      await guard(async () => {
+        if (closing) throw new Error('Xenoflux is stopping');
+        const fresh = await resolveCopilotSource(name);
+        assertEnvironmentBinding(fresh.environmentBinding, profile.environmentBinding);
+        if (JSON.stringify(fresh.accountQualification) !== JSON.stringify(profile.accountQualification))
+          throw new Error('Copilot account qualification changed');
+        await acquire(lock, owner, true);
+        held = true;
+      });
+      return await read({
+        onSpawn: async process => { state.process = process; await record(receipt, state); },
+        onShutdown: async process => { state.shutdown = process.shutdown; await record(receipt, state); },
+      });
+    } catch (error) {
+      if (held && state.shutdown?.groupTerminated !== true) error.nativeShutdownUncertain = true;
+      throw error;
+    } finally {
+      if (held && state.shutdown?.groupTerminated === true) {
+        try { await guard(() => release(lock, owner)); }
+        catch (error) { error.preserveNativeEvidence = true; throw error; }
+      }
+    }
+  }
   const resolveClaudeSource = name => resolveProfileExecutionProfile(store, { name, client: 'claude-code' },
     { defaultUserHome, sessionOnly: true, terminalEnvironment: runContext.terminalEnvironment ?? process.env });
   let closing = false;
@@ -919,11 +960,46 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       } finally { await rm(temporary, { force: true }); }
       return register(value, { title: name.replace(/\.md\.audit\.json$|\.audit\.json$|\.json$/i, '') || 'Saved report', savedAt: null, path: null });
     },
+    async copilotSessions({ profile: name, limit } = {}) {
+      if (closing) throw new UiError(409, 'The app is stopping.', 'stopping');
+      if (!plain(name) || limit !== undefined && (!/^\d{1,3}$/.test(String(limit)) || Number(limit) < 1 || Number(limit) > 100))
+        throw new UiError(400, 'Choose a Copilot CLI profile and a session limit from 1 to 100.', 'invalid-copilot-profile');
+      const operation = (async () => {
+        const id = randomUUID();
+        await admission.acquire(id);
+        try {
+          const profile = await resolveCopilotSource(name);
+          const parent = join(store.directory, 'session-probes'), directory = join(parent, id);
+          await privateDirectory(store.directory, true);
+          await privateDirectory(parent, true);
+          await mkdir(directory, { mode: 0o700 });
+          const result = await withCopilotMetadata(name, profile, directory, lifecycle =>
+            copilotRuntime.listSessions({ ...lifecycle, profile, workspace: profile.cwd, limit: limit === undefined ? undefined : Number(limit),
+              stdoutPath: join(directory, 'native.stdout'), stderrPath: join(directory, 'native.stderr') }));
+          const sessions = result.map(({ selection, ...row }) => {
+            const token = randomUUID();
+            copilotSelections.set(token, { name, selection, expiresAt: Date.now() + 20 * 60_000 });
+            return { ...row, token };
+          });
+          while (copilotSelections.size > 1000) copilotSelections.delete(copilotSelections.keys().next().value);
+          await rm(directory, { recursive: true, force: true });
+          return { client: 'copilot', profileId: profile.profileId, rootMode: profile.rootMode, sessions };
+        } catch {
+          throw new UiError(422, 'The selected Copilot session list is unavailable.', 'copilot-session-list-unavailable');
+        } finally { admission.release(id); }
+      })();
+      activeImports.add(operation);
+      try { return await operation; }
+      finally { activeImports.delete(operation); }
+    },
     async importCopilotComparison({ left, right } = {}) {
       if (closing) throw new UiError(409, 'The app is stopping. Start it again before importing.', 'stopping');
       if ([left, right].some(selected => !selected || typeof selected !== 'object' || Array.isArray(selected)
-        || Object.keys(selected).some(key => key !== 'sessionId') || typeof selected.sessionId !== 'string' || !UUID.test(selected.sessionId)))
-        throw new UiError(422, 'Enter both existing Copilot session UUIDs.', 'invalid-copilot-import');
+        || Object.keys(selected).length !== 1 || !(['sessionId', 'token'].some(key =>
+          Object.hasOwn(selected, key) && typeof selected[key] === 'string' && UUID.test(selected[key])))))
+        throw new UiError(422, 'Choose two Copilot sessions or enter their existing session UUIDs.', 'invalid-copilot-import');
+      if (Object.hasOwn(left, 'token') !== Object.hasOwn(right, 'token'))
+        throw new UiError(422, 'Choose both Copilot sessions using the same selection method.', 'invalid-copilot-import');
       const operation = (async () => {
         const id = randomUUID(), directories = [];
         await admission.acquire(id);
@@ -934,8 +1010,18 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           const imported = [];
           for (const selected of [left, right]) {
             const directory = join(parent, randomUUID());
-            imported.push(await importCopilotTranscript(selected, { ...copilotImportContext, directory,
-              onArtifactCreated: artifact => directories.push(artifact) }));
+            let artifact;
+            const options = { ...copilotImportContext, directory, onArtifactCreated: created => { artifact = created; } };
+            if (Object.hasOwn(selected, 'token')) {
+              const bound = copilotSelections.get(selected.token);
+              if (!bound || bound.expiresAt < Date.now()) throw new Error('Copilot session selection expired');
+              const profile = await resolveCopilotSource(bound.name);
+              const readJournal = input => withCopilotMetadata(bound.name, profile, directory,
+                lifecycle => copilotRuntime.readJournal({ ...input, ...lifecycle }));
+              imported.push(await importCopilotTranscript({ sessionId: bound.selection.sessionId, selection: bound.selection },
+                { ...options, profile, readJournal }));
+            } else imported.push(await importCopilotTranscript(selected, options));
+            if (artifact) directories.push(artifact);
           }
           const value = compareAuditRuns(imported[0], imported[1]);
           return { ...register(value, { title: 'Imported Copilot conversations', savedAt: null, path: null }), origin: 'copilot-import' };

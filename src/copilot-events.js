@@ -1,6 +1,8 @@
 import { isDeepStrictEqual } from 'node:util';
 import { copilotId } from './copilot-profile.js';
 
+export const COPILOT_REQUEST = 'copilot/permission';
+
 const pathText = value => typeof value === 'string' && value.startsWith('/') && value.length <= 16384 && !/[\p{Cc}\p{Cf}]/u.test(value);
 const strings = value => Array.isArray(value) && value.length <= 128 && value.every(copilotId);
 const record = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -34,7 +36,7 @@ export function copilotPermission(event, sessionId, turnId, cwd) {
       || fields.some(key => !isDeepStrictEqual(action[key], prompt[key])))
       throw new Error('Unsupported or mismatched Copilot permission category.');
   }
-  return { id: requestId, method: 'copilot/permission', params: {
+  return { id: requestId, method: COPILOT_REQUEST, params: {
     threadId: sessionId, turnId, itemId: action.toolCallId, cwd, category: prompt.kind,
     action: structuredClone(action), prompt: structuredClone(prompt), availableDecisions: ['approve-once', 'reject'],
   } };

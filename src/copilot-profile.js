@@ -27,7 +27,7 @@ export function copilotBinding(profile, workspace) {
     || binding.executable.path !== profile.executable || binding.executable.identity !== profile.executableIdentity
     || binding.settingsIdentity?.digest !== profile.settingsIdentity?.digest)
     throw new Error('Copilot execution does not match the selected profile binding.');
-  if (binding.rootMode === 'implicit' && (binding.roots.config !== join(binding.roots.user, '.copilot') || binding.profileId !== 'default'))
+  if (binding.rootMode === 'implicit' && (binding.roots.config !== join(binding.roots.user, '.copilot') || binding.profileId !== 'default-copilot'))
     throw new Error('Invalid implicit Copilot root.');
   return binding;
 }
@@ -40,7 +40,7 @@ export async function assertCopilotRoots(binding) {
     throw new Error('Managed Copilot configuration must belong to the selected reservation root.');
   for (const path of new Set([config, reservation])) {
     const stat = await lstat(path);
-    if (!stat.isDirectory() || stat.uid !== process.getuid() || stat.mode & 0o022 || await realpath(path) !== path)
+    if (!stat.isDirectory() || stat.uid !== process.getuid() || stat.mode & (binding.rootMode === 'explicit' ? 0o077 : 0o022) || await realpath(path) !== path)
       throw new Error('Unsafe Copilot profile root.');
   }
   if (!binding.workspace || await realpath(binding.workspace) !== binding.workspace
@@ -83,7 +83,7 @@ const configSources = ['config.json', 'settings.json', 'mcp-config.json', 'instr
 const projectSources = ['AGENTS.md', 'copilot-instructions.md', '.github/copilot-instructions.md', '.github/instructions',
   '.github/skills', '.github/agents', '.github/hooks', '.github/mcp.json', '.github/allowed_models.txt',
   '.github/copilot/settings.json', '.github/copilot/settings.local.json'];
-async function settingsIdentity(binding) {
+export async function copilotSettingMetadata(binding) {
   const rows = [];
   async function inspect(path, depth) {
     if (rows.length >= 4096 || depth > 16) throw new Error('Copilot settings metadata exceeds its inspection bound.');
@@ -104,16 +104,31 @@ async function settingsIdentity(binding) {
     if (++count > 32) throw new Error('Copilot workspace ancestry exceeds its inspection bound.');
     for (const name of projectSources) await inspect(join(cwd, name), 0);
   }
+  return new Map(rows.map(([path, value]) => [path, JSON.stringify(value)]));
+}
+
+async function settingsIdentity(binding) {
+  const rows = [...await copilotSettingMetadata(binding)].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   return { algorithm: 'sha256-file-stat-metadata-v1', digest: createHash('sha256').update(JSON.stringify(rows)).digest('hex') };
 }
 
 /** Resolve the selected persisted profile after the coordinator validates its repository binding. */
-export async function resolveCopilotProfile({ stored, workspace, terminalEnvironment = process.env,
-  bindingRepository = null, accountQualification } = {}) {
+export async function resolveCopilotProfile({ selected, stored = selected, repository, workspace,
+  terminalEnvironment = process.env, defaultUserHome = userInfo().homedir, sessionOnly = false,
+  bindingRepository, accountQualification } = {}) {
   assertCopilotEnvironment(process.env);
   assertCopilotEnvironment(terminalEnvironment);
   const userHome = userInfo().homedir;
+  if (defaultUserHome !== userHome) throw new Error('Copilot requires the native user home.');
   const managed = stored != null;
+  if (!workspace) {
+    const chosen = sessionOnly ? userHome : repository ?? stored?.repositories?.[0]?.path;
+    if (!chosen) throw new Error('Select a workspace for Copilot CLI.');
+    workspace = await realpath(chosen);
+    if (!sessionOnly && managed && !stored.repositories?.some(row => row.path === workspace))
+      throw Object.assign(new Error('The selected repository is not already bound to this profile'), { code: 'profile-repository-unbound' });
+    bindingRepository = sessionOnly ? null : workspace;
+  }
   if (managed && (stored.client !== 'copilot' || !copilotId(stored.id)
     || stored.native?.rootMode !== 'explicit' || !stored.native?.configRoot || !stored.native?.root))
     throw new Error('Select a persisted Copilot profile with an explicit canonical root.');
@@ -126,21 +141,25 @@ export async function resolveCopilotProfile({ stored, workspace, terminalEnviron
   if (!stat.isFile() || stat.mode & 0o022) throw new Error('Unsafe installed Copilot CLI executable.');
   await access(executable, constants.X_OK);
   const executableIdentity = copilotExecutableIdentity(stat);
-  const profileId = managed ? stored.id : 'default';
+  if (managed && stored.native.executableIdentity !== undefined && stored.native.executableIdentity !== executableIdentity)
+    throw new Error('The bound Copilot executable has changed.');
+  const profileId = managed ? stored.id : 'default-copilot';
   const rootMode = managed ? 'explicit' : 'implicit';
   const environmentBinding = createEnvironmentBinding({
     client: 'copilot', surface: 'cli', executionLocation: 'local', profileId, rootMode,
     roots: { config: home, reservation: reservationRoot, runtime: managed ? home : null, user: userHome },
-    workspace, executable: { path: executable, identity: executableIdentity, version: null }, settingsIdentity: null,
+    workspace, executable: { path: executable, identity: executableIdentity, version: stored?.native.version ?? null }, settingsIdentity: null,
   });
   await assertCopilotRoots(environmentBinding);
   environmentBinding.settingsIdentity = await settingsIdentity(environmentBinding);
   const env = { PATH: terminalEnvironment.PATH ?? '/usr/bin:/bin', HOME: userHome,
     USER: terminalEnvironment.USER, LOGNAME: terminalEnvironment.LOGNAME };
   return { client: 'copilot', surface: 'cli', executionLocation: 'local', executionMode: 'profile',
-    profileId, profileName: managed ? stored.name : 'Default', environmentId: managed ? stored.environmentId ?? profileId : 'copilot-default',
-    home, userHome, nativeRoot: managed ? reservationRoot : null, reservationRoot, rootMode, bindingRepository,
-    cwd: workspace, executable, executableIdentity, version: null, env, settingsIdentity: environmentBinding.settingsIdentity,
+    profileId, profileName: managed ? stored.name : 'Default', environmentId: stored?.native.environmentId ?? null,
+    home, userHome, nativeRoot: managed ? reservationRoot : null, reservationRoot, rootMode, bindingRepository: bindingRepository ?? null,
+    cwd: workspace, executable, executableIdentity, version: environmentBinding.executable.version,
+    versionSource: managed && environmentBinding.executable.version ? 'registered' : 'unavailable',
+    executableSource: managed ? 'registered' : 'path', env, settingsIdentity: environmentBinding.settingsIdentity,
     environmentBinding, accountQualification };
 }
 

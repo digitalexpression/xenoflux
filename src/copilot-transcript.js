@@ -129,9 +129,10 @@ export async function importCopilotTranscript({ sessionId, selection } = {}, { d
         ...(/^[a-f0-9]{64}$/.test(result.readerExecutableIdentitySha256 ?? '') ? { readerExecutableIdentitySha256: result.readerExecutableIdentitySha256 } : {}),
         observedModels: projected.observedModels, sourceLineBasis: 'sanitized-sdk-message-snapshot-ordinal',
         projectionBasis: 'Public data.content text from SDK durable-event pages; not a native execution capture' }, sessionReplay };
-  } catch {
+  } catch (error) {
     const current = await lstat(directory).catch(() => null);
-    if (current?.dev === owned.dev && current.ino === owned.ino) await rm(directory, { recursive: true, force: true });
+    if (error.process?.shutdown?.groupTerminated !== false && !error.nativeShutdownUncertain && !error.preserveNativeEvidence
+      && current?.dev === owned.dev && current.ino === owned.ino) await rm(directory, { recursive: true, force: true });
     throw failure();
   }
 }

@@ -4,6 +4,7 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { createClientCatalog, discoverCodexModels, validateCatalogSelection } from './client-catalog.js';
+import { discoverCopilotModels } from './copilot-runtime.js';
 import { discoverClaudeModels } from './claude-runtime.js';
 import { resolveProfileExecutionProfile } from './audit-profile.js';
 import { withProfileOperation } from './desktop-instances.js';
@@ -12,7 +13,7 @@ import { getAuditProcessIdentity, observeAuditProcess } from './audit-process.js
 import { UiError } from './ui-server.js';
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
-const unavailable = (reason, client = 'codex') => ({ status: 'unavailable', source: client === 'claude-code' ? 'claude-agent-sdk/initialize' : 'codex-model/list', reason, models: [],
+const unavailable = (reason, client = 'codex') => ({ status: 'unavailable', source: ({ 'claude-code': 'claude-agent-sdk/initialize', copilot: 'copilot-models.list' }[client] ?? 'codex-model/list'), reason, models: [],
   capabilities: { models: 'unknown', effort: 'unknown' } });
 
 export function createUiCatalog({ store, defaultUserHome, context = {} }) {
@@ -26,7 +27,7 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
       { defaultUserHome, ...(repository === undefined ? {} : { repository }), terminalEnvironment: context.terminalEnvironment ?? process.env, profileResolvers: context.profileResolvers });
     return { ...input, profile, workspace: profile.cwd };
   };
-  const discoveries = { codex: context.discover ?? discoverCodexModels, 'claude-code': discoverClaudeModels, ...context.discoveries };
+  const discoveries = { codex: context.discover ?? discoverCodexModels, 'claude-code': discoverClaudeModels, copilot: discoverCopilotModels, ...context.discoveries };
   const cache = createClientCatalog({ resolveContext, discover: async options => {
     const { onDiscoveryResult, onBeforeDiscover, ...nativeOptions } = options;
     onBeforeDiscover();
@@ -96,7 +97,8 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
       // Startup hooks can write native state. Exclude mutation and existing execution.
       await guard(profile, async () => {
         const fresh = await resolveContext(chosen);
-        if (JSON.stringify(fresh.profile.environmentBinding) !== JSON.stringify(profile.environmentBinding))
+        if (JSON.stringify(fresh.profile.environmentBinding) !== JSON.stringify(profile.environmentBinding)
+          || JSON.stringify(fresh.profile.accountQualification) !== JSON.stringify(profile.accountQualification))
           throw new UiError(409, 'The profile changed. Refresh the model list again.', 'catalog-context-changed');
         assertOpen(work);
         await acquire(join(profile.reservationRoot, '.run-lock'), owner, true); held = true;

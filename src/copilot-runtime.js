@@ -68,25 +68,41 @@ export function assertCopilotSessionSelection(selection, profile) {
 export function createCopilotRuntime({ launch = startWorker } = {}) {
   async function read(operation, options) {
     const { signal, timeoutMs = 25000 } = options;
-    signal?.throwIfAborted();
-    const data = workerInput(operation, options);
-    const worker = launch(data, () => {});
+    const startedAt = Date.now();
+    let data;
+    try {
+      signal?.throwIfAborted();
+      data = workerInput(operation, options);
+    } catch (cause) {
+      const process = { status: signal?.aborted ? 'cancelled' : 'spawn-failed', exitCode: null, shutdown: { groupTerminated: true } };
+      await options.onShutdown?.(process);
+      throw Object.assign(new Error(cause?.message ?? 'Copilot did not start.'), { process });
+    }
+    const worker = launch(data, (message, reply) => {
+      if (message.type !== 'process') return;
+      Promise.resolve().then(() => options.onSpawn?.(message.value)).then(
+        () => reply({ id: message.id, value: true }), () => reply({ id: message.id, error: true }));
+    });
     const cancel = () => worker.send({ cancel: true });
     signal?.addEventListener('abort', cancel, { once: true });
-    const timer = setTimeout(cancel, timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; cancel(); }, timeoutMs);
     try {
       const outcome = await worker.result;
-      signal?.throwIfAborted();
-      if (!outcome.shutdown.groupTerminated || outcome.failure || !outcome.result)
-        throw new Error(outcome.failure ?? 'Copilot discovery shutdown is uncertain.');
-      return { result: outcome.result, binding: data.binding };
+      const process = { status: signal?.aborted ? 'cancelled' : timedOut ? 'timeout' : outcome.failure ? 'failed' : 'exited',
+        exitCode: outcome.failure ? null : 0, elapsedMs: Date.now() - startedAt, pid: outcome.processIdentity?.pid ?? null,
+        processIdentity: outcome.processIdentity, shutdown: outcome.shutdown, output: outcome.output };
+      await options.onShutdown?.(process);
+      if (timedOut || signal?.aborted || !outcome.shutdown.groupTerminated || outcome.failure || !outcome.result)
+        throw Object.assign(new Error(outcome.failure ?? 'Copilot discovery shutdown is uncertain.'), { process });
+      return { result: outcome.result, binding: data.binding, process };
     } finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
   }
 
   async function discover(options) {
-    const { result, binding } = await read('catalog', options);
+    const { result, binding, process } = await read('catalog', options);
     const discoveredAt = new Date().toISOString();
-    return { ...result, status: 'ready', source: 'copilot-models.list', sdk,
+    return { ...result, status: 'ready', source: 'copilot-models.list', sdk, process,
       scope: { environmentBinding: binding, workspace: binding.workspace, account: result.account,
         accountScope: options.accountScope ?? null, connectionGeneration: options.connectionGeneration ?? null },
       capabilities: { models: 'supported', effort: result.models.some(model => model.effortCapability === 'supported') ? 'supported' : 'unknown' },
@@ -100,9 +116,9 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
     return sessionRows(result.sessions, binding, result.account, limit);
   }
 
-  async function readJournal({ selection, profile, directory, signal }) {
+  async function readJournal({ selection, profile, directory, signal, onSpawn, onShutdown }) {
     assertCopilotSessionSelection(selection, profile);
-    const { result } = await read('journal', { profile, workspace: profile.cwd, signal,
+    const { result } = await read('journal', { profile, workspace: profile.cwd, signal, onSpawn, onShutdown,
       stdoutPath: join(directory, 'reader.stdout'), stderrPath: join(directory, 'reader.stderr'),
       input: { directory, sessionId: selection.sessionId, authType: selection.authType, accountScope: selection.accountScope,
         accountScopeKey, accountToken: selection.accountToken } });
@@ -118,7 +134,16 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
     const { signal, timeoutMs = options.executionMode === 'profile' ? null : 300000 } = processOptions;
     if (timeoutMs !== null && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs >= 2147483647))
       throw new Error('Invalid Copilot capture deadline.');
-    const data = workerInput('capture', { ...processOptions, profile, workspace, input: { execution, task, timeoutMs } });
+    let data;
+    try {
+      signal?.throwIfAborted();
+      data = workerInput('capture', { ...processOptions, profile, workspace, input: { execution, task, timeoutMs } });
+    } catch (error) {
+      throw Object.assign(new Error(error?.message ?? 'Copilot did not start.'), {
+        ...(signal?.aborted ? { code: 'cancelled' } : {}),
+        process: { status: 'spawn-failed', shutdown: { groupTerminated: true } },
+      });
+    }
     const startedAt = Date.now();
     const id = options.limits?.id ?? randomUUID();
     const scope = { client: 'copilot', profileId: data.binding.profileId, jobId: id };
@@ -144,7 +169,6 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
       for (const controller of requests.values()) controller.abort();
     };
     const signalAbort = () => cancel();
-    signal?.throwIfAborted();
     signal?.addEventListener('abort', signalAbort, { once: true });
     function refuse(error) {
       failure ??= error?.message ?? 'Copilot capture stopped.';
@@ -228,6 +252,7 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
       exitCode: result.failure || failure ? null : 0, signal: null, elapsedMs, pid: result.processIdentity?.pid ?? null,
       processIdentity: result.processIdentity, shutdown: { ...result.shutdown, nativeAbortedIdle: nativeAborted }, output: result.output };
     run.status = completed ? 'ready' : 'partial';
+    run.outcome = { status: completed ? 'native-claim' : 'unknown', nativeTurnStatus: completed ? 'completed' : null };
     run.reason = reason;
     run.metrics.wallMs = elapsedMs;
     run.metrics.processElapsedMs = elapsedMs;
@@ -283,4 +308,14 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
   return { capture, discover, listSessions, readJournal };
 }
 
-export const discoverCopilotModels = options => createCopilotRuntime().discover(options);
+export async function discoverCopilotModels(options) {
+  try { return await createCopilotRuntime().discover(options); }
+  catch (error) {
+    if (!error.process) throw error;
+    const { profile, workspace } = options;
+    return { status: error.process.status === 'cancelled' ? 'cancelled' : 'unavailable',
+      reason: 'catalog-discovery-failed', source: 'copilot-models.list', sdk, process: error.process, models: [],
+      scope: { environmentBinding: profile.environmentBinding, workspace, account: null },
+      capabilities: { models: 'unknown', effort: 'unknown' } };
+  }
+}

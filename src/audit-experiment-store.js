@@ -2,14 +2,14 @@
 // remain in their owning Codex homes; this store contains only scoped evidence.
 import { constants, linkSync, unlinkSync } from 'node:fs';
 import { mkdir, open, lstat, realpath, rename, unlink } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { acquire, privateDirectory, readJSON, release } from './metadata.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { acquireProfileParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
 import { projectReportResourceProvenance } from './audit-store.js';
-import { assertNativeReference, createNativeReference } from './client-contracts.js';
+import { assertNativeReference, createEnvironmentBinding, createNativeReference } from './client-contracts.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const nativeId = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 1024
@@ -479,13 +479,41 @@ async function validateReservationRoot(root, owner) {
   }
 }
 
-/** Return null when free, otherwise the exact durable lock owner. Never reclaim. */
+async function validateReservationBinding(root, owner, { releasing = false } = {}) {
+  await validateReservationRoot(root, owner);
+  if (!owner.binding) {
+    if (![root, join(root, 'codex-home')].includes(owner.home) || await realpath(owner.home) !== owner.home)
+      throw new Error('Audit reservation home does not match its native-root identity');
+    return;
+  }
+  const binding = createEnvironmentBinding(owner.binding);
+  const rel = relative(root, owner.home);
+  const explicit = binding.rootMode === 'explicit' && rel && rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel);
+  const implicit = binding.rootMode === 'implicit' && owner.home === root && binding.roots.runtime === null
+    && owner.profileId === `default-${binding.client}` && root === join(binding.roots.user, binding.client === 'copilot' ? '.copilot' : '.claude');
+  if (owner.membershipVersion !== 1 || !UUID.test(owner.generation ?? '') || !['claude-code', 'copilot'].includes(binding.client)
+    || binding.surface !== 'cli' || binding.executionLocation !== 'local'
+    || binding.profileId !== owner.profileId || binding.roots.reservation !== root || binding.roots.config !== owner.home
+    || !binding.workspace || await realpath(binding.workspace) !== binding.workspace || !(await lstat(binding.workspace)).isDirectory()
+    || await realpath(owner.home) !== owner.home || !(await lstat(owner.home)).isDirectory()
+    || !(implicit || explicit && binding.roots.runtime === owner.home))
+    throw new Error('Audit reservation does not match its native profile binding');
+  const current = await readAuditRecord({ directory: owner.storePath }, owner.runId);
+  const saved = current.record.profile;
+  if (current.record.experimentId !== owner.experimentId || saved?.client !== binding.client || saved.profileId !== owner.profileId
+    || saved.home !== owner.home || saved.rootMode !== binding.rootMode || saved.bindingRepository !== binding.workspace
+    || saved.nativeRoot !== (implicit ? null : root)
+    || saved.userHome !== binding.roots.user || saved.executable !== binding.executable.path || saved.executableIdentity !== binding.executable.identity
+    || current.state.reservation?.root !== root || !equal(current.state.reservation?.owner, owner))
+    throw new Error('Audit reservation does not match the durable run owner');
+  if (releasing && (current.state.process || current.state.status === 'recovery-required' || current.state.nativeShutdownPending === true))
+    throw new Error('Native process shutdown is uncertain; preserving the reservation');
+}
+
+/** Read the exact durable owner after checking native shutdown fences. Never reclaim. */
 export async function inspectAuditReservation({ root, owner } = {}) {
   validateReservationOwner(owner);
-  const allowedHome = owner.home === root || owner.home === join(root, 'codex-home');
-  await validateReservationRoot(root, owner);
-  if (!allowedHome || await realpath(owner.home) !== owner.home)
-    throw new Error('Audit reservation home does not match its native-root identity');
+  await validateReservationBinding(root, owner, { releasing: true });
   if (owner.membershipVersion === 1) {
     let owners;
     try { owners = await readProfileOwners(root); }
@@ -504,18 +532,17 @@ export async function inspectAuditReservation({ root, owner } = {}) {
 /** Reserve an audit-only lease for a native home without touching Xenoflux's .run-lock. */
 export async function reserveAuditProfile({ root, owner, desktopOwner } = {}) {
   validateReservationOwner(owner);
-  const allowedHome = owner.home === root || owner.home === join(root, 'codex-home');
-  if (!allowedHome || await realpath(owner.home) !== owner.home)
-    throw new Error('Audit reservation home does not match its native-root identity');
-  await validateReservationRoot(root, owner);
   if (owner.membershipVersion === 1) {
     await withProfileOperation({ directory: owner.storePath }, owner.profileId, { waitMs: 5000, recovery: true }, async () => {
-      const legacy = await inspectAuditReservation({ root, owner: { ...owner, membershipVersion: undefined } });
-      if (legacy) throw new Error('An earlier audit lease still needs recovery');
+      await validateReservationBinding(root, owner);
+      const legacy = await auditLeasePath(owner);
+      if (legacy && await lstat(legacy).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; }))
+        throw new Error('An earlier audit lease still needs recovery');
       await acquireProfileParticipant(root, owner, desktopOwner);
     });
     return { root, lock: join(root, '.run-lock'), owner };
   }
+  await validateReservationBinding(root, owner);
   const lock = await auditLeasePath(owner, { create: true });
   await acquire(lock, owner, false);
   const observed = await inspectAuditReservation({ root, owner });
@@ -526,13 +553,11 @@ export async function reserveAuditProfile({ root, owner, desktopOwner } = {}) {
 /** Release only the exact reservation acquired by this audit run. */
 export async function releaseAuditProfileReservation({ root, owner } = {}) {
   validateReservationOwner(owner);
-  const allowedHome = owner.home === root || owner.home === join(root, 'codex-home');
-  if (!allowedHome || await realpath(owner.home) !== owner.home)
-    throw new Error('Audit reservation home does not match its native-root identity');
   if (owner.membershipVersion === 1) {
-    await validateReservationRoot(root, owner);
-    return withProfileOperation({ directory: owner.storePath }, owner.profileId, { waitMs: 5000, recovery: true },
-      () => releaseProfileParticipant(root, owner));
+    return withProfileOperation({ directory: owner.storePath }, owner.profileId, { waitMs: 5000, recovery: true }, async () => {
+      await validateReservationBinding(root, owner, { releasing: true });
+      return releaseProfileParticipant(root, owner);
+    });
   }
   const observed = await inspectAuditReservation({ root, owner });
   if (!observed) return false;

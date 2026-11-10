@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 // The UI's two-profile adapter over the existing durable experiment runner.
 // Preview is read-only; only an explicitly submitted preview token starts work.
 import { randomUUID } from 'node:crypto';
@@ -14,15 +15,14 @@ import { showAuditRecord, recoverAuditExperiment } from './audit-experiment.js';
 import { compareAuditRuns } from './audit-report.js';
 import { resolveAuditProfile } from './audit-discovery.js';
 import { buildAuditComparisonConditions } from './audit-conditions.js';
-import { CLAUDE_REQUEST, validateClaudeDecision } from './claude-decoder.js';
-import { validateNativeResponse } from './native-requests.js';
+import { validateClientNativeResponse } from './native-requests.js';
 import { UiError } from './ui-server.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const errorText = reason => reason instanceof Error ? reason.message : String(reason);
 const minutes = value => value === null ? 'No time cap' : Number.isFinite(value) ? `${Math.ceil(value / 60000)} min` : 'not recorded';
-const IDENTITY_FIELDS = ['profileId', 'home', 'nativeRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository', 'client', 'surface', 'rootMode'];
+const IDENTITY_FIELDS = ['profileId', 'home', 'nativeRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository', 'client', 'surface', 'rootMode', 'accountQualification'];
 const identity = profile => IDENTITY_FIELDS.map(key => profile[key] ?? null);
 const checkedId = id => { if (!UUID.test(id ?? '')) throw new UiError(400, 'Choose a saved task run.', 'invalid-run'); return id; };
 
@@ -55,6 +55,10 @@ function requestSpec(request) {
     ...(Object.hasOwn(advanced, 'approvalsReviewer') ? { approvalsReviewer: advanced.approvalsReviewer } : {}),
     allowIncompleteCapture: true, ...(files.length ? { taskContract: { id: 'ui-task', editableFiles: files } } : {}) });
 }
+
+const defaultLabel = profile => ({ 'claude-code': 'Claude Code Default', copilot: 'Copilot CLI Default' }[profile.client] ?? 'Codex Default');
+const profileLabel = (profile, profiles) => profile.profileName === 'Default'
+  && profiles.some(side => side.client && side.client !== 'codex') ? defaultLabel(profile) : profile.profileName;
 
 export function createUiRuns({ store, defaultUserHome, context = {}, admission }) {
   const root = join(store.directory, 'ui-runs');
@@ -162,15 +166,14 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const ready = preview.status === 'ready', token = ready ? randomUUID() : null;
     if (ready) boundedSet(previews, token, { ...reviewed, spec, at: Date.now() });
     const hasClaude = preview.profiles.some(profile => profile.client === 'claude-code');
-    const label = profile => profile.profileName === 'Default' && hasClaude
-      ? (profile.client === 'claude-code' ? 'Claude Code Default' : 'Codex Default') : profile.profileName;
+    const hasCopilot = preview.profiles.some(profile => profile.client === 'copilot');
     const profileText = profile => `${profile.executable ?? 'Native CLI unavailable'} · ${profile.version ?? 'version not known'} · ${profile.status}${profile.busy ? ' · existing clients stay open' : ''}`;
     return { ready, previewToken: token, blocked: ready ? null : { title: 'This task cannot start yet',
       reason: preview.failures.map(failure => `${failure.profile ? `${failure.profile}: ` : ''}${failure.message}`).join(' ') },
       summary: `2 model runs, one after the other · ${minutes(spec.limits.experimentMs)}`, limit: minutes(spec.limits.experimentMs),
       task: spec.task, files: spec.taskContract?.editableFiles.join(', ') ?? '',
       ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
-      runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: label(profile), text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'}` })),
+      runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: profileLabel(profile, preview.profiles), text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'}` })),
       where: [preview.baseline?.repository ?? spec.repository, `Pinned commit: ${preview.baseline?.commit ?? 'not available'}`,
         'Each profile starts in a separate checkout of this commit. Uncommitted edits and untracked or ignored files are excluded.',
         'Workspace preparation preserves the source checkout. Task, setup and check commands can have effects outside their copy.'],
@@ -178,6 +181,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       limits: [`${minutes(spec.limits.runMs)} per profile; ${minutes(spec.limits.experimentMs)} overall.`,
         `Codex access: ${spec.sandbox}; network disabled inside the sandbox. ${spec.approvalsReviewer ? 'Codex must confirm approval routing to you before a task starts.' : 'Approval routing follows the native profile settings.'} Output per program: ${spec.limits.outputBytes / 1024 / 1024} MiB.`,
         ...(hasClaude ? ['Claude Code uses its native permission rules. The Codex access setting does not apply to that side.'] : []),
+        ...(hasCopilot ? ['Copilot CLI uses its native permission rules. The Codex access setting does not apply to that side.'] : []),
         ...spec.setup.map(command => `Setup before each task: ${command.name}: ${command.argv[2]} (ordinary program outside the Codex sandbox).`),
         'Native skill-use capture is best effort; incomplete evidence stays explicit. No automatic review or rating is run.'],
       willDo: ['Start exactly two real model tasks using the selected profiles’ sign-ins.', 'Run only the setup and verification commands listed here.', 'Retain the evidence and open the shared comparison report.'],
@@ -200,9 +204,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         'preview-stale', { changes });
       if (closing) throw new UiError(409, 'Xenoflux stopped while checking the preview. No task started.', 'stopping');
       await privateDirectory(store.directory, true); await privateDirectory(root, true);
-      const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.preview.profiles.map(profile => profile.profileName === 'Default'
-          && reviewed.preview.profiles.some(side => side.client === 'claude-code')
-          ? (profile.client === 'claude-code' ? 'Claude Code Default' : 'Codex Default') : profile.profileName), sideIds: reviewed.spec.profiles.map(profile => profile.sideId),
+      const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.preview.profiles.map(profile => profileLabel(profile, reviewed.preview.profiles)), sideIds: reviewed.spec.profiles.map(profile => profile.sideId),
         ...(reviewed.spec.approvalsReviewer ? { approvalsReviewer: reviewed.spec.approvalsReviewer } : {}) };
       try { await writeFile(join(root, `${token}.json`), JSON.stringify(entry) + '\n', { flag: 'wx', mode: 0o600 }); }
       catch (error) { if (error.code === 'EEXIST') return { id: token }; throw error; }
@@ -212,6 +214,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         throw new UiError(409, 'Xenoflux stopped before the experiment started. No task started.', 'stopping');
       }
       const controller = new AbortController();
+      const clientBySide = new Map(reviewed.spec.profiles.map((side, index) => [side.sideId, reviewed.preview.profiles[index].client ?? 'codex']));
       const work = { ...entry, task: reviewed.spec.task, spec: reviewed.spec, controller, done: false, pendingRequests: new Map() };
       active.set(token, work);
       launched = true;
@@ -223,7 +226,8 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
             return new Promise((resolve, reject) => {
               const abort = () => { work.pendingRequests.delete(requestId); reject(new Error('Comparison leg stopped')); };
               signal.addEventListener('abort', abort, { once: true });
-              work.pendingRequests.set(requestId, { legId, side, requestId, request, item,
+              work.pendingRequests.set(requestId, { legId, side, requestId, client: clientBySide.get(side),
+                request: structuredClone(request), item: structuredClone(item), sourceRequest: request, sourceItem: item,
                 signal, resolve: value => { signal.removeEventListener('abort', abort); resolve(value); } });
             });
           } })
@@ -354,7 +358,9 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const work = active.get(id), request = work?.pendingRequests.get(requestId);
     if (!request || request.signal.aborted || work.controller.signal.aborted)
       throw new UiError(409, 'This comparison request is no longer waiting for an answer.', 'stale-run-request');
-    try { (request.request.method === CLAUDE_REQUEST ? validateClaudeDecision : validateNativeResponse)(request.request, response); }
+    if (!isDeepStrictEqual(request.request, request.sourceRequest) || !isDeepStrictEqual(request.item, request.sourceItem))
+      throw new UiError(409, 'The native request action changed.', 'stale-run-request');
+    try { validateClientNativeResponse(request.client, request.request, response); }
     catch (error) { throw new UiError(400, errorText(error), 'invalid-run-request'); }
     work.pendingRequests.delete(requestId);
     request.resolve(response);

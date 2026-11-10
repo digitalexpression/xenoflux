@@ -3,11 +3,12 @@ import { isDeepStrictEqual } from 'node:util';
 import { runAuditCapture } from './audit-capture.js';
 import { createEnvironmentBinding } from './client-contracts.js';
 import { createCaptureProjection } from './capture-projection.js';
+import { createCopilotRuntime } from './copilot-runtime.js';
 import { createClaudeRuntime } from './claude-runtime.js';
 import { createCodexRuntime } from './codex-runtime.js';
 
 export function createClientRuntime({ capture = runAuditCapture, runtimes = {} } = {}) {
-  const implementations = { codex: { ...createCodexRuntime(), capture }, 'claude-code': createClaudeRuntime(), ...runtimes };
+  const implementations = { codex: { ...createCodexRuntime(), capture }, 'claude-code': createClaudeRuntime(), copilot: createCopilotRuntime(), ...runtimes };
   const owners = new WeakMap();
   const implementationFor = client => {
     const implementation = Object.hasOwn(implementations, client) ? implementations[client] : null;

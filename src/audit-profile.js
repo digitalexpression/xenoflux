@@ -9,6 +9,7 @@ import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse } from 'smol-toml';
 import { find } from './profiles.js';
+import { copilotSettingMetadata, qualifiedCopilotRoute, resolveCopilotProfile } from './copilot-profile.js';
 import { CLAUDE_CLIENT, resolveClaudeProfile } from './claude-profile.js';
 import { launchPlan, discoverCodexExecutable } from './launcher.js';
 import { resolveHome } from './homes.js';
@@ -117,11 +118,14 @@ async function selectedClient(store, selection) {
 async function resolveNonCodexProfile(selection, { client, selected }, options) {
   if (['executable', 'version', 'nativeConfig'].some(key => selection[key] !== undefined) || selection.skills?.length)
     throw new Error('Use the bound native executable and settings for this client');
-  const resolveClient = { [CLAUDE_CLIENT]: resolveClaudeProfile, ...options.profileResolvers }[client];
+  const resolveClient = { [CLAUDE_CLIENT]: resolveClaudeProfile, copilot: resolveCopilotProfile, ...options.profileResolvers }[client];
   if (typeof resolveClient !== 'function') throw new Error(`No CLI profile resolver is available for ${client}`);
   const profile = { ...await resolveClient({ selected, ...options }), executionMode: 'profile' };
   if (profile.client !== client || profile.profileId !== (selected?.id ?? `default-${client}`))
     throw new Error('Native profile resolution changed its selected identity');
+  if (client === 'copilot' && profile.rootMode === 'explicit'
+    && !qualifiedCopilotRoute(profile.environmentBinding, profile.accountQualification))
+    throw Object.assign(new Error('The selected Copilot root has no verified account scope.'), { code: 'copilot-account-unverified' });
   profile.settingsSnapshot = await snapshotAuditProfileSettings(profile);
   profile.settingsIdentity = auditSettingsIdentity(profile.settingsSnapshot);
   if (!profile.settingsIdentity)
@@ -277,6 +281,7 @@ export async function recheckProfileExecutionProfile(store, preview, options = {
   const fields = ['profileId', 'home', 'userHome', 'nativeRoot', 'reservationRoot', 'environmentId',
     'executable', 'executableIdentity', 'cwd', 'bindingRepository', 'client', 'surface', 'executionLocation', 'rootMode'];
   if (!preview || fields.some(key => preview[key] !== fresh[key])
+    || !isDeepStrictEqual(preview.accountQualification, fresh.accountQualification)
     || !isDeepStrictEqual(preview.env, fresh.env) || !isDeepStrictEqual(preview.launchArgs, fresh.launchArgs))
     throw Object.assign(new Error('Selected profile or launch environment changed after preview'), { code: 'profile-preview-changed' });
   let settings = compareAuditProfileSettings(preview.settingsSnapshot, fresh.settingsSnapshot);
@@ -524,7 +529,8 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
 
     const targets = codex ? ['config.toml', 'auth.json', 'state_5.sqlite', 'state_5.sqlite-wal', 'state_5.sqlite-shm']
       .map(name => join(profile.home, name))
-      : [join(profile.home, 'settings.json'), join(profile.rootMode === 'implicit' ? profile.userHome : profile.home, '.claude.json')];
+      : profile.client === 'copilot' ? ['config.json', 'settings.json', 'mcp-config.json'].map(name => join(profile.home, name))
+        : [join(profile.home, 'settings.json'), join(profile.rootMode === 'implicit' ? profile.userHome : profile.home, '.claude.json')];
     const present = [];
     for (const path of targets) {
       let info;
@@ -778,7 +784,9 @@ export async function snapshotAuditProfileSettings(profile) {
   // Detailed records remain process-local. A series may persist the explicit
   // metadata-only continuity token below; ordinary run recovery has no such token.
   const snapshot = { status: 'ready', persistence: 'process-local', capturedAt: new Date().toISOString() };
-  try { settingsBySnapshot.set(snapshot, { status: 'ready', records: await collectSettingMetadata(await selectedSettingRoots(profile), profile) }); }
+  try { settingsBySnapshot.set(snapshot, { status: 'ready', records: profile.client === 'copilot'
+    ? await copilotSettingMetadata({ ...profile.environmentBinding, workspace: profile.cwd })
+    : await collectSettingMetadata(await selectedSettingRoots(profile), profile) }); }
   catch (error) {
     snapshot.status = 'unavailable';
     snapshot.reason = error.auditReason ?? 'settings-source-unavailable';

@@ -1,4 +1,5 @@
 // Explicit native catalog probes submit no task. Cache reads never launch a client.
+import { selectCopilotSettings } from './copilot-catalog.js';
 import { isDeepStrictEqual } from 'node:util';
 import { runAuditProcess } from './audit-process.js';
 import { createEnvironmentBinding } from './client-contracts.js';
@@ -162,6 +163,14 @@ export async function discoverCodexModels({ profile, workspace, signal, stdoutPa
 }
 
 export function validateCatalogSelection(snapshot, selection = {}) {
+  if (snapshot?.scope?.environmentBinding?.client === 'copilot') {
+    if (snapshot.status !== 'ready') throw fail('catalog-unavailable', 'Refresh available Copilot models before selecting a model or effort');
+    try {
+      const choice = selectCopilotSettings(snapshot, selection);
+      return { status: 'unverified', model: choice.model ?? null, reasoningEffort: choice.reasoningEffort ?? null, route: choice.route ?? null };
+    } catch (error) { throw fail('catalog-model-unavailable', error.message); }
+  }
+  if (selection.route != null) throw fail('catalog-model-unavailable', 'Auto routes require a current Copilot catalog');
   const modelChoice = selection.model, effortChoice = selection.reasoningEffort;
   if (modelChoice == null && effortChoice == null) return { status: 'inherited', model: null, reasoningEffort: null };
   if (modelChoice != null) text(modelChoice, 'selected model');
@@ -186,7 +195,7 @@ export function validateCatalogSelection(snapshot, selection = {}) {
 export function createClientCatalog({ discover = discoverCodexModels, resolveContext = async context => context,
   now = Date.now, ttlMs = CATALOG_TTL_MS } = {}) {
   const entries = new Map(), generations = new Map();
-  const keyOf = context => JSON.stringify(contextScope(context));
+  const keyOf = context => JSON.stringify([contextScope(context), context.profile.accountQualification ?? null]);
   const discarded = (scope, reason, generation, snapshot) => ({ ...(snapshot?.process ? { process: snapshot.process } : {}),
     status: 'unavailable', source: snapshot?.source ?? (scope.environmentBinding.client === 'codex' ? 'codex-model/list' : 'native-catalog'),
     reason, generation, models: [], capabilities: { models: 'unknown', effort: 'unknown' } });
@@ -202,10 +211,10 @@ export function createClientCatalog({ discover = discoverCodexModels, resolveCon
       const key = keyOf(context); entries.delete(key); generations.set(key, (generations.get(key) ?? 0) + 1);
     },
     async refresh(context, options = {}) {
-      const frozen = structuredClone(context), scope = contextScope(frozen), key = JSON.stringify(scope);
+      const frozen = structuredClone(context), scope = contextScope(frozen), key = keyOf(frozen);
       const generation = (generations.get(key) ?? 0) + 1; generations.set(key, generation);
       const current = () => generations.get(key) === generation;
-      if (!isDeepStrictEqual(contextScope(await resolveContext(context)), scope) || !current())
+      if (keyOf(await resolveContext(context)) !== key || !current())
         return discarded(scope, 'catalog-context-changed', generation);
       if (options.signal?.aborted) return discarded(scope, 'catalog-cancelled', generation);
       const snapshot = await discover({ ...options, profile: frozen.profile, workspace: frozen.workspace });
@@ -213,7 +222,7 @@ export function createClientCatalog({ discover = discoverCodexModels, resolveCon
       const reconciled = await resolveContext(context);
       if (!current()) return discarded(scope, 'catalog-superseded', generation, snapshot);
       if (options.signal?.aborted) return discarded(scope, 'catalog-cancelled', generation, snapshot);
-      if (!isDeepStrictEqual(contextScope(reconciled), scope)
+      if (keyOf(reconciled) !== key
         || !isDeepStrictEqual(snapshot.scope?.environmentBinding, scope.environmentBinding)
         || snapshot.scope?.workspace !== scope.workspace)
         return discarded(scope, 'catalog-context-changed', generation, snapshot);

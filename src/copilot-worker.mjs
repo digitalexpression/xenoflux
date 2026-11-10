@@ -176,7 +176,7 @@ async function initialize() {
   if (!processIdentity) throw new Error('Copilot process identity unavailable.');
   await sampled;
   if (inspectionFailed || !tracked.has(child.pid)) throw new Error('Copilot process ancestry unavailable.');
-  if (operation === 'capture') await checkpoint('process', { pid: child.pid, processIdentity });
+  await checkpoint('process', { pid: child.pid, processIdentity });
   return { status, auth, publicAccount };
 }
 
@@ -266,8 +266,9 @@ async function capture({ status, auth, publicAccount }) {
     appliedPermission = ['manual', 'assisted', 'allow-all'].includes(mode.mode) ? mode.mode : null;
   }
   await checkpoint('session', { sessionId, version: status.version, account: publicAccount, selection, confirmed: {
-    model: confirmed.modelId ?? null, reasoningEffort: confirmed.reasoningEffort ?? null,
-    route: confirmed.autoTier ?? null, permissionMode: appliedPermission,
+    model: copilotId(confirmed.modelId) ? confirmed.modelId : null,
+    reasoningEffort: copilotId(confirmed.reasoningEffort) ? confirmed.reasoningEffort : null,
+    route: copilotId(confirmed.autoTier) ? confirmed.autoTier : null, permissionMode: appliedPermission,
   } });
   const currentAccount = await rpc(() => client.getAuthStatus());
   copilotAuth(currentAccount, binding, accountQualification, status.version);
