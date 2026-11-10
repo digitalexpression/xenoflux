@@ -1,12 +1,14 @@
 // Live, bounded capture through the native Codex app-server JSON-RPC protocol.
 // Audit reports receive projected metadata. Profile execution also returns the
 // exact assistant response to its private task owner, separate from audit reports.
-import { randomUUID, createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { realpathSync } from 'node:fs';
 import { mkdir, lstat, realpath, rm } from 'node:fs/promises';
-import { getAuditProcessIdentity, runAuditProcess } from './audit-process.js';
-import { validateNativeRequest, validateNativeResponse } from './native-requests.js';
+import { getAuditProcessIdentity } from './audit-process.js';
+import { createCodexRuntime } from './codex-runtime.js';
+import { CAPTURE_NATIVE_EVENTS, safeText, idHash, count, validId, timestampFromNativeSeconds, nativePath, emptyUsage, safeUsage, skillProjection, eventProjection, linkedAgentCandidates } from './codex-decoder.js';
+import { validateNativeRequest } from './native-requests.js';
 import { createAuditToolCapture } from './audit-tools.js';
 import { createAuditHookCapture } from './audit-hooks.js';
 import { startAuditTelemetry } from './audit-telemetry.js';
@@ -14,13 +16,12 @@ import { mergeAuditSkillTelemetry } from './audit-skill-usage.js';
 import { assessUsageSequence, normalizeUsageSnapshot, nativeUsageAccounting, summarizeWorkflowUsage, summarizeTurnUsage, USAGE_FIELDS } from './audit-usage.js';
 import { redactValue } from './redact.js';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parseLiteralSkillReadDetails } from './audit-skill-read.js';
 import { projectInstructionSources, compactInstructionSources } from './audit-instructions.js';
 import { createResourceProvenance } from './audit-provenance.js';
 import { evaluateRequiredContext, validateRequiredContextRules } from './audit-context.js';
 import { prepareAuditStartup } from './audit-startup.js';
-import { validateExecution, validateAuditNativeConfig } from './audit-spec.js';
+import { validateExecution, validateAuditNativeConfig, validateAuditApprovalsReviewer } from './audit-spec.js';
 import { captureAuditChildDiscovery } from './audit-session.js';
 import { createSettingsEvidence } from './client-contracts.js';
 import { readCodexModels, validateCatalogSelection } from './client-catalog.js';
@@ -32,29 +33,6 @@ const MAX_ARTIFACTS = 10000;
 const MAX_OBSERVATIONS = 20000;
 const MAX_LINKED_AGENTS = 64;
 const MAX_PAGES = 100;
-const METADATA_NATIVE_EVENTS = new Set(['thread/readState/changed', 'turn/moderationMetadata', 'turn/diff/updated',
-  'item/agentMessage/delta', 'item/commandExecution/outputDelta']);
-const CAPTURE_NATIVE_EVENTS = new Set(['thread/started', 'thread/status/changed', 'turn/started', 'turn/completed',
-  'item/started', 'item/completed', ...METADATA_NATIVE_EVENTS,
-  'thread/tokenUsage/updated', 'mcpServer/startupStatus/updated', 'hook/started', 'hook/completed', 'error']);
-const SAFE_ID = /^[A-Za-z0-9._:-]{1,160}$/;
-const safeText = (v, max = 160) => typeof v === 'string' && v.length <= max
-  ? String(redactValue(v)).replace(/[\x00-\x1f\x7f-\x9f]/g, ' ').slice(0, max) : undefined;
-const idHash = v => createHash('sha256').update(String(v)).digest('hex').slice(0, 24);
-const count = v => Number.isSafeInteger(v) && v >= 0 ? v : null;
-const validId = v => typeof v === 'string' && SAFE_ID.test(v);
-const timestampFromNativeSeconds = value => Number.isSafeInteger(value) && Math.abs(value) <= 8640000000000
-  ? new Date(value * 1000).toISOString() : null;
-function nativePath(value, cwd = null) {
-  if (typeof value !== 'string' || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) return null;
-  let path = value;
-  if (value.startsWith('file://')) {
-    try { const url = new URL(value); if (url.search || url.hash) return null; path = fileURLToPath(url); }
-    catch { return null; }
-  }
-  if (!path.startsWith('/')) { if (!cwd) return null; path = resolve(cwd, path); }
-  return path.startsWith('/') ? path : null;
-}
 async function privateRuntimeDirectory(stdoutPath, requestedPath) {
   const base = await realpath(resolve(dirname(stdoutPath)));
   const baseInfo = await lstat(base);
@@ -96,123 +74,6 @@ function isolatedNativeOptions(env, paths) {
   return { env: processEnv, args };
 }
 
-function emptyUsage() {
-  return { scope: 'per-agent-source-reported', last: null, total: null, snapshots: 0 };
-}
-
-function safeUsage(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  const project = b => {
-    if (!b || typeof b !== 'object') return null;
-    const fields = ['inputTokens', 'outputTokens', 'cachedInputTokens', 'reasoningOutputTokens', 'cacheWriteInputTokens', 'totalTokens'];
-    const result = {};
-    for (const field of fields) result[field] = count(b[field]);
-    return result;
-  };
-  return { last: project(raw.last), total: project(raw.total), modelContextWindow: count(raw.modelContextWindow) };
-}
-
-function skillProjection(skill, cwd, profileHome = null) {
-  if (!skill || typeof skill !== 'object' || typeof skill.name !== 'string' || typeof skill.path !== 'string') return null;
-  const scopeMap = { user: 'user', repo: 'project', system: 'system', admin: 'admin' };
-  const nativeScope = scopeMap[skill.scope];
-  if (!nativeScope) return null;
-  const skillPath = nativePath(skill.path, nativePath(cwd));
-  if (!skillPath) return null;
-  const plugin = safeText(skill.pluginId, 120);
-  const profileSkillsRoot = typeof profileHome === 'string' && isAbsolute(profileHome) ? resolve(profileHome, 'skills') : null;
-  const absoluteSkillPath = resolve(skillPath);
-  const profileRelative = profileSkillsRoot && absoluteSkillPath ? relative(profileSkillsRoot, absoluteSkillPath) : null;
-  const isProfileSkill = !plugin && skill.scope === 'user' && profileRelative !== null
-    && profileRelative !== '..' && !profileRelative.startsWith(`..${sep}`) && !isAbsolute(profileRelative);
-  const scope = isProfileSkill ? 'profile' : nativeScope;
-  return {
-    id: idHash(`${skill.scope}\0${skill.pluginId ?? ''}\0${skillPath}`),
-    name: safeText(skill.name, 120) ?? 'unknown-skill',
-    origin: plugin ? 'plugin' : scope === 'project' ? 'repository' : scope === 'user' ? 'user' : scope,
-    scope,
-    nativeScope: skill.scope,
-    path: safeText(skillPath, 512),
-    ...(plugin ? { provider: plugin } : {}),
-    enabled: skill.enabled === true,
-    observations: [],
-    catalogs: [{ source: 'skills/list', cwd: safeText(cwd, 512), agentId: null }],
-  };
-}
-
-function eventProjection(method, p, index) {
-  const threadId = validId(p?.threadId) ? p.threadId : undefined;
-  const turnId = validId(p?.turnId) ? p.turnId : undefined;
-  const at = Number.isFinite(p?.completedAtMs) ? p.completedAtMs : Number.isFinite(p?.startedAtMs) ? p.startedAtMs : null;
-  const out = { kind: method, recordedAt: at, sourceLine: index };
-  if (threadId) out.threadId = threadId;
-  if (turnId) out.turnId = turnId;
-  // Streaming text, command output, diffs and moderation/read-state payloads
-  // stay private. Their known notification kind and item identity are enough
-  // to explain activity without duplicating terminal items or token counters.
-  if (METADATA_NATIVE_EVENTS.has(method)) {
-    if (method === 'thread/readState/changed') delete out.turnId;
-    if (['item/agentMessage/delta', 'item/commandExecution/outputDelta'].includes(method)
-      && validId(p?.itemId)) out.itemId = p.itemId;
-    return out;
-  }
-  if (p?.item && typeof p.item === 'object') {
-    const item = p.item;
-    const type = safeText(item.type, 80);
-    const itemId = validId(item.id) ? item.id : undefined;
-    if (type) out.itemType = type;
-    if (itemId) out.itemId = itemId;
-    if (typeof item.status === 'string') out.status = safeText(item.status, 60);
-    if (Number.isSafeInteger(item.exitCode)) out.exitCode = item.exitCode;
-    // A collab link is accepted only from structured native metadata; the
-    // prompt/description accompanying it is intentionally omitted.
-    const call = item.collabAgentToolCall ?? item;
-    const receivers = call?.receiverThreadIds;
-    if (Array.isArray(receivers)) out.receiverThreadIds = receivers.filter(validId).slice(0, MAX_LINKED_AGENTS);
-    const parent = call?.threadId ?? call?.senderThreadId;
-    if (validId(parent)) out.parentThreadId = parent;
-    const name = safeText(item.name ?? item.toolName, 100);
-    if (name) out.toolName = name;
-    if (typeof item.error === 'boolean') out.failed = item.error;
-  }
-  if (p?.turn && typeof p.turn === 'object') {
-    out.turnId ??= validId(p.turn.id) ? p.turn.id : undefined;
-    if (typeof p.turn.status === 'string') out.status = safeText(p.turn.status, 60);
-  }
-  if (p?.status && typeof p.status.type === 'string') out.status = safeText(p.status.type, 40);
-  if (method === 'error') {
-    if (typeof p?.willRetry === 'boolean') out.willRetry = p.willRetry;
-    const info = p?.error?.codexErrorInfo;
-    const allowed = new Set(['contextWindowExceeded','sessionBudgetExceeded','usageLimitExceeded','rateLimitExceeded','flexUnavailable',
-      'serverOverloaded','cyberPolicy','misalignmentPolicyViolation','tooManyDenials','internalServerError','unauthorized','badRequest',
-      'threadRollbackFailed','sandboxError','other']);
-    if (typeof info === 'string' && allowed.has(info)) out.errorCode = info;
-    else if (info && typeof info === 'object' && !Array.isArray(info)) {
-      const tag = Object.keys(info).find(key => ['httpConnectionFailed','responseStreamConnectionFailed','responseStreamDisconnected',
-        'responseTooManyFailedAttempts','activeTurnNotSteerable'].includes(key));
-      if (tag) {
-        out.errorCode = tag;
-        const detail = info[tag];
-        if (tag === 'activeTurnNotSteerable' && ['review','compact'].includes(detail?.turnKind)) out.turnKind = detail.turnKind;
-        else if (Number.isSafeInteger(detail?.httpStatusCode) && detail.httpStatusCode >= 0 && detail.httpStatusCode <= 65535)
-          out.httpStatusCode = detail.httpStatusCode;
-      }
-    }
-  }
-  return out;
-}
-
-function linkedAgentCandidates(item) {
-  if (!item || typeof item !== 'object') return [];
-  // Current Codex schemas can report delegated work as a sub-agent activity
-  // item without the older collaboration tool-call receiver list. Keep only
-  // the thread identifier; agentPath and any surrounding prose are ignored.
-  if (item.type === 'subAgentActivity')
-    return validId(item.agentThreadId) ? [item.agentThreadId] : [];
-  const call = item.collabAgentToolCall ?? item;
-  return Array.isArray(call?.receiverThreadIds) ? call.receiverThreadIds.filter(validId).slice(0, MAX_LINKED_AGENTS) : [];
-}
-
 /**
  * Run one task over the shared native app-server transport. The caller owns
  * profile resolution/access rechecks and durable onSession checkpoints. Profile
@@ -224,14 +85,17 @@ export async function runAuditCapture(options = {}) {
     telemetryFactory = startAuditTelemetry } = options;
   if (!['audit', 'profile'].includes(executionMode)) throw new TypeError('Select an explicit capture executionMode');
   const ordinary = executionMode === 'profile';
+  const approvalsReviewer = validateAuditApprovalsReviewer(options.approvalsReviewer);
   const auditApprovalPolicy = typeof onNativeRequest === 'function' ? 'on-request' : 'never';
-  if (ordinary && (['sandbox', 'sandboxPolicy', 'approvalPolicy', 'model', 'effort', 'nativeConfig', 'selectedSkills', 'requiredContext', 'preflightOnly', 'telemetryFactory'].some(key => Object.hasOwn(options, key))
+  if (ordinary && (['sandbox', 'sandboxPolicy', 'approvalPolicy', 'approvalsReviewer', 'model', 'effort', 'nativeConfig', 'selectedSkills', 'requiredContext', 'preflightOnly', 'telemetryFactory'].some(key => Object.hasOwn(options, key))
     || profile?.nativeConfig !== undefined || profile?.skills !== undefined
     || ['args', 'runtimeDirectory'].some(key => Object.hasOwn(processOptions, key))
     || ['completionWaitMs', 'maxTelemetryBytes', 'maxTelemetryEvents'].some(key => Object.hasOwn(limits, key))
     || (processOptions.outputLimitBytes !== undefined && processOptions.outputLimitBytes > 8 * 1024 * 1024)
     || (profile?.launchArgs !== undefined && !isDeepStrictEqual(profile.launchArgs, ['-c', `sqlite_home=${JSON.stringify(profile.home)}`]))))
     throw new TypeError('Profile execution does not accept audit policy overrides');
+  if (approvalsReviewer && auditApprovalPolicy !== 'on-request')
+    throw new TypeError('User approval routing requires a comparison request handler');
   if (ordinary && (typeof onSession !== 'function' || workspace !== profile?.cwd
     || !profile?.env || !isDeepStrictEqual(processOptions.env, profile.env)))
     throw new TypeError('Profile execution requires the selected cwd/environment and a durable session checkpoint');
@@ -270,6 +134,7 @@ export async function runAuditCapture(options = {}) {
     sent: { source: 'process-local-native-config',
       model: nativeConfig.model ?? null, reasoningEffort: nativeConfig.model_reasoning_effort ?? null },
   });
+  if (approvalsReviewer) capture.settingsEvidence.requested.approvalsReviewer = { value: approvalsReviewer, source: 'frozen-comparison-spec' };
   const provenance = createResourceProvenance({ workspace, profileHome: profile.home, userHome: profile.userHome });
   const updateProvenance = () => {
     run.resourceProvenance = provenance.snapshot();
@@ -289,10 +154,9 @@ export async function runAuditCapture(options = {}) {
   const pendingChildMessages = new Map();
   let pendingChildMessageCount = 0;
   const seenCompletedItems = new Set();
-  const outgoing = [];
-  const outgoingWaiters = [];
-  const pending = new Map();
-  const rpcEvidence = new WeakMap();
+  const nativeRuntime = createCodexRuntime();
+  let nativeHandle = null;
+  const rpcEvidence = { get: value => nativeHandle?.evidence.get(value) };
   const childNativeMetadata = new Map();
   const streamedAgentIds = new Set();
   const instructionSnapshot = (agent, result, source, reason = null) => {
@@ -313,7 +177,6 @@ export async function runAuditCapture(options = {}) {
   };
   const notifications = [];
   const notificationWaiters = [];
-  const rpcTimers = new Map();
   const nativeRequests = new Map();
   const approvalItems = new Map();
   const approvalItemKey = p => JSON.stringify([p.threadId, p.turnId, p.itemId ?? p.item?.id]);
@@ -321,12 +184,9 @@ export async function runAuditCapture(options = {}) {
   const requestController = new AbortController();
   const captureSignal = AbortSignal.any([requestController.signal, ...(processOptions.signal ? [processOptions.signal] : [])]);
   let requestFailure = null;
-  let sequence = 0;
   let rpcClosed = false;
   let captureStopped = false, spawnedProcess = null;
-  let inputStarted = false;
-  let settleInput;
-  const inputSettled = new Promise(resolve => { settleInput = resolve; });
+  let inputSettled = null;
   const notify = () => {
     for (let i = 0; i < notificationWaiters.length;) {
       const waiter = notificationWaiters[i];
@@ -338,7 +198,6 @@ export async function runAuditCapture(options = {}) {
       waiter.resolve(message);
     }
   };
-  const pushOutgoing = line => { if (outgoingWaiters.length) outgoingWaiters.shift()({ value: line, done: false }); else outgoing.push(line); };
   const recordWarning = code => { if (!run.warnings.includes(code)) run.warnings.push(code); };
   const agentFor = (threadId, parentId = null, depth = 0, sessionId = null, cwd = null) => {
     if (!validId(threadId)) return null;
@@ -623,20 +482,10 @@ export async function runAuditCapture(options = {}) {
           item: item ? structuredClone(item) : null }))
           .then(result => {
             if (captureSignal.aborted || rpcClosed || captureStopped) return;
-            validateNativeResponse(validated, result);
-            pushOutgoing(JSON.stringify({ jsonrpc: '2.0', id: validated.id, result }) + '\n');
+            nativeRuntime.respond(nativeHandle, validated, result);
             nativeRequests.delete(key);
           }).catch(failRequest);
       } catch (error) { failRequest(error); }
-      return;
-    }
-    if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
-      const waiter = pending.get(String(message.id));
-      if (waiter) {
-        if (message.result && typeof message.result === 'object') rpcEvidence.set(message.result, { sourceLine: packet.lineNumber });
-        pending.delete(String(message.id)); waiter(message);
-      }
-      else recordWarning('unmatched-rpc-response');
       return;
     }
     if (typeof message.method !== 'string' || !message.params || typeof message.params !== 'object') return;
@@ -698,25 +547,7 @@ export async function runAuditCapture(options = {}) {
     if (notifications.length < MAX_EVENTS) { notifications.push(message); notify(); }
     else { capped = true; recordWarning('notification-limit'); }
   };
-  const request = async (method, params, timeoutMs = 30000) => {
-    if (captureStopped) throw new Error('capture-stopped');
-    const id = ++sequence;
-    const key = String(id);
-    const response = new Promise((resolve, reject) => {
-      const timer = timeoutMs === null ? null : setTimeout(() => { pending.delete(key); rpcTimers.delete(key); reject(new Error(`rpc-timeout:${method}`)); }, timeoutMs);
-      pending.set(key, message => {
-        if (timer) clearTimeout(timer); rpcTimers.delete(key);
-        if (message.error) {
-          const error = new Error(`rpc-error:${method}`);
-          if (Number.isSafeInteger(message.error.code)) error.rpcCode = message.error.code;
-          reject(error);
-        } else resolve(message.result);
-      });
-      if (timer) rpcTimers.set(key, timer);
-    });
-    pushOutgoing(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    return response;
-  };
+  const request = (method, params, timeoutMs) => nativeRuntime.request(nativeHandle, method, params, timeoutMs);
   const takeNotification = (predicate, timeoutMs = 30000) => {
     if (captureStopped) return Promise.resolve(null);
     const i = notifications.findIndex(predicate);
@@ -731,12 +562,14 @@ export async function runAuditCapture(options = {}) {
       notificationWaiters.push(waiter);
     });
   };
-  const input = (async function* () {
-    inputStarted = true;
+  const input = async launch => {
     try {
       // Paginated history and bounded child-item hydration require the native
       // experimental API opt-in; this is scoped to this connection.
-      const initialized = await request('initialize', { clientInfo: { name: ordinary ? 'xfx-review' : 'xfx-audit', title: ordinary ? 'Xenoflux Review' : 'Xenoflux Audit', version: '1' }, capabilities: { experimentalApi: true } });
+      nativeHandle = await nativeRuntime.initialize(launch, { onEvent, onWarning: recordWarning,
+        onSpawn: async info => { spawnedProcess = info; await processOptions.onSpawn?.(info); },
+        initializeParams: { clientInfo: { name: ordinary ? 'xfx-review' : 'xfx-audit', title: ordinary ? 'Xenoflux Review' : 'Xenoflux Audit', version: '1' }, capabilities: { experimentalApi: true } } }, captureSignal);
+      const initialized = nativeHandle.capabilities;
       if (onProcessReady) {
         const initial = spawnedProcess?.processIdentity;
         const ready = await getAuditProcessIdentity(spawnedProcess?.pid);
@@ -746,7 +579,6 @@ export async function runAuditCapture(options = {}) {
         await onProcessReady({ pid: ready.pid, processIdentity: ready });
       }
       capture.capabilities.appServerV2 = initialized ? 'available' : 'partial';
-      pushOutgoing(JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} }) + '\n');
       if (execution?.model !== undefined || execution?.reasoningEffort !== undefined) {
         const models = await readCodexModels(request, { signal: processOptions.signal });
         capture.selectionValidation = validateCatalogSelection({ status: 'ready', models }, execution);
@@ -775,8 +607,17 @@ export async function runAuditCapture(options = {}) {
       // thread/start cwd makes native writable startup persist project trust in
       // the saved profile. Inherit the process cwd instead, preserving native
       // trust/config/managed-policy decisions, and verify it before any task.
-      const started = await request('thread/start', { ephemeral: false, experimentalRawEvents: false,
-        ...(!ordinary ? { sandbox, approvalPolicy: auditApprovalPolicy, historyMode: 'paginated' } : {}) });
+      if (approvalsReviewer) capture.settingsEvidence.sent.approvalsReviewer = { value: approvalsReviewer, source: 'thread/start' };
+      let started;
+      try {
+        started = await nativeRuntime.createSession(nativeHandle, { ephemeral: false, experimentalRawEvents: false,
+          ...(!ordinary ? { sandbox, approvalPolicy: auditApprovalPolicy, historyMode: 'paginated' } : {}),
+          ...(approvalsReviewer ? { approvalsReviewer } : {}) });
+      } catch (error) {
+        if (!approvalsReviewer) throw error;
+        throw Object.assign(new Error('Codex could not confirm the requested user approval routing; no model task was started'),
+          { code: 'requested-approval-reviewer-unconfirmed', cause: error });
+      }
       const nativeCwds = [started?.cwd, started?.thread?.cwd].filter(cwd => cwd !== undefined);
       if (!nativeCwds.length || nativeCwds.some(cwd => nativePath(cwd) !== nativePath(workspace))) {
         recordWarning('native-workspace-mismatch');
@@ -790,6 +631,11 @@ export async function runAuditCapture(options = {}) {
       capture.effectiveSettings = Object.fromEntries(['model', 'modelProvider', 'reasoningEffort', 'approvalPolicy', 'sandbox']
         .map(key => [key, ordinary ? started[key] ?? null : safeText(started[key], 100)]));
       capture.settingsEvidence.confirmed = { source: 'thread/start', ...capture.effectiveSettings };
+      if (approvalsReviewer) {
+        const value = ['user', 'auto_review', 'guardian_subagent'].includes(started.approvalsReviewer) ? started.approvalsReviewer : null;
+        capture.effectiveSettings.approvalsReviewer = value;
+        capture.settingsEvidence.confirmed.approvalsReviewer = { value, source: 'thread/start' };
+      }
       if ((execution?.model !== undefined && started.model !== execution.model)
         || (execution?.reasoningEffort !== undefined && started.reasoningEffort !== execution.reasoningEffort))
         throw Object.assign(new Error('Native app-server did not confirm the requested model or reasoning effort'), { code: 'requested-execution-unconfirmed' });
@@ -815,8 +661,15 @@ export async function runAuditCapture(options = {}) {
       run.usage.accounting = nativeUsageAccounting(profile.version);
       capture.checkpoint = 'native-session-started';
       updateInstructionCoverage();
+      const reviewerRejected = Boolean(approvalsReviewer && (started.approvalsReviewer !== approvalsReviewer || started.approvalPolicy !== auditApprovalPolicy));
+      if (reviewerRejected) {
+        capture.errors.push({ code: 'requested-approval-reviewer-unconfirmed' });
+        capture.checkpoint = 'approval-reviewer-rejected';
+        run.status = 'unavailable'; capture.status = 'unavailable';
+        run.reason = 'Codex did not confirm user approval routing with on-request policy; no model task was started';
+      }
       let contextRejected = false;
-      if (contextRules) {
+      if (contextRules && !reviewerRejected) {
         const rootRules = contextRules.filter(rule => rule.agents !== 'descendants');
         if (rootRules.length) {
           const acceptance = evaluateRequiredContext(run, rootRules, { rootOnly: true });
@@ -841,7 +694,7 @@ export async function runAuditCapture(options = {}) {
         run.reason = 'Could not checkpoint the native session before task start';
         return;
       }
-      if (contextRejected) return;
+      if (contextRejected || reviewerRejected) return;
       const sandboxPolicy = sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false }
         : sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' }
           : { type: 'workspaceWrite', writableRoots: [workspace], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
@@ -866,7 +719,7 @@ export async function runAuditCapture(options = {}) {
         run.reason = 'Native readiness only; no model task was requested';
         return;
       }
-      const turnResponse = await request('turn/start', { threadId: rootThreadId, cwd: workspace,
+      const turnResponse = await nativeRuntime.submit(nativeHandle, { threadId: rootThreadId, cwd: workspace,
         ...(ordinary ? {} : { sandboxPolicy, approvalPolicy: auditApprovalPolicy }), input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, ordinary ? 30000 : timeoutMs);
       rootTurnId = turnResponse?.turn?.id;
       if (!validId(rootTurnId)) throw new Error('turn-start-missing-id');
@@ -895,7 +748,7 @@ export async function runAuditCapture(options = {}) {
       if (ordinary) {
         // Read the exact owned thread and turn; streamed commentary or another
         // history entry can never substitute for its recorded assistant output.
-        const recorded = await request('thread/read', { threadId: rootThreadId, includeTurns: true });
+        const recorded = await nativeRuntime.inspect(nativeHandle, { sessionId: rootThreadId, turnId: rootTurnId });
         if (recorded?.thread?.id !== rootThreadId || !Array.isArray(recorded.thread.turns))
           throw new Error('response-thread-mismatch');
         const turns = recorded.thread.turns.filter(turn => turn?.id === rootTurnId);
@@ -1264,34 +1117,17 @@ export async function runAuditCapture(options = {}) {
         rootComplete: complete, childAgentsComplete: !childWaitIncomplete };
     } catch (error) {
       run.status = 'partial'; run.reason = ordinary ? `App-server capture failed: ${error.message}` : 'App-server capture failed';
-      const code = error.code === 'requested-execution-unconfirmed' ? error.code : 'app-server-capture-failed';
-      if (code === 'requested-execution-unconfirmed') run.reason = error.message;
+      const code = ['requested-execution-unconfirmed', 'requested-approval-reviewer-unconfirmed'].includes(error.code)
+        ? error.code : 'app-server-capture-failed';
+      if (code !== 'app-server-capture-failed') run.reason = error.message;
       capture.errors.push({ code });
       recordWarning(code);
       capture.status = 'partial';
     } finally {
       rpcClosed = true;
-      settleInput();
+      if (nativeHandle) nativeRuntime.finish(nativeHandle);
     }
-    // Drain output iterator after all orchestration has finished.
-    return;
-  })();
-  // Drive the orchestration generator while servicing its queued JSON-RPC
-  // requests. It waits for responses through onEvent before advancing.
-  const drive = (async function* () {
-    let iterator = input[Symbol.asyncIterator]();
-    let pendingStep = iterator.next();
-    while (!rpcClosed) {
-      if (outgoing.length) { yield outgoing.shift(); continue; }
-      const item = await Promise.race([pendingStep.then(step => ({ step })), new Promise(resolve => outgoingWaiters.push(value => resolve({ value })))]);
-      if (item.step) {
-        if (item.step.done) break;
-        // input generator's work is side-effect driven; it normally emits no chunks.
-        if (item.step.value) yield item.step.value;
-        pendingStep = iterator.next();
-      } else if (item.value?.value) yield item.value.value;
-    }
-  })();
+  };
   let receiver = null, runtime = null, nativeArgs = [], nativeEnv = processOptions.env;
   let telemetrySnapshot = { events: [], metadata: { delivery: 'unknown',
     warnings: ['skill-telemetry-unavailable'] } };
@@ -1323,11 +1159,12 @@ export async function runAuditCapture(options = {}) {
       mechanism: 'macos-process-policy', scope: 'saved-profile-auth-config-instructions-agents-skills-rules',
       credentialCopies: false, savedPermissionsChanged: false,
       commandSandboxTransition: 'native-image-only-with-reentry-denied' };
-    process = await runAuditProcess({ executable: launch.executable,
-      args: launch.args, cwd: workspace,
-      env: nativeEnv, timeoutMs, outputLimitBytes: processOptions.outputLimitBytes,
-      stdoutPath: processOptions.stdoutPath, stderrPath: processOptions.stderrPath, signal: captureSignal,
-      onSpawn: async info => { spawnedProcess = info; await processOptions.onSpawn?.(info); }, onEvent, input: drive });
+    inputSettled = input({ client: 'codex', jobId: limits.id, profileId: profile.profileId,
+      executable: launch.executable, args: launch.args, workspace,
+      processOptions: { env: nativeEnv, timeoutMs, outputLimitBytes: processOptions.outputLimitBytes,
+        stdoutPath: processOptions.stdoutPath, stderrPath: processOptions.stderrPath } });
+    process = await nativeRuntime.completion;
+
   } finally {
     if (receiver) {
       try { telemetrySnapshot = await receiver.close() ?? receiver.snapshot(); }
@@ -1346,10 +1183,6 @@ export async function runAuditCapture(options = {}) {
   // returning so no late callback can mutate the persisted run snapshot.
   captureStopped = true;
   for (const waiter of notificationWaiters.splice(0)) { if (waiter.timer) clearTimeout(waiter.timer); waiter.resolve(null); }
-  for (const [key, finish] of [...pending]) finish({ error: { code: -32000 } });
-  for (const timer of rpcTimers.values()) clearTimeout(timer);
-  rpcTimers.clear();
-  if (!inputStarted) { rpcClosed = true; settleInput(); }
   await inputSettled;
   const tools = toolCapture.result();
   run.toolInvocations = tools.toolInvocations;

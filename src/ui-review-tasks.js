@@ -81,7 +81,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
   if (!store?.directory || typeof resolveComparison !== 'function') throw new TypeError('Review task service requires a store and comparison resolver');
   let root = join(store.directory, 'review-tasks'), canonicalStoreDirectory = null;
   const previews = new Map(), starting = new Map(), operations = new Map(), active = new Map(), pending = new Map(), saveChains = new Map();
-  const capture = createClientRuntime({ capture: context.capture }).capture;
+  const capture = createClientRuntime({ capture: context.capture, runtimes: context.clientRuntimes }).capture;
   const resolveProfile = context.resolveProfile ?? resolveProfileExecutionProfile;
   const recheckProfile = context.recheckProfile ?? recheckProfileExecutionProfile;
   const reserve = context.reserve ?? (({ root: profileRoot, owner, profile, options }) =>

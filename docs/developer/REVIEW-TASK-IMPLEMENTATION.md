@@ -41,6 +41,19 @@ provider, permissions, sandbox, instructions, skills, integrations, hooks and me
 Resolve with `resolveProfileExecutionProfile`, recheck at Start with
 `recheckProfileExecutionProfile`, then call `createClientRuntime().capture` (implemented by `runAuditCapture`) using `executionMode: 'profile'`,
 `profile.cwd`/`profile.env` and private output paths. The caller owns admission/durable tasks.
+Comparison and review contexts may supply `clientRuntimes[client]` capture
+implementations; unavailable clients are refused before dispatch. Shared capture
+projection validates the client, environment and native job/profile scope before
+checkpoint publication and final return. Records remain version 1; supplied
+qualified references must match their owner, and missing native IDs stay null.
+
+`codex-runtime.js` owns the process and JSON-RPC connection behind Codex capture.
+It initializes, creates one native session, submits once, consumes exact native
+responses once, cancels owned work and inspects its attached session. Native
+interrupt acknowledgement and process shutdown are separate observations.
+Cancellation, connection closure and native turn completion invalidate pending
+answers. Missing attached native state never falls back to a new thread;
+recovery continues through the existing retained-evidence readers without dispatch.
 
 - `onSession`: durable thread checkpoint before dispatch.
 - `onTurn({threadId, turnId})`: checkpoint acknowledgement before `running`; pending approvals remain answerable.

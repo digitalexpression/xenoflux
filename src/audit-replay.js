@@ -7,6 +7,7 @@ import { readAuditRecord } from './audit-experiment-store.js';
 import { auditRetainedNativeSession } from './audit-session.js';
 import { buildAuditComparisonConditions } from './audit-conditions.js';
 import { evaluateAuditQuality } from './audit-quality.js';
+import { retainedNativeReference } from './capture-projection.js';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -80,15 +81,17 @@ async function retainedContext(store, current, read) {
 export async function projectRetainedAuditRun(store, current, { read = readAuditRecord,
   readNative = auditRetainedNativeSession, includeReplay = false } = {}) {
   const original = current.report;
+  const reference = retainedNativeReference(original, current.record.profile, current.id ?? original?.id, original?.source?.threadId);
   if (current.record.kind !== 'audit-experiment-run' || !original
-    || original.source?.kind !== 'native-app-server-v2' || !UUID.test(original.source.threadId ?? '')) return original;
+    || reference?.client !== 'codex' || !UUID.test(reference.sessionId ?? '')
+    || original.source?.kind !== 'native-app-server-v2') return original;
   const projection = { schemaVersion: 1, mode: 'retained-evidence-read-only',
     originalReportFingerprint: digest(original), native: 'unavailable', context: 'unavailable',
     sourceAttestation: 'read-time-retained-snapshot' };
   let context;
   try { context = await retainedContext(store, current, read); projection.context = 'verified'; }
   catch { return { ...original, reportProjection: projection }; }
-  const saved = current.record.profile, rootId = original.source.threadId;
+  const saved = current.record.profile, rootId = reference.sessionId;
   if (saved.profileId !== original.profile?.profileId || saved.profileName !== original.profile?.profileName
     || saved.home !== original.profile?.home
     || !original.agents?.some(row => row.id === rootId && row.parentId == null))

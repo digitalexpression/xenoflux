@@ -317,18 +317,36 @@ The current implementation maps those responsibilities without another scheduler
 | Contract | Implementation |
 | --- | --- |
 | Identity and profile environment | `client-contracts.js`, `audit-profile.js`; ordinary resolution records the actual explicit `CODEX_HOME` route, including Default. Unknown effective runtime roots remain null. |
-| Runtime | `client-runtime.js` wraps the existing Codex capture and its durable callbacks; rejects contradictory client/job/profile/native identities. Other client execution is refused. |
+| Runtime | `client-runtime.js` dispatches local CLI capture through the selected `context.clientRuntimes[client]` implementation; Codex defaults to `runAuditCapture`. `codex-runtime.js` owns app-server initialization, submission, exact replies, cancellation and attached-session inspection. Missing implementations are refused. |
 | Catalog | `client-catalog.js` provides bounded pagination and initialized selection validation; `ui-catalog.js` owns explicit probes, exclusive claims and five-minute cache freshness. GET/preview never starts discovery. |
 | Desktop | `desktop-surface.js` delegates existing Codex ownership/lifecycle; `stock-desktop-apps.js` independently verifies vendor signature/build/executable before ordinary Claude/Copilot opening. Copilot app-local session navigation separately requires a registered scheme and a bounded opaque ID. Opening/navigation submits no new task; successful OS dispatch does not prove session association. |
-| Evidence | Normalized run/report/review records validate supplied client, native reference and environment attribution; missing older observations stay unknown. `claude-transcript.js` imports a private selected snapshot through the isolated official SDK file reader, separately from native execution. |
+| Evidence | `codex-decoder.js` interprets native fields; `capture-projection.js` qualifies shared run/checkpoint identities and settings. Normalized run/report/review records validate supplied client, native reference and environment attribution; missing older observations stay unknown. `claude-transcript.js` imports a private selected snapshot through the isolated official SDK file reader, separately from native execution. |
 
-The runtime row is identity validation around a single `runAuditCapture` call.
-Separate initialize, submit, respond, cancel and inspect operations do not exist
-yet; extracting them from `audit-capture.js` is package B.
+Codex capture initializes an owned process/connection, checkpoints process and
+native session ownership, then submits once through that runtime. Discovery and
+owned-child reads remain Codex-specific RPC operations. Replies consume the
+exact pending native request once; cancellation, connection closure or a terminal
+native turn invalidates it. Cancellation records native interrupt acknowledgement
+separately from process shutdown. Attached inspection requires the exact existing
+session/turn and rejects contradictory client/job/profile scope. Inspection
+without attached native state is unavailable and never initializes or submits work.
+
+A Codex comparison may freeze `approvalsReviewer: "user"` in its audit spec
+(`advanced.approvalsReviewer` in comparison preview requests). This requires an
+interactive request handler. The runtime sends the setting to `thread/start`
+and requires native confirmation of both `user` and `on-request` before
+submission. Missing or different confirmation stops the comparison. The choice
+lasts for the owned native session; saved settings and ordinary reviews keep
+their native reviewer. The run records requested, sent and confirmed reviewer
+evidence separately.
 
 Current audit/review records retain version 1 with additive identity/evidence and
 owner-generation fields; supported older version-1 records remain readable without
-rewriting originals. Once a reservation owner exists, checkpoint updates require
+rewriting originals. Client-qualified `nativeReference` fields carry client, job,
+profile and nullable native session/turn/item/request IDs. Readers validate supplied
+scope against the owning record; an absent native ID stays unknown and never
+becomes a local job ID or a fresh session. Existing retained-history readers remain
+read-only and separate from attached runtime inspection. Once a reservation owner exists, checkpoint updates require
 its exact generation under the record mutation gate. Catalog probe records use
 `xfx-catalog-probe` version 1 in the private controller store. Only confirmed
 shutdown releases a started probe's claim; cancellation after restart inspects

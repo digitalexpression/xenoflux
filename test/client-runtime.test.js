@@ -14,6 +14,38 @@ function profile() {
 }
 const nativeRun = () => ({ schemaVersion: 1, kind: 'audit-run', id: 'job-a', source: { threadId: 'shared-native-id' }, events: [], turns: [] });
 
+test('a second runtime shares capture projection and lifecycle dispatch without Codex transport', async () => {
+  const input = profile();
+  input.client = input.environmentBinding.client = 'claude-code';
+  const calls = [], handle = {};
+  const adapter = {
+    initialize: async binding => { calls.push(['initialize', binding.client]); return handle; },
+    submit: async (owned, task) => { assert.equal(owned, handle); calls.push(['submit', task]); },
+    respond: (owned, request, answer) => { assert.equal(owned, handle); calls.push(['respond', request, answer]); },
+    cancel: async owned => { assert.equal(owned, handle); calls.push(['cancel']); return { shutdown: { groupTerminated: true } }; },
+    inspect: async (owned, reference) => { assert.equal(owned, handle); calls.push(['inspect', reference]); return { status: 'ready' }; },
+    capture: async options => {
+      calls.push(['capture', options.profile.client]);
+      const run = { ...nativeRun(), source: {} };
+      const capture = { nativeReference: { sessionId: 'second-native-session', turnId: 'second-turn' } };
+      await options.onSession(run, capture);
+      return { run, capture };
+    },
+  };
+  const runtime = createClientRuntime({ capture: () => assert.fail('Codex transport selected'), runtimes: { 'claude-code': adapter } });
+  const initialized = await runtime.initialize({ client: 'claude-code' });
+  await runtime.submit(initialized, { text: 'frozen task' });
+  runtime.respond(initialized, { id: 'request' }, { decision: 'accept' });
+  await runtime.inspect({ sessionId: 'second-native-session' }, { handle: initialized });
+  assert.equal((await runtime.cancel(initialized)).shutdown.groupTerminated, true);
+  const { run } = await runtime.capture({ executionMode: 'profile', jobId: 'job-a', profile: input, workspace: input.cwd });
+  assert.equal(run.clientIdentity.client, 'claude-code');
+  assert.deepEqual(run.nativeReference, { client: 'claude-code', jobId: 'job-a', profileId: 'profile-a',
+    sessionId: 'second-native-session', turnId: 'second-turn', itemId: null, requestId: null });
+  assert.deepEqual(calls.map(([name]) => name), ['initialize', 'submit', 'respond', 'inspect', 'cancel', 'capture']);
+  assert.throws(() => runtime.respond({}, {}, {}), /Unavailable runtime operation/);
+});
+
 test('runtime qualifies checkpoint and final evidence without manufacturing missing native IDs', async () => {
   const checkpoints = [], input = profile();
   const evidence = { settingsEvidence: { requested: {}, sent: {}, confirmed: null, observed: null } };

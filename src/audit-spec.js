@@ -20,6 +20,11 @@ const NATIVE_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'h
 
 export const selectionKey = selection => selection.sideId ?? selection.name.toLowerCase();
 
+export function validateAuditApprovalsReviewer(value) {
+  if (value !== undefined && value !== 'user') throw new Error('Comparison approval reviewer must be user or inherited');
+  return value;
+}
+
 export function validateExecution(value) {
   if (value === undefined) return undefined;
   allowed(value, ['model', 'reasoningEffort'], 'execution settings');
@@ -87,7 +92,7 @@ function taskContract(value) {
 
 /** Freeze one task, committed baseline, selected setups and bounded execution recipe. */
 export function validateAuditSpec(value) {
-  allowed(value, ['schemaVersion', 'repository', 'revision', 'task', 'taskContract', 'profiles', 'limits', 'setup', 'checks', 'sandbox', 'allowIncompleteCapture', 'captureRequirements', 'quality', 'trials', 'variables'], 'experiment specification');
+  allowed(value, ['schemaVersion', 'repository', 'revision', 'task', 'taskContract', 'profiles', 'limits', 'setup', 'checks', 'sandbox', 'approvalsReviewer', 'allowIncompleteCapture', 'captureRequirements', 'quality', 'trials', 'variables'], 'experiment specification');
   if (value.schemaVersion !== 1 || !plain(value.repository) || !value.repository.startsWith('/')
     || resolve(value.repository) !== value.repository || !plain(value.revision, 200))
     throw new Error('Specify schemaVersion 1, an absolute repository and explicit Git revision');
@@ -133,6 +138,7 @@ export function validateAuditSpec(value) {
     maxRuns: integer(value.limits?.maxRuns, profiles.length, profiles.length, 8, 'maxRuns') };
   const sandbox = value.sandbox ?? 'workspace-write';
   if (!['read-only', 'workspace-write'].includes(sandbox)) throw new Error('Audit sandbox must be read-only or workspace-write');
+  const approvalsReviewer = validateAuditApprovalsReviewer(value.approvalsReviewer);
   if (value.allowIncompleteCapture !== undefined && typeof value.allowIncompleteCapture !== 'boolean') throw new Error('allowIncompleteCapture must be a boolean');
   const setup = commands(value.setup, 'setup'), checks = commands(value.checks, 'check');
   const contract = taskContract(value.taskContract);
@@ -152,7 +158,7 @@ export function validateAuditSpec(value) {
     || value.variables.some(item => !plain(item, 160)) || new Set(value.variables).size !== value.variables.length))
     throw new Error('Intended setup variables require a trial schedule and distinct plain labels');
   return { schemaVersion: 1, repository: value.repository, revision: value.revision, task: value.task, profiles, limits,
-    setup, checks, sandbox, allowIncompleteCapture: value.allowIncompleteCapture ?? false,
+    setup, checks, sandbox, ...(approvalsReviewer ? { approvalsReviewer } : {}), allowIncompleteCapture: value.allowIncompleteCapture ?? false,
     ...(contract ? { taskContract: contract } : {}),
     ...(captureRequirements ? { captureRequirements } : {}),
     ...(quality ? { quality } : {}), ...(trials ? { trials, variables: value.variables ?? [] } : {}) };

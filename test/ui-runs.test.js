@@ -17,6 +17,37 @@ async function fixture(t, mode) {
   return app;
 }
 const request = app => ({ task: 'PRIVATE U3 TASK TEXT', files: '', a: 'baseline', b: 'strict-review', repository: app.repository, commit: 'HEAD', checks: [] });
+
+test('a fake second client completes a comparison through the runtime registry and retained reports', async t => {
+  const app = await fixture(t);
+  const dispatched = [];
+  const capture = client => async input => {
+    dispatched.push(client);
+    assert.equal(input.profile.client, client);
+    return app.runContext.capture(input);
+  };
+  const service = createUiRuns({ store: app.store, defaultUserHome: join(app.root, 'default-user-home'),
+    context: { ...app.runContext, capture: capture('codex'),
+      clientRuntimes: { 'claude-code': { capture: capture('claude-code') } },
+      resolveProfile: async (...args) => {
+        const profile = await resolveAuditExecutionProfile(...args);
+        if (profile.profileName !== 'strict-review') return profile;
+        return { ...profile, client: 'claude-code', ...(profile.environmentBinding ? { environmentBinding: { ...profile.environmentBinding, client: 'claude-code' } } : {}) };
+      },
+    } });
+  t.after(() => service.close());
+  const preview = await service.runPreview(request(app));
+  assert.equal(preview.ready, true);
+  const started = await service.startRun({ previewToken: preview.previewToken });
+  const done = await waitFor(() => service.run(started), value => value.state !== 'running', 'Mixed fixture comparison did not finish');
+  const parent = await readAuditRecord(app.store, started.id);
+  assert.equal(done.state, 'finished', JSON.stringify(parent.report.failures));
+  assert.deepEqual(dispatched, ['codex', 'claude-code']);
+  const children = await Promise.all(parent.state.runs.map(({ id }) => readAuditRecord(app.store, id)));
+  assert.deepEqual(children.map(child => child.report.clientIdentity.client), ['codex', 'claude-code']);
+  assert.deepEqual(children.map(child => child.report.nativeReference.client), ['codex', 'claude-code']);
+  assert.ok(done.reportHref);
+});
 async function waitFor(read, predicate, message) {
   const end = Date.now() + 15000;
   while (Date.now() < end) {

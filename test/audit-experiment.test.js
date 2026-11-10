@@ -613,6 +613,23 @@ test('runs a real bounded two-profile experiment, retains task-end evidence befo
   assert.equal(await launchCount(f.counter), launchCountAfterRuns);
 });
 
+test('recovery does not reinterpret another client’s saved native session as Codex', async t => {
+  const f = await fixture(t);
+  const experiment = await createExperiment(f.store, { spec: f.spec, task: 'Interrupted runtime fixture', profiles: [] });
+  const run = await createExperimentRun(f.store, { experimentId: experiment.id,
+    profile: { profileId: 'fixture-profile', profileName: 'Alpha', home: f.native[0].home, client: 'claude-code' } });
+  await writeAuditState(f.store, run.id, { status: 'running', phase: 'task', coordinator: {
+    pid: 987654321, started: 'fixture', host: hostname(),
+  }, nativeSessionId: '11111111-1111-4111-8111-111111111111' });
+  let reads = 0;
+  const recovered = await recoverAuditExperiment(f.store, run.id, { apply: true,
+    observeProcess: async () => ({ status: 'stopped' }), readNative: async () => { reads++; } });
+  assert.equal(recovered.status, 'recovered');
+  assert.equal(recovered.runs[0].execution.recovery, 'process-stopped-no-rerun');
+  assert.equal(recovered.runs[0].profile.client, 'claude-code');
+  assert.equal(reads, 0);
+});
+
 test('reconciles a dead coordinator from persisted workspace evidence without rerunning native work; preserves uncertain owners', async t => {
   const f = await fixture(t);
   const spec = { ...f.spec, profiles: [{ name: 'Alpha' }, { name: 'Beta' }], checks: [], setup: [] };

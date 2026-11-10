@@ -47,6 +47,7 @@ function requestSpec(request) {
       ...(advanced.program ? { executable: advanced.program } : {}), execution: execution && Object.hasOwn(execution, sideId) ? execution[sideId] : defaultExecution })),
     limits: { runMs, ...(runMs === null ? { experimentMs: null } : {}), outputBytes: (advanced.outputMiB ?? 8) * 1024 * 1024, maxRuns: 2 },
     checks: commandList(request.checks), setup: commandList(advanced.setup), sandbox: advanced.sandbox ?? 'workspace-write',
+    ...(Object.hasOwn(advanced, 'approvalsReviewer') ? { approvalsReviewer: advanced.approvalsReviewer } : {}),
     allowIncompleteCapture: true, ...(files.length ? { taskContract: { id: 'ui-task', editableFiles: files } } : {}) });
 }
 
@@ -70,6 +71,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       const value = await readJSON(join(root, `${id}.json`));
       if (value?.id !== id || !Array.isArray(value.profiles) || value.profiles.length !== 2
         || (value.sideIds !== undefined && !same(value.sideIds, ['a', 'b']))
+        || (value.approvalsReviewer !== undefined && value.approvalsReviewer !== 'user')
         || value.profiles.some(name => typeof name !== 'string' || !name.trim()) || !Number.isFinite(Date.parse(value.createdAt))) throw new Error('Invalid UI run receipt');
       return value;
     }
@@ -108,6 +110,8 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     if (!same(fresh.preview.baseline, reviewed.preview.baseline)) changes.push({ reason: 'baseline-changed',
       fields: [...new Set([...Object.keys(reviewed.preview.baseline ?? {}), ...Object.keys(fresh.preview.baseline ?? {})])]
         .filter(key => !same(reviewed.preview.baseline?.[key], fresh.preview.baseline?.[key])) });
+    if (fresh.preview.limits?.approvalsReviewer !== reviewed.preview.limits?.approvalsReviewer)
+      changes.push({ reason: 'approval-reviewer-changed', fields: ['approvalsReviewer'] });
     if (!same(fresh.profiles, reviewed.profiles)) {
       if (fresh.profiles.length !== reviewed.profiles.length) changes.push({ reason: 'profile-identity-changed', fields: ['resolved-profile-count'] });
       else for (const [index, before] of reviewed.profiles.entries()) {
@@ -153,13 +157,14 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       reason: preview.failures.map(failure => `${failure.profile ? `${failure.profile}: ` : ''}${failure.message}`).join(' ') },
       summary: `2 model runs, one after the other · ${minutes(spec.limits.experimentMs)}`, limit: minutes(spec.limits.experimentMs),
       task: spec.task, files: spec.taskContract?.editableFiles.join(', ') ?? '',
+      ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
       runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: profile.profileName, text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'}` })),
       where: [preview.baseline?.repository ?? spec.repository, `Pinned commit: ${preview.baseline?.commit ?? 'not available'}`,
         'Each profile starts in a separate checkout of this commit. Uncommitted edits and untracked or ignored files are excluded.',
         'Workspace preparation preserves the source checkout. Task, setup and check commands can have effects outside their copy.'],
       checks: spec.checks.map(check => `${check.name}: ${check.argv[2]} (up to ${minutes(check.timeoutMs)})`),
       limits: [`${minutes(spec.limits.runMs)} per profile; ${minutes(spec.limits.experimentMs)} overall.`,
-        `Codex access: ${spec.sandbox}; network disabled inside the sandbox. Native approvals are shown during the run. Output per program: ${spec.limits.outputBytes / 1024 / 1024} MiB.`,
+        `Codex access: ${spec.sandbox}; network disabled inside the sandbox. ${spec.approvalsReviewer ? 'Codex must confirm approval routing to you before a task starts.' : 'Approval routing follows the native profile settings.'} Output per program: ${spec.limits.outputBytes / 1024 / 1024} MiB.`,
         ...spec.setup.map(command => `Setup before each task: ${command.name}: ${command.argv[2]} (ordinary program outside the Codex sandbox).`),
         'Native skill-use capture is best effort; incomplete evidence stays explicit. No automatic review or rating is run.'],
       willDo: ['Start exactly two real model tasks using the selected profiles’ sign-ins.', 'Run only the setup and verification commands listed here.', 'Retain the evidence and open the shared comparison report.'],
@@ -182,7 +187,8 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         'preview-stale', { changes });
       if (closing) throw new UiError(409, 'Xenoflux stopped while checking the preview. No task started.', 'stopping');
       await privateDirectory(store.directory, true); await privateDirectory(root, true);
-      const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.spec.profiles.map(profile => profile.name), sideIds: reviewed.spec.profiles.map(profile => profile.sideId) };
+      const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.spec.profiles.map(profile => profile.name), sideIds: reviewed.spec.profiles.map(profile => profile.sideId),
+        ...(reviewed.spec.approvalsReviewer ? { approvalsReviewer: reviewed.spec.approvalsReviewer } : {}) };
       try { await writeFile(join(root, `${token}.json`), JSON.stringify(entry) + '\n', { flag: 'wx', mode: 0o600 }); }
       catch (error) { if (error.code === 'EEXIST') return { id: token }; throw error; }
       if (closing) {
@@ -287,6 +293,8 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       const hasNativeActivity = (outcome.turns?.length ?? record?.captureCheckpoint?.run?.turns?.length ?? 0) > 0
         || ['completed', 'failed'].includes(nativeStatus) || checks.length > 0;
       const startupSandboxUnavailable = !hasNativeActivity && captureErrors.some(error => error?.code === 'startup-command-sandbox-unavailable');
+      const reviewerUnavailable = !hasNativeActivity && captureErrors.some(error => error?.code === 'requested-approval-reviewer-unconfirmed');
+      const preflightUnavailable = startupSandboxUnavailable || reviewerUnavailable;
       const started = phase !== 'not-started' && Boolean(outcome.sourceWorkspace?.directory || record?.state.workspace?.finalFingerprint
         || (['setup', 'task', 'capture', 'checks', 'complete'].includes(phase) && record?.state.workspace?.directory));
       // Process elapsed time is not evidence that a native model turn began or completed.
@@ -300,9 +308,9 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         { text: 'Prepared copy', state: phaseState(0, started) },
         { text: spec?.setup?.length ? 'Setup commands' : 'No setup commands selected', state: !spec?.setup?.length ? 'skipped'
           : setup.some(item => item.status === 'failed') ? 'failed' : phaseState(1, phaseAt > 1 || (setup.length === spec.setup.length && setup.every(item => item.status === 'passed'))) },
-        { text: neverStarted ? 'Model task not started' : startupSandboxUnavailable ? 'Model task did not start' : !live && !taskCompleted ? 'Model task stopped; completion not recorded' : 'Model task',
-          state: neverStarted ? 'skipped' : startupSandboxUnavailable || nativeStatus === 'failed' ? 'failed' : phaseState(2, taskCompleted) },
-        { text: !spec?.checks?.length ? 'No verification checks selected' : startupSandboxUnavailable ? 'Verification checks skipped' : 'Verification checks', state: startupSandboxUnavailable || !spec?.checks?.length ? 'skipped'
+        { text: neverStarted ? 'Model task not started' : preflightUnavailable ? 'Model task did not start' : !live && !taskCompleted ? 'Model task stopped; completion not recorded' : 'Model task',
+          state: neverStarted ? 'skipped' : preflightUnavailable || nativeStatus === 'failed' ? 'failed' : phaseState(2, taskCompleted) },
+        { text: !spec?.checks?.length ? 'No verification checks selected' : preflightUnavailable ? 'Verification checks skipped' : 'Verification checks', state: preflightUnavailable || !spec?.checks?.length ? 'skipped'
           : checks.some(item => item.status === 'failed') ? 'failed' : phaseState(3, checks.length === spec.checks.length && checks.every(item => item.status === 'passed')) },
         { text: 'Evidence saved', state: record?.finalized ? 'done' : phaseState(4, false) },
       ];
@@ -310,6 +318,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       const waitingForUser = live && [...work.pendingRequests.values()].some(request => request.side === side);
       return { side, profile, state: waitingForUser ? 'Waiting for your response' : record?.state.status ?? 'Not started',
         failure: startupSandboxUnavailable ? 'The native command sandbox could not be verified, so the model task did not start.'
+          : reviewerUnavailable ? 'Codex did not confirm user approval routing, so the model task did not start.'
           : captureErrors.some(error => error?.code === 'requested-execution-unconfirmed') ? 'Codex did not confirm the requested model or reasoning effort. The model turn did not start.'
             : captureErrors.some(error => error?.code === 'native-request-failed') ? 'The native approval or input request could not be handled.' : null,
         steps };
