@@ -1,4 +1,4 @@
-// Selective copy of individually inventoried Codex items. Selection IDs are
+// Selective copy of individually inventoried same-client items. Selection IDs are
 // resolved against a fresh inventory; no path supplied by a caller is used.
 import { lstat, open, readdir, realpath, mkdir, writeFile, rename, unlink, rmdir, readFile, chmod } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -6,11 +6,82 @@ import { dirname, join, relative, resolve, sep, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { parse, stringify } from 'smol-toml';
-import { inspectProfile } from './profile-inventory.js';
+import { inspectCopyProfile, CLIENT_COPY_SETTINGS, clientCopyPath, validClientSetting } from './copy-client.js';
 import { resolveNativeSettingsHome } from './native-copy.js';
 import { redactText, redactValue } from './redact.js';
 import { supportsNativeProvider } from './native-config.js';
 import { privateDirectory } from './metadata.js';
+
+const settingsTokens = /"(?:\\.|[^"\\])*"|[{}[\]:,]|[^\s{}[\]:,]+/g;
+function parseCopySettings(text) {
+  let value;
+  try { value = JSON.parse(text); } catch { throw new Error('Copy requires strict JSON settings'); }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected settings object');
+  // Duplicate keys have ambiguous ownership, including in unselected objects.
+  const frames = [];
+  const tokens = text.match(settingsTokens) ?? [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token === '{') frames.push(new Set());
+    else if (token === '[') frames.push(null);
+    else if (token === '}' || token === ']') frames.pop();
+    else if (token.startsWith('"') && tokens[i + 1] === ':') {
+      const key = JSON.parse(token), frame = frames.at(-1);
+      if (!frame || frame.has(key) || ['__proto__', 'constructor', 'prototype'].includes(key)) throw new Error('Ambiguous settings field ownership');
+      frame.add(key);
+    }
+  }
+  return value;
+}
+// Replace only selected top-level scalar spans; retain every other byte, including
+// unknown values whose numbers cannot round-trip through JavaScript's Number.
+function updateCopySettings(text, values) {
+  const tokens = [...text.matchAll(settingsTokens)];
+  const replacements = [], present = new Set();
+  let depth = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i][0];
+    if (depth === 1 && token.startsWith('"') && tokens[i + 1]?.[0] === ':') {
+      const key = JSON.parse(token);
+      if (values.has(key)) {
+        // Eligible source values are scalars; an existing destination may be any JSON value.
+        const start = i + 2; let end = start, nested = 0;
+        do {
+          const value = tokens[end][0];
+          if (value === '{' || value === '[') nested++;
+          else if (value === '}' || value === ']') nested--;
+          if (nested > 0) end++;
+        } while (nested > 0);
+        replacements.push({ start: tokens[start].index, end: tokens[end].index + tokens[end][0].length, text: JSON.stringify(values.get(key)) });
+        present.add(key);
+      }
+    }
+    if (token === '{' || token === '[') depth++;
+    else if (token === '}' || token === ']') depth--;
+  }
+  const additions = [...values].filter(([key]) => !present.has(key));
+  if (additions.length) replacements.push({ start: tokens.at(-1).index, end: tokens.at(-1).index,
+    text: (Object.keys(JSON.parse(text)).length ? ',' : '') + additions.map(([key, value]) => JSON.stringify(key) + ':' + JSON.stringify(value)).join(',') });
+  for (const edit of replacements.sort((a, b) => b.start - a.start)) text = text.slice(0, edit.start) + edit.text + text.slice(edit.end);
+  return text;
+}
+
+function assertPortableDefinition(text) {
+  if (/^---(?:\r?\n)/.test(text)) {
+    const end = /\n---[ \t]*(?:\r?\n|$)/.exec(text.slice(3));
+    if (!end) throw new Error('Unknown definition frontmatter ownership');
+    const header = text.slice(3, end.index + 3);
+    const fields = new Set();
+    for (const line of header.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const field = /^(name|description|model|color|argument-hint|user-invocable|disable-model-invocation):[^\r\n]*$/.exec(line)?.[1];
+      if (!field || fields.has(field)) throw new Error('Unknown or integration-bearing definition ownership');
+      fields.add(field);
+    }
+  }
+  if (/"(?:hooks|mcpServers|mcp-servers|plugins)"\s*:|^(?:hooks|mcpServers|mcp-servers|plugins):/m.test(text))
+    throw new Error('Integration definitions require native/manual setup');
+}
 
 const MAX_FILES = 256, MAX_FILE = 4 * 1024 * 1024, MAX_TOTAL = 32 * 1024 * 1024;
 const sha = data => createHash('sha256').update(data).digest('hex');
@@ -84,10 +155,10 @@ async function tree(root, sourcePath, destination, {allowEmpty=false}={}) {
   if (!out.length&&!allowEmpty) throw new Error('Cannot copy an empty skill package');
   return {files:out,directories};
 }
-async function resolveSelection(store, source, selection, defaultUserHome) {
+async function resolveSelection(store, source, selection, defaultUserHome, options = {}) {
   if (!Array.isArray(selection) || selection.some(x => typeof x !== 'string') || new Set(selection).size !== selection.length)
     throw new Error('Choose zero or more inventoried item IDs');
-  const inventory = await inspectProfile(store, source, { defaultUserHome, includeProjects: false, copyOnly:true });
+  const inventory = await inspectCopyProfile(store, source, { defaultUserHome, ...options });
   const byId = new Map(inventory.items.map(x => [x.id, x]));
   const items = selection.map(id => {
     const item = byId.get(id);
@@ -97,8 +168,18 @@ async function resolveSelection(store, source, selection, defaultUserHome) {
   });
   return { inventory, items };
 }
-export async function selectAdvancedComponents(store, source, components, {defaultUserHome=homedir()}={}) {
-  const inventory=await inspectProfile(store,source,{defaultUserHome,includeProjects:false,copyOnly:true});
+export async function selectAdvancedComponents(store, source, components, {defaultUserHome=homedir(), ...options}={}) {
+  const inventory=await inspectCopyProfile(store,source,{defaultUserHome, ...options});
+  if (options.clientId && options.clientId !== 'codex') {
+    const categories = { config: 'config', instructions: 'instruction', agents: 'agent' };
+    for (const category of components.map(c => categories[c])) {
+      if (inventory.items.some(item => item.category === category && item.status !== 'missing' && !item.copyable && item.label !== 'settings.json'))
+        throw new Error('Selected category contains unsafe or unsupported items; choose individual supported items');
+      if (inventory.coverage?.[{ config: 'config', instruction: 'instructions', agent: 'agents' }[category]] !== 'complete')
+        throw new Error('Selected category inventory is partial; choose individual supported items');
+    }
+    return inventory.items.filter(item => item.copyable && components.some(c => categories[c] === item.transfer.kind)).map(item => item.id);
+  }
   const profileItems=inventory.items.filter(item=>item.scope==='profile'&&item.origin===inventory.profile.name&&item.copyable&&item.transfer);
   const inScope=inventory.items.filter(item=>item.scope==='profile'&&item.origin===inventory.profile.name);
   if(components.includes('config')&&inScope.some(item=>item.category==='config'&&item.label==='config.toml'&&!/^Missing/.test(item.reason??''))) {
@@ -122,9 +203,9 @@ export async function selectAdvancedComponents(store, source, components, {defau
     return false;
   }).map(item=>item.id);
 }
-export async function validateAdvancedSelection(store, source, selection, { defaultUserHome = homedir() } = {}) {
-  const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome);
-  const sourceEndpoint=await resolveNativeSettingsHome(store,source,{defaultUserHome});
+export async function validateAdvancedSelection(store, source, selection, { defaultUserHome = homedir(), clientId, binding, sourceBinding = binding } = {}) {
+  const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome, { clientId, binding: sourceBinding });
+  const sourceEndpoint=await resolveNativeSettingsHome(store,source,{defaultUserHome, clientId, binding: sourceBinding});
   // Read every selected source payload now, before profile creation. This is
   // deliberately reused by planning so unsafe packages never reach the UI as eligible.
   const root = inventory.profile.home;
@@ -132,20 +213,28 @@ export async function validateAdvancedSelection(store, source, selection, { defa
   for (const item of items) {
     const payload=await sourcePayload(item,root,defaultUserHome,sourceEndpoint);
     const files=payload.kind==='tree'?payload.files:payload.kind==='file'?[payload.file]:[];
-    previews.push({id:item.id,label:item.label,status:'new',origin:item.origin,scope:item.scope,sourcePath:item.transfer.sourcePath,changes:payload.kind==='config'?[{path:'config.toml:'+payload.key,action:'new',after:previewValue(payload.value)}]:files.map(f=>({path:f.path,action:'add',after:preview(f.after,f.path),afterMode:f.afterMode}))});
+    previews.push({id:item.id,label:item.label,status:'new',origin:item.origin,scope:item.scope,sourcePath:item.transfer.sourcePath,changes:payload.kind==='config'?[{path:item.transfer.path+':'+payload.key,action:'new',after:previewValue(payload.value)}]:files.map(f=>({path:f.path,action:'add',after:preview(f.after,f.path),afterMode:f.afterMode}))});
   }
   return { valid: true, selection: items.map(x => x.id), source: inventory.profile, items:previews };
 }
 async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint) {
   const t = item.transfer;
   if (!validRel(t.path) || typeof t.sourcePath !== 'string') throw new Error('Invalid generated transfer descriptor');
-  const expectedRoot = item.scope !== 'user' ? profileHome : item.origin === 'user' ? join(defaultUserHome,'.agents') : join(sourceEndpoint.root,'user-home','.agents');
+  const nativeClient = sourceEndpoint.clientId && sourceEndpoint.clientId !== 'codex';
+  if (nativeClient && !clientCopyPath(sourceEndpoint.clientId, t.path, t.kind)) throw new Error('Unsupported client transfer ownership');
+  const expectedRoot = nativeClient ? profileHome : item.scope !== 'user' ? profileHome : item.origin === 'user' ? join(defaultUserHome,'.agents') : join(sourceEndpoint.root,'user-home','.agents');
   const expected = join(expectedRoot, t.path);
   if (resolve(t.sourcePath) !== expected || !inside(expectedRoot, expected)) throw new Error('Generated item path does not match its inventory scope');
   await parentSafe(expectedRoot, expected);
   if (t.kind === 'config') {
     const f = await readSafe(expected, { text: true }); if (!f) throw new Error('Selected config source is missing');
-    const config = parse(f.content), key = t.key;
+    const config = nativeClient ? parseCopySettings(f.content) : parse(f.content), key = t.key;
+    if (nativeClient) {
+      if (!CLIENT_COPY_SETTINGS[sourceEndpoint.clientId].includes(key)) throw new Error('Unsupported client setting');
+      const value = config[key];
+      if (!validClientSetting(key, value)) throw new Error('Unsupported client setting value');
+      return { kind: 'config', key, value, sourcePath: expected, sourceMode: f.mode };
+    }
     if (!supportsNativeProvider(config))
       throw new Error('Config copy does not support custom model providers in the source');
     if (typeof key !== 'string' || !/^(?:[A-Za-z_][\w-]*|agents\.[A-Za-z_][\w-]*|features\.multi_agent)$/.test(key)) throw new Error('Unsupported config key');
@@ -154,10 +243,22 @@ async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint)
     if (JSON.stringify(redactValue(value, key)) !== JSON.stringify(value)) throw new Error('Credential-like content in selected setting; copy refused: '+t.path+':'+key);
     return { kind:'config', key, value, sourcePath:expected };
   }
-  if (t.kind === 'skill') return { kind:'tree', ...await tree(expectedRoot, expected, t.path) };
+  if (t.kind === 'skill') {
+    const payload = await tree(expectedRoot, expected, t.path);
+    if (nativeClient) assertPortablePackage(payload);
+    return { kind:'tree', ...payload };
+  }
   const f = await readSafe(expected, { text: true }); if (!f) throw new Error('Selected source file is missing');
+  if (nativeClient) assertPortableDefinition(f.content);
   if(redactText(f.content,expected)!==f.content) throw new Error('Credential-like content in selected settings; copy refused: '+t.path);
   return { kind:'file', file:{ path:t.path, after:f.data, afterMode:f.mode, sha256:sha(f.data) } };
+}
+function assertPortablePackage({ files }) {
+  for (const file of files) {
+    if (/(?:^|\/)(?:auth|credentials?|tokens?|config|settings|history|sessions?|hooks|mcp(?:-config)?|plugin)\.(?:jsonl?|ya?ml)$/i.test(file.path))
+      throw new Error('Native state or integration file in selected skill package');
+    if (/\.(?:md|json|ya?ml)$/i.test(file.path)) assertPortableDefinition(new TextDecoder('utf-8', { fatal: true }).decode(file.after));
+  }
 }
 function fingerprintPayload(payload) {
   const parts = payload.kind === 'tree' ? [
@@ -165,12 +266,12 @@ function fingerprintPayload(payload) {
     ...payload.directories.map(d => ['directory', d.path, d.mode]),
   ].sort((a,b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
     : payload.kind === 'file' ? [['file', payload.file.path, payload.file.afterMode, sha(payload.file.after)]]
-      : [['config.toml:' + payload.key, sha(Buffer.from(JSON.stringify(payload.value)))]];
+      : [[payload.sourcePath + ':' + payload.key, sha(Buffer.from(JSON.stringify(payload.value))), payload.sourceMode ?? null]];
   return sha(Buffer.from(JSON.stringify(parts)));
 }
-export async function fingerprintAdvancedSelection(store, source, selection, { defaultUserHome = homedir(), skipUnsafe = false } = {}) {
-  const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome);
-  const endpoint = await resolveNativeSettingsHome(store, source, { defaultUserHome });
+export async function fingerprintAdvancedSelection(store, source, selection, { defaultUserHome = homedir(), skipUnsafe = false, clientId, binding, sourceBinding = binding } = {}) {
+  const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome, { clientId, binding: sourceBinding });
+  const endpoint = await resolveNativeSettingsHome(store, source, { defaultUserHome, clientId, binding: sourceBinding });
   const result = Object.create(null);
   for (const item of items) {
     try { result[item.id] = fingerprintPayload(await sourcePayload(item, inventory.profile.home, defaultUserHome, endpoint)); }
@@ -187,21 +288,28 @@ function preview(data,path) {
 }
 
 /** Build item-granular operations and a redacted UI report. */
-export async function buildAdvancedCopy(store, source, target, selection, { defaultUserHome = homedir() } = {}) {
-  const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome);
-  const sourceEndpoint = await resolveNativeSettingsHome(store, source, { defaultUserHome });
-  const targetEndpoint = await resolveNativeSettingsHome(store, target, { defaultUserHome });
-  const destinationInventory=await inspectProfile(store,target,{defaultUserHome,includeProjects:false,copyOnly:true});
+export async function buildAdvancedCopy(store, source, target, selection, { defaultUserHome = homedir(), clientId, binding, sourceBinding = binding, targetBinding } = {}) {
+  const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome, { clientId, binding: sourceBinding });
+  const sourceEndpoint = await resolveNativeSettingsHome(store, source, { defaultUserHome, clientId, binding: sourceBinding });
+  const targetEndpoint = await resolveNativeSettingsHome(store, target, { defaultUserHome, clientId, binding: targetBinding });
+  const destinationInventory=await inspectCopyProfile(store,target,{defaultUserHome, clientId, binding: targetBinding});
+  if ((sourceEndpoint.clientId ?? 'codex') !== (targetEndpoint.clientId ?? 'codex')) throw new Error('Cross-client copying is unsupported');
+  const nativeClient = clientId && clientId !== 'codex';
+  const configPath = nativeClient ? 'settings.json' : 'config.toml';
+  const parseConfig = nativeClient ? parseCopySettings : parse;
   const payloads = [];
   const sourceFingerprints = Object.create(null);
   const configItems = items.filter(x => x.transfer.kind === 'config');
   if (configItems.length) {
     if(new Set(configItems.map(x=>x.transfer.key)).size!==configItems.length) throw new Error('Selected config keys collide at the destination');
-    const targetPath = join(targetEndpoint.home,'config.toml');
+    const targetPath = join(targetEndpoint.home,configPath);
     await parentSafe(targetEndpoint.home,targetPath);
-    const current = await readSafe(targetPath,{text:true}); if (!current) throw new Error('Destination configuration is missing');
-    const destinationConfig=parse(current.content);
-    if(!supportsNativeProvider(destinationConfig))
+    let current = await readSafe(targetPath,{text:true});
+    if (!current && !nativeClient) throw new Error('Destination configuration is missing');
+    const missingConfig = !current;
+    current ??= { content: '{}', data: null, mode: 0o600 };
+    const beforeObj = parseConfig(current.content);
+    if (!nativeClient && !supportsNativeProvider(beforeObj))
       throw new Error('Config copy does not support custom model providers in the destination');
     const sourceValues = new Map();
     for(const item of configItems) {
@@ -209,9 +317,12 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
       sourceFingerprints[item.id] = fingerprintPayload(value);
       sourceValues.set(item.id, value.value);
     }
-    const beforeObj = parse(current.content), afterObj = parse(current.content);
+    const afterObj = parseConfig(current.content);
     for(const item of configItems) {
-      const parts=item.transfer.key.split('.'); let node=beforeObj;
+      const key = item.transfer.key;
+      if (nativeClient && Object.hasOwn(beforeObj, key) && !validClientSetting(key, beforeObj[key]))
+        throw new Error('Unsupported destination value for selected setting: ' + key);
+      const parts=key.split('.'); let node=beforeObj;
       for(const part of parts.slice(0,-1)) {
         if(node[part]===undefined) break;
         if(!node[part]||typeof node[part]!=='object'||Array.isArray(node[part])||node[part] instanceof Date)
@@ -221,12 +332,18 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     }
     for (const item of configItems) setKey(afterObj,item.transfer.key,sourceValues.get(item.id));
     // Native named homes require this flag for their symlinked CODEX_HOME.
-    const enforcedSymlink=afterObj.allow_symlinked_codex_home!==true;
-    afterObj.allow_symlinked_codex_home = true;
+    const enforcedSymlink=!nativeClient && afterObj.allow_symlinked_codex_home!==true;
+    if (!nativeClient) afterObj.allow_symlinked_codex_home = true;
     const configChanged=Object.keys(afterObj).some(k=>JSON.stringify(afterObj[k])!==JSON.stringify(beforeObj[k]));
-    const serialized=configChanged?Buffer.from(stringify(afterObj)):current.data;
-    if(!serialized.equals(current.data)&&serialized.length>MAX_SERIALIZED_CONFIG) throw new Error('Selected configuration exceeds the bounded native config limit');
-    if(!serialized.equals(current.data)) payloads.push({path:'config.toml',before:current.data, beforeMode:current.mode, after:serialized, afterMode:current.mode});
+    if (configChanged) {
+      const changed = configItems.map(item => [item.transfer.key, sourceValues.get(item.id)])
+        .filter(([key, value]) => beforeObj[key] !== value);
+      let serialized = Buffer.from(nativeClient ? updateCopySettings(current.content, new Map(changed)) : stringify(afterObj));
+      if (nativeClient && current.data?.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf])))
+        serialized = Buffer.concat([current.data.subarray(0, 3), serialized]);
+      if (serialized.length > MAX_SERIALIZED_CONFIG) throw new Error('Selected configuration exceeds the bounded native config limit');
+      payloads.push({ path: configPath, before: current.data, beforeMode: missingConfig ? null : current.mode, after: serialized, afterMode: current.mode });
+    }
     for (const item of configItems) {
       const before=getKey(beforeObj,item.transfer.key), after=getKey(afterObj,item.transfer.key);
       item._status=JSON.stringify(before)===JSON.stringify(after)?'identical':before===undefined?'new':'conflict';
@@ -247,6 +364,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
       let beforeTree={files:[],directories:[]};
       try { const st=await lstat(destRoot); if(st.isSymbolicLink()||!st.isDirectory()) throw new Error('Unsafe existing skill destination'); beforeTree=await tree(targetEndpoint.home,destRoot,item.transfer.path,{allowEmpty:true}); }
       catch(e) { if(e.code!=='ENOENT') throw e; }
+      if (nativeClient) assertPortablePackage(beforeTree);
       const afterDirectories=value.directories;
       const beforeFiles=new Map(beforeTree.files.map(f=>[f.path,f]));
       const afterFiles=new Map(value.files.map(f=>[f.path,f]));
@@ -278,7 +396,11 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
       destinations.set(file.path,item.id);
       const destination = join(targetEndpoint.home,file.path);
       await parentSafe(targetEndpoint.home,destination,{allowMissing:true});
-      const prior = await readSafe(destination);
+      const prior = await readSafe(destination, { text: Boolean(nativeClient) });
+      if (nativeClient && prior) {
+        assertPortableDefinition(prior.content);
+        if (redactText(prior.content, destination) !== prior.content) throw new Error('Credential-like content in destination definition; copy refused: ' + file.path);
+      }
       payloads.push({path:file.path,before:prior?.data ?? null,beforeMode:prior?.mode ?? null,after:file.after,afterMode:file.afterMode});
     }
   }
@@ -291,7 +413,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
       })));
       return { fingerprint, id: item.id, label: item.label, origin: item.origin, scope: item.scope,
         sourcePath: item.transfer.sourcePath, status: item._status,
-        changes: [{ path: 'config.toml:' + item.transfer.key, action: item._status,
+        changes: [{ path: configPath + ':' + item.transfer.key, action: item._status,
           before: previewValue(item._before), after: previewValue(item._after) }] };
     }
     const prefix = item.transfer.path;
@@ -328,7 +450,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     destinationPath:item.transfer?.sourcePath??item.path,status:'kept',inventoryStatus:item.status,
     ...(item.reason?{reason:item.reason}:{})}));
   const plan={source:sourceEndpoint,target:targetEndpoint,selection:items.map(x=>x.id),sourceFingerprints,files:payloads,packages,createdDirectories:[...new Set(createdDirectories)]};
-  const hash=createHash('sha256').update(JSON.stringify({source:plan.source,target:plan.target,selection:plan.selection,packages,createdDirectories:plan.createdDirectories,files:payloads.map(f=>({path:f.path,before:f.before&&sha(f.before),beforeMode:f.beforeMode,after:f.after&&sha(f.after),afterMode:f.afterMode}))})).digest('hex');
+  const hash=createHash('sha256').update(JSON.stringify({source:plan.source,target:plan.target,selection:plan.selection,sourceFingerprints,packages,createdDirectories:plan.createdDirectories,files:payloads.map(f=>({path:f.path,before:f.before&&sha(f.before),beforeMode:f.beforeMode,after:f.after&&sha(f.after),afterMode:f.afterMode}))})).digest('hex');
   return {plan,report:{status:'preview',hash,endpointFingerprint:sha(Buffer.from(JSON.stringify({source:sourceEndpoint,target:targetEndpoint}))),source:inventory.profile,target:{name:targetEndpoint.name,home:targetEndpoint.home},items:reports,kept,destinationLimitations:destinationInventory.limitations,changes:[
     ...payloads.filter(f=>f.before===null||f.after===null||!f.before.equals(f.after)||f.beforeMode!==f.afterMode).map(f=>({path:f.path,action:f.after===null?'remove':f.before===null?'add':'replace',beforeSha256:f.before&&sha(f.before),afterSha256:f.after&&sha(f.after),beforeMode:f.beforeMode,afterMode:f.afterMode})),
     ...packages.flatMap(p=>p.directoryChanges.map(d=>({path:d.path,action:d.after===null?'remove-directory':d.before===null?'add-directory':'directory-mode',beforeMode:d.before,afterMode:d.after})))
@@ -337,7 +459,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
 function previewValue(value) { if(value===undefined)return null; const text=typeof value==='string'?value:JSON.stringify(value); return redactText(text,'preview'); }
 
 function safeDestinationPath(path) {
-  if (!validRel(path) || !/^(?:config\.toml|AGENTS(?:\.override)?\.md|agents\/[A-Za-z0-9_-]+\.toml|rules\/[A-Za-z0-9_-]+\.rules|skills\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*)$/.test(path)) throw new Error('Invalid advanced-copy journal path');
+  if (!validRel(path) || !/^(?:settings\.json|CLAUDE\.md|copilot-instructions\.md|(?:agents|rules|instructions)\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+\.md|config\.toml|AGENTS(?:\.override)?\.md|agents\/[A-Za-z0-9_-]+\.toml|rules\/[A-Za-z0-9_-]+\.rules|skills\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*)$/.test(path)) throw new Error('Invalid advanced-copy journal path');
 }
 async function putPayload(dir,name,data) {
   await mkdir(join(dir,'payloads'),{mode:0o700}).catch(e=>{if(e.code!=='EEXIST')throw e;});
@@ -407,7 +529,7 @@ export async function snapshotAdvanced(home,f) {
 export async function cleanupAdvancedDirectories(home, paths=[]) {
   if(!Array.isArray(paths)||paths.length>3072) throw new Error('Invalid advanced-copy directory cleanup list');
   for(const path of [...new Set(paths)].sort((a,b)=>b.length-a.length)) {
-    if(typeof path!=='string'||! /^(?:agents|rules|skills)(?:\/[A-Za-z0-9_.-]+)*$/.test(path)) throw new Error('Unsafe advanced-copy cleanup path');
+    if(typeof path!=='string'||! /^(?:agents|rules|instructions|skills)(?:\/[A-Za-z0-9_.-]+)*$/.test(path)) throw new Error('Unsafe advanced-copy cleanup path');
     const full=join(home,path); if(!inside(home,full)) throw new Error('Advanced-copy cleanup escapes target home');
     try { await ownedDir(full); await rmdir(full); } catch(e) { if(!['ENOENT','ENOTEMPTY','EEXIST'].includes(e.code)) throw e; }
   }

@@ -5,6 +5,9 @@ import { join, dirname, relative, isAbsolute } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { resolveHome } from './homes.js';
+import { createEnvironmentBinding } from './client-contracts.js';
+import { clientCopyPath } from './copy-client.js';
+import { resolveAuditProfile } from './audit-discovery.js';
 import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { acquire, release, globalLock, privateDirectory, readJSON, record, exists } from './metadata.js';
 import { createDesktopRuntime } from './desktop-runtime.js';
@@ -52,8 +55,18 @@ async function directory(path, privateOnly = false) {
     || (s.mode & (privateOnly ? 0o077 : 0o022))) throw new Error('Expected a canonical owned directory: ' + path);
   return { path, device: s.dev, inode: s.ino };
 }
-async function endpoint(store, name, defaultUserHome, target = false) {
+async function endpoint(store, name, defaultUserHome, target = false, { clientId, binding } = {}) {
   if (typeof name !== 'string' || !name) throw new Error('Choose a source and destination');
+  if (clientId && clientId !== 'codex') {
+    if (target && name.toLowerCase() === 'default') throw new Error('Default is a source; copy into a named profile');
+    binding = binding === undefined ? undefined : createEnvironmentBinding(binding);
+    if (binding && (binding.surface !== 'cli' || binding.executionLocation !== 'local')) throw new Error('Copy requires a local CLI binding');
+    const profile = await resolveAuditProfile(store, name, { defaultUserHome, clientId, binding });
+    return { name: profile.profileName, profileId: profile.profileId, clientId, rootMode: profile.rootMode,
+      home: profile.home, identity: await directory(profile.home, target), root: binding?.roots.reservation ?? profile.nativeRoot,
+      executable: profile.executable, binding: binding ?? null };
+  }
+  if (binding) throw new Error('Explicit copy bindings require a supported native client');
   if (name.toLowerCase() === 'default') {
     if (target) throw new Error('Default is a source; copy into a named profile');
     const home = join(defaultUserHome, '.codex');
@@ -64,37 +77,39 @@ async function endpoint(store, name, defaultUserHome, target = false) {
     root: native.root, executable: native.executable, binding: profile.native };
 }
 /** Resolve a comparison endpoint without applying copy's destination limits. */
-export async function resolveNativeSettingsHome(store, name, { defaultUserHome = homedir() } = {}) {
-  return endpoint(store, name, defaultUserHome);
+export async function resolveNativeSettingsHome(store, name, { defaultUserHome = homedir(), ...options } = {}) {
+  return endpoint(store, name, defaultUserHome, false, options);
 }
 async function safeStore(store, create = false) {
   await directory(store.directory, true);
   const canonical = await realpath(store.directory);
-  if (canonical.split('/').some(p => ['.codex', '.agents'].includes(p))) throw new Error('Copy backups must be outside native discovery paths');
+  if (canonical.split('/').some(p => ['.codex', '.agents', '.claude', '.copilot'].includes(p))) throw new Error('Copy backups must be outside native discovery paths');
   if (create) await privateDirectory(rootPath(store), true);
   else if (await exists(rootPath(store))) await privateDirectory(rootPath(store));
 }
-async function build(store, sourceName, targetName, { include, selection: selectedItems, defaultUserHome = homedir() } = {}) {
+async function build(store, sourceName, targetName, { include, selection: selectedItems, defaultUserHome = homedir(), clientId, sourceBinding, targetBinding } = {}) {
+  const sourceOptions = { clientId, binding: sourceBinding }, targetOptions = { clientId, binding: targetBinding };
+  const copyOptions = { defaultUserHome, clientId, sourceBinding, targetBinding };
   if (selectedItems !== undefined) {
     if (include !== undefined) throw new Error('Choose either category --include or advanced item selection');
     await safeStore(store);
-    const source = await endpoint(store, sourceName, defaultUserHome);
-    const target = await endpoint(store, targetName, defaultUserHome, true);
+    const source = await endpoint(store, sourceName, defaultUserHome, false, sourceOptions);
+    const target = await endpoint(store, targetName, defaultUserHome, true, targetOptions);
     if (overlap(source.home, target.home) || overlap(store.directory, target.home) || overlap(store.directory, source.home))
       throw new Error('Source, destination and backup storage must be separate');
-    const built = await buildAdvancedCopy(store, sourceName, targetName, selectedItems, { defaultUserHome });
+    const built = await buildAdvancedCopy(store, sourceName, targetName, selectedItems, copyOptions);
     return { report: built.report, plan: { source, target, components: ['advanced'], selection: selectedItems, sourceFingerprints: built.plan.sourceFingerprints,
       files: built.plan.files.filter(f => f.before === null || f.after === null || !f.before.equals(f.after) || f.beforeMode !== f.afterMode),
       packages:built.plan.packages??[], createdDirectories: built.plan.createdDirectories ?? [], defaultUserHome } };
   }
   const components = selection(include);
   await safeStore(store);
-  const source = await endpoint(store, sourceName, defaultUserHome), target = await endpoint(store, targetName, defaultUserHome, true);
+  const source = await endpoint(store, sourceName, defaultUserHome, false, sourceOptions), target = await endpoint(store, targetName, defaultUserHome, true, targetOptions);
   if (overlap(source.home, target.home) || overlap(store.directory, target.home) || overlap(store.directory, source.home))
     throw new Error('Source, destination and backup storage must be separate');
-  const selected=await selectAdvancedComponents(store,sourceName,components,{defaultUserHome});
-  const built=await buildAdvancedCopy(store,sourceName,targetName,selected,{defaultUserHome});
-  const configItems=built.report.items.filter(item=>item.path?.startsWith('config.toml')||item.changes?.some(change=>change.path.startsWith('config.toml:')));
+  const selected=await selectAdvancedComponents(store,sourceName,components,{defaultUserHome, ...sourceOptions});
+  const built=await buildAdvancedCopy(store,sourceName,targetName,selected,copyOptions);
+  const configItems=built.report.items.filter(item=>item.path?.startsWith('config.toml')||item.changes?.some(change=>change.path.startsWith('config.toml:')||change.path.startsWith('settings.json:')));
   const copiedKeys=configItems.filter(item=>item.status!=='identical').map(item=>item.label);
   return {report:{...built.report,components,
     ...(components.includes('config')||components.includes('agents')?{config:{scope:'Selected supported source config values and agent settings; absent source values and all unselected destination values are preserved.',copiedKeys,enforcedKeys:built.report.notes.some(note=>note.includes('allow_symlinked_codex_home'))?['allow_symlinked_codex_home']:[]}}:{}),
@@ -111,14 +126,19 @@ function alive(pid) {
 }
 async function locks(store, journal, preflight, action, { runtime = createDesktopRuntime(), lockPath = globalLock(), isAlive = alive, signal } = {}, recovering = false, targetOnly = false) {
   const owner = { kind: 'native-copy', host: hostname(), pid: process.pid, runId: journal.id, storePath: store.directory };
-  const paths = [lockPath + '.operation', lockPath, ...new Set([journal.source.root ?? journal.source.home, journal.target.root ?? journal.target.home].filter(Boolean).map(p => join(p, '.run-lock')))];
+  const profileLocks = new Set([journal.source.root ?? journal.source.home, journal.target.root ?? journal.target.home]
+    .filter(Boolean).map(path => join(path, '.run-lock')));
+  const paths = [lockPath + '.operation', lockPath, ...profileLocks];
   const acquired = [];
+  const pending = async () => await exists(pendingPath(store)) && (await readJSON(pendingPath(store))).id === journal.id;
+  let acted = false;
   try {
     for (const path of paths) {
       if (recovering && await exists(path)) {
         const old = await readJSON(join(path, 'owner.json'));
-        if (old.kind !== 'native-copy' || old.host !== owner.host || old.runId !== journal.id
-          || old.storePath !== store.directory || !Number.isSafeInteger(old.pid) || old.pid <= 0 || isAlive(old.pid))
+        const reserved = old.kind === 'native-copy-pending' && profileLocks.has(path) && await pending();
+        const dead = old.kind === 'native-copy' && Number.isSafeInteger(old.pid) && old.pid > 0 && !isAlive(old.pid);
+        if ((!reserved && !dead) || old.host !== owner.host || old.runId !== journal.id || old.storePath !== store.directory)
           throw new Error('Another client or copy owns a required lock; preserve it');
         await release(path, old);
       }
@@ -132,13 +152,27 @@ async function locks(store, journal, preflight, action, { runtime = createDeskto
     if (needsClients !== false) {
       const cliExecutables = [...new Set([journal.source.executable, journal.target.executable].filter(Boolean))];
       const scope = clientScope(journal, targetOnly);
-      await runtime.prepareClients?.({ cliExecutables, includeDesktop: true });
+      if (!journal.target.clientId) await runtime.prepareClients?.({ cliExecutables, includeDesktop: true });
       await runtime.assertIdle({ cliExecutables, ...scope });
     }
     if (signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
+    acted = true;
     return await action(runtime);
   } finally {
-    for (const path of acquired.reverse()) await release(path, owner);
+    // An interrupted transaction can leave settings in an intermediate state.
+    // Keep the profile reservations until the same journal finishes recovery.
+    let retain = acted || recovering, cleanupError;
+    if (retain) try { retain = await pending(); } catch (error) { cleanupError = error; }
+    for (const path of acquired.reverse()) {
+      try {
+        if (retain && profileLocks.has(path)) {
+          const ownerPath = join(path, 'owner.json');
+          if (!equal(await readJSON(ownerPath), owner)) throw new Error('Copy lock owner changed; preserving lock');
+          await record(ownerPath, { ...owner, kind: 'native-copy-pending' });
+        } else await release(path, owner);
+      } catch (error) { cleanupError ??= error; }
+    }
+    if (cleanupError) throw cleanupError;
   }
 }
 async function journalPath(store, id) {
@@ -150,7 +184,7 @@ async function journalPath(store, id) {
   return join(rootPath(store), id, 'journal.json');
 }
 async function validateTarget(store, j) {
-  const target = await endpoint(store, j.target.profileId, j.defaultUserHome, true);
+  const target = await endpoint(store, j.target.profileId, j.defaultUserHome, true, j.target.clientId ? { clientId: j.target.clientId, binding: j.target.binding } : {});
   const { name: currentName, ...currentIdentity } = target;
   const { name: savedName, ...savedIdentity } = j.target;
   if (!equal(currentIdentity, savedIdentity)) throw new Error('Copy destination binding or directory identity changed');
@@ -171,9 +205,17 @@ async function readJournal(store, id) {
     || j.payloadHash !== digest(journalPayload(j))) throw new Error('Invalid settings-copy journal');
   if (!Array.isArray(j.selection) || j.selection.some(id => typeof id !== 'string')
       || !Array.isArray(j.createdDirectories) || j.createdDirectories.length > 3072
-      || j.createdDirectories.some(dir => typeof dir !== 'string' || !/^(?:agents|rules|skills)(?:\/[A-Za-z0-9_.-]+)*$/.test(dir)
+      || j.createdDirectories.some(dir => typeof dir !== 'string' || !/^(?:agents|rules|instructions|skills)(?:\/[A-Za-z0-9_.-]+)*$/.test(dir)
         || dir.split('/').some(part => part === '.' || part === '..')))
     throw new Error('Invalid advanced-copy journal');
+  for (const file of j.files) {
+    const clientId = j.target?.clientId;
+    if (clientId && clientId !== 'codex' && !['config', 'instruction', 'agent', 'rule'].some(kind => clientCopyPath(clientId, file.path, kind))
+      && !/^skills\/[A-Za-z0-9_-]+\/(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+$/.test(file.path))
+      throw new Error('Unsupported client journal field ownership');
+    if (!clientId && /^(?:settings\.json|CLAUDE\.md|copilot-instructions\.md|instructions\/)|^(?:agents|rules)\/.*\.md$/.test(file.path))
+      throw new Error('Unsupported Codex journal field ownership');
+  }
   await validateAdvancedFiles(dirname(path), j.files);
   if(!Array.isArray(j.packages)||j.packages.length>MAX_FILES) throw new Error('Invalid skill package journal');
   const packagePaths=new Set();
@@ -243,6 +285,7 @@ export async function applyCopy(store, source, target, options = {}) {
   }
   const packageChanges=(initial.plan.packages??[]).some(p=>JSON.stringify(p.before)!==JSON.stringify(p.after));
   if (!initial.plan.files.length&&!packageChanges) return { ...initial.report, status: 'unchanged' };
+  if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
   const j = { schemaVersion: 3, kind: 'native-settings-copy', id: randomUUID(), storePath: store.directory,
     phase: 'prepared', createdAt: new Date().toISOString(), ...initial.plan };
   j.payloadHash = digest(journalPayload(j));
@@ -282,7 +325,9 @@ export async function applyCopy(store, source, target, options = {}) {
         resourcePaths: targetResourcePaths(j.target.home, packageResourcePaths(j.packages)) });
       await applyAdvancedPackageDirectories(j.target.home,j.packages,false);
       await matchesAdvancedPackages(j.target.home,j.packages,'after');
-      j.phase = 'applied'; j.appliedAt = new Date().toISOString(); await record(path, j);
+      const committed = { ...j, phase: 'applied', appliedAt: new Date().toISOString() };
+      await record(path, committed);
+      Object.assign(j, committed);
       await clearPending(store, j.id);
       return { ...initial.report, status: 'applied', id: j.id, backup: path, undo: 'copy undo ' + j.id };
     } catch (e) {

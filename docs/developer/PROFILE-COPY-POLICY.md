@@ -5,8 +5,8 @@ Current transfer contract; [user commands](../user/ADVANCED-COPY.md). The [goal]
 ## Purpose
 
 The [client support plan](CLIENT-SUPPORT-PLAN.md#authentication-and-profile-storage)
-defines the planned client-specific profile boundaries. Extend this transfer
-contract when each new client's eligible configuration is implemented.
+defines the client-specific profile boundaries. The allowlists below define
+transfer eligibility within those boundaries.
 
 Create fresh profiles or seed explicitly selected parts; profiles then evolve independently. Later copies are reviewed updates, not synchronization, effective-state clones, shared storage or a migration framework. Default is a source only.
 
@@ -31,6 +31,42 @@ Create fresh profiles or seed explicitly selected parts; profiles then evolve in
 | Project/built-in resources | Keep existing ownership; do not assume shared runtime availability. |
 | Memory/history/credentials/trust/caches/runtime/unknown state | No automatic transfer; explain unknowns without disclosing private contents. |
 
+## Claude Code and Copilot CLI allowlists
+
+Copy requires a same-client local CLI route. Default is a source only. A named
+endpoint requires its validated profile and environment binding; the configuration
+root must be inside that profile’s reservation root. Preview binds the client,
+root mode, directory identity and selected content and modes. The operation
+checks both reservations and refuses active owners. It does not close either
+client on the user’s behalf.
+
+| Client | Keys in root `settings.json` | Standalone content inside the configuration root |
+| --- | --- | --- |
+| Claude Code | `model`, `effortLevel`, `theme`, `autoUpdatesChannel` | `CLAUDE.md`, Markdown under `agents/` and `rules/`, `skills/<name>/SKILL.md` and its package |
+| Copilot CLI | `model`, `reasoningEffort`, `theme`, `stream`, `banner`, `beep` | `copilot-instructions.md`, Markdown under `agents/` and `instructions/`, `skills/<name>/SKILL.md` and its package |
+
+`stream`, `banner` and `beep` require booleans; other listed keys require bounded
+plain identifiers. The planner changes only selected top-level values and keeps
+all other settings bytes. It refuses duplicate fields, unsupported selected
+values, JSONC and malformed settings. Undo restores the original file and mode
+or removes a file created by the copy. A changed destination file or mode blocks
+Undo. This covers the selected file, without claiming effective precedence or
+native loading.
+
+Definitions must have known standalone ownership and safe paths. Supported
+frontmatter is limited to simple single-line `name`, `description`, `model`,
+`color`, `argument-hint`, `user-invocable` and `disable-model-invocation` fields.
+Unsupported frontmatter, links and embedded integration definitions are refused
+on either side of replacement. Skill packages may include ordinary resources
+and scripts; recognized native state and integration files are excluded.
+
+Only root `settings.json` is a settings source. Account stores such as Claude’s
+`.claude.json` and `.credentials.json` and Copilot’s `config.json` are excluded,
+as are history, project resources, runtime data, permission grants, hook trust
+and plugin-owned files. Selected manual integration guidance stays outside the
+transaction; a package cache or partial metadata cannot establish installation,
+enablement or the need to reinstall.
+
 ## Concrete acceptance cases
 
 - Preview/cancel creates nothing, closes no clients and activates no integration.
@@ -42,7 +78,7 @@ Create fresh profiles or seed explicitly selected parts; profiles then evolve in
 
 ## Implementation and evidence boundary
 
-Selected and category copying use the shared planner; bounded selection avoids project/history/memory/plugin-cache scans, while diagnostic inventory remains broader. Empty/identical selections create no transaction or client preparation. Metadata versions describe sources, not installed/runtime state.
+Selected and category copying use the shared planner. Copy never scans project, history or memory stores. Claude Code and Copilot inventory uses bounded setup discovery to identify native integrations and their ownership; only allowlisted standalone files can enter the transaction. Empty/identical selections create no transaction or client preparation. Metadata versions describe sources, not installed/runtime state.
 
 [Historical copy/loading controls](history/README.md#profile-transfer-controls) and
 [release summaries](AUDIT-ACCEPTANCE.md) retain source-bound results and limits.
