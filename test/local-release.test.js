@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { buildOfflineRuntime, hasReadCorroboration, manifestFor, parseArguments, preservesFrozenAuditFields } from '../scripts/local-release.mjs';
+import { archiveRuntimeDependency, buildOfflineRuntime, hasReadCorroboration, manifestFor, parseArguments, preservesFrozenAuditFields } from '../scripts/local-release.mjs';
 
 test('local release arguments and manifests retain only reviewable artifact facts', () => {
   assert.deepEqual(parseArguments(['--output', '/tmp/release', '--smoke']), {
@@ -79,6 +79,41 @@ function run(file, args, options = {}) {
 }
 
 async function digest(path) { return createHash('sha256').update(await readFile(path)).digest('hex'); }
+
+test('runtime dependency archives preserve package files without running lifecycle scripts', { skip: process.platform !== 'darwin' }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx dependency archive '));
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const source = join(root, 'installed-dependency');
+  const staged = join(root, 'staged');
+  const archive = join(root, 'dependency.tgz');
+  await mkdir(join(source, 'node_modules', 'separately-locked'), { recursive: true });
+  await mkdir(staged);
+  const canary = "node -e \"require('node:fs').writeFileSync('lifecycle-ran', 'hook'); process.exit(97)\"";
+  const manifest = JSON.stringify({
+    name: 'xfx-dependency-canary', version: '1.0.0', bin: { canary: 'bin.js' },
+    scripts: { prepack: canary, prepare: canary, postpack: canary, install: canary },
+  }) + '\n';
+  await writeFile(join(source, 'package.json'), manifest);
+  await writeFile(join(source, 'LICENSE'), 'Canary license bytes.\n');
+  await writeFile(join(source, 'bin.js'), '#!/usr/bin/env node\n', { mode: 0o755 });
+  await writeFile(join(source, 'node_modules', 'separately-locked', 'package.json'), '{"name":"separately-locked"}\n');
+  const integrity = await archiveRuntimeDependency(source, archive);
+  assert.equal(integrity, `sha512-${createHash('sha512').update(await readFile(archive)).digest('base64')}`);
+  const extracted = await run('/usr/bin/tar', ['-xzf', archive, '-C', staged]);
+  assert.equal(extracted.code, 0, extracted.stderr);
+  const packaged = join(staged, 'package');
+  assert.equal(await readFile(join(packaged, 'package.json'), 'utf8'), manifest);
+  assert.equal(await readFile(join(packaged, 'LICENSE'), 'utf8'), 'Canary license bytes.\n');
+  assert.equal((await stat(join(packaged, 'bin.js'))).mode & 0o111, 0o111);
+  await assert.rejects(access(join(packaged, 'node_modules')), { code: 'ENOENT' });
+
+  await writeFile(join(staged, 'package.json'), '{"private":true}\n');
+  const installed = await run('npm', ['install', '--offline', '--ignore-scripts', '--no-package-lock',
+    '--no-audit', '--no-fund', '--cache', join(root, 'empty-cache'), archive], { cwd: staged });
+  assert.equal(installed.code, 0, installed.stderr);
+  for (const location of [source, packaged, join(staged, 'node_modules', 'xfx-dependency-canary')])
+    await assert.rejects(access(join(location, 'lifecycle-ran')), { code: 'ENOENT' });
+});
 
 test('offline npm installs the locked SDKs and builds a runtime archive without SDK CLIs', { skip: process.platform !== 'darwin' }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'xfx offline runtime '));

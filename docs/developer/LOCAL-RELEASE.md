@@ -43,8 +43,10 @@ The output directory must not exist. The command produces the Xenoflux npm
 tarball, `xenoflux-runtime-VERSION-darwin-ARCH.tgz`, a schema-2 SHA-256 manifest
 and `install.mjs`. The runtime archive retains the installed, locked dependency
 tree, including required peers and the matching Koffi native library. The
-builder stages it using an offline npm install of local tarballs and a fresh
-cache. Optional SDK CLI binaries and development dependencies are excluded.
+builder archives installed dependency files directly with tar, preserving
+package metadata and license files. It stages the tree with an offline npm
+install from those local tarballs and a fresh cache. Optional SDK CLI binaries
+and development dependencies are excluded.
 Users supply their selected native CLIs separately. Build the offline bundle
 with the target Node architecture on macOS. The installer checks the
 architecture and both artifact checksums before staging. Use the installer
@@ -58,7 +60,9 @@ serve their bundled HTML, JavaScript and CSS and refuse unauthenticated API
 requests. The managed check runs outside the package directory with a disposable
 home/controller and mocked native service callbacks. It does not sign in, start or quit real Codex, mount
 RAM storage, or use a real native home. The manifest records the exact source commit,
-artifact hashes and smoke result. Package scripts are ignored during packing.
+artifact hashes and smoke result. Dependency archiving does not invoke npm
+lifecycle hooks or retain builder account ownership in tar headers. The
+application pack and detached npm install use `--ignore-scripts`.
 
 ## Public source and package boundary
 

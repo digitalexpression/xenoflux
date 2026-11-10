@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
-import { access, chmod, cp, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
@@ -94,21 +94,52 @@ async function assertPackageInputsTracked() {
   if (unsafe.length) throw new Error(`Refusing to package untracked runtime input: ${unsafe.join(', ')}`);
 }
 
-async function pack(directories, destination, cache) {
-  // Run from this project so a dependency's development-only tool requirements
-  // do not apply to repacking its already installed runtime files.
-  const result = await run('npm', ['pack', ...directories, '--offline', '--json', '--ignore-scripts', '--pack-destination', destination], {
+async function packApp(destination, cache) {
+  const result = await run('npm', ['pack', '--offline', '--json', '--ignore-scripts', '--pack-destination', destination], {
     cwd: root,
     env: { ...process.env, npm_config_cache: cache },
   });
   const entries = JSON.parse(result.stdout);
-  if (!Array.isArray(entries) || entries.length !== directories.length ||
-      entries.some(entry => typeof entry.filename !== 'string' || dirname(entry.filename) !== '.'))
-    throw new Error('npm pack did not return the expected tarballs');
-  return entries;
+  if (!Array.isArray(entries) || entries.length !== 1 || typeof entries[0].filename !== 'string' ||
+      dirname(entries[0].filename) !== '.')
+    throw new Error('npm pack did not return the expected application tarball');
+  return entries[0];
 }
 
-async function installDetached(packed, tarball, temporary, packCache) {
+function writePackageTarball(archive, directory, members) {
+  return run('/usr/bin/tar', ['-czf', archive, '--uid', '0', '--gid', '0', '--uname', 'root', '--gname', 'root',
+    '--no-xattrs', '--no-acls', '--no-fflags', '-C', directory, ...members], {
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+  });
+}
+
+export async function archiveRuntimeDependency(directory, archive) {
+  const members = ['.'];
+  async function collect(parent) {
+    for (const entry of await readdir(join(directory, parent), { withFileTypes: true })) {
+      // The lockfile supplies nested dependencies as separate archives.
+      if (entry.name === 'node_modules') continue;
+      const member = `${parent}/${entry.name}`;
+      if ((!entry.isFile() && !entry.isDirectory()) || /[\\\r\n]/.test(entry.name) || entry.name.startsWith('._') ||
+          ['.git', '.npmrc', '.env', '.DS_Store'].includes(entry.name))
+        throw new Error(`Unsafe installed runtime dependency member: ${member}`);
+      members.push(member);
+      if (entry.isDirectory()) await collect(member);
+    }
+  }
+  await collect('.');
+  // Older npm versions can run prepare while packing a directory, even with
+  // --ignore-scripts. Use tar on the verified installed files instead.
+  const list = `${archive}.members`;
+  await writeFile(list, members.sort().join('\0') + '\0', { flag: 'wx', mode: 0o600 });
+  try {
+    await writePackageTarball(archive, directory, ['--no-recursion',
+      '-s', ',^\\.$,package,', '-s', ',^\\./,package/,', '--null', '-T', list]);
+  } finally { await rm(list, { force: true }); }
+  return `sha512-${createHash('sha512').update(await readFile(archive)).digest('base64')}`;
+}
+
+async function installDetached(packed, tarball, temporary) {
   const { packages } = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
   const { devDependencies, ...project } = packages[''];
   const platformPackage = koffiPlatformPackage();
@@ -117,8 +148,10 @@ async function installDetached(packed, tarball, temporary, packCache) {
     throw new Error(`The release lock does not specify the required native library: ${platformPackage}`);
   if (project.name !== packed.name || project.version !== packed.version)
     throw new Error('The package lock does not match the packed project');
-  const directories = new Map();
-  const identities = new Map();
+  const tarballs = join(temporary, 'runtime-tarballs');
+  const install = join(temporary, 'installed');
+  await Promise.all([mkdir(tarballs, { mode: 0o700 }), mkdir(install, { mode: 0o700 })]);
+  const archives = new Map();
   for (const [path, entry] of Object.entries(packages)) {
     if (!path || entry.dev || (entry.optional && path !== platformPath)) continue;
     const name = path.split('node_modules/').at(-1);
@@ -129,23 +162,12 @@ async function installDetached(packed, tarball, temporary, packCache) {
     const installed = JSON.parse(await readFile(join(resolved, 'package.json'), 'utf8'));
     if (installed.name !== name || installed.version !== entry.version)
       throw new Error(`Installed runtime dependency does not match the lock: ${path}; run npm ci first`);
-    const identity = `${name}@${entry.version}`;
-    directories.set(identity, resolved);
-    identities.set(path, identity);
+    const archive = join(tarballs, `dependency-${archives.size}.tgz`);
+    archives.set(path, { resolved: `file:${archive}`, integrity: await archiveRuntimeDependency(resolved, archive) });
   }
-
-  const tarballs = join(temporary, 'runtime-tarballs');
-  const install = join(temporary, 'installed');
-  await Promise.all([mkdir(tarballs, { mode: 0o700 }), mkdir(install, { mode: 0o700 })]);
-  const archives = await pack([...directories.values()], tarballs, packCache);
-  const archiveByIdentity = new Map(archives.map(entry => [`${entry.name}@${entry.version}`, entry]));
-  if (new Set(archives.map(entry => entry.filename)).size !== directories.size ||
-      [...directories.keys()].some(identity => !archiveByIdentity.has(identity)))
-    throw new Error('Packed runtime dependency identities are incomplete or have conflicting filenames');
-  const artifact = entry => `file:${join(tarballs, entry.filename)}`;
   const dependencies = {
     [project.name]: `file:${tarball}`,
-    [platformPackage]: artifact(archiveByIdentity.get(identities.get(platformPath))),
+    [platformPackage]: archives.get(platformPath).resolved,
   };
   const localPackages = {
     '': { dependencies },
@@ -153,8 +175,7 @@ async function installDetached(packed, tarball, temporary, packCache) {
   };
   for (const [path, entry] of Object.entries(packages)) {
     if (!path || entry.dev) continue;
-    const archive = archiveByIdentity.get(identities.get(path));
-    localPackages[path] = archive ? { ...entry, resolved: artifact(archive), integrity: archive.integrity } : entry;
+    localPackages[path] = { ...entry, ...archives.get(path) };
   }
   // npm omits other optional dependencies. The FFI library is a direct local
   // dependency of this disposable install so its native code stays available.
@@ -171,15 +192,13 @@ async function runtimeArchive(installedRoot, temporary, output, version) {
   await copyRuntimeDependencies(installedRoot, join(staging, 'package'));
   const tarball = `xenoflux-runtime-${version}-${process.platform}-${process.arch}.tgz`;
   const archive = join(output, tarball);
-  await run('/usr/bin/tar', ['-czf', archive, '-C', staging, 'package'], {
-    env: { ...process.env, COPYFILE_DISABLE: '1' },
-  });
+  await writePackageTarball(archive, staging, ['package']);
   return { name: 'xenoflux-runtime', version, tarball, platform: process.platform, arch: process.arch,
     sha256: createHash('sha256').update(await readFile(archive)).digest('hex') };
 }
 
 export async function buildOfflineRuntime(packed, tarball, temporary, output) {
-  const install = await installDetached(packed, tarball, temporary, join(temporary, 'pack-cache'));
+  const install = await installDetached(packed, tarball, temporary);
   const dependency = await runtimeArchive(join(install, 'node_modules', packed.name), temporary, output, packed.version);
   return { install, dependency };
 }
@@ -411,7 +430,7 @@ export async function main(argv = process.argv.slice(2)) {
   const temporary = await realpath(await mkdtemp(join(tmpdir(), 'xfx-local-release-')));
   try {
     const cache = join(temporary, 'pack-cache');
-    const [packed] = await pack([root], output, cache);
+    const packed = await packApp(output, cache);
     const tarball = join(output, packed.filename);
     const sha256 = createHash('sha256').update(await readFile(tarball)).digest('hex');
     const { install, dependency } = await buildOfflineRuntime(packed, tarball, temporary, output);
