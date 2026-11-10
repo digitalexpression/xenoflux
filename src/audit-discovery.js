@@ -8,6 +8,8 @@ import { createHash } from 'node:crypto';
 import { parse } from 'smol-toml';
 import { find } from './profiles.js';
 import { redactText, redactValue } from './redact.js';
+import { discoverClientSetup } from './client-setup-reader.js';
+import { createEnvironmentBinding } from './client-contracts.js';
 
 const MAX_ENTRIES = 256, MAX_DEPTH = 5, MAX_LOCAL_PACKAGE_ENTRIES = 4096, MAX_LOCAL_PACKAGE_DEPTH = 16,
   MAX_FILE = 512 * 1024, MAX_PACKAGE_FILE_BYTES = 64 * 1024 * 1024,
@@ -747,12 +749,31 @@ async function discoverPlugins(home, resources, coverage, detailBudget, inventor
 }
 
 /** Resolve the selected identity and its read roots without launcher readiness checks. */
-export async function resolveAuditProfile(store, name, { defaultUserHome = homedir(), client = 'cli' } = {}) {
+export async function resolveAuditProfile(store, name, { defaultUserHome = homedir(), client = 'cli', clientId, binding } = {}) {
   if (typeof name !== 'string' || !name.trim()) throw new Error('Profile name is required');
   if (!['cli', 'desktop'].includes(client)) throw new Error(`Unsupported audit client: ${client}`);
+  if (clientId !== undefined && !['codex', 'claude-code', 'copilot'].includes(clientId)) throw new Error('Unsupported setup client');
+  if (binding !== undefined) {
+    const bound = createEnvironmentBinding(binding);
+    if (bound.surface !== client || (clientId && bound.client !== clientId)) throw new Error('Setup binding client does not match');
+    if (name.toLowerCase() !== 'default') {
+      const selected = find(await store.read(), name);
+      if (!selected.native || selected.native.root !== bound.roots.reservation
+        || !inside(selected.native.root, bound.roots.config) || selected.native.root === bound.roots.config) throw new Error('Setup binding roots do not match profile');
+      if (selected.id !== bound.profileId || (selected.client ?? 'codex') !== bound.client) throw new Error('Setup binding profile does not match');
+    } else if (bound.profileId !== 'default') throw new Error('Setup binding profile does not match');
+    for (const root of [bound.roots.config, bound.roots.user, bound.roots.reservation]) {
+      const checked = await inspectPath(root);
+      if (checked.status !== 'directory' || checked.real !== root) throw new Error('Setup binding root is missing or unsafe');
+    }
+    return { profileId: bound.profileId, profileName: name.toLowerCase() === 'default' ? 'Default' : name,
+      clientId: bound.client, rootMode: bound.rootMode, home: bound.roots.config, userHome: bound.roots.user,
+      nativeRoot: bound.rootMode === 'implicit' ? null : bound.roots.reservation,
+      environmentId: null, executable: bound.executable.path, version: bound.executable.version };
+  }
   if (name.toLowerCase() === 'default') {
-    const userHome = resolve(defaultUserHome), home = join(userHome, '.codex');
-    return { profileId: 'default', profileName: 'Default', home, userHome, nativeRoot: null, environmentId: null, executable: null, version: null };
+    const userHome = resolve(defaultUserHome), home = join(userHome, clientId === 'claude-code' ? '.claude' : clientId === 'copilot' ? '.copilot' : '.codex');
+    return { ...(clientId ? { clientId, rootMode: 'implicit' } : {}), profileId: 'default', profileName: 'Default', home, userHome, nativeRoot: null, environmentId: null, executable: null, version: null };
   }
   let profile;
   try { profile = find(await store.read(), name); }
@@ -760,6 +781,8 @@ export async function resolveAuditProfile(store, name, { defaultUserHome = homed
     if (/^(?:Profile not found|Ambiguous profile)/i.test(error.message)) throw new Error('Selected audit profile is unavailable or ambiguous');
     throw error;
   }
+  if ((profile.client ?? 'codex') !== (clientId ?? 'codex')) throw new Error('Setup profile client does not match; a resolved binding is required for other clients');
+  if (clientId && clientId !== 'codex') throw new Error('Managed client setup requires a resolved environment binding');
   if (!profile.native) throw new Error(`Profile has no native home binding: ${name}`);
   const nativeRoot = profile.native.root;
   const checked = await inspectPath(nativeRoot);
@@ -772,9 +795,14 @@ export async function resolveAuditProfile(store, name, { defaultUserHome = homed
 }
 
 /** Discover current setup sources for the selected client/repository context. */
-export async function discoverAuditProfile(store, name, { repo, client = 'cli', defaultUserHome = homedir(), adminRoots = ['/etc/codex/skills'], includeSourceValues = false } = {}) {
+export async function discoverAuditProfile(store, name, { repo, client = 'cli', clientId, binding, defaultUserHome = homedir(), adminRoots = ['/etc/codex/skills'], includeSourceValues = false } = {}) {
   if (typeof includeSourceValues !== 'boolean') throw new Error('includeSourceValues must be a boolean');
-  const profile = await resolveAuditProfile(store, name, { defaultUserHome, client });
+  const profile = await resolveAuditProfile(store, name, { defaultUserHome, client, clientId, binding });
+  const setupClient = profile.clientId ?? 'codex';
+  if (setupClient !== 'codex') return discoverClientSetup(profile, { repo, client, includeSourceValues }, {
+    add, safeText, safeNames, inspectPath, fileResource, discoverSkillRoot, recordInventory, sourceRoleFor,
+    safeIntegrationValue, hash, clean,
+  });
   const detailBudget = { remaining: MAX_REPORT_DETAIL_BYTES,
     ...(includeSourceValues ? { sourceValuesRemaining: MAX_REPORT_DETAIL_BYTES, sourceValuesComplete: true, sourceDigestRemaining: MAX_SOURCE_DIGEST_BYTES } : {}) };
   const resources = [], inventory = [], warnings = [], coverage = { client: 'partial', config: 'complete', instructions: 'complete', agents: 'complete', skills: 'complete', rules: 'complete', plugins: 'partial', mcp: 'partial', hooks: 'partial', tools: 'unavailable', memorySettings: 'partial', system: 'partial' };
@@ -838,5 +866,5 @@ export async function discoverAuditProfile(store, name, { repo, client = 'cli', 
   } else if (includeSourceValues) coverage.sourceValues = 'complete';
   if (detailBudget.remaining === 0) addWarning('The aggregate text preview limit was reached; remaining resource previews are partial.');
   if (client === 'desktop') addWarning('Desktop-specific discovery locations and activation metadata are version-dependent; unavailable sources remain partial.');
-  return { schemaVersion: 1, kind: 'audit-profile', status: Object.values(coverage).some(value => value !== 'complete') ? 'partial' : 'present', profile, context: { client, ...(includeSourceValues ? { includeSourceValues: true } : {}), ...(repo ? { repo: resolve(repo) } : {}) }, resources, inventory, coverage, warnings };
+  return { schemaVersion: 1, kind: 'audit-profile', status: Object.values(coverage).some(value => value !== 'complete') ? 'partial' : 'present', profile, context: { client, clientId: 'codex', ...(includeSourceValues ? { includeSourceValues: true } : {}), ...(repo ? { repo: resolve(repo) } : {}) }, resources, inventory, coverage, warnings };
 }

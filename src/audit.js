@@ -100,11 +100,20 @@ function supportedSourceDifference(left, right, diff) {
 }
 
 export async function compareAuditProfiles(store, left, right, options = {}) {
-  const snapshots = await Promise.allSettled([discoverAuditProfile(store, left, options), discoverAuditProfile(store, right, options)]);
+  const leftOptions = { ...options, ...options.leftOptions }, rightOptions = { ...options, ...options.rightOptions };
+  const snapshots = await Promise.allSettled([discoverAuditProfile(store, left, leftOptions), discoverAuditProfile(store, right, rightOptions)]);
   const side = (result, name) => result.status === 'fulfilled' ? result.value
     : { schemaVersion: 1, kind: 'audit-profile', status: 'unavailable', profile: { profileName: name },
       resources: [], coverage: { discovery: 'unavailable' }, warnings: ['The selected profile discovery source is unavailable.'] };
   const a = side(snapshots[0], left), b = side(snapshots[1], right);
+  const leftClient = a.context?.clientId ?? leftOptions.clientId ?? leftOptions.binding?.client ?? 'codex';
+  const rightClient = b.context?.clientId ?? rightOptions.clientId ?? rightOptions.binding?.client ?? 'codex';
+  if (leftClient !== rightClient) return {
+    schemaVersion: 1, kind: 'audit-profile-comparison', status: 'partial', left: a, right: b,
+    comparison: { mode: 'separate', reason: 'Mixed-client setups are shown separately; categories and settings are not equivalent.',
+      resources: { added: [], removed: [], changed: [], unchanged: [], unavailable: [] } },
+    coverage: { discovery: [a, b].some(value => value.status === 'unavailable') ? 'unavailable' : 'partial', equivalence: 'unavailable' },
+  };
   const first = new Map(a.resources.map(item => [resourceKey(item, a.profile), item]));
   const second = new Map(b.resources.map(item => [resourceKey(item, b.profile), item]));
   const staticCategories = new Set(['agent', 'config', 'feature', 'hook', 'instruction', 'mcp', 'memory-setting', 'plugin', 'rule', 'skill', 'tool']);
