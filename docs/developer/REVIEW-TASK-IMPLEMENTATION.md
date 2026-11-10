@@ -60,6 +60,31 @@ recovery continues through the existing retained-evidence readers without dispat
 - `onNativeRequest(request, {signal, item})`: matching action item when available (required for file-change approval); await explicit response, invalidate unanswered requests on abort.
 - Returned `response`: exact owned assistant text; completion, capture coverage and process shutdown stay separate.
 
+### Claude Code ordinary review
+
+The selected local Claude CLI runs through `@anthropic-ai/claude-agent-sdk@0.3.322`
+using the public custom-process option, normal user/project/local sources, and
+the Claude Code system prompt. Preserve implicit Default versus explicit
+`CLAUDE_CONFIG_DIR`, even for identical paths. Refuse ambient credential or
+provider overrides, signed-out routes and unexpected executable or SDK launch
+arguments. Preparation reads only binding and settings metadata.
+
+Startup verifies the owned process and its inherited cwd, checks native
+subscription and advertised explicit choices, and durably checkpoints the fresh
+SDK session ID before releasing the one input frame. The native init event
+confirms the session and reports applied settings when available. A sent effort
+option is not an observed effort. Ordinary reviews inherit permission mode;
+comparisons may opt into the supported per-job modes without editing settings.
+
+A tool approval binds the native request and tool-use ID to the exact proposed
+arguments. Only an explicit approve-once or decline reply reaches the live
+request. Cancel invalidates pending replies, asks the owned SDK session to
+interrupt, and joins its iterators, streams, child close and observed ancestry.
+Record the interrupt acknowledgement separately from shutdown. Recovery does
+not assume an absent main process proves the observed job's descendants stopped.
+Keep a matching terminal assistant response separate from capture gaps, advisory
+child heartbeats and shutdown. Missing native turn IDs remain unknown.
+
 ## Durable record, API and lifecycle
 
 `ui-review-tasks.js` owns staging/state/results; capture owns native execution. Reuse

@@ -18,7 +18,7 @@ const integer = (value, fallback, min, max, label) => {
 
 const NATIVE_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
-export const selectionKey = selection => selection.sideId ?? selection.name.toLowerCase();
+export const selectionKey = selection => selection.sideId ?? (selection.client && selection.client !== 'codex' ? `${selection.client}:${selection.name.toLowerCase()}` : selection.name.toLowerCase());
 
 export function validateAuditApprovalsReviewer(value) {
   if (value !== undefined && value !== 'user') throw new Error('Comparison approval reviewer must be user or inherited');
@@ -27,11 +27,13 @@ export function validateAuditApprovalsReviewer(value) {
 
 export function validateExecution(value) {
   if (value === undefined) return undefined;
-  allowed(value, ['model', 'reasoningEffort'], 'execution settings');
+  allowed(value, ['model', 'reasoningEffort', 'permissionMode'], 'execution settings');
   if (value.model !== undefined && !plain(value.model, 1024)) throw new Error('Model must be a bounded native model ID');
   if (value.reasoningEffort !== undefined && !plain(value.reasoningEffort, 1024))
     throw new Error('Reasoning effort must be a bounded native option');
-  return { ...(value.model !== undefined ? { model: value.model } : {}),
+  if (value.permissionMode !== undefined && !['default', 'acceptEdits', 'plan'].includes(value.permissionMode))
+    throw new Error('Permission mode is not a supported per-job override');
+  return { ...(value.permissionMode !== undefined ? { permissionMode: value.permissionMode } : {}), ...(value.model !== undefined ? { model: value.model } : {}),
     ...(value.reasoningEffort !== undefined ? { reasoningEffort: value.reasoningEffort } : {}) };
 }
 
@@ -104,14 +106,17 @@ export function validateAuditSpec(value) {
   const names = new Set();
   const profiles = value.profiles.map(selection => {
     const profile = typeof selection === 'string' ? { name: selection } : selection;
-    allowed(profile, ['name', 'executable', 'version', 'skills', 'nativeConfig', 'sideId', 'execution'], 'profile selection');
-    if (!plain(profile.name, 200) || (profile.sideId !== undefined && !/^[a-z][a-z0-9-]{0,39}$/.test(profile.sideId))
-      || (profile.sideId === undefined && names.has(profile.name.toLowerCase())))
+    allowed(profile, ['name', 'client', 'executable', 'version', 'skills', 'nativeConfig', 'sideId', 'execution'], 'profile selection');
+    if (profile.client !== undefined && !['codex', 'claude-code', 'copilot'].includes(profile.client))
+      throw new Error('Choose a supported native client');
+    const scopedName = plain(profile.name, 200) ? `${profile.client ?? 'codex'}:${profile.name.toLowerCase()}` : null;
+    if (!scopedName || (profile.sideId !== undefined && !/^[a-z][a-z0-9-]{0,39}$/.test(profile.sideId))
+      || (profile.sideId === undefined && names.has(scopedName)))
       throw new Error('Select distinct plain profile names or give each side a distinct side ID');
     const key = selectionKey(profile);
     if (keys.has(key)) throw new Error('Choose distinct side IDs');
     keys.add(key);
-    names.add(profile.name.toLowerCase());
+    names.add(scopedName);
     if ((profile.executable !== undefined && (!plain(profile.executable) || !profile.executable.startsWith('/')
         || resolve(profile.executable) !== profile.executable))
       || (profile.version !== undefined && !plain(profile.version, 100)))
@@ -123,7 +128,7 @@ export function validateAuditSpec(value) {
     const execution = validateExecution(profile.execution);
     if (execution && (nativeConfig?.model !== undefined || nativeConfig?.model_reasoning_effort !== undefined))
       throw new Error('Choose one way to specify the model and reasoning effort');
-    return { name: profile.name, ...(profile.sideId ? { sideId: profile.sideId } : {}),
+    return { name: profile.name, ...(profile.client ? { client: profile.client } : {}), ...(profile.sideId ? { sideId: profile.sideId } : {}),
       ...(execution !== undefined ? { execution } : {}), ...(profile.executable ? { executable: profile.executable } : {}),
       ...(profile.version !== undefined ? { version: profile.version } : {}), skills: [...skills],
       ...(nativeConfig !== undefined ? { nativeConfig } : {}) };

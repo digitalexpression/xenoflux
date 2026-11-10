@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ArrowLeftRight } from 'lucide-react';
 import { ApiError, apiGet, apiPost } from '@/api/client';
-import type { ReviewTaskDecision, RunOptions, RunPreview, RunRequest, RunView } from '@/api/types';
+import type { ReviewTaskDecision, RunOptions, RunProfileOption, RunPreview, RunRequest, RunView } from '@/api/types';
 import { ExecutionFields } from '@/components/ExecutionFields';
 import { NativeReviewRequest } from '@/components/NativeReviewRequest';
 import { StatusBadge } from '@/components/badges';
@@ -14,6 +14,7 @@ import { useResource } from '@/lib/useResource';
 import { cn } from '@/lib/cn';
 
 const DRAFT = 'xenoflux-run-draft';
+const optionKey = (profile: Pick<RunProfileOption, 'client' | 'name'>) => profile.client ? `${profile.client}:${profile.name}` : profile.name;
 function notifyInfoChanged() { window.dispatchEvent(new Event('xenoflux-info-changed')); }
 function loadDraft(): RunRequest | null {
   try { const value = sessionStorage.getItem(DRAFT); return value ? JSON.parse(value) as RunRequest : null; } catch { return null; }
@@ -42,8 +43,8 @@ function RunForm() {
   const draft = loadDraft();
   const [task, setTask] = useState(draft?.task ?? '');
   const [files, setFiles] = useState(draft?.files ?? '');
-  const [a, setA] = useState(draft?.a ?? '');
-  const [b, setB] = useState(draft?.b ?? '');
+  const [a, setA] = useState(draft?.a ? optionKey({ name: draft.a, client: draft.clients?.a }) : '');
+  const [b, setB] = useState(draft?.b ? optionKey({ name: draft.b, client: draft.clients?.b }) : '');
   const inherited = { reasoningEffort: draft?.advanced?.reasoningEffort || undefined };
   const [execution, setExecution] = useState(draft?.execution ?? { a: inherited, b: inherited });
   const [repository, setRepository] = useState(draft?.repository ?? '');
@@ -57,17 +58,20 @@ function RunForm() {
   const data = options.data;
   useEffect(() => {
     if (!data) return;
-    const ready = data.profiles.filter(p => p.ready).map(p => p.name);
+    const ready = data.profiles.filter(p => p.ready && !p.client).map(optionKey);
     if (!a) setA(ready[0] ?? '');
     if (!b) setB(ready[1] ?? ready[0] ?? '');
     if (!repository && data.repositories[0]) { setRepository(data.repositories[0].path); setCommit(data.repositories[0].commit); }
   }, [data]);
 
-  const note = (name: string) => data?.profiles.find(p => p.name === name);
+  const note = (name: string) => data?.profiles.find(p => optionKey(p) === name);
   function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!task.trim()) { setTaskError(true); document.getElementById(ids.task)?.focus(); return; }
-    const request: RunRequest = { task, files, a, b, repository, commit, checks, execution, ...(advanced ? { advanced } : {}) };
+    const left = note(a), right = note(b);
+    const clients = { a: left?.client, b: right?.client };
+    const request: RunRequest = { task, files, a: left?.name ?? a, b: right?.name ?? b,
+      ...(clients.a || clients.b ? { clients } : {}), repository, commit, checks, execution, ...(advanced ? { advanced } : {}) };
     saveDraft(request);
     navigate('/runs/new/review', { state: request });
   }
@@ -109,9 +113,9 @@ function RunForm() {
                       <label htmlFor={side === 'a' ? ids.a : ids.b} className="field-label"><SideText side={side}>{side === 'a' ? 'First' : 'Second'}</SideText> · {side === 'a' ? 'left' : 'right'} side of the report</label>
                   <select id={side === 'a' ? ids.a : ids.b} className="input font-mono" value={value} onChange={event => set(event.target.value)}>
                     <option value="">Choose a profile</option>
-                        {data.profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                        {data.profiles.map(p => <option key={optionKey(p)} value={optionKey(p)}>{p.label ?? p.name}</option>)}
                       </select>
-                      <ExecutionFields profile={value} workspace={repository} value={execution[side]} onChange={value => setExecution(old => ({ ...old, [side]: value }))} />
+                      <ExecutionFields profile={readiness?.name ?? value} client={readiness?.client} workspace={repository} value={execution[side]} onChange={value => setExecution(old => ({ ...old, [side]: value }))} />
                       {readiness ? <span className="text-ui" style={{ color: readiness.ready ? 'var(--color-text-muted)' : 'var(--color-warning)' }}>{readiness.readiness}</span> : null}
                     </div>
                   );

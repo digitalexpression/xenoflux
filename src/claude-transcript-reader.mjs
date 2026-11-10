@@ -73,12 +73,28 @@ function publicMessage(row, sessionId, omissions) {
 
 try {
   const sessionId = process.argv[2];
-  if (!UUID.test(sessionId)) throw new Error('Invalid source session');
+  const listing = sessionId === '--list';
+  if (!listing && !UUID.test(sessionId)) throw new Error('Invalid source session');
   const sdkUrl = import.meta.resolve('@anthropic-ai/claude-agent-sdk');
   const packageInfo = JSON.parse(await fsp.readFile(new URL('./package.json', sdkUrl), 'utf8'));
   if (packageInfo.version !== '0.3.322') throw new Error('Unexpected reader version');
   guardEffects();
-  const { getSessionInfo, getSessionMessages } = await import(sdkUrl);
+  const { getSessionInfo, getSessionMessages, listSessions } = await import(sdkUrl);
+  if (listing) {
+    const limit = Number(process.argv[3]), offset = Number(process.argv[4]);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 101
+      || !Number.isSafeInteger(offset) || offset < 0 || offset > 1000) throw new Error('Invalid session list page');
+    const sessions = await listSessions({ limit, offset, includeProgrammatic: true });
+    if (guardAttempts || !Array.isArray(sessions) || sessions.length > limit) throw new Error('Invalid session list');
+    const rows = sessions.map(row => {
+      if (!UUID.test(row?.sessionId)) throw new Error('Invalid native session ID');
+      return { id: row.sessionId, title: typeof row.summary === 'string' ? row.summary.slice(0, 240) : null,
+        cwd: typeof row.cwd === 'string' && row.cwd.length <= 4096 ? row.cwd : null,
+        mtime: Number.isSafeInteger(row.lastModified) ? row.lastModified : null,
+        bytes: Number.isSafeInteger(row.fileSize) ? row.fileSize : null };
+    });
+    process.stdout.write(JSON.stringify({ rows, guardAttempts }));
+  } else {
   // The private config root contains one snapshot. Omitting dir also prevents the SDK's Git worktree fallback.
   const info = await getSessionInfo(sessionId);
   if (info && info.sessionId !== sessionId) throw new Error('Mismatched stored session');
@@ -103,6 +119,7 @@ try {
     info: info ? { sessionId: info.sessionId, fileSize: info.fileSize } : null, messages, omissions });
   if (Buffer.byteLength(result) > OUTPUT_BYTES) throw new Error('Reader output limit');
   process.stdout.write(result);
+  }
 } catch {
   // SDK errors can contain source fragments. Never return those or raw message payloads to the caller.
   process.stderr.write('Claude stored-session reader failed.');

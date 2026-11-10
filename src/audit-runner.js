@@ -10,8 +10,9 @@ import { inspectAuditRepository, authorizeAuditWorkspaceParent, createAuditWorks
 import { createExperiment, createExperimentRun, writeAuditState, finalizeAuditRecord,
   reserveAuditProfile, releaseAuditProfileReservation, writeAuditCaptureCheckpoint } from './audit-experiment-store.js';
 import { resolveAuditExecutionProfile, observeAuditProfileAccess, snapshotAuditProfileSettings,
-  compareAuditProfileSettings, inspectAuditExecutable } from './audit-profile.js';
+  compareAuditProfileSettings, inspectAuditExecutable, auditSettingsIdentity } from './audit-profile.js';
 import { createClientRuntime } from './client-runtime.js';
+import { createEnvironmentBinding } from './client-contracts.js';
 import { retainedNativeReference } from './capture-projection.js';
 import { runAuditProcess, getAuditProcessIdentity } from './audit-process.js';
 import { compareAuditRuns, auditExitCode } from './audit-report.js';
@@ -118,6 +119,10 @@ function dependencies(context) {
 
 /** Freeze a bounded native replay beside the finalized run report. */
 export async function captureFrozenSessionReplay(deps, store, profile, capturedRun, runDirectory, capturedAt = now()) {
+  if (profile.client === 'claude-code' && capturedRun?.sessionReplay && capturedRun?.source?.fingerprint)
+    return { sessionReplay: capturedRun.sessionReplay,
+      replayCapture: { status: 'partial', capturedAt, sourceFingerprint: capturedRun.source.fingerprint,
+        boundary: 'owned-native-sdk-stream' }, coverage: capturedRun.coverage, childDiscovery: undefined };
   const { client, sessionId: id, nativeReference: reference } = retainedNativeReference(capturedRun, profile,
     capturedRun?.id, capturedRun?.source?.threadId) ?? {};
   const validId = typeof id === 'string' && (client === 'codex'
@@ -231,7 +236,11 @@ export async function previewAuditExperiment(store, input, context = {}) {
     try {
       const resolvedProfile = await deps.resolveProfile(store, selection, { repository: repository?.repository ?? spec.repository });
       const profile = { ...resolvedProfile, sideId: selection.sideId, execution: selection.execution, ...(selection.version !== undefined ? { requestedVersion: selection.version } : {}) };
-      const requested = selection;
+      const requested = selection, codex = (profile.client ?? 'codex') === 'codex';
+      if (requested.execution?.permissionMode && profile.client !== 'claude-code')
+        throw new Error('The selected client does not support this permission override');
+      if (!codex && spec.captureRequirements?.context)
+        throw new Error('The selected client does not support Codex context verification');
       const checks = [];
       if (spec.approvalsReviewer && (profile.client ?? 'codex') !== 'codex')
         throw Object.assign(new Error(SAFE_ERROR_TEXT['requested-approval-reviewer-unsupported']), { code: 'requested-approval-reviewer-unsupported' });
@@ -249,7 +258,7 @@ export async function previewAuditExperiment(store, input, context = {}) {
       if (access?.status !== 'ready') failures.push({ scope: 'profile', profile: profile.profileName,
         code: access?.status === 'blocked' ? 'profile-access-blocked' : 'profile-access-unavailable',
         message: 'Safe coexistence with this profile could not be established.' });
-      else {
+      else if (codex) {
         let observedVersion = null;
         try { observedVersion = await deps.probeVersion({ executable: profile.executable, cwd: repository?.repository ?? spec.repository,
           env: profile.env, timeoutMs: 2000 }) ?? null; }
@@ -261,21 +270,21 @@ export async function previewAuditExperiment(store, input, context = {}) {
           observed: observedVersion, registered: profile.version ?? null,
           ...(requested.version !== undefined ? { requested: requested.version } : {}) });
       }
-      checks.push({ name: 'capture-protocol', status: 'pending', reason: 'Confirmed by app-server initialize and skills/list during the run.' });
+      checks.push({ name: 'capture-protocol', status: 'pending', reason: codex ? 'Confirmed by app-server initialize and skills/list during the run.' : 'Checked on the selected native connection during the run.' });
       let settings;
       try { settings = await deps.snapshotSettings(profile); }
       catch { settings = { status: 'unavailable' }; }
       checks.push({ name: 'settings-snapshot', status: settings?.status === 'ready' ? 'ready' : 'unknown' });
       if (settings?.status !== 'ready') failures.push({ scope: 'profile', profile: profile.profileName,
         code: 'profile-settings-unavailable', message: 'Profile settings cannot be safely fingerprinted; execution is blocked.' });
-      profiles.push({ sideId: selection.sideId, profileId: profile.profileId, profileName: profile.profileName, home: profile.home,
-        executable: profile.executable, version: profile.version ?? null, versionSource: profile.versionSource ?? 'unavailable',
+      profiles.push({ sideId: selection.sideId, profileId: profile.profileId, profileName: profile.profileName, home: profile.home, client: profile.client ?? 'codex',
+        rootMode: profile.rootMode, surface: profile.surface, executionLocation: profile.executionLocation, executable: profile.executable, version: profile.version ?? null, versionSource: profile.versionSource ?? 'unavailable',
         ...(profile.requestedVersion !== undefined ? { requestedVersion: profile.requestedVersion } : {}),
         status: failures.some(f => f.profile === profile.profileName) ? 'blocked' : 'ready',
         busy: (access?.clients?.length ?? 0) > 0, reason: null, checks });
     } catch (error) {
       failures.push({ scope: 'profile', profile: selection.name, code: errorCode(error), message: errorText(error) });
-      profiles.push({ profileName: selection.name, profileId: null, home: null, executable: null,
+      profiles.push({ profileName: selection.name, client: selection.client ?? 'codex', profileId: null, home: null, executable: null,
         version: null, status: 'unavailable', busy: false, reason: errorText(error), checks: [] });
     }
   }
@@ -340,7 +349,7 @@ async function runCommand(store, runId, deps, command, { profile, workspace, dir
     env, timeoutMs, outputLimitBytes: outputBytes, stdoutPath, stderrPath, signal,
     onSpawn: async info => { await deps.writeState(store, runId, { status: 'running', phase,
       coordinator: await coordinatorIdentity(), reservation: { root: profile.reservationRoot, owner, status: 'held' },
-      process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname() } }); } });
+      process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname(), ...(info.nativeAncestry ? { nativeAncestry: info.nativeAncestry } : {}) } }); } });
   if (result.shutdown?.groupTerminated === false || result.status === 'shutdown-failed')
     return { name: command.name, status: 'recovery-required', exitCode: result.exitCode, elapsedMs: result.elapsedMs,
       process: result.processIdentity ?? null, pid: result.pid ?? null, shutdown: result.shutdown ?? null };
@@ -374,7 +383,7 @@ export async function runAuditExperiment(store, input, context = {}) {
   const experiment = await deps.createExperiment(store, { ...(context.experimentId ? { id: context.experimentId } : {}),
     ...(context.series ? { series: context.series } : {}), spec: { ...spec, task: undefined }, task: spec.task,
     profiles: preview.profiles.map(item => safeProfile({ profileId: item.profileId, profileName: item.profileName,
-      home: item.home, sideId: item.sideId, version: item.version })), baseline: { repository: preview.baseline, source: 'committed-snapshot' } });
+      home: item.home, sideId: item.sideId, version: item.version, client: item.client, rootMode: item.rootMode, surface: item.surface, executionLocation: item.executionLocation })), baseline: { repository: preview.baseline, source: 'committed-snapshot' } });
   const runs = [], reservations = [], failures = [], warnings = [], runReferences = [], finalizedRuns = new Set(), releasedRunIds = new Set(), pendingFinalReports = new Map();
   let recoveryRequired = false;
   const startedAt = Date.now(), experimentDeadline = spec.limits.experimentMs === null ? null : startedAt + spec.limits.experimentMs;
@@ -420,7 +429,7 @@ export async function runAuditExperiment(store, input, context = {}) {
     for (const selection of spec.profiles) {
       const prepared = bySelection.get(selectionKey(selection)), { profile } = prepared;
       const fresh = await deps.resolveProfile(store, selection, { repository: repository.repository });
-      const keys = ['profileId', 'profileName', 'home', 'nativeRoot', 'reservationRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository', 'client'];
+      const keys = ['profileId', 'profileName', 'home', 'nativeRoot', 'reservationRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository', 'client', 'rootMode', 'surface'];
       if (keys.some(key => fresh[key] !== profile[key]))
         throw Object.assign(new Error('The selected profile binding changed before its reservation was held.'), { code: 'profile-binding-changed' });
       const executable = await deps.inspectExecutable(profile.executable);
@@ -432,6 +441,7 @@ export async function runAuditExperiment(store, input, context = {}) {
         throw Object.assign(new Error(SAFE_ERROR_TEXT['profile-clients-changed']), { code: 'profile-clients-changed' });
       if (deps.compareSettings(prepared.beforeSettings, await deps.snapshotSettings(profile)).status !== 'unchanged')
         throw Object.assign(new Error(SAFE_ERROR_TEXT['profile-settings-changed']), { code: 'profile-settings-changed' });
+      if ((profile.client ?? 'codex') !== 'codex') continue;
       let observedVersion = null;
       try { observedVersion = await deps.probeVersion({ executable: profile.executable, cwd: repository.repository,
         env: profile.env, timeoutMs: 2000, signal: controller.signal }) ?? null; }
@@ -526,20 +536,29 @@ export async function runAuditExperiment(store, input, context = {}) {
           if (!capturing || controller.signal.aborted) return;
           return deps.writeState(store, runRecord.id, patch, { owner, signal: controller.signal });
         };
-        const captured = await deps.capture({ executionMode: 'audit', profile, execution: selection.execution, workspace: workspace.directory, task: spec.task, selectedSkills,
+        let executionProfile = profile;
+        if (profile.client && profile.client !== 'codex' && profile.environmentBinding) {
+          executionProfile = { ...profile, cwd: workspace.directory };
+          executionProfile.settingsSnapshot = await deps.snapshotSettings(executionProfile);
+          executionProfile.settingsIdentity = auditSettingsIdentity(executionProfile.settingsSnapshot);
+          if (!executionProfile.settingsIdentity) throw new Error('The prepared workspace settings could not be verified');
+          executionProfile.environmentBinding = createEnvironmentBinding({ ...profile.environmentBinding,
+            workspace: workspace.directory, settingsIdentity: executionProfile.settingsIdentity });
+        }
+        const captured = await deps.capture({ executionMode: 'audit', profile: executionProfile, execution: selection.execution, workspace: workspace.directory, task: spec.task, selectedSkills,
           requiredContext: spec.captureRequirements?.context,
           onProcessReady: async info => captureState({
-            process: { pid: info.pid, processIdentity: info.processIdentity, host: hostname() } }),
+            process: { pid: info.pid, processIdentity: info.processIdentity, host: hostname(), ...(info.nativeAncestry ? { nativeAncestry: info.nativeAncestry } : {}) } }),
           ...(context.onNativeRequest ? { onNativeRequest: (request, details) => {
             if (!capturing || controller.signal.aborted) throw new Error('Comparison leg stopped');
             return context.onNativeRequest(runRecord.id, selection.sideId, request, details);
           } } : {}),
           processOptions: { env: profile.env, timeoutMs: taskTimeout, outputLimitBytes: spec.limits.outputBytes,
-            stdoutPath: join(runRecord.directory, 'codex.stdout'), stderrPath: join(runRecord.directory, 'codex.stderr'),
+            stdoutPath: join(runRecord.directory, `${profile.client ?? 'codex'}.stdout`), stderrPath: join(runRecord.directory, `${profile.client ?? 'codex'}.stderr`),
             signal: controller.signal,
           onSpawn: async info => captureState({ status: 'running', phase: 'task',
             coordinator: await coordinatorIdentity(), reservation: { root: profile.reservationRoot, owner, status: 'held' },
-            process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname() },
+            process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname(), ...(info.nativeAncestry ? { nativeAncestry: info.nativeAncestry } : {}) },
             workspace: { ...workspaceIntent, active: true } }) },
           limits: { id: runRecord.id },
           sandbox: spec.sandbox,
@@ -601,7 +620,7 @@ export async function runAuditExperiment(store, input, context = {}) {
         runResult.warnings.push(...(Array.isArray(runResult.normalized.warnings) ? runResult.normalized.warnings : []));
         runResult.normalized.metrics = { ...(runResult.normalized.metrics ?? {}), ...runResult.metrics };
         runResult.coverage = { ...(runResult.normalized.coverage ?? {}), ...runResult.coverage };
-        if (!taskEndSnapshot) {
+        if (!taskEndSnapshot && !taskProcessUnsafe) {
           const snapshot = await deps.snapshotWorkspace({ directory: workspace.directory, owner: workspaceOwner,
             outputDirectory: dirs.artifacts, label: 'task-end-fallback', retainPatchContent: true,
             sourceBaselineCommit: workspace.sourceCommit, sourceBaselineTree: workspace.sourceTree,
@@ -660,7 +679,7 @@ export async function runAuditExperiment(store, input, context = {}) {
         if (captured?.capture?.errors?.some(error => error?.code === 'native-request-failed'))
           throw Object.assign(new Error(SAFE_ERROR_TEXT['native-request-failed']), { code: 'native-request-failed' });
         const nativeCompleted = runResult.normalized.outcome?.nativeTurnStatus === 'completed';
-        const taskStatus = captured?.process?.status === 'exited' && captured?.process?.exitCode === 0 && nativeCompleted
+        const taskStatus = nativeCompleted && (profile.client === 'claude-code' || captured?.process?.status === 'exited' && captured?.process?.exitCode === 0)
           ? 'passed' : 'failed';
         runResult.task = { status: taskStatus, processStatus: captured?.process?.status ?? 'unknown',
           exitCode: captured?.process?.exitCode ?? null, nativeTurnStatus: runResult.normalized.outcome?.nativeTurnStatus ?? null, nativeThreadId: runResult.normalized.source?.threadId ?? null };

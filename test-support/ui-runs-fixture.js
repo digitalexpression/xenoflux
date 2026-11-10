@@ -1,8 +1,8 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Store, create, bind } from '../src/profiles.js';
 import { createExperiment, createExperimentRun, writeAuditState } from '../src/audit-experiment-store.js';
 import { validateAuditSpec } from '../src/audit-spec.js';
@@ -55,6 +55,18 @@ export async function createUiRunsFixture({
     await registerHome(store, 'strict-review', strict.root, { executable, version: '0.153.4' });
     const defaultUserHome = join(root, 'default-user-home');
     await mkdir(join(defaultUserHome, '.codex'), { recursive: true, mode: 0o700 });
+    let terminalEnvironment;
+    if (mode.mixedClaude) {
+      await writeFile(join(defaultUserHome, '.codex', 'config.toml'),
+        `[projects.${JSON.stringify(repository)}]
+trust_level = "trusted"
+`, { mode: 0o600 });
+      await mkdir(join(defaultUserHome, '.claude'), { mode: 0o700 });
+      const fixture = (await readFile(new URL('../test/fixtures/claude-runtime-cli.mjs', import.meta.url), 'utf8')).replace(
+        '/* CLAUDE_SANITIZED_NATIVE_FRAMES */ null', await readFile(new URL('../test/fixtures/claude-sanitized-native.json', import.meta.url), 'utf8'));
+      await writeFile(join(root, 'claude'), '#!' + await realpath(process.execPath) + '\n' + fixture, { mode: 0o700 });
+      terminalEnvironment = { PATH: root + ':' + dirname(process.execPath) + ':/usr/bin:/bin', TZ: 'UTC' };
+    }
 
     const capture = async input => {
       calls.captures.push(input.profile.profileName);
@@ -154,6 +166,7 @@ export async function createUiRunsFixture({
     let accessChecks = 0;
     const runContext = {
       capture, process: runProcess,
+      ...(terminalEnvironment ? { terminalEnvironment } : {}),
       ...(mode.blockFinalPreflight ? { observeAccess: async () => ++accessChecks > 4
         ? { status: 'blocked', reason: 'fixture-access-changed', clients: [], sourceReservation: null }
         : { status: 'ready', clients: [], sourceReservation: null } } : {}),
@@ -166,8 +179,8 @@ export async function createUiRunsFixture({
     };
     const reportsRoot = join(root, 'reports');
     const serverLogs = [];
-    const makeProvider = () => createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'), runContext, reviewContext, copilotImportContext,
-      catalogContext: { discover: async ({ profile, workspace, signal }) => {
+    const makeProvider = () => createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'), runContext, reviewContext: { ...(terminalEnvironment ? { terminalEnvironment } : {}), ...reviewContext }, copilotImportContext,
+      catalogContext: { ...(terminalEnvironment ? { terminalEnvironment } : {}), discover: async ({ profile, workspace, signal }) => {
         calls.catalogs.push({ profile: profile.profileName, workspace });
         const models = [['fixture-left', ['low', 'max']], ['fixture-right', ['medium', 'high']]].map(([model, efforts], index) => ({
           id: model, model, displayName: model, hidden: false, isDefault: index === 0,

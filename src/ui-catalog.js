@@ -4,6 +4,7 @@ import { mkdir, realpath } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { createClientCatalog, discoverCodexModels, validateCatalogSelection } from './client-catalog.js';
+import { discoverClaudeModels } from './claude-runtime.js';
 import { resolveProfileExecutionProfile } from './audit-profile.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { acquire, privateDirectory, readJSON, record, release } from './metadata.js';
@@ -11,42 +12,48 @@ import { getAuditProcessIdentity, observeAuditProcess } from './audit-process.js
 import { UiError } from './ui-server.js';
 
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
-const unavailable = reason => ({ status: 'unavailable', source: 'codex-model/list', reason, models: [],
+const unavailable = (reason, client = 'codex') => ({ status: 'unavailable', source: client === 'claude-code' ? 'claude-agent-sdk/initialize' : 'codex-model/list', reason, models: [],
   capabilities: { models: 'unknown', effort: 'unknown' } });
 
 export function createUiCatalog({ store, defaultUserHome, context = {} }) {
   const active = new Map(), attempts = new Map();
   let closing = false;
   const resolveProfile = context.resolveProfile ?? resolveProfileExecutionProfile;
+  const select = (name, client) => client ? { name, client } : name;
   const resolveContext = async input => {
     const repository = input.profile.bindingRepository === null || input.requestedWorkspace === null ? undefined : input.workspace;
-    const profile = await resolveProfile(store, input.profile.profileName,
-      { defaultUserHome, ...(repository === undefined ? {} : { repository }), terminalEnvironment: context.terminalEnvironment ?? process.env });
+    const profile = await resolveProfile(store, select(input.profile.profileName, input.profile.client === 'codex' && !input.requestedClient ? undefined : input.profile.client),
+      { defaultUserHome, ...(repository === undefined ? {} : { repository }), terminalEnvironment: context.terminalEnvironment ?? process.env, profileResolvers: context.profileResolvers });
     return { ...input, profile, workspace: profile.cwd };
   };
-  const discover = context.discover ?? discoverCodexModels;
+  const discoveries = { codex: context.discover ?? discoverCodexModels, 'claude-code': discoverClaudeModels, ...context.discoveries };
   const cache = createClientCatalog({ resolveContext, discover: async options => {
     const { onDiscoveryResult, onBeforeDiscover, ...nativeOptions } = options;
     onBeforeDiscover();
+    const client = nativeOptions.profile.client ?? 'codex';
+    const discover = Object.hasOwn(discoveries, client) ? discoveries[client] : null;
+    if (typeof discover !== 'function') throw new Error(`Catalog discovery is unavailable for ${client}`);
     const result = await discover(nativeOptions);
     await onDiscoveryResult(result);
     return result;
   } });
   async function selected(input) {
     if (typeof input?.profile !== 'string' || !input.profile.trim() || input.profile.length > 1024
+      || input.client !== undefined && !['codex', 'claude-code', 'copilot'].includes(input.client)
       || input.workspace !== undefined && input.workspace !== ''
         && (typeof input.workspace !== 'string' || !input.workspace.startsWith('/') || input.workspace.length > 16384))
       throw new UiError(400, 'Choose a profile and workspace before discovering models.', 'catalog-context-required');
     const repository = input.workspace || undefined;
-    const profile = await resolveProfile(store, input.profile, { defaultUserHome, ...(repository === undefined ? {} : { repository }),
-      terminalEnvironment: context.terminalEnvironment ?? process.env });
-    return { profile, workspace: profile.cwd, requestedWorkspace: repository ?? null };
+    const profile = await resolveProfile(store, select(input.profile, input.client), { defaultUserHome, ...(repository === undefined ? {} : { repository }),
+      terminalEnvironment: context.terminalEnvironment ?? process.env, profileResolvers: context.profileResolvers });
+    return { profile, workspace: profile.cwd, requestedWorkspace: repository ?? null, requestedClient: input.client ?? null };
   }
   const guard = (profile, action) => withProfileOperation(store, profile.profileId,
     { waitMs: 5000, recovery: true, ...context.lockOptions }, action);
 
   async function get(input) {
-    const snapshot = cache.get(await selected(input)) ?? unavailable('catalog-not-refreshed');
+    const chosen = await selected(input);
+    const snapshot = cache.get(chosen) ?? unavailable('catalog-not-refreshed', chosen.profile.client);
     return snapshot.status === 'stale' ? { ...snapshot, status: 'unavailable' } : snapshot;
   }
   async function validate(input, execution) {
@@ -119,7 +126,7 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
   }
   function refresh(input) {
     if (!UUID.test(input?.requestId ?? '')) throw new UiError(400, 'Model discovery request ID is invalid.', 'invalid-catalog-request');
-    const fingerprint = JSON.stringify([input.profile, input.workspace]);
+    const fingerprint = JSON.stringify([input.client ?? null, input.profile, input.workspace]);
     if (attempts.has(input.requestId)) {
       const previous = attempts.get(input.requestId);
       if (previous.fingerprint !== fingerprint) throw new UiError(409, 'This discovery request belongs to another profile or workspace.', 'catalog-request-mismatch');
@@ -153,7 +160,8 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
       || saved.owner?.storePath !== await realpath(store.directory)) throw new Error('Invalid catalog ownership; preserving probe');
     if (saved.released) return { status: 'stopped' };
     const observation = await (context.observeProcess ?? observeAuditProcess)(saved.process?.processIdentity);
-    if (saved.shutdown?.groupTerminated !== true && observation.status !== 'stopped') return { status: 'uncertain' };
+    if (saved.shutdown?.groupTerminated !== true
+      && (saved.environmentBinding.client !== 'codex' || observation.status !== 'stopped')) return { status: 'uncertain' };
     await guard({ profileId: saved.owner.profileId }, () => release(join(saved.root, '.run-lock'), saved.owner));
     saved.released = true; saved.shutdown = { ...saved.shutdown, groupTerminated: true };
     await record(join(directory, 'probe.json'), saved);

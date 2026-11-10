@@ -8,6 +8,8 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse } from 'smol-toml';
+import { find } from './profiles.js';
+import { CLAUDE_CLIENT, resolveClaudeProfile } from './claude-profile.js';
 import { launchPlan, discoverCodexExecutable } from './launcher.js';
 import { resolveHome } from './homes.js';
 import { nativePath } from './node-runtime.js';
@@ -103,9 +105,44 @@ async function defaultProfile(name, { repository, defaultUserHome }) {
     reservationRoot: home, environmentId: null, bindingRepository };
 }
 
+async function selectedClient(store, selection) {
+  const selected = selection.name.trim().toLowerCase() === 'default' ? null : find(await store.read(), selection.name);
+  const client = selected ? selected.client ?? 'codex' : selection.client ?? 'codex';
+  if (!['codex', 'claude-code', 'copilot'].includes(client)) throw new Error('Unknown native profile client');
+  if (selection.client !== undefined && selection.client !== client)
+    throw new Error('Selected client does not match the persisted profile');
+  return { client, selected };
+}
+
+async function resolveNonCodexProfile(selection, { client, selected }, options) {
+  if (['executable', 'version', 'nativeConfig'].some(key => selection[key] !== undefined) || selection.skills?.length)
+    throw new Error('Use the bound native executable and settings for this client');
+  const resolveClient = { [CLAUDE_CLIENT]: resolveClaudeProfile, ...options.profileResolvers }[client];
+  if (typeof resolveClient !== 'function') throw new Error(`No CLI profile resolver is available for ${client}`);
+  const profile = { ...await resolveClient({ selected, ...options }), executionMode: 'profile' };
+  if (profile.client !== client || profile.profileId !== (selected?.id ?? `default-${client}`))
+    throw new Error('Native profile resolution changed its selected identity');
+  profile.settingsSnapshot = await snapshotAuditProfileSettings(profile);
+  profile.settingsIdentity = auditSettingsIdentity(profile.settingsSnapshot);
+  if (!profile.settingsIdentity)
+    throw Object.assign(new Error('Selected profile settings could not be safely inspected'), { code: 'profile-settings-unavailable' });
+  profile.environmentBinding = createEnvironmentBinding({
+    client, surface: profile.surface, executionLocation: profile.executionLocation, profileId: profile.profileId, rootMode: profile.rootMode,
+    roots: { config: profile.home, runtime: profile.nativeRoot ? profile.home : null,
+      user: profile.userHome, reservation: profile.reservationRoot },
+    workspace: profile.cwd, executable: { path: profile.executable, identity: profile.executableIdentity,
+      version: profile.version }, settingsIdentity: profile.settingsIdentity,
+  });
+  return profile;
+}
+
 /** Resolve one explicit profile to a launch-ready, credential-minimal environment. */
-export async function resolveAuditExecutionProfile(store, input, { repository, defaultUserHome = homedir(), probe = probeAuditVersion } = {}) {
+export async function resolveAuditExecutionProfile(store, input, { repository, defaultUserHome = homedir(), probe = probeAuditVersion,
+  terminalEnvironment = process.env, profileResolvers } = {}) {
   const selection = selectionOf(input);
+  const route = await selectedClient(store, selection);
+  if (route.client !== 'codex') return resolveNonCodexProfile(selection, route,
+    { repository, defaultUserHome, terminalEnvironment, profileResolvers });
   const isDefault = selection.name.trim().toLowerCase() === 'default';
   let profile;
   if (isDefault) profile = await defaultProfile(selection.name, { repository, defaultUserHome });
@@ -171,13 +208,16 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
 
 /** Resolve ordinary native execution without probing the executable or changing profile settings. */
 export async function resolveProfileExecutionProfile(store, input, {
-  repository, defaultUserHome = homedir(), terminalEnvironment = process.env,
+  repository, defaultUserHome = homedir(), terminalEnvironment = process.env, profileResolvers, sessionOnly = false,
 } = {}) {
   const selection = typeof input === 'string' ? { name: input } : input;
   if (!selection || typeof selection !== 'object' || Array.isArray(selection)
     || typeof selection.name !== 'string' || !selection.name.trim()
-    || Object.keys(selection).some(key => key !== 'name'))
+    || Object.keys(selection).some(key => !['name', 'client'].includes(key)))
     throw new Error('Select a profile without execution overrides');
+  const route = await selectedClient(store, selection);
+  if (route.client !== 'codex') return resolveNonCodexProfile(selection, route,
+    { repository, defaultUserHome, terminalEnvironment, profileResolvers, sessionOnly });
   const isDefault = selection.name.trim().toLowerCase() === 'default';
   let profile;
   if (isDefault) {
@@ -233,7 +273,7 @@ export async function resolveProfileExecutionProfile(store, input, {
 
 /** Recheck the preview immediately before Start; no task or version probe is run. */
 export async function recheckProfileExecutionProfile(store, preview, options = {}) {
-  const fresh = await resolveProfileExecutionProfile(store, preview?.profileName, options);
+  const fresh = await resolveProfileExecutionProfile(store, { name: preview?.profileName, ...(preview?.client ? { client: preview.client } : {}) }, options);
   const fields = ['profileId', 'home', 'userHome', 'nativeRoot', 'reservationRoot', 'environmentId',
     'executable', 'executableIdentity', 'cwd', 'bindingRepository', 'client', 'surface', 'executionLocation', 'rootMode'];
   if (!preview || fields.some(key => preview[key] !== fresh[key])
@@ -441,10 +481,12 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
     // The built-in ~/.codex directory is commonly mode 0755; the existing
     // safety contract only forbids group/world write access there. Named
     // profile native roots and homes remain strictly private.
-    const homeInfo = await canonicalDirectory(profile.home, 'Selected Codex home', { privateOnly: Boolean(profile.nativeRoot) });
+    const codex = !profile.client || profile.client === 'codex';
+    const homeInfo = await canonicalDirectory(profile.home, 'Selected configuration root', { privateOnly: Boolean(profile.nativeRoot) });
     if (profile.nativeRoot) {
       await canonicalDirectory(profile.nativeRoot, 'Selected native root', { privateOnly: true });
-      if (profile.home !== join(profile.nativeRoot, 'codex-home') || profile.reservationRoot !== profile.nativeRoot)
+      if ((codex ? profile.home !== join(profile.nativeRoot, 'codex-home') : !insideRoot(profile.home, profile.nativeRoot))
+        || profile.reservationRoot !== profile.nativeRoot)
         throw new Error('Selected native home identity is inconsistent');
     } else if (profile.reservationRoot !== profile.home) throw new Error('Selected default home identity is inconsistent');
     void homeInfo;
@@ -470,7 +512,7 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
         return { status: 'blocked', reason: 'profile-reservation-untrusted', clients: [], sourceReservation: { status: 'untrusted' } };
       }
       if (owner) {
-        const journal = await readDesktopJournal(profile, owner);
+        const journal = codex && await readDesktopJournal(profile, owner);
         if (!journal) return { status: 'blocked', reason: 'profile-reservation-foreign', clients: [], sourceReservation: { status: 'foreign' } };
         trustedOwner = owner;
         sourceReservation = { kind: 'desktop-instance', runId: owner.runId, profileId: owner.profileId,
@@ -480,8 +522,9 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
       if (error.code !== 'ENOENT') throw error;
     }
 
-    const targets = ['config.toml', 'auth.json', 'state_5.sqlite', 'state_5.sqlite-wal', 'state_5.sqlite-shm']
-      .map(name => join(profile.home, name));
+    const targets = codex ? ['config.toml', 'auth.json', 'state_5.sqlite', 'state_5.sqlite-wal', 'state_5.sqlite-shm']
+      .map(name => join(profile.home, name))
+      : [join(profile.home, 'settings.json'), join(profile.rootMode === 'implicit' ? profile.userHome : profile.home, '.claude.json')];
     const present = [];
     for (const path of targets) {
       let info;
@@ -583,8 +626,9 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
 }
 
 async function selectedSettingRoots(profile) {
+  const claude = profile.client === CLAUDE_CLIENT;
   const roots = [
-    { root: profile.home, label: '$CODEX_HOME', ...(profile.executionMode === 'profile' ? { identity: true } : {}) },
+    { root: profile.home, label: claude ? '$CLAUDE_CONFIG' : '$CODEX_HOME', ...(profile.executionMode === 'profile' ? { identity: true } : {}) },
     ...(profile.userHome !== profile.home ? [{ root: profile.userHome, label: '$HOME',
       ...(profile.executionMode === 'profile' ? { identity: true } : {}) }] : []),
   ];
@@ -670,6 +714,8 @@ async function collectSettingMetadata(roots, profile) {
       return;
     }
     if (info.isFile()) {
+      if (profile.client === CLAUDE_CLIENT && !observational && await realpath(absolute) !== absolute)
+        fail('Claude settings source is not canonical');
       if ((!observational && (info.nlink !== 1 || info.uid !== process.getuid())) || (info.mode & 0o022))
         throw new Error('Settings source file is unsafe');
       files += 1;
@@ -696,6 +742,20 @@ async function collectSettingMetadata(roots, profile) {
     const rootInfo = await canonicalDirectory(root, 'Settings root');
     if (descriptor.identity)
       records.set(`${label}/@directory`, JSON.stringify([rootInfo.dev, rootInfo.ino, rootInfo.mode & 0o777]));
+    if (profile.client === CLAUDE_CLIENT) {
+      if (descriptor.workspace || descriptor.workspaceAncestor) {
+        for (const name of ['CLAUDE.md', 'CLAUDE.local.md', '.mcp.json']) await walk(root, join(root, name), `${label}/${name}`);
+        for (const name of ['settings.json', 'settings.local.json', 'CLAUDE.md', 'rules', 'agents', 'skills', 'commands'])
+          await walk(root, join(root, '.claude', name), `${label}/.claude/${name}`, 0, new Set(), { skillSource: name === 'skills' });
+      } else if (label === '$CLAUDE_CONFIG') {
+        for (const name of ['settings.json', 'CLAUDE.md', 'rules', 'agents', 'skills', 'commands', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json'])
+          await walk(root, join(root, name), `${label}/${name}`, 0, new Set(), { skillSource: name === 'skills' });
+      }
+      // Native trust/account metadata is statted as one file; credential bodies are never opened.
+      if (label === (profile.rootMode === 'implicit' ? '$HOME' : '$CLAUDE_CONFIG'))
+        await walk(root, join(root, '.claude.json'), `${label}/.claude.json`);
+      continue;
+    }
     if (descriptor?.workspace || descriptor?.workspaceAncestor) {
       for (const name of ['AGENTS.md', 'AGENTS.override.md']) await walk(root, join(root, name), `${label}/${name}`);
       const codex = join(root, '.codex');

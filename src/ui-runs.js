@@ -14,6 +14,7 @@ import { showAuditRecord, recoverAuditExperiment } from './audit-experiment.js';
 import { compareAuditRuns } from './audit-report.js';
 import { resolveAuditProfile } from './audit-discovery.js';
 import { buildAuditComparisonConditions } from './audit-conditions.js';
+import { CLAUDE_REQUEST, validateClaudeDecision } from './claude-decoder.js';
 import { validateNativeResponse } from './native-requests.js';
 import { UiError } from './ui-server.js';
 
@@ -28,7 +29,10 @@ const checkedId = id => { if (!UUID.test(id ?? '')) throw new UiError(400, 'Choo
 function requestSpec(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Describe the task first.');
   const advanced = request.advanced ?? {};
-  const execution = request.execution;
+  const execution = request.execution, clients = request.clients;
+  if (clients !== undefined && (!clients || typeof clients !== 'object' || Array.isArray(clients)
+    || Object.entries(clients).some(([side, client]) => !['a', 'b'].includes(side) || !['codex', 'claude-code', 'copilot'].includes(client))))
+    throw new Error('Choose a supported native client for each side');
   if (execution !== undefined && (!execution || typeof execution !== 'object' || Array.isArray(execution)
     || Object.keys(execution).some(key => key !== 'a' && key !== 'b')))
     throw new Error('Choose execution settings for comparison sides A and B');
@@ -44,7 +48,8 @@ function requestSpec(request) {
   const runMs = advanced.timeMinutes === null ? null : (advanced.timeMinutes ?? 15) * 60000;
   return validateAuditSpec({ schemaVersion: 1, repository: request.repository, revision: request.commit,
     task: request.task, profiles: ['a', 'b'].map(sideId => ({ name: request[sideId], sideId,
-      ...(advanced.program ? { executable: advanced.program } : {}), execution: execution && Object.hasOwn(execution, sideId) ? execution[sideId] : defaultExecution })),
+      ...(clients?.[sideId] ? { client: clients[sideId] } : {}),
+      ...(advanced.program && (!clients?.[sideId] || clients[sideId] === 'codex') ? { executable: advanced.program } : {}), execution: execution && Object.hasOwn(execution, sideId) ? execution[sideId] : defaultExecution })),
     limits: { runMs, ...(runMs === null ? { experimentMs: null } : {}), outputBytes: (advanced.outputMiB ?? 8) * 1024 * 1024, maxRuns: 2 },
     checks: commandList(request.checks), setup: commandList(advanced.setup), sandbox: advanced.sandbox ?? 'workspace-write',
     ...(Object.hasOwn(advanced, 'approvalsReviewer') ? { approvalsReviewer: advanced.approvalsReviewer } : {}),
@@ -56,7 +61,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
   const previews = new Map(), starts = new Map(), active = new Map(), finished = new Map(), recoveryPlans = new Map();
   let closing = false;
   const baseContext = { ...context,
-    resolveProfile: (selectedStore, selection, options = {}) => (context.resolveProfile ?? resolveAuditExecutionProfile)(selectedStore, selection, { defaultUserHome, ...options }) };
+    resolveProfile: (selectedStore, selection, options = {}) => (context.resolveProfile ?? resolveAuditExecutionProfile)(selectedStore, selection, { defaultUserHome, terminalEnvironment: context.terminalEnvironment ?? process.env, profileResolvers: context.profileResolvers, ...options }) };
   // Recovery checks the saved home/lease identity; it never prepares execution.
   const recoveryContext = { ...context, resolveProfile: (selectedStore, selection) =>
     (context.recoverProfile ?? resolveAuditProfile)(selectedStore, selection, { defaultUserHome }) };
@@ -90,7 +95,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
   }
   async function inspect(spec) {
     for (const selection of spec.profiles)
-      await context.validateSelection?.({ profile: selection.name, workspace: spec.repository }, selection.execution);
+      await context.validateSelection?.({ profile: selection.name, ...(selection.client ? { client: selection.client } : {}), workspace: spec.repository }, selection.execution);
     const profiles = [], snapshots = [];
     const preview = await previewAuditExperiment(store, spec, { ...baseContext,
       resolveProfile: async (...args) => { const value = await baseContext.resolveProfile(...args); profiles.push(identity(value)); return value; },
@@ -140,8 +145,12 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const profiles = homes.map(home => ({ name: home.name, ready: home.state === 'ready',
       readiness: home.state === 'ready' ? 'Profile available; sign-in and access are checked before Start.' : home.reason ?? 'Set up this profile in Profiles first.' })),
       defaults = { timeMinutes: 15, access: 'its workspace copy, no network', outputCap: '8 MiB', outputMiB: 8, program: '' };
-    if (await lstat(join(defaultUserHome, '.codex')).then(info => info.isDirectory(), () => false)) profiles.push({ name: 'Default', ready: false,
+    const claudeDefault = await lstat(join(defaultUserHome, '.claude')).then(info => info.isDirectory(), () => false);
+    if (await lstat(join(defaultUserHome, '.codex')).then(info => info.isDirectory(), () => false)) profiles.push({ name: 'Default', ...(claudeDefault ? { label: 'Codex Default' } : {}), ready: false,
       readiness: 'Choose the Codex program in Advanced settings to preview Default. Its saved setup is not changed.' });
+    if (claudeDefault)
+      profiles.push({ name: 'Default', client: 'claude-code', label: 'Claude Code Default', ready: true,
+        readiness: 'Uses the installed Claude CLI and its native Default profile. Sign-in is checked before the task.' });
     return { profiles, repositories, defaults, simulated: false };
   }
 
@@ -152,19 +161,23 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const reviewed = await inspect(spec), { preview } = reviewed;
     const ready = preview.status === 'ready', token = ready ? randomUUID() : null;
     if (ready) boundedSet(previews, token, { ...reviewed, spec, at: Date.now() });
-    const profileText = profile => `${profile.executable ?? 'Codex CLI unavailable'} · ${profile.version ?? 'version not known'} · ${profile.status}${profile.busy ? ' · existing clients stay open' : ''}`;
+    const hasClaude = preview.profiles.some(profile => profile.client === 'claude-code');
+    const label = profile => profile.profileName === 'Default' && hasClaude
+      ? (profile.client === 'claude-code' ? 'Claude Code Default' : 'Codex Default') : profile.profileName;
+    const profileText = profile => `${profile.executable ?? 'Native CLI unavailable'} · ${profile.version ?? 'version not known'} · ${profile.status}${profile.busy ? ' · existing clients stay open' : ''}`;
     return { ready, previewToken: token, blocked: ready ? null : { title: 'This task cannot start yet',
       reason: preview.failures.map(failure => `${failure.profile ? `${failure.profile}: ` : ''}${failure.message}`).join(' ') },
       summary: `2 model runs, one after the other · ${minutes(spec.limits.experimentMs)}`, limit: minutes(spec.limits.experimentMs),
       task: spec.task, files: spec.taskContract?.editableFiles.join(', ') ?? '',
       ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
-      runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: profile.profileName, text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'}` })),
+      runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: label(profile), text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'}` })),
       where: [preview.baseline?.repository ?? spec.repository, `Pinned commit: ${preview.baseline?.commit ?? 'not available'}`,
         'Each profile starts in a separate checkout of this commit. Uncommitted edits and untracked or ignored files are excluded.',
         'Workspace preparation preserves the source checkout. Task, setup and check commands can have effects outside their copy.'],
       checks: spec.checks.map(check => `${check.name}: ${check.argv[2]} (up to ${minutes(check.timeoutMs)})`),
       limits: [`${minutes(spec.limits.runMs)} per profile; ${minutes(spec.limits.experimentMs)} overall.`,
         `Codex access: ${spec.sandbox}; network disabled inside the sandbox. ${spec.approvalsReviewer ? 'Codex must confirm approval routing to you before a task starts.' : 'Approval routing follows the native profile settings.'} Output per program: ${spec.limits.outputBytes / 1024 / 1024} MiB.`,
+        ...(hasClaude ? ['Claude Code uses its native permission rules. The Codex access setting does not apply to that side.'] : []),
         ...spec.setup.map(command => `Setup before each task: ${command.name}: ${command.argv[2]} (ordinary program outside the Codex sandbox).`),
         'Native skill-use capture is best effort; incomplete evidence stays explicit. No automatic review or rating is run.'],
       willDo: ['Start exactly two real model tasks using the selected profiles’ sign-ins.', 'Run only the setup and verification commands listed here.', 'Retain the evidence and open the shared comparison report.'],
@@ -187,7 +200,9 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         'preview-stale', { changes });
       if (closing) throw new UiError(409, 'Xenoflux stopped while checking the preview. No task started.', 'stopping');
       await privateDirectory(store.directory, true); await privateDirectory(root, true);
-      const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.spec.profiles.map(profile => profile.name), sideIds: reviewed.spec.profiles.map(profile => profile.sideId),
+      const entry = { id: token, createdAt: new Date().toISOString(), profiles: reviewed.preview.profiles.map(profile => profile.profileName === 'Default'
+          && reviewed.preview.profiles.some(side => side.client === 'claude-code')
+          ? (profile.client === 'claude-code' ? 'Claude Code Default' : 'Codex Default') : profile.profileName), sideIds: reviewed.spec.profiles.map(profile => profile.sideId),
         ...(reviewed.spec.approvalsReviewer ? { approvalsReviewer: reviewed.spec.approvalsReviewer } : {}) };
       try { await writeFile(join(root, `${token}.json`), JSON.stringify(entry) + '\n', { flag: 'wx', mode: 0o600 }); }
       catch (error) { if (error.code === 'EEXIST') return { id: token }; throw error; }
@@ -339,7 +354,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const work = active.get(id), request = work?.pendingRequests.get(requestId);
     if (!request || request.signal.aborted || work.controller.signal.aborted)
       throw new UiError(409, 'This comparison request is no longer waiting for an answer.', 'stale-run-request');
-    try { validateNativeResponse(request.request, response); }
+    try { (request.request.method === CLAUDE_REQUEST ? validateClaudeDecision : validateNativeResponse)(request.request, response); }
     catch (error) { throw new UiError(400, errorText(error), 'invalid-run-request'); }
     work.pendingRequests.delete(requestId);
     request.resolve(response);

@@ -1,16 +1,16 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { apiGet, apiPost } from '@/api/client';
-import type { ExecutionSelection, ModelCatalogSnapshot } from '@/api/types';
+import type { ExecutionSelection, ModelCatalogSnapshot, NativeClientId } from '@/api/types';
 import { Button } from '@/components/ui/button';
 
 type CatalogState = { context: string; snapshot: ModelCatalogSnapshot | null; busy: boolean; message: string };
 
-export function ExecutionFields({ profile, workspace, value, onChange, disabled }: {
-  profile: string; workspace: string; value: ExecutionSelection;
+export function ExecutionFields({ profile, client, workspace, value, onChange, disabled }: {
+  profile: string; client?: NativeClientId; workspace: string; value: ExecutionSelection;
   onChange: (value: ExecutionSelection) => void; disabled?: boolean;
 }) {
   const id = useId();
-  const context = JSON.stringify([profile, workspace]);
+  const context = JSON.stringify([profile, client, workspace]);
   const currentContext = useRef(context);
   currentContext.current = context;
   const generation = useRef(0);
@@ -29,7 +29,7 @@ export function ExecutionFields({ profile, workspace, value, onChange, disabled 
     previousContext.current = context;
     setState({ context, snapshot: null, busy: false, message: profile ? 'Checking saved model catalog…' : 'Choose a profile to discover its models.' });
     if (profile) {
-      apiGet<ModelCatalogSnapshot>('/api/catalog', { profile, workspace }).then(snapshot => {
+      apiGet<ModelCatalogSnapshot>('/api/catalog', { profile, workspace, ...(client ? { client } : {}) }).then(snapshot => {
         if (currentContext.current === context && generation.current === owner)
           setState({ context, snapshot, busy: false, message: '' });
       }).catch(error => {
@@ -68,7 +68,7 @@ export function ExecutionFields({ profile, workspace, value, onChange, disabled 
     activeRefresh.current = requestId;
     setState({ context, snapshot: null, busy: true, message: 'Refreshing models…' });
     try {
-      const result = await apiPost<ModelCatalogSnapshot>('/api/catalog/refresh', { profile, workspace, requestId });
+      const result = await apiPost<ModelCatalogSnapshot>('/api/catalog/refresh', { profile, workspace, ...(client ? { client } : {}), requestId });
       if (currentContext.current === context && generation.current === owner)
         setState({ context, snapshot: result, busy: false, message: '' });
     } catch (error) {

@@ -112,6 +112,7 @@ export function uiRoutes(provider) {
     route('GET', '/api/compare/setups', call('setupComparison', q)),
     route('GET', '/api/compare/setups/skills/:skill', call('skillDetail', ({ params, query }) => ({ skill: params.skill, ...q({ query }) }))),
     route('GET', '/api/sessions', call('sessions', q)),
+    route('GET', '/api/sessions/claude-code', call('claudeSessions', q)),
     route('GET', '/api/compare/sessions/association', call('association', q)),
     route('POST', '/api/compare/sessions', call('compareSessions', ({ body }) => body)),
     route('GET', '/api/reports/recent', call('savedReports', () => ({}))),

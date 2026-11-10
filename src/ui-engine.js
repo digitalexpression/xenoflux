@@ -32,6 +32,8 @@ import { createUiRuns } from './ui-runs.js';
 import { createUiReviewTasks } from './ui-review-tasks.js';
 import { createUiCatalog } from './ui-catalog.js';
 import { createStockDesktopApps } from './stock-desktop-apps.js';
+import { resolveProfileExecutionProfile } from './audit-profile.js';
+import { importClaudeSession, listClaudeSessions } from './claude-sessions.js';
 import { importClaudeTranscript } from './claude-transcript.js';
 import { importCopilotTranscript } from './copilot-transcript.js';
 import { compareAuditRuns } from './audit-report.js';
@@ -111,6 +113,9 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   if (!Number.isSafeInteger(maxActiveJobs) || maxActiveJobs < 1) throw new Error('Invalid active job capacity');
   const admitted = new Set();
   const activeImports = new Set();
+  const claudeSelections = new Map();
+  const resolveClaudeSource = name => resolveProfileExecutionProfile(store, { name, client: 'claude-code' },
+    { defaultUserHome, sessionOnly: true, terminalEnvironment: runContext.terminalEnvironment ?? process.env });
   let closing = false;
   const admission = {
     async acquire(id) {
@@ -383,6 +388,12 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     const { value, selection, saved, execution } = await comparisonFor(ref);
     const { subject, reviews } = subjectOf(value);
     const view = presentComparison(subject, { title: execution ? 'Task comparison' : await titleFor(ref, selection, saved), reviews, sameTaskLabel: selection?.t });
+    for (const [side, run] of [['a', subject.left], ['b', subject.right]]) {
+      const client = run?.clientIdentity?.client ?? run?.profile?.client;
+      if (client === 'claude-code') view[side].client = 'Claude Code CLI';
+      if (client === 'copilot') view[side].client = 'GitHub Copilot CLI';
+      if (client === 'codex' && view[side].client === 'Client not known') view[side].client = 'Codex CLI';
+    }
     const quote = text => `"${String(text).replace(/(["\\$`])/g, '\\$1')}"`;
     const left = subject.selection?.left, right = subject.selection?.right;
     const sameProfile = left?.profileName === right?.profileName;
@@ -941,6 +952,26 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       try { return await operation; }
       finally { activeImports.delete(operation); }
     },
+    async claudeSessions({ profile: name, limit, offset } = {}) {
+      if (closing) throw new UiError(409, 'The app is stopping.', 'stopping');
+      if (!plain(name) || name.length > 200) throw new UiError(400, 'Choose a Claude Code profile.', 'invalid-claude-profile');
+      const id = randomUUID();
+      await admission.acquire(id);
+      try {
+        const profile = await resolveClaudeSource(name);
+        const result = await listClaudeSessions(profile, { limit: limit === undefined ? undefined : Number(limit),
+          offset: offset === undefined ? undefined : Number(offset) });
+        const sessions = result.sessions.map(({ selection, ...row }) => {
+          const token = row.importable ? randomUUID() : null;
+          if (token) claudeSelections.set(token, { name, selection, expiresAt: Date.now() + 20 * 60_000 });
+          return { ...row, token };
+        });
+        while (claudeSelections.size > 1000) claudeSelections.delete(claudeSelections.keys().next().value);
+        return { client: 'claude-code', profileId: profile.profileId, rootMode: profile.rootMode, sessions, nextOffset: result.nextOffset };
+      } catch {
+        throw new UiError(422, 'The selected Claude Code session list is unavailable.', 'claude-session-list-unavailable');
+      } finally { admission.release(id); }
+    },
     async importClaudeComparison({ left, right } = {}) {
       if (closing) throw new UiError(409, 'The app is stopping. Start it again before importing.', 'stopping');
       if (!left || !right || typeof left !== 'object' || typeof right !== 'object')
@@ -955,8 +986,13 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           const imported = [];
           for (const selected of [left, right]) {
             const directory = join(parent, randomUUID());
-            imported.push(await importClaudeTranscript(selected, { directory,
-              onArtifactCreated: artifact => directories.push(artifact) }));
+            const options = { directory, onArtifactCreated: artifact => directories.push(artifact) };
+            if (Object.hasOwn(selected, 'token')) {
+              const bound = claudeSelections.get(selected.token);
+              if (Object.keys(selected).length !== 1 || !bound || bound.expiresAt < Date.now())
+                throw new Error('Claude session selection expired');
+              imported.push(await importClaudeSession(await resolveClaudeSource(bound.name), bound.selection, options));
+            } else imported.push(await importClaudeTranscript(selected, options));
           }
           const value = compareAuditRuns(imported[0], imported[1]);
           const summary = register(value, { title: 'Imported Claude Code conversations', savedAt: null, path: null });

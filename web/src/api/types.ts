@@ -323,17 +323,18 @@ export interface ReviewTaskOptions {
   defaults: { timeoutMs: number | null };
 }
 export interface ModelCatalogModel {
-  id: string; model: string; displayName: string; hidden: boolean; isDefault: boolean;
-  supportedReasoningEfforts: null | { reasoningEffort: string; description: string }[];
+  id: string; model: string; displayName: string | null; hidden: boolean | null; isDefault: boolean | null;
+  supportedReasoningEfforts: null | { reasoningEffort: string; description: string | null }[];
   defaultReasoningEffort: string | null;
 }
 export interface ModelCatalogSnapshot {
-  status: 'ready' | 'unavailable' | 'cancelled'; source: 'codex-model/list';
+  status: 'ready' | 'unavailable' | 'cancelled'; source: 'codex-model/list' | 'claude-agent-sdk/initialize' | 'native-catalog';
   models: ModelCatalogModel[]; scope: Record<string, unknown> | null;
   discoveredAt: string | null; expiresAt: string | null; reason?: string; generation?: number;
 }
-export interface ExecutionSelection { model?: string; reasoningEffort?: string }
+export interface ExecutionSelection { model?: string; reasoningEffort?: string; permissionMode?: 'default' | 'acceptEdits' | 'plan' }
 export interface ReviewTaskRequest {
+  client?: NativeClientId;
   execution?: ExecutionSelection;
   profile: string;
   cwd?: string;
@@ -347,6 +348,7 @@ export interface ReviewTaskPreview {
   blocked: { title: string; reason: string } | null;
   title: string;
   profile: string;
+  client?: NativeClientId;
   cwd: string;
   prompt: string;
   effectivePrompt: string;
@@ -376,6 +378,9 @@ export interface ReviewTaskPendingRequest {
 }
 export interface ReviewTaskView {
   id: string;
+  client?: NativeClientId | null;
+  nativeReference?: { client: NativeClientId; jobId: string; profileId: string; sessionId: string | null;
+    turnId: string | null; itemId: string | null; requestId: string | null } | null;
   threadId: string | null;
   turnId: string | null;
   status: ReviewTaskState;
@@ -439,7 +444,8 @@ export interface SavedSummary {
 export interface SavedReportsView { recent: { id: string; title: string; savedAt: string; folder: string; sides?: { side: string; profile: string; state: string; detail: string; checks: string }[] | null }[] }
 
 /* Runs */
-export interface RunProfileOption { name: string; readiness: string; ready: boolean }
+export type NativeClientId = 'codex' | 'claude-code' | 'copilot';
+export interface RunProfileOption { name: string; label?: string; client?: NativeClientId; readiness: string; ready: boolean }
 export interface RunOptions {
   profiles: RunProfileOption[];
   repositories: { path: string; commit: string }[];
@@ -455,6 +461,7 @@ export interface RunAdvanced {
   setup: { name: string; command: string }[];
 }
 export interface RunRequest {
+  clients?: Partial<Record<'a' | 'b', NativeClientId>>;
   execution?: Record<'a' | 'b', ExecutionSelection>;
   task: string;
   files: string;

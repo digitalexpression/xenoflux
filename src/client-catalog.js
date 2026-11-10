@@ -1,4 +1,4 @@
-// Explicit Codex catalog probes submit no task. Cache reads never launch a client.
+// Explicit native catalog probes submit no task. Cache reads never launch a client.
 import { isDeepStrictEqual } from 'node:util';
 import { runAuditProcess } from './audit-process.js';
 import { createEnvironmentBinding } from './client-contracts.js';
@@ -65,8 +65,8 @@ export async function readCodexModels(request, { signal } = {}) {
 
 function contextScope(context) {
   const binding = createEnvironmentBinding(context.profile.environmentBinding);
-  if (binding.client !== 'codex' || binding.surface !== 'cli' || binding.executionLocation !== 'local')
-    throw fail('catalog-unsupported-context', 'Model discovery requires the local Codex CLI profile');
+  if (binding.surface !== 'cli' || binding.executionLocation !== 'local')
+    throw fail('catalog-unsupported-context', 'Model discovery requires a local CLI profile');
   if (context.workspace !== binding.workspace) throw fail('catalog-context-changed', 'Catalog workspace does not match the profile');
   return { environmentBinding: binding, workspace: context.workspace,
     accountScope: optionalText(context.accountScope, 'account scope'),
@@ -84,6 +84,8 @@ function accountObservation(response) {
 export async function discoverCodexModels({ profile, workspace, signal, stdoutPath, stderrPath,
   timeoutMs = 15000, runProcess = runAuditProcess, onSpawn } = {}) {
   const scope = contextScope({ profile, workspace });
+  if (scope.environmentBinding.client !== 'codex')
+    throw fail('catalog-unsupported-context', 'Codex model discovery requires the Codex CLI profile');
   let nextId = 0, waiting = null, failure = null, models = [], account = { status: 'unverified', type: null, id: null };
   let initialized = false;
   function requestMessage(method, params) {
@@ -185,8 +187,9 @@ export function createClientCatalog({ discover = discoverCodexModels, resolveCon
   now = Date.now, ttlMs = CATALOG_TTL_MS } = {}) {
   const entries = new Map(), generations = new Map();
   const keyOf = context => JSON.stringify(contextScope(context));
-  const discarded = (reason, generation, snapshot) => ({ ...(snapshot?.process ? { process: snapshot.process } : {}), status: 'unavailable', source: 'codex-model/list', reason,
-    generation, models: [], capabilities: { models: 'unknown', effort: 'unknown' } });
+  const discarded = (scope, reason, generation, snapshot) => ({ ...(snapshot?.process ? { process: snapshot.process } : {}),
+    status: 'unavailable', source: snapshot?.source ?? (scope.environmentBinding.client === 'codex' ? 'codex-model/list' : 'native-catalog'),
+    reason, generation, models: [], capabilities: { models: 'unknown', effort: 'unknown' } });
   return {
     get(context) {
       const entry = entries.get(keyOf(context));
@@ -203,17 +206,17 @@ export function createClientCatalog({ discover = discoverCodexModels, resolveCon
       const generation = (generations.get(key) ?? 0) + 1; generations.set(key, generation);
       const current = () => generations.get(key) === generation;
       if (!isDeepStrictEqual(contextScope(await resolveContext(context)), scope) || !current())
-        return discarded('catalog-context-changed', generation);
-      if (options.signal?.aborted) return discarded('catalog-cancelled', generation);
+        return discarded(scope, 'catalog-context-changed', generation);
+      if (options.signal?.aborted) return discarded(scope, 'catalog-cancelled', generation);
       const snapshot = await discover({ ...options, profile: frozen.profile, workspace: frozen.workspace });
-      if (!current()) return discarded('catalog-superseded', generation, snapshot);
+      if (!current()) return discarded(scope, 'catalog-superseded', generation, snapshot);
       const reconciled = await resolveContext(context);
-      if (!current()) return discarded('catalog-superseded', generation, snapshot);
-      if (options.signal?.aborted) return discarded('catalog-cancelled', generation, snapshot);
+      if (!current()) return discarded(scope, 'catalog-superseded', generation, snapshot);
+      if (options.signal?.aborted) return discarded(scope, 'catalog-cancelled', generation, snapshot);
       if (!isDeepStrictEqual(contextScope(reconciled), scope)
         || !isDeepStrictEqual(snapshot.scope?.environmentBinding, scope.environmentBinding)
         || snapshot.scope?.workspace !== scope.workspace)
-        return discarded('catalog-context-changed', generation, snapshot);
+        return discarded(scope, 'catalog-context-changed', generation, snapshot);
       snapshot.scope = { ...scope, account: snapshot.scope.account };
       snapshot.generation = generation;
       snapshot.expiresAt = new Date(now() + ttlMs).toISOString();

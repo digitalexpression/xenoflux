@@ -3,10 +3,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { runAuditCapture } from './audit-capture.js';
 import { createEnvironmentBinding } from './client-contracts.js';
 import { createCaptureProjection } from './capture-projection.js';
+import { createClaudeRuntime } from './claude-runtime.js';
 import { createCodexRuntime } from './codex-runtime.js';
 
 export function createClientRuntime({ capture = runAuditCapture, runtimes = {} } = {}) {
-  const implementations = { codex: { ...createCodexRuntime(), capture }, ...runtimes };
+  const implementations = { codex: { ...createCodexRuntime(), capture }, 'claude-code': createClaudeRuntime(), ...runtimes };
   const owners = new WeakMap();
   const implementationFor = client => {
     const implementation = Object.hasOwn(implementations, client) ? implementations[client] : null;
@@ -45,7 +46,7 @@ export function createClientRuntime({ capture = runAuditCapture, runtimes = {} }
     if (binding && (binding.profileId !== profile.profileId || binding.roots.config !== profile.home
       || binding.rootMode !== profile.rootMode || binding.roots.user !== profile.userHome
       || binding.roots.reservation !== (profile.reservationRoot ?? profile.nativeRoot ?? profile.home)
-      || options.executionMode === 'profile' && (binding.workspace !== options.workspace
+      || (options.executionMode === 'profile' || client !== 'codex') && (binding.workspace !== options.workspace
         || binding.roots.runtime !== (profile.nativeRoot ? profile.home : null))
       || binding.executable.path !== profile.executable || binding.executable.identity !== profile.executableIdentity
       || !isDeepStrictEqual(binding.settingsIdentity, profile.settingsIdentity ?? null)))
