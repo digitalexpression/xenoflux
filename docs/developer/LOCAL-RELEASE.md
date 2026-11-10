@@ -39,10 +39,21 @@ npm test
 npm run local-release -- --output /absolute/new/release-directory --smoke
 ```
 
-The output directory must not exist. The command produces four files: the Xenoflux
-tarball, `smol-toml` dependency tarball, SHA-256 manifest and `install.mjs`. `--smoke`
-installs them into a disposable directory and checks the detached offline package
-and managed installation lifecycle. Both the npm and managed shell entries must
+The output directory must not exist. The command produces the Xenoflux npm
+tarball, `xenoflux-runtime-VERSION-darwin-ARCH.tgz`, a schema-2 SHA-256 manifest
+and `install.mjs`. The runtime archive retains the installed, locked dependency
+tree, including required peers and the matching Koffi native library. The
+builder stages it using an offline npm install of local tarballs and a fresh
+cache. Optional SDK CLI binaries and development dependencies are excluded.
+Users supply their selected native CLIs separately. Build the offline bundle
+with the target Node architecture on macOS. The installer checks the
+architecture and both artifact checksums before staging. Use the installer
+shipped with each bundle.
+
+The npm tarball remains the publication artifact and resolves its dependencies
+through npm during a normal install. The runtime archive is for the detached
+installer. `--smoke` checks SDK imports and the managed installation lifecycle
+in disposable directories. Both the npm and managed shell entries must
 serve their bundled HTML, JavaScript and CSS and refuse unauthenticated API
 requests. The managed check runs outside the package directory with a disposable
 home/controller and mocked native service callbacks. It does not sign in, start or quit real Codex, mount
@@ -51,7 +62,7 @@ artifact hashes and smoke result. Package scripts are ignored during packing.
 
 ## Public source and package boundary
 
-Review the complete outgoing commit range and the actual tarball before sharing.
+Review the complete outgoing commit range and both tarballs before sharing.
 Keep internal operational receipts and audit handovers in private storage; preserve
 their originals before producing explicitly sanitized summaries. Public summaries
 retain outcomes, failed controls and coverage limits without personal paths, private

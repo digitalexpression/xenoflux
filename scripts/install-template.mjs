@@ -68,11 +68,14 @@ if (!Number.isInteger(version[0]) || !Number.isInteger(version[1])
     let manifest;
     try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')); }
     catch { fail('Unable to read release manifest'); }
-    if (manifest?.schemaVersion !== 1 || typeof manifest.package !== 'string' || typeof manifest.version !== 'string'
+    if (manifest?.schemaVersion !== 2 || typeof manifest.package !== 'string' || typeof manifest.version !== 'string'
       || !Array.isArray(manifest.dependencies) || manifest.dependencies.length !== 1) fail('Unsupported release manifest');
     const project = { name: validArtifact(manifest.tarball), digest: validDigest(manifest.sha256) };
     const dependency = manifest.dependencies[0];
-    if (dependency?.name !== 'smol-toml') fail('Release manifest must include smol-toml');
+    if (dependency?.name !== 'xenoflux-runtime' || dependency.version !== manifest.version)
+      fail('Release manifest must include the matching Xenoflux runtime archive');
+    if (dependency.platform !== process.platform || dependency.arch !== process.arch)
+      fail(`Release runtime requires ${dependency.platform}/${dependency.arch}; found ${process.platform}/${process.arch}`);
     const dependencyArtifact = { name: validArtifact(dependency.tarball), digest: validDigest(dependency.sha256) };
     if (project.name === dependencyArtifact.name) fail('Release artifacts must be distinct');
     for (const artifact of [project, dependencyArtifact]) {
@@ -91,13 +94,13 @@ if (!Number.isInteger(version[0]) || !Number.isInteger(version[1])
       const dependencyRoot = await extract(dependencyArtifact.file, dependencyExtract);
       const stage = join(temporary, 'xenoflux');
       await rename(projectRoot, stage);
-      const modules = join(stage, 'node_modules');
-      await mkdir(modules, { recursive: true, mode: 0o700 });
-      await rename(dependencyRoot, join(modules, 'smol-toml'));
+      const modules = join(dependencyRoot, 'node_modules');
+      if (!(await lstat(modules).catch(() => null))?.isDirectory()) fail('Runtime archive has no safe node_modules directory');
+      await rename(modules, join(stage, 'node_modules'));
       const command = join(stage, 'bin', 'xfx.js');
       const commandInfo = await lstat(command).catch(() => null);
       if (!commandInfo?.isFile() || commandInfo.isSymbolicLink()) fail('Release package has no safe xfx command');
-      await run('node', [command, 'install', ...process.argv.slice(2)], { cwd: stage, stdio: 'inherit' });
+      await run(process.execPath, [command, 'install', ...process.argv.slice(2)], { cwd: stage, stdio: 'inherit' });
     } finally { await rm(temporary, { force: true, recursive: true }); }
   }
   main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });

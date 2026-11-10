@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { cp, mkdtemp, mkdir, readFile, writeFile, access, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { createInstallation } from '../src/installation.js';
 import { userPaths } from '../src/paths.js';
 import { readLogSettings, writeLogSettings } from '../src/log-storage.js';
@@ -35,6 +36,20 @@ test('install validates Node first, stages a runnable package, and writes a port
   assert.match(await readFile(join(result.app, '.xfx-install.json'), 'utf8'), /com\.xenoflux\.app\.v1/);
   assert.match(await readFile(join(result.app, 'LICENSE'), 'utf8'), /MIT License[\s\S]*Copyright \(c\) 2026 Digital Expression/);
   await access(join(result.app, 'node_modules', 'smol-toml', 'package.json'));
+  const externalCopilot = join(f.home, 'external', 'copilot');
+  const sdk = spawnSync(process.execPath, ['--input-type=module', '--eval', `
+    import assert from 'node:assert/strict';
+    import { query } from '@anthropic-ai/claude-agent-sdk';
+    import { RuntimeConnection } from '@github/copilot-sdk';
+    assert.equal(typeof query, 'function');
+    assert.equal(RuntimeConnection.forStdio({ path: process.argv[1] }).path, process.argv[1]);
+  `, externalCopilot], { cwd: result.app, encoding: 'utf8', env: { ...process.env, NODE_PATH: '' } });
+  assert.equal(sdk.status, 0, sdk.stderr);
+  for (const name of ['@anthropic-ai/claude-agent-sdk', '@github/copilot-sdk']) {
+    const modules = join(result.app, 'node_modules');
+    const manifest = JSON.parse(await readFile(join(modules, name, 'package.json'), 'utf8'));
+    for (const cli of Object.keys(manifest.optionalDependencies ?? {})) await assert.rejects(access(join(modules, cli)), { code: 'ENOENT' });
+  }
   assert.equal(f.calls.filter(([kind]) => kind === 'node').length, 2);
   assert.equal(f.calls.some(([kind, file, args]) => kind === 'execute' && file === 'node' && args[1] === '--help' && args[0].includes('.stage-')), true);
 });

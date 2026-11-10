@@ -6,14 +6,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
+import { copyRuntimeDependencies, koffiPlatformPackage } from '../src/installation.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const usage = `Usage: npm run local-release -- --output DIRECTORY [--smoke]
 
 Builds the current Xenoflux package locally, writes a SHA-256 manifest beside it,
-and optionally verifies a detached offline installation using the checked-out
-smol-toml dependency. It never installs xfx globally or changes profile stores.
+and stages the locked runtime dependencies for the build architecture offline.
+It never installs xfx globally or changes profile stores.
 
   --output DIRECTORY  New directory for the tarball and manifest.
   --smoke             Verify a detached offline install and disposable fixture lifecycle.
@@ -37,7 +38,7 @@ export function parseArguments(argv) {
 }
 
 export function manifestFor({ packageName, version, tarball, sha256, dependencies, sourceRevision, smoke }) {
-  return { schemaVersion: 1, package: packageName, version, tarball, sha256, dependencies, sourceRevision, smoke };
+  return { schemaVersion: 2, package: packageName, version, tarball, sha256, dependencies, sourceRevision, smoke };
 }
 
 export function preservesFrozenAuditFields(actual, frozen) {
@@ -93,17 +94,94 @@ async function assertPackageInputsTracked() {
   if (unsafe.length) throw new Error(`Refusing to package untracked runtime input: ${unsafe.join(', ')}`);
 }
 
-async function pack(directory, destination, cache) {
+async function pack(directories, destination, cache) {
   // Run from this project so a dependency's development-only tool requirements
   // do not apply to repacking its already installed runtime files.
-  const result = await run('npm', ['pack', directory, '--offline', '--json', '--ignore-scripts', '--pack-destination', destination], {
+  const result = await run('npm', ['pack', ...directories, '--offline', '--json', '--ignore-scripts', '--pack-destination', destination], {
     cwd: root,
     env: { ...process.env, npm_config_cache: cache },
   });
   const entries = JSON.parse(result.stdout);
-  if (!Array.isArray(entries) || entries.length !== 1 || typeof entries[0].filename !== 'string')
-    throw new Error('npm pack did not return exactly one tarball');
-  return entries[0];
+  if (!Array.isArray(entries) || entries.length !== directories.length ||
+      entries.some(entry => typeof entry.filename !== 'string' || dirname(entry.filename) !== '.'))
+    throw new Error('npm pack did not return the expected tarballs');
+  return entries;
+}
+
+async function installDetached(packed, tarball, temporary, packCache) {
+  const { packages } = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
+  const { devDependencies, ...project } = packages[''];
+  const platformPackage = koffiPlatformPackage();
+  const platformPath = `node_modules/${platformPackage}`;
+  if (!packages[platformPath] || packages['node_modules/koffi']?.optionalDependencies?.[platformPackage] !== packages[platformPath].version)
+    throw new Error(`The release lock does not specify the required native library: ${platformPackage}`);
+  if (project.name !== packed.name || project.version !== packed.version)
+    throw new Error('The package lock does not match the packed project');
+  const directories = new Map();
+  const identities = new Map();
+  for (const [path, entry] of Object.entries(packages)) {
+    if (!path || entry.dev || (entry.optional && path !== platformPath)) continue;
+    const name = path.split('node_modules/').at(-1);
+    const directory = join(root, path);
+    const resolved = await realpath(directory).catch(() => null);
+    if (!resolved?.startsWith(join(root, 'node_modules') + sep))
+      throw new Error(`Missing or external runtime dependency: ${path}; run npm ci first`);
+    const installed = JSON.parse(await readFile(join(resolved, 'package.json'), 'utf8'));
+    if (installed.name !== name || installed.version !== entry.version)
+      throw new Error(`Installed runtime dependency does not match the lock: ${path}; run npm ci first`);
+    const identity = `${name}@${entry.version}`;
+    directories.set(identity, resolved);
+    identities.set(path, identity);
+  }
+
+  const tarballs = join(temporary, 'runtime-tarballs');
+  const install = join(temporary, 'installed');
+  await Promise.all([mkdir(tarballs, { mode: 0o700 }), mkdir(install, { mode: 0o700 })]);
+  const archives = await pack([...directories.values()], tarballs, packCache);
+  const archiveByIdentity = new Map(archives.map(entry => [`${entry.name}@${entry.version}`, entry]));
+  if (new Set(archives.map(entry => entry.filename)).size !== directories.size ||
+      [...directories.keys()].some(identity => !archiveByIdentity.has(identity)))
+    throw new Error('Packed runtime dependency identities are incomplete or have conflicting filenames');
+  const artifact = entry => `file:${join(tarballs, entry.filename)}`;
+  const dependencies = {
+    [project.name]: `file:${tarball}`,
+    [platformPackage]: artifact(archiveByIdentity.get(identities.get(platformPath))),
+  };
+  const localPackages = {
+    '': { dependencies },
+    [`node_modules/${project.name}`]: { ...project, resolved: dependencies[project.name], integrity: packed.integrity },
+  };
+  for (const [path, entry] of Object.entries(packages)) {
+    if (!path || entry.dev) continue;
+    const archive = archiveByIdentity.get(identities.get(path));
+    localPackages[path] = archive ? { ...entry, resolved: artifact(archive), integrity: archive.integrity } : entry;
+  }
+  // npm omits other optional dependencies. The FFI library is a direct local
+  // dependency of this disposable install so its native code stays available.
+  delete localPackages[platformPath].optional;
+  await writeFile(join(install, 'package.json'), JSON.stringify({ private: true, dependencies }));
+  await writeFile(join(install, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: localPackages }));
+  await run('npm', ['ci', '--offline', '--ignore-scripts', '--omit=optional', '--no-audit', '--no-fund',
+    '--cache', join(temporary, 'empty-install-cache')], { cwd: install });
+  return install;
+}
+
+async function runtimeArchive(installedRoot, temporary, output, version) {
+  const staging = join(temporary, 'runtime-archive');
+  await copyRuntimeDependencies(installedRoot, join(staging, 'package'));
+  const tarball = `xenoflux-runtime-${version}-${process.platform}-${process.arch}.tgz`;
+  const archive = join(output, tarball);
+  await run('/usr/bin/tar', ['-czf', archive, '-C', staging, 'package'], {
+    env: { ...process.env, COPYFILE_DISABLE: '1' },
+  });
+  return { name: 'xenoflux-runtime', version, tarball, platform: process.platform, arch: process.arch,
+    sha256: createHash('sha256').update(await readFile(archive)).digest('hex') };
+}
+
+export async function buildOfflineRuntime(packed, tarball, temporary, output) {
+  const install = await installDetached(packed, tarball, temporary, join(temporary, 'pack-cache'));
+  const dependency = await runtimeArchive(join(install, 'node_modules', packed.name), temporary, output, packed.version);
+  return { install, dependency };
 }
 
 async function writeInstaller(directory) {
@@ -143,20 +221,33 @@ async function smokeLocalApp(installed, store, cwd, env = process.env) {
   }
 }
 
-async function smokeInstall(tarball, dependencyTarball, cache) {
-  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'xfx-local-release-')));
+async function smokeSdkLibraries(application, modules, externalCopilot) {
+  for (const sdk of ['@anthropic-ai/claude-agent-sdk', '@github/copilot-sdk']) {
+    const manifest = JSON.parse(await readFile(join(modules, sdk, 'package.json'), 'utf8'));
+    for (const cli of Object.keys(manifest.optionalDependencies ?? {})) {
+      if (await exists(join(modules, cli))) throw new Error(`Offline bundle included an optional SDK CLI: ${cli}`);
+    }
+  }
+  await run(process.execPath, ['--input-type=module', '--eval', `
+    import { query } from '@anthropic-ai/claude-agent-sdk';
+    import { CopilotClient, RuntimeConnection } from '@github/copilot-sdk';
+    import koffi from 'koffi';
+    const executable = process.argv[1];
+    if (typeof query !== 'function' || typeof CopilotClient !== 'function' || typeof koffi.load !== 'function' ||
+        RuntimeConnection.forStdio({ path: executable }).path !== executable)
+      throw new Error('Detached SDK libraries did not load with an external CLI path');
+  `, externalCopilot], { cwd: application, env: { ...process.env, NODE_PATH: '' } });
+}
+
+async function smokeInstall(install) {
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'xfx-release-smoke-')));
   try {
-    const install = join(temporary, 'installed');
-    await mkdir(install, { mode: 0o700 });
-    await writeFile(join(install, 'package.json'), '{"private":true}\n', { mode: 0o600 });
-    await run('npm', ['install', '--offline', '--ignore-scripts', '--no-package-lock', tarball, dependencyTarball], {
-      cwd: install,
-      env: { ...process.env, npm_config_cache: cache, npm_config_audit: 'false', npm_config_fund: 'false' },
-    });
     const installed = join(install, 'node_modules', '.bin', 'xfx');
     const installedRoot = await realpath(join(install, 'node_modules', 'xenoflux'));
     if (installedRoot === root || installedRoot.startsWith(root + sep))
       throw new Error('Detached smoke resolved the installed package into the checkout');
+    const externalCopilot = join(temporary, 'external', 'copilot');
+    await smokeSdkLibraries(installedRoot, join(install, 'node_modules'), externalCopilot);
     const result = await run(installed, ['--help'], { cwd: install });
     if (!result.stdout.startsWith('xfx — Xenoflux')) throw new Error('Installed xfx did not print its help header');
     await smokeLocalApp(installed, join(temporary, 'ui store'), install);
@@ -294,6 +385,7 @@ async function smokeInstall(tarball, dependencyTarball, cache) {
       backgroundPath: '/missing/node:/usr/bin:/bin' });
     if (installation.ramStartup.enabled || prepared !== 0 || serviceCalls !== 0)
       throw new Error('Detached install attempted native RAM-log setup without a background Node');
+    await smokeSdkLibraries(installation.app, join(installation.app, 'node_modules'), externalCopilot);
     for (const notice of ['LICENSE', join('node_modules', 'smol-toml', 'LICENSE')]) {
       if (!(await readFile(join(root, notice))).equals(await readFile(join(installation.app, notice))))
         throw new Error(`Detached installation changed or omitted its license notice: ${notice}`);
@@ -315,29 +407,25 @@ export async function main(argv = process.argv.slice(2)) {
   if (!options.output) throw new Error('--output is required');
   const sourceRevision = await revision();
   await assertPackageInputsTracked();
-  const sourceDependency = join(root, 'node_modules', 'smol-toml');
-  const dependencyInfo = await stat(sourceDependency).catch(() => null);
-  if (!dependencyInfo?.isDirectory()) throw new Error('Local release requires installed node_modules/smol-toml; run npm ci first');
   const output = await newDirectory(options.output, 'Output directory');
-  const cache = await mkdtemp(join(tmpdir(), 'xfx-npm-cache-'));
+  const temporary = await realpath(await mkdtemp(join(tmpdir(), 'xfx-local-release-')));
   try {
-    const packed = await pack(root, output, cache);
+    const cache = join(temporary, 'pack-cache');
+    const [packed] = await pack([root], output, cache);
     const tarball = join(output, packed.filename);
-    const dependency = await pack(sourceDependency, output, cache);
-    const dependencyTarball = join(output, dependency.filename);
     const sha256 = createHash('sha256').update(await readFile(tarball)).digest('hex');
-    const dependencySha256 = createHash('sha256').update(await readFile(dependencyTarball)).digest('hex');
+    const { install, dependency } = await buildOfflineRuntime(packed, tarball, temporary, output);
     const installer = await writeInstaller(output);
-    const smoke = options.smoke ? await smokeInstall(tarball, dependencyTarball, cache) : { status: 'not-run' };
+    const smoke = options.smoke ? await smokeInstall(install) : { status: 'not-run' };
     if (await revision() !== sourceRevision) throw new Error('Source revision changed while packaging; discard this output and rebuild');
     await assertPackageInputsTracked();
     const manifest = manifestFor({ packageName: packed.name, version: packed.version, tarball: packed.filename,
-      sha256, dependencies: [{ name: dependency.name, version: dependency.version, tarball: dependency.filename, sha256: dependencySha256 }],
+      sha256, dependencies: [dependency],
       sourceRevision, smoke });
     const manifestPath = join(output, 'manifest.json');
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600 });
     process.stdout.write(JSON.stringify({ status: 'built', output, tarball, manifest: manifestPath, installer, smoke }, null, 2) + '\n');
-  } finally { await rm(cache, { force: true, recursive: true }); }
+  } finally { await rm(temporary, { force: true, recursive: true }); }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
