@@ -146,7 +146,7 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
   const selection = selectionOf(input);
   const route = await selectedClient(store, selection);
   if (route.client !== 'codex') return resolveNonCodexProfile(selection, route,
-    { repository, defaultUserHome, terminalEnvironment, profileResolvers });
+    { repository, defaultUserHome, terminalEnvironment, profileResolvers, sessionOnly: false });
   const isDefault = selection.name.trim().toLowerCase() === 'default';
   let profile;
   if (isDefault) profile = await defaultProfile(selection.name, { repository, defaultUserHome });

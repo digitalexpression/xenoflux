@@ -23,7 +23,7 @@ async function waitFor(action, match, label) {
   assert.fail(label + ' ' + JSON.stringify(value));
 }
 
-async function setup(t, { escapedDescendant = false, defaultRuntime = false } = {}) {
+async function setup(t, { escapedDescendant = false, defaultRuntime = false, productRouting = false } = {}) {
   const base = await createUiRunsFixture();
   t.after(() => base.close());
   const { root, repository } = base;
@@ -31,17 +31,18 @@ async function setup(t, { escapedDescendant = false, defaultRuntime = false } = 
   await copyFile(nativeFixture('cli.cjs'), executable);
   await copyFile(nativeFixture('events.json'), join(root, 'events.json'));
   await chmod(executable, 0o700);
-  const managed = [];
+  const managed = [], invocationLog = join(root, 'copilot-invocations.jsonl');
   for (const label of ['Copilot A', 'Copilot B']) {
     const rootPath = join(root, label), configRoot = join(rootPath, 'config'), reviewPath = join(root, label + ' review');
     await mkdir(configRoot, { recursive: true, mode: 0o700 });
     await mkdir(reviewPath, { mode: 0o700 });
-    await writeFile(join(configRoot, 'fixture.json'), JSON.stringify({ label, escapedDescendant }), { mode: 0o600 });
-    managed.push({ id: randomUUID(), name: label, client: 'copilot', repositories: [{ path: repository }, { path: reviewPath }],
+    await writeFile(join(configRoot, 'fixture.json'), JSON.stringify({ label, escapedDescendant, ...(productRouting && { noTools: true, invocationLog }) }), { mode: 0o600 });
+    managed.push({ id: randomUUID(), name: label, description: '', revision: 1, client: 'copilot', repositories: [{ path: repository }, { path: reviewPath }],
       native: { root: rootPath, configRoot, rootMode: 'explicit', executable,
         executableIdentity: copilotExecutableIdentity(await lstat(executable)), environmentId: randomUUID(), version: '1.0.107' } });
   }
-  const store = { directory: base.store.directory, read: async () => {
+  if (productRouting) await base.store.update(data => { data.profiles.push(...managed); });
+  const store = productRouting ? base.store : { directory: base.store.directory, read: async () => {
     const data = await base.store.read();
     return { ...data, profiles: [...data.profiles, ...managed] };
   } };
@@ -62,15 +63,39 @@ async function setup(t, { escapedDescendant = false, defaultRuntime = false } = 
       route: copilotAccountRoute(profile.environmentBinding), expiresAt: Number.MAX_SAFE_INTEGER };
     return profile;
   } };
-  const clientRuntimes = defaultRuntime ? { copilot: createCopilotRuntime({ launch: fixtureDefaultLaunch }) } : undefined;
+  const runtime = createCopilotRuntime();
+  const reservations = [];
+  const clientRuntimes = defaultRuntime ? { copilot: createCopilotRuntime({ launch: fixtureDefaultLaunch }) }
+    : productRouting ? { copilot: { ...runtime, async capture(options) {
+      const lock = join(options.profile.reservationRoot, '.run-lock', 'owner.json');
+      reservations.push(JSON.parse(await readFile(lock, 'utf8')));
+      return runtime.capture(options);
+    } } } : undefined;
   const accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
+  const fixtureResolvers = productRouting ? {} : { profileResolvers };
+  const fixtureAccounts = new Map();
+  // The explicit status launches use the inert SDK CLI. Substitute only the stock account check.
+  const accountContext = productRouting ? {
+    resolveStockCopilot: async ({ workspace }) => ({ workspace, rootMode: 'implicit', home: defaultRoot, executable,
+      executableIdentity: managed[0].native.executableIdentity }),
+    readCopilotAccount: async options => {
+      if (options.profile.rootMode === 'implicit') {
+        const status = fixtureAccounts.get(options.workspace);
+        fixtureAccounts.delete(options.workspace);
+        return status;
+      }
+      const status = await runtime.accountStatus(options);
+      fixtureAccounts.set(options.workspace, status);
+      return status;
+    },
+  } : undefined;
   const provider = createEngineProvider({ store, defaultUserHome, reportsRoot: base.reportsRoot,
     lockOptions: { lockPath: join(root, 'operation') },
-    runContext: { ...base.runContext, profileResolvers, clientRuntimes },
-    reviewContext: { profileResolvers, accessOptions, clientRuntimes, lockOptions: { lockPath: join(root, 'operation') } },
-    catalogContext: { profileResolvers } });
+    runContext: { ...base.runContext, ...fixtureResolvers, clientRuntimes },
+    reviewContext: { ...fixtureResolvers, accessOptions, clientRuntimes, lockOptions: { lockPath: join(root, 'operation') } },
+    catalogContext: fixtureResolvers, accountContext });
   t.after(() => provider.close());
-  return { ...base, store, provider, managed, defaultRoot };
+  return { ...base, store, provider, managed, defaultRoot, invocationLog, reservations };
 }
 
 // The implicit stock route is disposable here. Managed cases exercise the
@@ -181,6 +206,64 @@ test('managed Copilot refresh, comparison and independently owned reviews use th
   const methods = log.trim().split('\n').map(line => JSON.parse(line).method);
   assert.ok(methods.indexOf('session.abort') < methods.indexOf('session.detach'));
   assert.equal(methods.includes('session.permissions.handlePendingPermissionRequest'), false);
+});
+
+test('two persisted Copilot profiles reserve the requested repository and launch in separate owned checkouts', async t => {
+  const app = await setup(t, { productRouting: true });
+  for (const { name } of app.managed) {
+    const account = await app.provider.profileAccount({ name, client: 'copilot' });
+    assert.equal(account.accountScope, 'shared');
+  }
+  const launched = async () => (await readFile(app.invocationLog, 'utf8')).trim().split('\n').map(JSON.parse);
+  const before = await launched();
+  assert.equal(before.length, 2, 'only the two explicit fixture status processes have launched');
+  const input = { ...compareInput(app), b: 'Copilot B', clients: { a: 'copilot', b: 'copilot' } };
+  const started = await startComparison(app, input);
+  const finished = await waitFor(() => app.provider.run(started), terminalRun, 'Two managed Copilot profiles');
+  assert.equal(finished.state, 'finished-partial', JSON.stringify(finished));
+
+  const experiment = await readAuditRecord(app.store, started.id);
+  const legs = await Promise.all(experiment.state.runs.map(run => readAuditRecord(app.store, run.id)));
+  const captures = (await launched()).slice(before.length);
+  assert.equal(legs.length, 2);
+  assert.equal(captures.length, 2);
+  assert.equal(app.reservations.length, 2);
+  assert.notEqual(captures[0].workspace, captures[1].workspace);
+  for (const [index, leg] of legs.entries()) {
+    const { native, id } = app.managed[index];
+    assert.equal(leg.record.profile.bindingRepository, app.repository);
+    assert.equal(app.reservations[index].binding.workspace, app.repository);
+    assert.equal(app.reservations[index].profileId, id);
+    assert.equal(app.reservations[index].runId, leg.record.id);
+    assert.equal(leg.state.reservation, null);
+    assert.equal(leg.report.environmentBinding.workspace, leg.state.workspace.directory);
+    assert.deepEqual(captures[index], { workspace: leg.state.workspace.directory, home: homedir(), root: native.configRoot });
+    assert.notEqual(captures[index].workspace, app.repository);
+    await assert.rejects(lstat(join(native.root, '.run-lock')), { code: 'ENOENT' });
+  }
+
+  const [left] = app.managed;
+  const listed = await app.provider.copilotSessions({ profile: left.name });
+  assert.equal(listed.sessions.length, 1);
+  assert.equal((await launched()).at(-1).workspace, app.repository);
+  const reviewCwd = left.repositories[1].path;
+  const review = await app.provider.previewReviewTask({ ref: 'e.' + started.id, profile: left.name, client: 'copilot', cwd: reviewCwd });
+  const reviewStarted = await app.provider.startReviewTask({ ref: 'e.' + started.id, previewToken: review.previewToken });
+  const completed = await waitFor(() => app.provider.reviewTask(reviewStarted), value => value.status === 'completed', 'Managed review');
+  assert.equal(completed.shutdown.groupTerminated, true);
+  assert.equal((await launched()).at(-1).workspace, reviewCwd);
+
+  await app.store.update(data => {
+    data.profiles.find(profile => profile.id === app.managed[1].id).repositories.shift();
+  });
+  const priorLaunches = await launched();
+  const blocked = await app.provider.runPreview(input);
+  assert.equal(blocked.ready, false);
+  assert.equal(blocked.previewToken, null);
+  assert.match(blocked.blocked.reason, /Copilot B: The selected repository is not already bound/);
+  assert.deepEqual(await launched(), priorLaunches);
+  for (const { native } of app.managed)
+    await assert.rejects(lstat(join(native.root, '.run-lock')), { code: 'ENOENT' });
 });
 
 test('uncertain Copilot shutdown leaves the exact reservation and skips verification checks', async t => {
