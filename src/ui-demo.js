@@ -173,7 +173,7 @@ function report(ref, selection) {
     limits: [
       `Whether ${a} ran a check at the end — no result was recorded.`,
       'Which instructions each session actually loaded.',
-      'Environment and cache state — Codex doesn’t record them.',
+      'Environment and cache state — not recorded in this evidence.',
       ...partialKeys.map(side => `${side === 'a' ? a : b}’s history after turn 4, including file changes and whether checks ran. Findings use turns 1–4 only.`),
       '3 behaviors that the recorded actions can’t show.',
       'Whether these differences repeat — this is one pair, so consistency is unmeasured.',

@@ -429,7 +429,7 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
   }
   const fullSetup = [left, right].some(run => run.source?.recordedSetup?.fullHistoricalSetup === 'unavailable');
   if (fullSetup) limits.push('The full setup each session ran with — only the model and reasoning effort are recorded per turn. Today’s setup is a separate snapshot.');
-  limits.push('Environment and cache state — Codex doesn’t record them.');
+  limits.push('Environment and cache state — not recorded in this evidence.');
   limits.push('Whether these differences repeat — this is one pair, so consistency is unmeasured.');
 
   const verification = ['left', 'right'].map(key => {
