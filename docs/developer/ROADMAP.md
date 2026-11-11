@@ -28,15 +28,15 @@ updates. Handle blocked steps under the recorded instructions below.
 | B. Runtime seam: behaviour lock, then move the Codex app-server transport behind the client runtime interface | Complete: runtime and live approval verified; integrated CI passed; package chat (private mapping) | Native dispatch accounting before regression |
 | C. Claude Code: account-scope check, profile binding, runtime, catalog, permission modes, decoder, session listing/import, review and minimal Default-pair UI | Per-root scope and mixed Default journey verified; integrated `e432a2c`; package chat (private mapping) | B runtime checkpoint; account-scope probe first |
 | D. Copilot CLI: account-scope check, profile binding, runtime, catalog, permission modes, decoder, session listing/import, review | Shared gh-cli scope and controller integration verified at `d4834b9`; package chat (private mapping) | B runtime checkpoint; account-scope probe first |
-| E1. Profiles: client choice, guided sign-in, account-scope display | Active; package chat (private mapping) | C/D verified; user-operated per-root account checkpoint |
+| E1. Profiles: client choice, guided sign-in, account-scope display | Implementation `0824be2` verified; user sign-in pending for both disposable Claude roots; package chat (private mapping) | C/D verified; user-operated per-root account checkpoint |
 | E2. Setup readers and setup comparison for Claude Code and Copilot | Implementation verified (65 focused tests); combined-suite gate open; package chat (private mapping) | — |
 | E3. Same-client selected-parts copy | Planner/journal/Undo fixture verified; product wiring E1/F; package chat (private mapping) | E2 implementation verified at `fcce9c9`; combined gate open |
-| F. Extend C's UI to all clients/managed profiles: supported permission overrides and request queue, mixed pairs, session selection/import, `--surface` rename, notices | Not started | C, D, E1–E3 |
+| F. Extend C's UI to all clients/managed profiles: supported permission overrides and request queue, mixed pairs, session selection/import, `--surface` rename, notices | Active in isolated worktree; package chat (private mapping) | C, D, E1–E3 implementation; E1 live gate stays open |
 | G. Native qualification through the product path | Not started | C–F; allowances below |
 | H. Release 4.0.0: product statement, install-size check, user documentation, release procedure | Not started | G; separate approval for merge, publication and installed updates |
 
 Package chats use `gpt-6.1-sol` with medium reasoning on host `local`.
-At most three workers including helpers; E1 holds a slot and the browser/build lock,
+At most three workers including helpers; F holds its isolated browser/build lock; E1 handles native metadata preparation,
 with no helper slots assigned. The coordinator owns this status, accounting,
 integration, commits, pushes, draft PR and CI. Browser/build output has one writer.
 B evidence: `local/4.0.0/package-b/HANDOFF.md`; 1,602 Node tests passed,
@@ -63,19 +63,27 @@ a combined integration gate. D checkpoint: `local/4.0.0/package-d/integration-re
 source-bound tests and five independent combined controller checks passed.
 Earlier client-specific results remain in `package-d/report.md`. Persistent
 profile creation/current account scope go to E1, full UI to F, live to G.
+E1 fixture handoff: `local/4.0.0/package-e1/report.md`; 187 Node checks, 10
+Chromium journeys and two independent Store/API checks passed. E1 prepared
+two disposable Claude profiles through the product. Stock was
+signed in and both managed roots signed out; zero model prompts. The user
+operates native sign-in and target-only sign-out/re-sign-in. Private stage
+commands and receipts: `local/4.0.0/package-e1/`.
 Package evidence and chat mapping: private `local/4.0.0/`; no candidate is verified yet.
 E2 handoff: `local/4.0.0/package-e2/report.md`; independent focused check passed
 65/65. Its in-flight broad run failed (1,550 pass, 26 fail, one skip); stable
 combined-source verification remains required.
 E3 handoff: `local/4.0.0/package-e3/report.md`; 190 affected fixture tests and
 61 independent copy checks passed. Managed product binding remains with E1/F.
-Public checkpoint: `3ae28bc` on `codex/release-4.0.0`, [draft PR #13](https://github.com/digitalexpression/xenoflux/pull/13). Both initial CI Node versions failed because the offline SDK dependency archive was missing; the fix passed the clean local smoke and reviewed tarballs. Node 24 CI passed. Node 22.15 exposed a dependency `prepare` invocation
+Public checkpoint: `271bfb9` on `codex/release-4.0.0`, [draft PR #13](https://github.com/digitalexpression/xenoflux/pull/13). Both initial CI Node versions failed because the offline SDK dependency archive was missing; the fix passed the clean local smoke and reviewed tarballs. Node 24 CI passed. Node 22.15 exposed a dependency `prepare` invocation
 under npm pack and a review cleanup test race. Both fixes passed focused tests
 on Node 22.15. The combined clean smoke passed, both tarballs and eight
 outgoing commits passed review, and [CI on `d48cf23`](https://github.com/digitalexpression/xenoflux/actions/runs/42922350523)
 passed on Node 22.15.0 and 24, including detached smoke. The reviewed `3ae28bc`
-adds Claude Default and Copilot client-specific code; its clean smoke passed,
-with CI pending.
+adds Claude Default and Copilot client-specific code; its clean smoke and
+[both CI jobs](https://github.com/digitalexpression/xenoflux/actions/runs/42925288706)
+passed. The Copilot controller checkpoint `271bfb9` passed clean smoke and
+public-source review and [both CI jobs](https://github.com/digitalexpression/xenoflux/actions/runs/42927049945).
 A preserved private evidence and outgoing history, sanitized five historical
 summaries and verified source/package privacy. The isolated public worktree
 contains no development history or private chat IDs. Never push the development
@@ -83,7 +91,8 @@ branch history; integrate only reviewed snapshots onto the public branch.
 A evidence: `local/4.0.0/package-a-review/PACKAGE-A-REPORT.md`; public baseline
 review under `local/4.0.0/package-a-review/public-baseline/corrected/`. The
 source-bound Node 22 smoke manifests are under
-`local/4.0.0/coordinator/public-smoke-d48cf23/` and `public-smoke-3ae28bc/`.
+`local/4.0.0/coordinator/public-smoke-d48cf23/`, `public-smoke-3ae28bc/`
+and `public-smoke-271bfb9/`.
 
 B's extraction, E2 and the fixture-driven parts of C and D need no account,
 sign-in or prompt; B's native regression uses its recorded allowance.
