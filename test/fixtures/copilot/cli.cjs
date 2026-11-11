@@ -26,7 +26,8 @@ function handle({ method, id, params }) {
   switch (method) {
     case 'connect': reply({ ok: true, protocolVersion: 3, version: '1.0.107' }); break;
     case 'status.get': reply({ protocolVersion: 3, version: '1.0.107' }); break;
-    case 'auth.getStatus': reply({ isAuthenticated: true, authType: config.authType ?? 'gh-cli', login: config.login ?? 'fixture-login', host: 'fixture.invalid' }); break;
+    case 'auth.getStatus': reply(config.signedOut ? { isAuthenticated: false } :
+      { isAuthenticated: true, authType: config.authType ?? 'gh-cli', login: config.login ?? 'fixture-login', host: 'fixture.invalid' }); break;
     case 'models.list': reply({ models: [], auto: { defaultTier: 'balance', tiers: [
       { id: 'balance', type: 'auto', status: { enabled: true, pickerVisible: true } },
       { id: 'fast', type: 'auto', status: { enabled: true, pickerVisible: false } },

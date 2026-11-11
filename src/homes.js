@@ -118,6 +118,7 @@ export async function registerHome(store, name, root, { executable: requestedExe
       // after a concurrent deletion. Public registration may create a new record.
       const profile = expectedProfileId !== undefined ? find(data, expectedProfileId)
         : data.profiles.some(item => item.id === name || item.name === name) ? find(data, name) : create(data, name);
+      if ((profile.client ?? 'codex') !== 'codex') fail('The profile does not use Codex');
       if (profile.native) {
         if (profile.native.root === candidate.root && profile.native.executable === candidate.executable) return profile;
         fail('Profile already has a different native home binding');
@@ -134,13 +135,14 @@ export { unbindNativeHome as unbindHome } from './profile-removal.js';
 export async function loadHomeBinding(native) { return load(native); }
 export async function resolveHome(store, name) {
   const profile = find(await store.read(), name);
+  if ((profile.client ?? 'codex') !== 'codex') fail('The profile does not use Codex');
   if (!profile.native) fail('Profile has no native home binding');
   const { native, environment } = await load(profile.native);
   return { profile, native, environment };
 }
 export async function listHomes(store) {
   const data = await store.read();
-  return Promise.all(data.profiles.map(async profile => {
+  return Promise.all(data.profiles.filter(profile => (profile.client ?? 'codex') === 'codex').map(async profile => {
     const basic = { id: profile.id, name: profile.name, description: profile.description };
     if (!profile.native) return { ...basic, root: null, home: null, state: 'unbound', reason: null };
     try {

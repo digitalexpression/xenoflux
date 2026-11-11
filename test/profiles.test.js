@@ -101,9 +101,9 @@ test('unsupported or malformed profile clients fail before registry actions with
     create(data, 'research').client = client;
     const original = `${JSON.stringify(data)}\n`;
     await writeFile(f.store.file, original, { mode: 0o600 });
-    await assert.rejects(f.store.read(), /Only Codex profiles/);
+    await assert.rejects(f.store.read(), /Unsupported profile client|requires an explicit native home binding/);
     let actionCalled = false;
-    await assert.rejects(f.store.update(() => { actionCalled = true; }), /Only Codex profiles/);
+    await assert.rejects(f.store.update(() => { actionCalled = true; }), /Unsupported profile client|requires an explicit native home binding/);
     assert.equal(actionCalled, false);
     assert.equal(await readFile(f.store.file, 'utf8'), original);
   }

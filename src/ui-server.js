@@ -101,6 +101,7 @@ export function uiRoutes(provider) {
     route('GET', '/api/overview', call('overview', () => ({}))),
     route('GET', '/api/profiles', call('profiles', () => ({}))),
     route('POST', '/api/profiles/:name/clients', call('clientAction', ({ params, body }) => ({ name: params.name, ...body }))),
+    route('POST', '/api/profiles/:name/account', call('profileAccount', ({ params, body }) => ({ name: params.name, client: body?.client })), { bodyLimit: 2048 }),
     route('GET', '/api/profiles/:name/copy', call('copyPlan', ({ params, query }) => ({ target: params.name, ...q({ query }) }))),
     route('POST', '/api/profiles/:name/copy', call('copyApply', ({ params, body }) => ({ target: params.name, ...body }))),
     route('POST', '/api/copies/:id/undo', call('copyUndo', ({ params, body }) => ({ id: params.id, ...body }))),

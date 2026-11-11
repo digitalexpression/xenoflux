@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { parentPort, workerData } from 'node:worker_threads';
 import { promisify } from 'node:util';
 import { getAuditProcessIdentity } from './audit-process.js';
-import { assertCopilotEnvironment, assertCopilotRoots, copilotAuth, copilotExecutableIdentity, copilotId, qualifiedCopilotRoute, COPILOT_SDK_VERSION } from './copilot-profile.js';
+import { assertCopilotEnvironment, assertCopilotRoots, copilotAccountRootIdentities, copilotAuth, copilotExecutableIdentity, copilotId, qualifiedCopilotRoute, COPILOT_SDK_VERSION } from './copilot-profile.js';
 import { decodeCopilotCatalog, selectCopilotSettings } from './copilot-catalog.js';
 import { readCopilotJournal } from './copilot-transcript-reader.mjs';
 import { copilotDecision } from './copilot-events.js';
@@ -47,6 +47,14 @@ async function bounded(work, ms, signal) {
   }
 }
 const rpc = work => { stop.signal.throwIfAborted(); return bounded(work(), 12000, stop.signal); };
+const accountToken = auth => createHmac('sha256', input.accountScopeKey)
+  .update(JSON.stringify([auth.authType, auth.login, auth.host])).digest('hex');
+function checkAccount(auth, version) {
+  const account = copilotAuth(auth, binding, accountQualification, version);
+  if (accountQualification?.accountToken && accountToken(auth) !== accountQualification.accountToken)
+    throw new Error('Copilot account changed. Check sign-in again for this profile.');
+  return account;
+}
 async function checkpoint(type, value) {
   const id = ++next;
   const reply = new Promise(resolve => pending.set(id, resolve));
@@ -151,8 +159,10 @@ function installSpawn(out, err) {
 async function initialize() {
   assertCopilotEnvironment(env);
   await assertCopilotRoots(binding);
-  if (binding.rootMode === 'explicit' && !qualifiedCopilotRoute(binding, accountQualification))
+  if (operation !== 'account-status' && binding.rootMode === 'explicit' && !qualifiedCopilotRoute(binding, accountQualification))
     throw new Error('Copilot account scope is unverified for the selected binding.');
+  if (accountQualification?.rootIdentities && JSON.stringify(accountQualification.rootIdentities)
+    !== JSON.stringify(await copilotAccountRootIdentities(binding))) throw new Error('Copilot account roots changed. Check sign-in again.');
   const executable = binding.executable.path;
   const stat = await lstat(executable);
   if (!stat.isFile() || stat.mode & 0o022 || await realpath(executable) !== executable
@@ -171,7 +181,7 @@ async function initialize() {
   if (status.protocolVersion !== 3 || typeof status.version !== 'string' || !/^[\w.+-]{1,128}$/.test(status.version))
     throw new Error('Unrecognized Copilot runtime protocol.');
   const auth = await rpc(() => client.getAuthStatus());
-  const publicAccount = copilotAuth(auth, binding, accountQualification, status.version);
+  const publicAccount = operation === 'account-status' ? null : checkAccount(auth, status.version);
   processIdentity = await getAuditProcessIdentity(child?.pid);
   if (!processIdentity) throw new Error('Copilot process identity unavailable.');
   await sampled;
@@ -182,9 +192,14 @@ async function initialize() {
 
 async function metadata({ status, auth, publicAccount }) {
   let result;
+  if (operation === 'account-status') {
+    if (auth?.isAuthenticated === false) return { state: 'signed-out', version: status.version };
+    if (auth?.isAuthenticated !== true || auth.authType !== 'gh-cli' || !copilotId(auth.login) || !copilotId(auth.host))
+      return { state: 'unverified', version: status.version };
+    return { state: 'signed-in', route: auth.authType, version: status.version, token: accountToken(auth) };
+  }
   // Bind list-to-read to account metadata without retaining the login or host.
-  const token = input.accountScopeKey ? createHmac('sha256', input.accountScopeKey)
-    .update(JSON.stringify([auth.authType, auth.login, auth.host])).digest('hex') : null;
+  const token = operation === 'list' || operation === 'journal' ? accountToken(auth) : null;
   if (operation === 'catalog') {
     result = decodeCopilotCatalog(await rpc(() => client.rpc.models.list({})));
   } else if (operation === 'list') {
@@ -202,7 +217,7 @@ async function metadata({ status, auth, publicAccount }) {
     });
   } else throw new Error('Unexpected Copilot operation.');
   const after = await rpc(() => client.getAuthStatus());
-  copilotAuth(after, binding, accountQualification, status.version);
+  checkAccount(after, status.version);
   if (auth.login !== after.login || auth.host !== after.host || auth.authType !== after.authType)
     throw new Error('Copilot account changed during discovery.');
   return operation === 'catalog'
@@ -271,7 +286,7 @@ async function capture({ status, auth, publicAccount }) {
     route: copilotId(confirmed.autoTier) ? confirmed.autoTier : null, permissionMode: appliedPermission,
   } });
   const currentAccount = await rpc(() => client.getAuthStatus());
-  copilotAuth(currentAccount, binding, accountQualification, status.version);
+  checkAccount(currentAccount, status.version);
   if (auth.login !== currentAccount.login || auth.host !== currentAccount.host || auth.authType !== currentAccount.authType)
     throw new Error('Copilot account changed before initial submission.');
   const handleControl = message => {

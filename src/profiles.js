@@ -1,5 +1,5 @@
 import { mkdir, readFile, writeFile, rename, unlink, rmdir, lstat, realpath, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 function nonempty(value, label) {
@@ -10,6 +10,11 @@ function namedProfileValue(value, label) {
   if (value.trim().toLowerCase() === 'default') throw new Error('Default is reserved for the built-in profile');
 }
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+export const PROFILE_CLIENTS = Object.freeze(['codex', 'claude-code', 'copilot']);
+export function strictDescendant(root, path) {
+  const child = relative(root, path);
+  return !!child && child !== '..' && !child.startsWith('../') && !isAbsolute(child);
+}
 function nativePath(value) {
   return typeof value === 'string' && value.startsWith('/') && resolve(value) === value && !/[\x00-\x1f\x7f]/.test(value);
 }
@@ -25,13 +30,19 @@ function recognizableVersion(value) {
 }
 export function validateProfile(p) {
   namedProfileValue(p.id, 'Profile ID'); namedProfileValue(p.name, 'Profile name');
-  if (p.client !== undefined && p.client !== 'codex') throw new Error('Only Codex profiles are currently supported');
+  const client = p.client === undefined ? 'codex' : p.client;
+  if (!PROFILE_CLIENTS.includes(client)) throw new Error('Unsupported profile client');
+  if (client !== 'codex' && !p.native) throw new Error('A managed client requires an explicit native home binding');
   if (typeof p.description !== 'string' || !Number.isInteger(p.revision) || p.revision < 1) throw new Error('Invalid profile metadata');
   if (p.native !== undefined) {
     const h = p.native;
-    if (!(h && Object.keys(h).sort().join(',') === 'environmentId,executable,executableIdentity,root,version'
+    const keys = client === 'codex' ? 'environmentId,executable,executableIdentity,root,version'
+      : 'configRoot,environmentId,executable,executableIdentity,root,rootMode,version';
+    if (!(h && Object.keys(h).sort().join(',') === keys
       && uuid.test(h.environmentId ?? '') && nativePath(h.root) && nativePath(h.executable)
-      && executableIdentity(h.executableIdentity) && recognizableVersion(h.version))) throw new Error('Invalid native home binding');
+      && executableIdentity(h.executableIdentity) && recognizableVersion(h.version)
+      && (client === 'codex' || (nativePath(h.configRoot) && h.rootMode === 'explicit'
+        && strictDescendant(h.root, h.configRoot))))) throw new Error('Invalid native home binding');
   }
   if (!Array.isArray(p.repositories) || (p.unboundRepository !== undefined && p.unboundRepository !== 'keep-existing')) throw new Error('Invalid repository policy');
   const paths = new Set();
@@ -43,15 +54,18 @@ export function validateProfile(p) {
 }
 function validate(data) {
   if (data.schemaVersion !== 1 || !Array.isArray(data.profiles)) throw new Error('Unsupported or invalid Xenoflux store');
-  const ids = new Set(), names = new Set(), homes = new Set();
+  const ids = new Set(), names = new Set(), homes = [];
   for (const p of data.profiles) {
     validateProfile(p);
     if (ids.has(p.id) || names.has(p.name)) throw new Error('Duplicate profile ID or name');
     ids.add(p.id); names.add(p.name);
     if (p.native) {
       const key = p.native.root;
-      if (homes.has(key)) throw new Error('A native home is already bound to another profile');
-      homes.add(key);
+      const client = p.client ?? 'codex';
+      if (homes.some(([home, owner]) => home === key || ((client !== 'codex' || owner !== 'codex')
+        && (strictDescendant(home, key) || strictDescendant(key, home)))))
+        throw new Error('A native home is already bound to another profile');
+      homes.push([key, client]);
     }
   }
   return data;
@@ -99,10 +113,10 @@ function unique(data, name) {
   if (data.profiles.some(p => p.name === name || p.id === name)) throw new Error(`Profile already exists: ${name}`);
 }
 function revised(profile) { profile.revision += 1; return profile; }
-export function create(data, name, description = '') {
+export function create(data, name, description = '', client = 'codex') {
   unique(data, name);
   const profile = {
-    id: randomUUID(), name, description, revision: 1, client: 'codex',
+    id: randomUUID(), name, description, revision: 1, client,
     unboundRepository: 'keep-existing', repositories: [],
   };
   data.profiles.push(profile); return profile;

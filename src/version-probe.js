@@ -20,13 +20,13 @@ function validOptions({ executable, cwd, env, timeoutMs, maxBytes, signal, args 
       !env || Object.getPrototypeOf(env) !== Object.prototype ||
       Object.entries(env).some(([key, value]) => !key || key.includes('=') || key.includes('\0') || typeof value !== 'string' || value.includes('\0')) ||
       !Number.isFinite(timeoutMs) || timeoutMs <= 0 || !Number.isFinite(maxBytes) || maxBytes <= 0 ||
-      !Array.isArray(args) || args.length > 100 || args.at(-1) !== '--version'
+      !Array.isArray(args) || args.length > 100
         || args.some(arg => typeof arg !== 'string' || arg.includes('\0')) ||
       (signal !== undefined && (!signal || typeof signal.addEventListener !== 'function'))) throw probeError('INVALID_OPTIONS');
 }
 
 /** Run only a bounded native `--version` preflight in its own process group. */
-export async function probeVersion({ executable, cwd, env, signal, timeoutMs = 2000, maxBytes = 65536, args = ['--version'] } = {}) {
+async function probeMetadata({ executable, cwd, env, signal, timeoutMs = 2000, maxBytes = 65536, args, allowedExits = [0] }) {
   validOptions({ executable, cwd, env, timeoutMs, maxBytes, signal, args });
   if (!['darwin', 'linux'].includes(process.platform)) throw probeError('UNSUPPORTED_PLATFORM');
   if (signal?.aborted) throw probeError('CANCELLED');
@@ -91,7 +91,7 @@ export async function probeVersion({ executable, cwd, env, signal, timeoutMs = 2
     settled = true;
     clearTimeout(timer);
     if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
-    resolveResult({ code: exitCode === 0 ? null : 'PROTOCOL_ERROR' });
+    resolveResult({ code: allowedExits.includes(exitCode) ? null : 'PROTOCOL_ERROR' });
   };
   const count = chunk => {
     bytes += Buffer.byteLength(chunk);
@@ -113,7 +113,33 @@ export async function probeVersion({ executable, cwd, env, signal, timeoutMs = 2
   if (outcome.code) throw probeError(outcome.code);
   let text;
   try { text = new TextDecoder('utf-8', { fatal: true }).decode(stdout); } catch { throw probeError('PROTOCOL_ERROR'); }
+  return { text, exitCode };
+}
+
+export async function probeVersion({ args = ['--version'], ...options } = {}) {
+  if (!Array.isArray(args) || args.at(-1) !== '--version') throw probeError('INVALID_OPTIONS');
+  const { text } = await probeMetadata({ ...options, args });
   const match = /^\s*codex(?:-cli)?\s+v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s*$/i.exec(text);
   if (!match) throw probeError('VERSION_MISMATCH');
   return match[1];
+}
+
+export async function probeNativeProfileVersion(client, options) {
+  const { text } = await probeMetadata({ ...options, args: ['--version'] });
+  const match = (client === 'claude-code'
+    ? /^\s*v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s+\(Claude Code\)\s*$/i
+    : /^\s*(?:GitHub )?Copilot CLI(?: Version)?[: ]+v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s+.*)?\s*$/i).exec(text);
+  if (!match) throw new Error('Unrecognized native CLI version');
+  return match[1];
+}
+
+export async function probeClaudeAccount(options) {
+  const { text, exitCode } = await probeMetadata({ ...options, args: ['auth', 'status'], timeoutMs: 10000,
+    maxBytes: 16384, allowedExits: [0, 1] });
+  let value;
+  try { value = JSON.parse(text); } catch { throw new Error('Unrecognized Claude sign-in status'); }
+  if (value?.loggedIn === false && exitCode === 1) return { state: 'signed-out' };
+  if (value?.loggedIn === true && exitCode === 0 && ['claude.ai', 'oauth', 'claudeai'].includes(value.authMethod))
+    return { state: 'signed-in', route: 'native subscription' };
+  return { state: 'unverified' };
 }

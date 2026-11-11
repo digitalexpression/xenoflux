@@ -15,10 +15,10 @@ export function claudeEnvironment(ambient, { userHome, home, rootMode }) {
   return { ...env, PATH: nativePath(ambient), HOME: userHome, ...(rootMode === 'explicit' ? { CLAUDE_CONFIG_DIR: home } : {}) };
 }
 
-export async function canonicalClaudeDirectory(path, label) {
+export async function canonicalClaudeDirectory(path, label, privateOnly = false) {
   if (typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path) throw new Error(`Invalid ${label}`);
   const info = await lstat(path);
-  if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o022) || await realpath(path) !== path)
+  if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & (privateOnly ? 0o077 : 0o022)) || await realpath(path) !== path)
     throw new Error(`Unsafe ${label}`);
   return path;
 }
@@ -32,7 +32,7 @@ export async function inspectClaudeExecutable(path) {
   return { executable, executableIdentity: JSON.stringify([info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]) };
 }
 
-async function discoverClaudeExecutable(env) {
+export async function discoverClaudeExecutable(env) {
   for (const directory of env.PATH.split(':')) {
     if (!isAbsolute(directory)) continue;
     try { return await inspectClaudeExecutable(join(directory, 'claude')); }
@@ -51,9 +51,11 @@ export async function resolveClaudeProfile({ selected, repository, defaultUserHo
   const rootMode = selected ? selected.native?.rootMode : 'implicit';
   if (selected && (selected.client !== CLAUDE_CLIENT || rootMode !== 'explicit'))
     throw new Error('Managed Claude Code profile has no explicit native binding');
-  const home = await canonicalClaudeDirectory(selected ? selected.native?.configRoot : join(userHome, '.claude'), 'Claude configuration root');
-  const reservationRoot = selected ? await canonicalClaudeDirectory(selected.native.root, 'Claude reservation root') : home;
-  if (selected && !descendant(reservationRoot, home))
+  const stock = join(userHome, '.claude');
+  const home = await canonicalClaudeDirectory(selected ? selected.native?.configRoot : stock, 'Claude configuration root', Boolean(selected));
+  const reservationRoot = selected ? await canonicalClaudeDirectory(selected.native.root, 'Claude reservation root', true) : home;
+  if (selected && (!descendant(reservationRoot, home) || reservationRoot === stock
+    || descendant(reservationRoot, stock) || descendant(stock, reservationRoot)))
     throw new Error('Claude configuration is outside the selected managed profile');
   const env = claudeEnvironment(terminalEnvironment, { userHome, home, rootMode });
   const binary = selected ? await inspectClaudeExecutable(selected.native.executable) : await discoverClaudeExecutable(env);

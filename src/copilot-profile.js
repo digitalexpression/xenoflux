@@ -38,6 +38,14 @@ export async function assertCopilotRoots(binding) {
   const nested = relative(reservation, config);
   if (binding.rootMode === 'explicit' && (!nested || nested === '..' || nested.startsWith('../') || isAbsolute(nested)))
     throw new Error('Managed Copilot configuration must belong to the selected reservation root.');
+  if (binding.rootMode === 'explicit') {
+    const stock = join(user, '.copilot');
+    const within = (root, path) => {
+      const child = relative(root, path);
+      return child !== '..' && !child.startsWith('../') && !isAbsolute(child);
+    };
+    if (within(stock, reservation) || within(reservation, stock)) throw new Error('Managed Copilot root overlaps stock.');
+  }
   for (const path of new Set([config, reservation])) {
     const stat = await lstat(path);
     if (!stat.isDirectory() || stat.uid !== process.getuid() || stat.mode & (binding.rootMode === 'explicit' ? 0o077 : 0o022) || await realpath(path) !== path)
@@ -51,11 +59,7 @@ export async function resolveCopilotExecutable(env) {
   assertCopilotEnvironment(env);
   for (const folder of (env.PATH ?? '').split(':').filter(value => isAbsolute(value) && resolve(value) === value)) {
     try {
-      const executable = await realpath(join(folder, 'copilot'));
-      const stat = await lstat(executable);
-      if (!stat.isFile() || stat.mode & 0o022) continue;
-      await access(executable, constants.X_OK);
-      return executable;
+      return (await inspectCopilotExecutable(join(folder, 'copilot'))).executable;
     } catch { /* Continue through the selected user's absolute PATH entries. */ }
   }
   throw new Error('The selected native PATH does not contain an executable Copilot CLI.');
@@ -63,11 +67,28 @@ export async function resolveCopilotExecutable(env) {
 
 export const copilotExecutableIdentity = stat => JSON.stringify([stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]);
 
+export async function inspectCopilotExecutable(path) {
+  if (!isAbsolute(path ?? '')) throw new Error('Select an absolute Copilot executable path.');
+  const executable = await realpath(path), stat = await lstat(executable);
+  if (!stat.isFile() || stat.mode & 0o022) throw new Error('Unsafe installed Copilot CLI executable.');
+  await access(executable, constants.X_OK);
+  return { executable, executableIdentity: copilotExecutableIdentity(stat) };
+}
+
 export function qualifiedCopilotRoute(binding, qualification) {
   return qualification?.rootMode === binding.rootMode && isCopilotNativeAuthType(qualification.authType)
     && qualification.executableIdentity === binding.executable.identity && qualification.sdk === COPILOT_SDK_VERSION
-    && ['shared', 'per-root'].includes(qualification.scope) && copilotId(qualification.runtimeVersion);
+    && ['shared', 'per-root'].includes(qualification.scope) && copilotId(qualification.runtimeVersion)
+    && qualification.expiresAt > Date.now()
+    && JSON.stringify(qualification.route) === JSON.stringify(copilotAccountRoute(binding));
 }
+
+export const copilotAccountRoute = binding => [binding.client, binding.profileId, binding.roots.config,
+  binding.roots.reservation, binding.roots.user, binding.executable.path];
+export const copilotAccountRootIdentities = binding => Promise.all([binding.roots.config, binding.roots.reservation].map(async path => {
+  const stat = await lstat(path);
+  return [stat.dev, stat.ino];
+}));
 
 export function copilotAuth(auth, binding, accountQualification, runtimeVersion) {
   if (auth?.isAuthenticated !== true) throw new Error('Copilot is signed out in the selected profile context.');
@@ -137,10 +158,7 @@ export async function resolveCopilotProfile({ selected, stored = selected, repos
   const executable = managed ? stored.native.executable : await resolveCopilotExecutable(terminalEnvironment);
   if (!isAbsolute(executable ?? '') || await realpath(executable) !== executable)
     throw new Error('Select the canonical installed Copilot CLI executable.');
-  const stat = await lstat(executable);
-  if (!stat.isFile() || stat.mode & 0o022) throw new Error('Unsafe installed Copilot CLI executable.');
-  await access(executable, constants.X_OK);
-  const executableIdentity = copilotExecutableIdentity(stat);
+  const { executableIdentity } = await inspectCopilotExecutable(executable);
   if (managed && stored.native.executableIdentity !== undefined && stored.native.executableIdentity !== executableIdentity)
     throw new Error('The bound Copilot executable has changed.');
   const profileId = managed ? stored.id : 'default-copilot';

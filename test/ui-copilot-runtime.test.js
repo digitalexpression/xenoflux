@@ -7,7 +7,7 @@ import { setTimeout } from 'node:timers/promises';
 import test from 'node:test';
 import { createUiRunsFixture } from '../test-support/ui-runs-fixture.js';
 import { inspectAuditReservation, readAuditRecord, releaseAuditProfileReservation } from '../src/audit-experiment-store.js';
-import { resolveCopilotProfile, copilotExecutableIdentity } from '../src/copilot-profile.js';
+import { resolveCopilotProfile, copilotAccountRoute, copilotExecutableIdentity } from '../src/copilot-profile.js';
 import { createCopilotRuntime } from '../src/copilot-runtime.js';
 import { createEngineProvider } from '../src/ui-engine.js';
 import { startUiServer } from '../src/ui-server.js';
@@ -58,7 +58,8 @@ async function setup(t, { escapedDescendant = false, defaultRuntime = false } = 
     }
     const profile = await resolveCopilotProfile(options);
     if (options.selected) profile.accountQualification = { scope: 'shared', authType: 'gh-cli', sdk: '1.0.29',
-      rootMode: 'explicit', runtimeVersion: '1.0.107', executableIdentity: profile.executableIdentity };
+      rootMode: 'explicit', runtimeVersion: '1.0.107', executableIdentity: profile.executableIdentity,
+      route: copilotAccountRoute(profile.environmentBinding), expiresAt: Number.MAX_SAFE_INTEGER };
     return profile;
   } };
   const clientRuntimes = defaultRuntime ? { copilot: createCopilotRuntime({ launch: fixtureDefaultLaunch }) } : undefined;

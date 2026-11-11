@@ -29,10 +29,10 @@ function workerInput(operation, { profile, workspace, stdoutPath, stderrPath, ou
   const binding = copilotBinding(profile, workspace);
   assertCopilotEnvironment(process.env);
   assertCopilotEnvironment(profile.env);
-  if (binding.rootMode === 'explicit' && !qualifiedCopilotRoute(binding, profile.accountQualification))
+  if (operation !== 'account-status' && binding.rootMode === 'explicit' && !qualifiedCopilotRoute(binding, profile.accountQualification))
     throw new Error('The selected Copilot root has no verified account scope.');
   return { binding, env: profile.env, paths: { stdoutPath, stderrPath }, limit: outputLimitBytes,
-    accountQualification: profile.accountQualification, operation, input };
+    accountQualification: profile.accountQualification, operation, input: { ...input, accountScopeKey } };
 }
 
 function sessionRows(result, binding, account, limit) {
@@ -112,8 +112,13 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
   async function listSessions(options) {
     const limit = options.limit ?? 30;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid Copilot session list limit.');
-    const { result, binding } = await read('list', { ...options, input: { limit, accountScopeKey } });
+    const { result, binding } = await read('list', { ...options, input: { limit } });
     return sessionRows(result.sessions, binding, result.account, limit);
+  }
+
+  async function accountStatus(options) {
+    const { result } = await read('account-status', options);
+    return result;
   }
 
   async function readJournal({ selection, profile, directory, signal, onSpawn, onShutdown }) {
@@ -121,7 +126,7 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
     const { result } = await read('journal', { profile, workspace: profile.cwd, signal, onSpawn, onShutdown,
       stdoutPath: join(directory, 'reader.stdout'), stderrPath: join(directory, 'reader.stderr'),
       input: { directory, sessionId: selection.sessionId, authType: selection.authType, accountScope: selection.accountScope,
-        accountScopeKey, accountToken: selection.accountToken } });
+        accountToken: selection.accountToken } });
     return { ...result, shutdown: { sdkStopJoined: true, childrenClosed: true } };
   }
 
@@ -305,7 +310,7 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
     return { run, capture, process, response, capabilities: capture.capabilities };
   }
 
-  return { capture, discover, listSessions, readJournal };
+  return { capture, discover, listSessions, readJournal, accountStatus };
 }
 
 export async function discoverCopilotModels(options) {

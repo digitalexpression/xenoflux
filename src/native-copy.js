@@ -11,7 +11,7 @@ import { resolveAuditProfile } from './audit-discovery.js';
 import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { acquire, release, globalLock, privateDirectory, readJSON, record, exists } from './metadata.js';
 import { createDesktopRuntime } from './desktop-runtime.js';
-import { buildAdvancedCopy, selectAdvancedComponents, validateAdvancedSelection, persistAdvancedFiles, validateAdvancedFiles,
+import { buildAdvancedCopy, copyEndpointFingerprint, selectAdvancedComponents, validateAdvancedSelection, persistAdvancedFiles, validateAdvancedFiles,
   writeAdvanced, matchesAdvanced, snapshotAdvanced, cleanupAdvancedDirectories, matchesAdvancedPackages,
   applyAdvancedPackageDirectories } from './advanced-copy.js';
 export { validateAdvancedSelection };
@@ -269,7 +269,9 @@ async function clearPending(store, id) {
     await unlink(pendingPath(store));
   }
 }
-function assertReviewedCopy(report, options) {
+function assertReviewedCopy({ report, plan }, options) {
+  if (options.expectedSourceEndpointFingerprint && copyEndpointFingerprint(plan.source) !== options.expectedSourceEndpointFingerprint)
+    throw new Error('Copy source binding changed; preview again');
   if (options.expectedEndpointFingerprint && report.endpointFingerprint !== options.expectedEndpointFingerprint)
     throw new Error('Copy profile identity changed; preview again');
   if (options.expectedItemFingerprints && report.items.some(item => item.fingerprint !== options.expectedItemFingerprints[item.id]))
@@ -277,7 +279,7 @@ function assertReviewedCopy(report, options) {
 }
 export async function applyCopy(store, source, target, options = {}) {
   const initial = await build(store, source, target, options);
-  assertReviewedCopy(initial.report, options);
+  assertReviewedCopy(initial, options);
   if (options.expectedHash && initial.report.hash !== options.expectedHash) throw new Error('Copy preview changed; preview again');
   if (options.expectedSourceFingerprints) {
     const current = initial.plan.sourceFingerprints ?? {};
@@ -292,7 +294,7 @@ export async function applyCopy(store, source, target, options = {}) {
   const verifyInputs = async () => {
     if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
     const current = await build(store, source, target, options);
-    assertReviewedCopy(current.report, options);
+    assertReviewedCopy(current, options);
     if (current.report.hash !== initial.report.hash) throw new Error('Copy inputs changed; preview again');
     if (options.expectedSourceFingerprints) {
       const fingerprints = current.plan.sourceFingerprints ?? {};

@@ -34,10 +34,15 @@ export interface Overview {
 export interface RecentItem { kind: 'task' | 'setup' | 'saved'; title: string; meta: string; href: string }
 
 /* Profiles */
+export type ProfileClient = 'codex' | 'claude-code' | 'copilot';
 export type ClientState = 'running' | 'not-running' | 'unknown' | 'unavailable';
 export interface ClientInfo { state: ClientState; text: string }
 export interface ProfileCard {
   name: string;
+  client?: ProfileClient;
+  accountScope?: 'per-root' | 'shared' | 'unverified';
+  accountIndependence?: 'not verified';
+  setup?: { command: string; executable: string; configRoot: string; rootMode: 'explicit'; version: string };
   isDefault: boolean;
   state: 'ready' | 'unbound' | 'unavailable';
   reason: string | null;
@@ -58,7 +63,7 @@ export interface NativeAppEntry {
 }
 export interface NativeAppsView { apps: NativeAppEntry[] }
 export interface NativeAppOpenResult { status: 'opened' | 'link-opened'; message: string }
-export interface ProfilesView { profiles: ProfileCard[]; notes: string[]; simulated: boolean }
+export interface ProfilesView { profiles: ProfileCard[]; copySources?: Record<ProfileClient, string[]>; notes: string[]; simulated: boolean }
 export interface ClientActionResult { status: StatusKind; message: string; profile?: ProfileCard }
 
 /* Setup comparison */
@@ -517,7 +522,11 @@ export interface CopyItem {
   note: string;
   selected: boolean;
 }
+export interface ManualCopyGuidance { id: string; label: string; steps: string[] }
 export interface CopyPlan {
+  client?: ProfileClient;
+  executable?: string;
+  manualOptions?: ManualCopyGuidance[];
   mode: 'copy' | 'create';
   source: string;
   target: string;
@@ -532,6 +541,7 @@ export interface CopyPlan {
   simulated: boolean;
 }
 export interface CopyResult {
+  guidance?: ManualCopyGuidance[];
   status: 'applied' | 'undone';
   title: string;
   changes: string[];

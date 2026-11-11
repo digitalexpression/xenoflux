@@ -6,7 +6,7 @@ import test from 'node:test';
 import { createClientRuntime } from '../src/client-runtime.js';
 import { decodeCopilotCatalog, selectCopilotSettings } from '../src/copilot-catalog.js';
 import { copilotDecision, copilotPermission } from '../src/copilot-events.js';
-import { assertCopilotEnvironment, resolveCopilotProfile } from '../src/copilot-profile.js';
+import { assertCopilotEnvironment, copilotAccountRoute, resolveCopilotProfile } from '../src/copilot-profile.js';
 import { assertCopilotSessionSelection, createCopilotRuntime } from '../src/copilot-runtime.js';
 import { importCopilotTranscript } from '../src/copilot-transcript.js';
 import { createUiReviewTasks } from '../src/ui-review-tasks.js';
@@ -31,7 +31,8 @@ async function setup(t) {
       workspace,
     });
     profile.accountQualification = { scope: 'shared', authType: 'gh-cli', sdk,
-      rootMode: 'explicit', executableIdentity: profile.executableIdentity, runtimeVersion: '1.0.107' };
+      rootMode: 'explicit', executableIdentity: profile.executableIdentity, runtimeVersion: '1.0.107',
+      route: copilotAccountRoute(profile.environmentBinding), expiresAt: Date.now() + 300000 };
     return profile;
   };
   const evidence = async label => {
@@ -42,6 +43,20 @@ async function setup(t) {
   };
   return { root, workspace, profileFor, evidence };
 }
+
+test('Copilot account status is bounded metadata even before an explicit profile is qualified', async t => {
+  const { workspace, profileFor, evidence } = await setup(t);
+  const profile = await profileFor('SignedOut', { signedOut: true });
+  delete profile.accountQualification;
+  const paths = await evidence('status');
+  assert.deepEqual(await createCopilotRuntime().accountStatus({ ...paths, profile, workspace }),
+    { state: 'signed-out', version: '1.0.107' });
+  const rows = await paths.log();
+  assert.ok(rows.some(row => row.method === 'auth.getStatus'));
+  assert.ok(rows.every(row => ['connect', 'ping', 'status.get', 'auth.getStatus', 'runtime.shutdown'].includes(row.method)),
+    JSON.stringify(rows.map(row => row.method)));
+  assert.ok(rows.every(row => row.root === profile.home && row.cwd === workspace));
+});
 
 test('Copilot catalog keeps advertised explicit and Auto choices separate', () => {
   const catalog = decodeCopilotCatalog({ models: [

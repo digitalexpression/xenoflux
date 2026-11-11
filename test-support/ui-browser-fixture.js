@@ -94,6 +94,17 @@ export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 
     const defaultUserHome = join(root, 'default-user-home');
     await mkdir(join(defaultUserHome, '.codex'), { recursive: true, mode: 0o700 });
     await put(join(defaultUserHome, '.codex'), 'AGENTS.md', 'Default instructions.\n');
+    await put(join(defaultUserHome, '.claude'), 'CLAUDE.md', 'Claude fixture instructions.\n');
+    const claudeExecutable = join(root, 'claude');
+    const nativeProfileLog = join(root, 'claude-launches.log');
+    await writeFile(claudeExecutable, `#!/bin/sh
+printf '%s\\n' "$*" >> "${nativeProfileLog}"
+case "$*" in
+  --version) printf '2.1.319 (Claude Code)\\n' ;;
+  'auth status') printf '{"loggedIn":false,"authMethod":"none"}\\n'; exit 1 ;;
+  *) exit 99 ;;
+esac
+`, { mode: 0o700 });
     const rollouts = [];
     rollouts.push(await addSession(baseline.home, 1, 'Fix the date test', 'cli', 10));
     rollouts.push(await addSession(strict.home, 2, 'Fix the date test', 'vscode', 11));
@@ -103,6 +114,7 @@ export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 
     const reportsRoot = join(root, 'reports');
     const serverLogs = [];
     const provider = createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'),
+      accountContext: { terminalEnvironment: { PATH: root + ':' + process.env.PATH, USER: process.env.USER, LOGNAME: process.env.LOGNAME } },
       lockOptions: { lockPath: join(root, 'global.lock'), concurrentLockPath: join(root, 'desktop.lock') },
       // Isolate only OS process discovery to this fixture's empty process table.
       // Real DesktopRuntime idle guards still run; no client-control operation is called.
@@ -111,7 +123,7 @@ export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 
     });
     server = await startUiServer({ provider, staticRoot, log: message => serverLogs.push(message) });
     return { url: server.launchUrl, origin: server.origin, root, store,
-      homes: { baseline, strict }, defaultUserHome, reportsRoot, rollouts, instructions, skillLines, longSkillNames, privacyMarkers,
+      homes: { baseline, strict }, defaultUserHome, reportsRoot, rollouts, instructions, skillLines, longSkillNames, privacyMarkers, nativeProfileLog,
       serverLogs,
       close: async () => { await server.close(); await rm(root, { recursive: true, force: true }); } };
   } catch (error) {

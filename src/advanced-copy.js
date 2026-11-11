@@ -203,19 +203,26 @@ export async function selectAdvancedComponents(store, source, components, {defau
     return false;
   }).map(item=>item.id);
 }
-export async function validateAdvancedSelection(store, source, selection, { defaultUserHome = homedir(), clientId, binding, sourceBinding = binding } = {}) {
+export async function validateAdvancedSelection(store, source, selection, { defaultUserHome = homedir(), clientId, binding, sourceBinding = binding, skipUnsafe = false } = {}) {
   const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome, { clientId, binding: sourceBinding });
   const sourceEndpoint=await resolveNativeSettingsHome(store,source,{defaultUserHome, clientId, binding: sourceBinding});
   // Read every selected source payload now, before profile creation. This is
   // deliberately reused by planning so unsafe packages never reach the UI as eligible.
   const root = inventory.profile.home;
-  const previews=[];
+  const previews=[], fingerprints = Object.create(null);
   for (const item of items) {
-    const payload=await sourcePayload(item,root,defaultUserHome,sourceEndpoint);
+    let payload;
+    try { payload=await sourcePayload(item,root,defaultUserHome,sourceEndpoint); }
+    catch (error) { if (!skipUnsafe) throw error; continue; }
     const files=payload.kind==='tree'?payload.files:payload.kind==='file'?[payload.file]:[];
-    previews.push({id:item.id,label:item.label,status:'new',origin:item.origin,scope:item.scope,sourcePath:item.transfer.sourcePath,changes:payload.kind==='config'?[{path:item.transfer.path+':'+payload.key,action:'new',after:previewValue(payload.value)}]:files.map(f=>({path:f.path,action:'add',after:preview(f.after,f.path),afterMode:f.afterMode}))});
+    fingerprints[item.id] = fingerprintPayload(payload);
+    previews.push({id:item.id,label:item.label,category:item.category,status:'new',origin:item.origin,scope:item.scope,sourcePath:item.transfer.sourcePath,changes:payload.kind==='config'?[{path:item.transfer.path+':'+payload.key,action:'new',after:previewValue(payload.value)}]:[
+      ...files.map(f=>({path:f.path,action:'add',after:preview(f.after,f.path),afterMode:f.afterMode})),
+      ...(payload.kind === 'tree' ? payload.directories.map(d => ({path:d.path,action:'add-directory',afterMode:d.mode})) : []),
+    ]});
   }
-  return { valid: true, selection: items.map(x => x.id), source: inventory.profile, items:previews };
+  return { valid: true, selection: previews.map(x => x.id), source: inventory.profile, items:previews,
+    fingerprints, sourceEndpointFingerprint: copyEndpointFingerprint(sourceEndpoint) };
 }
 async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint) {
   const t = item.transfer;
@@ -269,6 +276,7 @@ function fingerprintPayload(payload) {
       : [[payload.sourcePath + ':' + payload.key, sha(Buffer.from(JSON.stringify(payload.value))), payload.sourceMode ?? null]];
   return sha(Buffer.from(JSON.stringify(parts)));
 }
+export const copyEndpointFingerprint = endpoint => sha(Buffer.from(JSON.stringify(endpoint)));
 export async function fingerprintAdvancedSelection(store, source, selection, { defaultUserHome = homedir(), skipUnsafe = false, clientId, binding, sourceBinding = binding } = {}) {
   const { inventory, items } = await resolveSelection(store, source, selection, defaultUserHome, { clientId, binding: sourceBinding });
   const endpoint = await resolveNativeSettingsHome(store, source, { defaultUserHome, clientId, binding: sourceBinding });

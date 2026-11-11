@@ -16,11 +16,13 @@ export function CopyPreview({ mode }: { mode: 'copy' | 'create' }) {
   const item = params.get('item') ?? undefined;
   const skill = params.get('skill') ?? undefined;
   const newName = params.get('name') ?? '';
+  const client = params.get('client') ?? undefined;
   const profiles = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles');
   const sourceId = useId();
 
   if (mode === 'copy' && !from) {
-    const names = profiles.data?.profiles.map(p => p.name).filter(n => n !== target) ?? [];
+    const targetClient = profiles.data?.profiles.find(p => p.name === target)?.client ?? 'codex';
+    const names = (profiles.data?.copySources?.[targetClient] ?? profiles.data?.profiles.map(p => p.name) ?? []).filter(n => n !== target);
     return (
       <Page current="profiles" title="Copy settings">
         <PageTitle breadcrumb={[{ label: 'Profiles', to: '/profiles' }, { label: target }, { label: 'Copy settings from another profile' }]}
@@ -36,14 +38,15 @@ export function CopyPreview({ mode }: { mode: 'copy' | 'create' }) {
       </Page>
     );
   }
-  return <PlanView key={JSON.stringify([mode, target, from, item, newName])} mode={mode} target={target} from={from} item={item} skill={skill} newName={newName} />;
+  return <PlanView key={JSON.stringify([mode, target, from, item, newName, client])} mode={mode} client={client} target={target} from={from} item={item} skill={skill} newName={newName} />;
 }
 
-function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' | 'create'; target: string; from: string; item?: string; skill?: string; newName: string }) {
+function PlanView({ mode, target, from, item, skill, newName, client }: { mode: 'copy' | 'create'; client?: string; target: string; from: string; item?: string; skill?: string; newName: string }) {
   const plan = useResource(() => mode === 'copy'
     ? apiGet<CopyPlan>(`/api/profiles/${encodeURIComponent(target)}/copy`, { from, item, skill })
-    : apiGet<CopyPlan>('/api/profiles/new', { name: newName, from }), JSON.stringify([mode, target, from, item, newName]));
+    : apiGet<CopyPlan>('/api/profiles/new', { name: newName, from, client }), JSON.stringify([mode, target, from, item, newName, client]));
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [manual, setManual] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CopyResult | null>(null);
   const [error, setError] = useState<{ title: string; text: string; refused?: boolean } | null>(null);
@@ -54,7 +57,9 @@ function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' |
   const chosen = data?.items.filter(entry => selected[entry.id]) ?? [];
   const n = chosen.length;
   const destination = data?.target ?? target;
-  const applyLabel = mode === 'copy' ? `Apply ${n} change${n === 1 ? '' : 's'} to ${destination}` : `Create ${destination} with ${n} item${n === 1 ? '' : 's'}`;
+  const clientName = data?.client === 'claude-code' ? 'Claude Code' : data?.client === 'copilot' ? 'Copilot CLI' : 'Codex';
+  const empty = mode === 'create' && !data?.source;
+  const applyLabel = mode === 'copy' ? `Apply ${n} change${n === 1 ? '' : 's'} to ${destination}` : empty ? `Create ${destination}` : `Create ${destination} with ${n} item${n === 1 ? '' : 's'}`;
 
   const modeText = (value: number | null) => value === null ? null : value.toString(8).padStart(4, '0');
 
@@ -62,10 +67,11 @@ function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' |
     if (!data || (!n && mode === 'copy')) return;
     setBusy(true); setError(null);
     try {
-      const body = { from: data.source, items: chosen.map(entry => entry.id), planToken: data.planToken };
+      const body = { from: data.source, items: chosen.map(entry => entry.id), planToken: data.planToken,
+        manualItems: (data.manualOptions ?? []).filter(entry => manual[entry.id]).map(entry => entry.id) };
       setResult(mode === 'copy'
         ? await apiPost<CopyResult>(`/api/profiles/${encodeURIComponent(target)}/copy`, body)
-        : await apiPost<CopyResult>('/api/profiles/new', { ...body, name: destination }));
+        : await apiPost<CopyResult>('/api/profiles/new', { ...body, client: data.client, name: destination }));
     } catch (reason) {
       setError({ title: reason instanceof ApiError && reason.code === 'client-open' ? 'Codex is open in this profile' : 'Nothing was changed', text: (reason as Error).message });
       plan.reload();
@@ -89,6 +95,7 @@ function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' |
         <>
           <PageTitle breadcrumb={crumb} title={data.title} subtitle={data.intro} />
           {data.simulated ? <SimulatedNote>Applying and undoing are simulated; no profile files are written.</SimulatedNote> : null}
+          {data.executable && !result ? <InfoNotice>{clientName} executable: <code className="font-mono wrap-anywhere">{data.executable}</code></InfoNotice> : null}
           {data.origin && !result ? <InfoNotice>{data.origin}</InfoNotice> : null}
           {error ? (error.refused ? <WarningAlert live title={error.title}>{error.text}</WarningAlert> : <ErrorPanel title={error.title}>{error.text}</ErrorPanel>) : null}
           {result ? (
@@ -96,11 +103,13 @@ function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' |
               <h2 id="result-title" className="text-heading" style={{ color: result.status === 'applied' ? 'var(--color-success)' : undefined }}>{result.status === 'applied' ? '✓ ' : ''}{result.title}</h2>
               {result.changes.length ? <ul className="text-ui list-disc pl-5" style={{ color: 'var(--color-text)' }}>{result.changes.map(change => <li key={change} className="wrap-anywhere">{change}</li>)}</ul> : null}
               <p className="text-ui" style={{ color: 'var(--color-text)' }}>{result.note}</p>
+              {result.guidance?.map(entry => <div key={entry.id}><p className="font-semibold">{entry.label}</p>
+                <ul className="list-disc pl-5">{entry.steps.map(step => <li key={step}>{step}</li>)}</ul></div>)}
               <div className="flex flex-wrap gap-2">
                 {result.undo ? <Button busy={busy} busyLabel="Undoing…" onClick={() => void undo()}>Undo this copy</Button> : null}
                 {result.undo && data.simulated ? <Button onClick={() => void undo(true)}>Try undo after a later edit (demo)</Button> : null}
                 <Link className="btn" to="/profiles">Back to Profiles</Link>
-                {result.status === 'undone' ? <Button onClick={() => { setResult(null); plan.reload(); }}>Start over</Button> : null}
+                {result.status === 'undone' && mode === 'copy' ? <Button onClick={() => { setResult(null); plan.reload(); }}>Start over</Button> : null}
               </div>
               {result.undo ? <p className="hint" style={{ color: 'var(--color-text-muted)' }}>{result.undo.explanation}</p> : null}
             </section>
@@ -109,7 +118,7 @@ function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' |
               {data.blocked ? (
                 <WarningAlert title={data.blocked.title} actions={<Button onClick={plan.reload}>Check again</Button>}>{data.blocked.body}</WarningAlert>
               ) : null}
-              <section className="panel p-0 overflow-hidden" aria-labelledby="items-title">
+              {!empty ? <section className="panel p-0 overflow-hidden" aria-labelledby="items-title">
                 <h2 id="items-title" className="panel-head text-body font-semibold" style={{ borderRadius: 0 }}>{mode === 'copy' ? `What will change in ${destination}` : `What ${destination} will get`}</h2>
                 {data.items.length ? (
                   <ul className="list-none p-0">
@@ -143,11 +152,17 @@ function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' |
                     ))}
                   </ul>
                 ) : <p className="p-4 text-ui">Nothing here can be copied: the two profiles already match for everything Xenoflux can copy.</p>}
-              </section>
-              <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))' }}>
-                <section className="panel flex flex-col gap-2" aria-labelledby="manual"><h2 id="manual" className="text-body font-semibold">Set up in Codex instead</h2>{data.manual.map(text => <p key={text} className="text-ui">{text}</p>)}</section>
+              </section> : null}
+              {!empty ? <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))' }}>
+                <section className="panel flex flex-col gap-2" aria-labelledby="manual"><h2 id="manual" className="text-body font-semibold">Set up in {clientName} instead</h2>
+                  {data.manual.map(text => <p key={text} className="text-ui">{text}</p>)}
+                  {data.manualOptions?.map(entry => <label key={entry.id} className="flex items-center gap-2 text-ui wrap-anywhere">
+                    <input type="checkbox" checked={Boolean(manual[entry.id])} onChange={() => setManual(value => ({ ...value, [entry.id]: !value[entry.id] }))} />
+                    Show setup guidance for {entry.label}
+                  </label>)}
+                </section>
                 <section className="panel flex flex-col gap-2" aria-labelledby="never"><h2 id="never" className="text-body font-semibold">Never copied</h2>{data.never.map(text => <p key={text} className="text-ui">{text}</p>)}</section>
-              </div>
+              </div> : null}
               <div className="flex flex-wrap items-center gap-3">
                 {data.blocked ? null : (
                   <Button variant="primary" disabled={mode === 'copy' && !n} busy={busy} busyLabel={mode === 'copy' ? 'Applying…' : 'Creating…'} onClick={() => void apply()}
@@ -157,8 +172,8 @@ function PlanView({ mode, target, from, item, skill, newName }: { mode: 'copy' |
                 {mode === 'copy' && !n && !data.blocked ? <span id={reasonId} className="hint">Choose at least one item.</span> : null}
               </div>
               <p className="hint">{mode === 'copy'
-                ? `Checked again just before applying. ${destination}’s Codex must be closed while changes are applied; you’ll be asked first.`
-                : `Creating doesn’t open Codex. Sign in to ${destination} from Codex afterwards.`}</p>
+                ? `Checked again just before applying. Close the selected client before copying.`
+                : `Creating doesn’t open ${clientName}. See the profile card for native setup afterwards.`}</p>
             </>
           )}
         </>

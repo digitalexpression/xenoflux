@@ -45,8 +45,15 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
         && (typeof input.workspace !== 'string' || !input.workspace.startsWith('/') || input.workspace.length > 16384))
       throw new UiError(400, 'Choose a profile and workspace before discovering models.', 'catalog-context-required');
     const repository = input.workspace || undefined;
-    const profile = await resolveProfile(store, select(input.profile, input.client), { defaultUserHome, ...(repository === undefined ? {} : { repository }),
-      terminalEnvironment: context.terminalEnvironment ?? process.env, profileResolvers: context.profileResolvers });
+    let profile;
+    try {
+      profile = await resolveProfile(store, select(input.profile, input.client), { defaultUserHome, ...(repository === undefined ? {} : { repository }),
+        terminalEnvironment: context.terminalEnvironment ?? process.env, profileResolvers: context.profileResolvers });
+    } catch (error) {
+      if (error.code === 'copilot-account-unverified')
+        throw new UiError(422, 'Check sign-in on the selected Copilot profile before discovering models.', error.code);
+      throw error;
+    }
     return { profile, workspace: profile.cwd, requestedWorkspace: repository ?? null, requestedClient: input.client ?? null };
   }
   const guard = (profile, action) => withProfileOperation(store, profile.profileId,
