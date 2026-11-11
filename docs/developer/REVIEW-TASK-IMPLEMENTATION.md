@@ -96,6 +96,9 @@ successful result explicitly echoes that prompt, with no prior failure, once onl
 This narrow shape comes from owned producer evidence plus the SDK's post-result
 informational semantics; it is not declared in `SDKMessage`. Task work, unknown
 frames and mismatched/extra receipt fields retain their existing guards.
+One subsequent exact owned host-only `session_state_changed: idle` notification
+may be recorded as informational metadata; other states, payloads and repeats
+remain guarded. It adds no permission, task or completion authority.
 
 ### Copilot CLI ordinary review
 

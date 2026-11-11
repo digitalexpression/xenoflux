@@ -148,6 +148,13 @@ function ownedCommandReceipt(frame, sessionId, promptId) {
     && typeof frame.uuid === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(frame.uuid);
 }
 
+function ownedHostIdle(frame, sessionId) {
+  return frame.type === 'system' && frame.subtype === 'session_state_changed' && frame.state === 'idle'
+    && frame.sdk_host_only === true && frame.session_id === sessionId && Object.keys(frame).length === 6
+    && ['type', 'subtype', 'state', 'sdk_host_only', 'session_id', 'uuid'].every(key => Object.hasOwn(frame, key))
+    && typeof frame.uuid === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[a-f0-9]{12}$/i.test(frame.uuid);
+}
+
 export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownClaudeProcess,
   readCwd = claudeProcessCwd, readTrust = claudeWorkspaceTrust } = {}) {
   async function execute({ profile, workspace, task, execution = {}, processOptions, onProcessReady,
@@ -226,11 +233,16 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
       if (!decoder.result && frame.type === 'command_lifecycle')
         commandStage = ownReceipt && commandStage === 0 && frame.state === 'queued' ? 1
           : ownReceipt && commandStage === 1 && frame.state === 'started' ? 2 : -1;
-      if (decoder.result?.complete && sessionObserved && resultPromptMatched && !failure && !nativeFailure
-        && commandStage === 2 && ownReceipt && frame.state === 'completed') {
+      const successfulClosure = decoder.result?.complete && sessionObserved && resultPromptMatched && !failure && !nativeFailure;
+      if (successfulClosure && commandStage === 2 && ownReceipt && frame.state === 'completed') {
         // Optional scoped queue closure, observed in native stdout; not a new task/completion authority.
         commandStage = 3;
         capture.commandClosure = { source: 'claude-native-command-lifecycle', advisory: true, receiptCount: 1 };
+        return;
+      }
+      if (successfulClosure && commandStage === 3 && ownedHostIdle(frame, sessionId)) {
+        commandStage = 4;
+        capture.commandClosure.hostIdleObserved = true;
         return;
       }
       decoder.consume(frame);

@@ -54,11 +54,11 @@ const result = (error = false) => frame({ ...retained[error ? 'interrupt' : 'com
 const toolResult = (tool, error, content) => frame({ type: 'user', parent_tool_use_id: null,
   message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tool.id, is_error: error, content }] } });
 const finishClosure = () => {
-  if (mode === 'closure-after-progress') frame({ type: 'assistant', parent_tool_use_id: null,
+  if (mode.endsWith('-after-progress')) frame({ type: 'assistant', parent_tool_use_id: null,
     message: { content: [{ type: 'tool_use', id: 'known-closure-tool', name: 'Bash', input: { command: '/bin/sleep 60' } }] } });
   frame({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', model: 'claude-fixture-sonnet',
     content: [{ type: 'text', text: 'Claude closure fixture completed.' }] } });
-  const terminal = { type: 'result', subtype: 'success', is_error: mode === 'closure-error',
+  const terminal = { type: 'result', subtype: 'success', is_error: mode.endsWith('-error'),
     result: 'Claude closure fixture completed.',
     ...(!mode.includes('no-echo') && mode !== 'closure-no-result-echo' ? { user_message_uuid: promptId } : {}) };
   frame(terminal);
@@ -68,16 +68,28 @@ const finishClosure = () => {
     ...(mode === 'closure-wrong-session' ? { session_id: randomUUID() } : {}),
     ...(mode === 'closure-extra' ? { payload: {} } : {}), ...(mode === 'closure-bad-uuid' ? { uuid: 'not-a-uuid' } : {}),
     ...(mode === 'closure-missing-uuid' ? { uuid: undefined } : {}) };
-  frame(receipt);
+  const idle = mode.startsWith('closure-idle') || mode === 'closure-controller-idle' ? {
+    type: 'system', subtype: 'session_state_changed', state: mode === 'closure-idle-running' ? 'running'
+      : mode === 'closure-idle-requires-action' ? 'requires_action' : 'idle', sdk_host_only: true,
+    ...(mode === 'closure-idle-foreign' ? { session_id: randomUUID() } : {}),
+    ...(mode === 'closure-idle-extra' ? { payload: {} } : {}),
+    ...(mode === 'closure-idle-not-host' ? { sdk_host_only: false } : {}),
+    ...(mode === 'closure-idle-missing-host' ? { sdk_host_only: undefined } : {}),
+    ...(mode === 'closure-idle-bad-uuid' ? { uuid: 'not-a-uuid' } : {}),
+    ...(mode === 'closure-idle-missing-uuid' ? { uuid: undefined } : {}) } : null;
+  if (mode === 'closure-idle-before-closure') frame(idle);
+  if (mode !== 'closure-idle-no-closure') frame(receipt);
+  if (idle && mode !== 'closure-idle-before-closure') frame(idle);
+  if (mode === 'closure-idle-duplicate') frame(idle);
   if (mode === 'closure-duplicate') frame(receipt);
-  if (mode === 'closure-after-assistant') frame({ type: 'assistant', parent_tool_use_id: null,
+  if (mode.endsWith('-after-assistant')) frame({ type: 'assistant', parent_tool_use_id: null,
     message: { content: [{ type: 'text', text: 'Unexpected later work.' }] } });
-  if (mode === 'closure-after-tool') frame({ type: 'assistant', parent_tool_use_id: null,
+  if (mode.endsWith('-after-tool')) frame({ type: 'assistant', parent_tool_use_id: null,
     message: { content: [{ type: 'tool_use', id: 'later-tool', name: 'Bash', input: { command: '/bin/sleep 60' } }] } });
-  if (mode === 'closure-after-progress') frame({ type: 'tool_progress', tool_use_id: 'known-closure-tool',
+  if (mode.endsWith('-after-progress')) frame({ type: 'tool_progress', tool_use_id: 'known-closure-tool',
     tool_name: 'Bash', parent_tool_use_id: null, elapsed_time_seconds: 1 });
-  if (mode === 'closure-after-result') frame(terminal);
-  if (mode === 'closure-after-unknown') frame({ type: 'system', subtype: 'future_task_activity' });
+  if (mode.endsWith('-after-result')) frame(terminal);
+  if (mode.endsWith('-after-unknown')) frame({ type: 'system', subtype: 'future_task_activity' });
 };
 for await (const line of io) {
   const message = JSON.parse(line);
@@ -114,7 +126,7 @@ for await (const line of io) {
     }
     frame({ ...retained.companion[0], cwd: process.cwd(), apiKeySource: 'none', model, permissionMode: arg('--permission-mode') ?? 'default' });
     if (mode.startsWith('closure-')) {
-      if (mode === 'closure-controller') {
+      if (['closure-controller', 'closure-controller-idle'].includes(mode)) {
         tools = [{ type: 'tool_use', id: 'tool-fixture-0', name: 'Bash', input: { command: '/usr/bin/touch xfx-local-marker.txt' } }];
         frame({ type: 'assistant', parent_tool_use_id: null, message: { content: tools } });
         emit({ type: 'control_request', request_id: 'request-fixture-0', request: { subtype: 'can_use_tool',
@@ -160,7 +172,7 @@ for await (const line of io) {
     if (!tool || decisions.has(index) || reply.subtype !== 'success' || reply.response.toolUseID !== tool.id)
       throw new Error('Invalid exact response');
     decisions.add(index);
-    if (mode === 'closure-controller') {
+    if (['closure-controller', 'closure-controller-idle'].includes(mode)) {
       if (reply.response.behavior !== 'allow' || reply.response.updatedInput?.command !== tool.input.command || reply.response.updatedPermissions)
         throw new Error('Unexpected closure fixture approval');
       writeFileSync(join(process.cwd(), 'xfx-local-marker.txt'), 'fixture marker\n');

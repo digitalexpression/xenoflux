@@ -135,6 +135,48 @@ test('one exact owned command closure is optional bookkeeping after a matching s
   assert.equal(ordinary.capture.commandClosure, undefined);
 });
 
+test('one exact owned host idle after command closure is informational only', async t => {
+  const f = await fixture(t), result = await f.capture('closure-idle-valid');
+  assert.equal(result.failure, null, JSON.stringify(result.failure));
+  assert.equal(result.response.status, 'complete');
+  assert.equal(result.response.text, 'Claude closure fixture completed.');
+  assert.equal(result.capture.commandClosure.hostIdleObserved, true);
+  assert.equal(result.capture.commandClosure.receiptCount, 1);
+  assert.equal(result.capture.shutdown.groupTerminated, true);
+  assert.equal(result.capture.shutdown.sdkIteratorJoined, true);
+  assert.equal(result.run.nativeReference.turnId, null);
+  assert.equal(result.run.coverage.agents, 'partial');
+});
+
+test('post-closure host idle refuses other scope, shape, state, order and later work', async t => {
+  for (const mode of ['foreign', 'extra', 'not-host', 'missing-host', 'running', 'requires-action', 'bad-uuid', 'missing-uuid',
+    'duplicate', 'before-closure', 'no-closure', 'no-echo', 'after-assistant', 'after-tool', 'after-progress', 'after-result', 'after-unknown', 'error'])
+    await t.test(mode, async t => {
+      const f = await fixture(t), result = await f.capture('closure-idle-' + mode);
+      assert.notEqual(result.failure, null, mode);
+      assert.notEqual(result.response.status, 'complete', mode);
+      if (mode === 'error') {
+        assert.equal(result.failure.code, 'claude-native-task-failed');
+        assert.equal(result.capture.errors[1].message, 'Claude event arrived after the terminal result');
+      } else assert.match(result.failure.message, mode === 'foreign' ? /does not match the owned session/ : /after the terminal result/);
+      assert.equal(result.capture.shutdown.groupTerminated, true);
+    });
+});
+
+test('a pre-existing failure prevents admitting an otherwise exact host idle', async t => {
+  const f = await fixture(t, { processOwner(options) {
+    return ownClaudeProcess({ ...options, onFrame(frame) {
+      if (frame.type === 'system' && frame.subtype === 'session_state_changed' && frame.state === 'idle')
+        options.stop(Object.assign(new Error('Claude fixture prior failure'), { code: 'claude-fixture-prior-failure' }));
+      options.onFrame(frame);
+    } });
+  } });
+  const result = await f.capture('closure-idle-valid');
+  assert.equal(result.failure.code, 'claude-fixture-prior-failure');
+  assert.equal(result.capture.commandClosure.hostIdleObserved, undefined);
+  assert.notEqual(result.response.status, 'complete');
+});
+
 test('command closure refuses scope, shape, sequence and post-terminal work mismatches', async t => {
   for (const mode of ['no-result-echo', 'wrong-command', 'wrong-session', 'extra', 'duplicate', 'wrong-state', 'bad-uuid', 'missing-uuid', 'duplicate-queued',
     'missing-queued', 'missing-started', 'reversed', 'sequence-extra', 'after-assistant', 'after-tool', 'after-progress', 'after-result', 'after-unknown', 'error'])

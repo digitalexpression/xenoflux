@@ -81,7 +81,7 @@ test('ordinary Claude review uses the selected profile, frozen inputs and pinned
 test('ordinary Claude survivor completes exact approvals, checks and lock release with an optional command closure', async t => {
   const app = await createUiRunsFixture({ mode: { mixedClaude: true } });
   t.after(() => app.close());
-  const preview = await app.provider.runPreview({ task: 'closure-controller', a: 'Default', b: 'Default',
+  const preview = await app.provider.runPreview({ task: 'closure-controller-idle', a: 'Default', b: 'Default',
     clients: { a: 'claude-code', b: 'claude-code' }, repository: app.repository, commit: 'HEAD',
     checks: [{ name: 'marker', command: '/bin/test -f xfx-local-marker.txt' }] });
   assert.equal(preview.ready, true, JSON.stringify(preview));
@@ -107,6 +107,7 @@ test('ordinary Claude survivor completes exact approvals, checks and lock releas
     const child = await readAuditRecord(app.store, leg.id);
     assert.equal(child.report.capture.commandClosure.receiptCount, 1);
     assert.equal(child.report.capture.commandClosure.advisory, true);
+    assert.equal(child.report.capture.commandClosure.hostIdleObserved, true);
     assert.equal(child.report.capture.shutdown.groupTerminated, true);
     assert.equal(child.state.reservation, null);
     assert.equal(child.state.process, null);
