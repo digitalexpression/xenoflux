@@ -458,7 +458,11 @@ test('reviews and applies recovery for stopped runs opened from Recent', async (
   const progress = page.getByRole('region', { name: 'Interrupted' });
   await expect(progress.getByText('Before changing anything')).toBeVisible();
   await expect(progress.getByText('recoverable', { exact: false })).toHaveCount(2);
+  const recovered = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/recover'));
   await progress.getByRole('button', { name: 'Tidy up and keep the record' }).click();
+  const response = await recovered;
+  expect(response.ok()).toBe(true);
+  expect((await response.json()).recovery).toBeNull();
   await expect(page.getByRole('button', { name: 'Tidy up and keep the record' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Open the partial report' })).toBeVisible();
   expect(app.calls.captures).toHaveLength(0);
