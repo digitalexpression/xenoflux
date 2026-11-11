@@ -31,8 +31,8 @@ updates. Handle blocked steps under the recorded instructions below.
 | E1. Profiles: client choice, guided sign-in, account-scope display | Implementation `0824be2` and Copilot shared scope at `85c0ad1` verified; user sign-in pending for both disposable Claude roots; package chat (private mapping) | C/D verified; user-operated per-root account checkpoint |
 | E2. Setup readers and setup comparison for Claude Code and Copilot | Reader fixtures and combined CI verified; F owns full setup comparison UI; package chat (private mapping) | — |
 | E3. Same-client selected-parts copy | Planner/journal/Undo and E1 product creation verified; F owns full setup application UI; package chat (private mapping) | E2 implementation verified at `fcce9c9` |
-| F. Extend C's UI to all clients/managed profiles: supported permission overrides and request queue, mixed pairs, session selection/import, `--surface` rename, notices | All six fixture pairs verified; integrated `35e8c35`, full combined checks running; package chat (private mapping) | C, D, E1–E3 implementation; E1 Claude live gate stays open |
-| G. Native qualification through the product path | Preparing independent Copilot/Codex checks at `35e8c35`; no native launches or prompts assigned; package chat (private mapping) | C–F; full combined verification before live dispatch; E1 Claude gate for Claude tasks |
+| F. Extend C's UI to all clients/managed profiles: supported permission overrides and request queue, mixed pairs, session selection/import, `--surface` rename, notices | Six pairs and combined checks passed at `35e8c35`; workspace fix `743f8e9` passed affected checks; CI fixture correction `dfb3729`; package chat (private mapping) | C, D, E1–E3 implementation; E1 Claude live gate stays open |
+| G. Native qualification through the product path | Independent Copilot/Codex checks active; both Copilot metadata attempts stopped before catalogs; zero model prompts; package chat (private mapping) | C–F; E1 Claude gate for Claude tasks |
 | H. Release 4.0.0: product statement, install-size check, user documentation, release procedure | Not started | G; separate approval for merge, publication and installed updates |
 
 Package chats use `gpt-6.1-sol` with medium reasoning on host `local`.
@@ -89,9 +89,28 @@ nine Chromium journeys passed. All six pairs ran pinned checks and reopened
 with distinct provenance. Broad runs preserved a catalog promise identity
 failure (269 passed) and a browser refusal-heading failure (39 passed); the
 final focused runs covered both corrections. The verified 42-path handoff is
-integrated at `35e8c35`; combined Node 22.15 checks are in progress. No native
-prompts were used.
-Public checkpoint: `4012ab6` on `codex/release-4.0.0`, [draft PR #13](https://github.com/digitalexpression/xenoflux/pull/13). The Copilot version fix passed five focused checks, detached smoke and outgoing source and artifact review; [CI](https://github.com/digitalexpression/xenoflux/actions/runs/42932990396) is running. Both initial CI Node versions failed because the offline SDK dependency archive was missing; the fix passed the clean local smoke and reviewed tarballs. Node 24 CI passed. Node 22.15 exposed a dependency `prepare` invocation
+integrated at `35e8c35`; syntax, native launcher, docs and combined Node 22.15
+passed (1,645 pass, one opt-in skip). All 73 local Chromium journeys passed;
+the browser step passed on both CI versions at `0b41549`. Combined evidence:
+`local/4.0.0/coordinator/combined-f-35e8c35.log`. No native prompts were used.
+G's offline replay refused 13 forbidden frames. The first bounded catalog
+attempt lacked `gh` on the private PATH. The pinned helper retry reached the
+expected response size but the paired stock check returned 422 before launch.
+Inert SDK workers reproduced the private wrapper's duplicate directory creation
+refusal. Both live attempts joined one managed process, preserved protected
+metadata and dispatched zero prompts. Original receipts are under
+`local/4.0.0/package-g/`. Managed Copilot
+session metadata was refused before launch because the product selected the
+native user home. F's canonical profile-bound workspace fix passed 25 focused
+tests including pre-launch refusal of changed, foreign and missing bindings.
+Evidence: `local/4.0.0/package-f/copilot-metadata-workspace/`; combined affected
+checks at `743f8e9` passed 25 Node and five Chromium journeys. G owns live
+verification. Node 22.15 CI at `0b41549` timed out waiting for four approvals;
+Node 24 passed. The fixture correction observes each startup before asserting
+all four are live with distinct approvals, keeping the original guards and
+timeout. Focused tests passed; the next matrix verifies `dfb3729`. Evidence:
+`local/4.0.0/package-f/node22-overlap/`.
+Public checkpoint: `0b41549` on `codex/release-4.0.0`, [draft PR #13](https://github.com/digitalexpression/xenoflux/pull/13). F's integrated patch passed detached Node 22.15 smoke and review of all 17 outgoing commits and both archives. [CI](https://github.com/digitalexpression/xenoflux/actions/runs/42935031540) passed on Node 24; the Node 22.15 overlap timeout is recorded above. The preceding Copilot version fix `4012ab6` passed five focused checks, detached smoke, public review and [both CI versions](https://github.com/digitalexpression/xenoflux/actions/runs/42932990396). Both initial CI Node versions failed because the offline SDK dependency archive was missing; the fix passed the clean local smoke and reviewed tarballs. Node 24 CI passed. Node 22.15 exposed a dependency `prepare` invocation
 under npm pack and a review cleanup test race. Both fixes passed focused tests
 on Node 22.15. The combined clean smoke passed, both tarballs and eight
 outgoing commits passed review, and [CI on `d48cf23`](https://github.com/digitalexpression/xenoflux/actions/runs/42922350523)
@@ -111,7 +130,8 @@ A evidence: `local/4.0.0/package-a-review/PACKAGE-A-REPORT.md`; public baseline
 review under `local/4.0.0/package-a-review/public-baseline/corrected/`. The
 source-bound Node 22 smoke manifests are under
 `local/4.0.0/coordinator/public-smoke-d48cf23/`, `public-smoke-3ae28bc/`
-`public-smoke-271bfb9/`, `public-smoke-a905b04/` and `public-smoke-4012ab6/`.
+`public-smoke-271bfb9/`, `public-smoke-a905b04/`, `public-smoke-4012ab6/`
+and `public-smoke-0b41549/`. F boundary review: `local/4.0.0/package-a-review/0b41549/`.
 
 B's extraction, E2 and the fixture-driven parts of C and D need no account,
 sign-in or prompt; B's native regression uses its recorded allowance.
