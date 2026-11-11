@@ -27,12 +27,12 @@ updates. Handle blocked steps under the recorded instructions below.
 | A. Protect the work: back up `local/`; push the branch and open a draft pull request so CI runs | Complete: backup, public review, smoke and both CI jobs passed; package chat (private mapping) | Public-source review before push |
 | B. Runtime seam: behaviour lock, then move the Codex app-server transport behind the client runtime interface | Complete: runtime and live approval verified; integrated CI passed; package chat (private mapping) | Native dispatch accounting before regression |
 | C. Claude Code: account-scope check, profile binding, runtime, catalog, permission modes, decoder, session listing/import, review and minimal Default-pair UI | Per-root scope and mixed Default journey verified; integrated `e432a2c`; package chat (private mapping) | B runtime checkpoint; account-scope probe first |
-| D. Copilot CLI: account-scope check, profile binding, runtime, catalog, permission modes, decoder, session listing/import, review | Shared gh-cli scope and controller integration verified at `d4834b9`; package chat (private mapping) | B runtime checkpoint; account-scope probe first |
+| D. Copilot CLI: account-scope check, profile binding, runtime, catalog, permission modes, decoder, session listing/import, review | Shared scope and controller fixtures verified; pre-session shutdown fix `48f9e0b` integrated; package chat (private mapping) | B runtime checkpoint; G stopped capture evidence |
 | E1. Profiles: client choice, guided sign-in, account-scope display | Copilot scope verified; managed comparison binding fix `f949407` integrated; Claude sign-in pending; package chat (private mapping) | C/D verified; user-operated per-root account checkpoint |
 | E2. Setup readers and setup comparison for Claude Code and Copilot | Reader fixtures and combined CI verified; F owns full setup comparison UI; package chat (private mapping) | — |
 | E3. Same-client selected-parts copy | Planner/journal/Undo and E1 product creation verified; F owns full setup application UI; package chat (private mapping) | E2 implementation verified at `fcce9c9` |
 | F. Extend C's UI to all clients/managed profiles: supported permission overrides and request queue, mixed pairs, session selection/import, `--surface` rename, notices | Six pairs and combined checks passed at `35e8c35`; workspace fix `743f8e9` passed affected checks; CI fixture correction `dfb3729`; package chat (private mapping) | C, D, E1–E3 implementation; E1 Claude live gate stays open |
-| G. Native qualification through the product path | Copilot shared account, Auto catalogs and managed list passed. Re-pinning first comparison after reservation refusal; Codex offline probe unavailable; zero G prompts; package chat (private mapping) | C–F; verified binding fix and separate Claude gate |
+| G. Native qualification through the product path | Copilot shared account, Auto catalogs and managed list passed; first capture stopped before send and retains both owners. Codex offline probe unavailable; zero G prompts; package chat (private mapping) | C–F; safe capture recovery/readiness and separate Claude gate |
 | H. Release 4.0.0: product statement, install-size check, user documentation, release procedure | Not started | G; separate approval for merge, publication and installed updates |
 
 Package chats use `gpt-6.1-sol` with medium reasoning on host `local`.
@@ -113,7 +113,18 @@ comparison path inherited metadata-only routing and supplied the native home
 instead of the bound repository. No capture or model prompt started and both
 profile locks were absent. E1's `f949407` fix sets execution mode explicitly;
 95 focused fixtures passed, including exact owned reservations through the
-real controller and an unbound repository refusal. G re-pins before retry.
+real controller and an unbound repository refusal. The re-pinned G comparison
+reserved the exact repository and started one capture. The worker joined,
+but the product retained both reservations after a pre-session assertion.
+The first root gained opaque native metadata; the preservation guard failed.
+Zero prompts were sent. D reproduced the missing-session callback losing the
+joined result, then fixed it for future runs. The 100-test suite proved joined
+failures release their own reservation and unjoined failures preserve it.
+Keep both original reservations and their evidence intact: the native cause
+is still unknown. The retry's receipt and derived evidence are under
+`local/4.0.0/package-g/copilot-p1-route-1-failure-source/` and
+`copilot-p1-route-live-1.json`; D's fixture evidence is
+`local/4.0.0/package-d/shutdown-followup.md`.
 Evidence: `local/4.0.0/package-g/copilot-p1-1-failure-source/` and
 `local/4.0.0/package-e1/managed-execution-route/`. The separate Codex catalog
 probe exited after initialize under verified host write confinement. The
@@ -125,7 +136,7 @@ Node 24 passed. The fixture correction observes each startup before asserting
 all four are live with distinct approvals, keeping the original guards and
 timeout. Focused tests and both new CI jobs passed. Evidence:
 `local/4.0.0/package-f/node22-overlap/`.
-Public checkpoint: `30dea07` on `codex/release-4.0.0`, [draft PR #13](https://github.com/digitalexpression/xenoflux/pull/13). The managed Copilot workspace and overlap fixture corrections passed detached Node 22.15 smoke, review of all 20 outgoing commits and both archives, and [both CI versions](https://github.com/digitalexpression/xenoflux/actions/runs/42938481538). The preceding F checkpoint `0b41549` passed smoke and public review. [CI](https://github.com/digitalexpression/xenoflux/actions/runs/42935031540) passed on Node 24; the Node 22.15 overlap timeout is recorded above. The Copilot version fix `4012ab6` passed five focused checks, detached smoke, public review and [both CI versions](https://github.com/digitalexpression/xenoflux/actions/runs/42932990396). Both initial CI Node versions failed because the offline SDK dependency archive was missing; the fix passed the clean local smoke and reviewed tarballs. Node 24 CI passed. Node 22.15 exposed a dependency `prepare` invocation
+Public checkpoint: `6cc19ca` on `codex/release-4.0.0`, [draft PR #13](https://github.com/digitalexpression/xenoflux/pull/13). The resolver fix passed 29 combined Node checks, three Chromium journeys, detached smoke and review of all 22 outgoing commits and both archives; [CI](https://github.com/digitalexpression/xenoflux/actions/runs/42941910324) is running. The preceding workspace and overlap corrections at `30dea07` passed smoke, boundary review and [both CI versions](https://github.com/digitalexpression/xenoflux/actions/runs/42938481538). The F checkpoint `0b41549` passed smoke and public review; [Node 24 CI passed](https://github.com/digitalexpression/xenoflux/actions/runs/42935031540) and the Node 22.15 overlap timeout is recorded above. The Copilot version fix `4012ab6` passed five focused checks, detached smoke, public review and [both CI versions](https://github.com/digitalexpression/xenoflux/actions/runs/42932990396). Both initial CI Node versions failed because the offline SDK dependency archive was missing; the fix passed the clean local smoke and reviewed tarballs. Node 24 CI passed. Node 22.15 exposed a dependency `prepare` invocation
 under npm pack and a review cleanup test race. Both fixes passed focused tests
 on Node 22.15. The combined clean smoke passed, both tarballs and eight
 outgoing commits passed review, and [CI on `d48cf23`](https://github.com/digitalexpression/xenoflux/actions/runs/42922350523)
@@ -146,8 +157,8 @@ review under `local/4.0.0/package-a-review/public-baseline/corrected/`. The
 source-bound Node 22 smoke manifests are under
 `local/4.0.0/coordinator/public-smoke-d48cf23/`, `public-smoke-3ae28bc/`
 `public-smoke-271bfb9/`, `public-smoke-a905b04/`, `public-smoke-4012ab6/`
-`public-smoke-0b41549/` and `public-smoke-30dea07/`. F boundary reviews:
-`local/4.0.0/package-a-review/0b41549/` and `30dea07/`.
+`public-smoke-0b41549/`, `public-smoke-30dea07/` and `public-smoke-6cc19ca/`.
+Boundary reviews: `local/4.0.0/package-a-review/{0b41549,30dea07,6cc19ca}/`.
 
 B's extraction, E2 and the fixture-driven parts of C and D need no account,
 sign-in or prompt; B's native regression uses its recorded allowance.
