@@ -21,8 +21,9 @@ const input = app => ({ task: 'Disposable paired review fixture', files: '', a: 
 const timeout = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(read, predicate, message) {
   const end = Date.now() + 15000;
-  while (Date.now() < end) { const value = await read(); if (predicate(value)) return value; await timeout(20); }
-  assert.fail(message);
+  let value;
+  while (Date.now() < end) { value = await read(); if (predicate(value)) return value; await timeout(20); }
+  assert.fail(typeof message === 'function' ? message(value) : message);
 }
 
 async function seedComparison(app) {
@@ -423,15 +424,30 @@ test('two comparisons and two reviews overlap on one profile with separate setti
       execution: { model: name, reasoningEffort }, includeRecordedContent: name === 'r2', timeoutMs: 60000 });
     return (await app.provider.startReviewTask({ ref, previewToken })).id;
   };
-  const [c1, c2, r1, r2] = await Promise.all([
-    startComparison('c1', 'high'), startComparison('c2', 'low'),
-    startReview('r1', app.repository, 'medium'), startReview('r2', workspace, 'high'),
-  ]);
+  const readRun = id => app.provider.run({ id });
+  const readReview = id => app.provider.reviewTask({ id });
+  const describe = row => JSON.stringify({
+    status: row?.state ?? row?.status, phase: row?.phase, error: row?.error ?? row?.headline,
+    requests: row?.pendingRequests?.length, sides: row?.columns?.map(({ side, state, failure }) => ({ side, state, failure })),
+  });
+  async function atApproval(name, id, read) {
+    await until(() => read(id), row => {
+      assert.ok(['starting', 'prepared', 'running', 'waiting-for-user'].includes(row.state ?? row.status),
+        `${name} stopped before native approval: ${describe(row)}`);
+      assert.ok(row.pendingRequests.length <= 1, `${name} presented duplicate approvals: ${describe(row)}`);
+      return row.pendingRequests.length === 1;
+    }, row => `${name} did not reach native approval: ${describe(row)}`);
+    return id;
+  }
+  // Keep each job waiting while the next goes through real admission and reservation.
+  const c1 = await atApproval('c1', await startComparison('c1', 'high'), readRun);
+  const c2 = await atApproval('c2', await startComparison('c2', 'low'), readRun);
+  const r1 = await atApproval('r1', await startReview('r1', app.repository, 'medium'), readReview);
+  const r2 = await atApproval('r2', await startReview('r2', workspace, 'high'), readReview);
   const jobs = [c1, c2, r1, r2];
-  const [one, two, first, second] = await until(
-    () => Promise.all([app.provider.run({ id: c1 }), app.provider.run({ id: c2 }),
-      app.provider.reviewTask({ id: r1 }), app.provider.reviewTask({ id: r2 })]),
-    rows => rows.every(row => row.pendingRequests?.length === 1), 'four jobs did not reach native approval together');
+  const [one, two, first, second] = await Promise.all([readRun(c1), readRun(c2), readReview(r1), readReview(r2)]);
+  assert.deepEqual([one.state, two.state, first.status, second.status], ['running', 'running', 'waiting-for-user', 'waiting-for-user']);
+  assert.deepEqual([one, two, first, second].map(row => row.pendingRequests.length), [1, 1, 1, 1]);
   assert.deepEqual(new Set((await app.provider.info()).activeJobs.map(job => job.id)), new Set(jobs));
   assert.equal((await readProfileOwners(app.homes.baseline.root)).length, 6);
   assert.equal(new Set([one, two, first, second].map(row => row.pendingRequests[0].requestId)).size, 4);
