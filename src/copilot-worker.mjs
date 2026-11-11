@@ -24,6 +24,18 @@ let abortIdleObserved = false;
 let monitor, sampled = Promise.resolve(), sampling = false, inspectionFailed = false, unsubscribe;
 const tracked = new Map();
 const originalSpawn = cp.spawn;
+const captureFailures = Object.freeze({
+  startup: 'Copilot could not initialize the selected native runtime.',
+  catalog: 'Copilot did not advertise the requested execution settings.',
+  'session-create': 'Copilot could not create the owned native session.',
+  'cwd-confirmation': 'Copilot did not confirm the exact working directory.',
+  'model-confirmation': 'Copilot did not confirm the requested model, effort or route.',
+  'permission-confirmation': 'Copilot did not confirm the native permission mode.',
+  'session-checkpoint': 'Copilot could not checkpoint the owned native session.',
+  'account-recheck': 'Copilot could not verify the account before initial submission.',
+  'turn-execution': 'Copilot could not complete the owned native turn.',
+});
+let captureStage = null;
 let next = 0;
 parentPort.on('message', message => {
   if (message.cancel) stop.abort();
@@ -227,13 +239,25 @@ async function metadata({ status, auth, publicAccount }) {
 }
 
 async function capture({ status, auth, publicAccount }) {
+  captureStage = 'catalog';
   const wanted = input.execution ?? {};
   const catalog = wanted.model != null || wanted.reasoningEffort != null
     ? decodeCopilotCatalog(await rpc(() => client.rpc.models.list({}))) : null;
   const selection = selectCopilotSettings(catalog, wanted);
   const permissionMode = selection.permissionMode ?? null;
   const onPermissionRequest = () => ({ kind: 'no-result' });
-  session = await rpc(() => client.createSession({ onPermissionRequest,
+  let startProof, startCount = 0, resolveStart;
+  const observedStart = new Promise(resolve => { resolveStart = resolve; });
+  const onEvent = event => {
+    if (event?.type !== 'session.start' || Object.hasOwn(event, 'agentId') || Object.hasOwn(event.data ?? {}, 'agentId')
+      || event.checkpoint === true || event.data?.checkpoint === true) return;
+    startCount++;
+    startProof = { eventId: event.id, sessionId: event.data?.sessionId, cwd: event.data?.context?.cwd,
+      streamSessionId: event.sessionId };
+    resolveStart();
+  };
+  captureStage = 'session-create';
+  session = await rpc(() => client.createSession({ onPermissionRequest, onEvent,
     ...(selection.model ? { model: selection.model } : {}),
     ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
     ...(selection.route ? { capi: { autoTier: selection.route } } : {}) }));
@@ -264,13 +288,17 @@ async function capture({ status, auth, publicAccount }) {
     }
     send({ type: 'event', value: event });
   });
-  const metadata = await rpc(() => client.getSessionMetadata(sessionId));
-  if (metadata?.sessionId !== sessionId || metadata.context?.workingDirectory !== binding.workspace)
-    throw new Error('Copilot did not confirm the exact working directory.');
+  captureStage = 'cwd-confirmation';
+  await bounded(observedStart, 12000, stop.signal);
+  const cwdConfirmed = () => startCount === 1 && copilotId(startProof?.eventId) && startProof.sessionId === sessionId
+    && (startProof.streamSessionId === undefined || startProof.streamSessionId === sessionId) && startProof.cwd === binding.workspace;
+  if (!cwdConfirmed()) throw new Error('Copilot did not confirm the exact working directory.');
+  captureStage = 'model-confirmation';
   const confirmed = await rpc(() => session.rpc.model.getCurrent());
   if (selection.model && confirmed.modelId !== selection.model || selection.route && confirmed.autoTier !== selection.route
     || selection.reasoningEffort && confirmed.reasoningEffort !== selection.reasoningEffort)
     throw new Error('Copilot did not confirm the requested model, effort or route.');
+  captureStage = 'permission-confirmation';
   let appliedPermission = null;
   if (permissionMode) {
     const applied = await rpc(() => session.rpc.permissions.setMode({ mode: permissionMode }));
@@ -280,11 +308,13 @@ async function capture({ status, auth, publicAccount }) {
     const mode = await rpc(() => session.rpc.permissions.getMode());
     appliedPermission = ['manual', 'assisted', 'allow-all'].includes(mode.mode) ? mode.mode : null;
   }
+  captureStage = 'session-checkpoint';
   await checkpoint('session', { sessionId, version: status.version, account: publicAccount, selection, confirmed: {
     model: copilotId(confirmed.modelId) ? confirmed.modelId : null,
     reasoningEffort: copilotId(confirmed.reasoningEffort) ? confirmed.reasoningEffort : null,
     route: copilotId(confirmed.autoTier) ? confirmed.autoTier : null, permissionMode: appliedPermission,
   } });
+  captureStage = 'account-recheck';
   const currentAccount = await rpc(() => client.getAuthStatus());
   checkAccount(currentAccount, status.version);
   if (auth.login !== currentAccount.login || auth.host !== currentAccount.host || auth.authType !== currentAccount.authType)
@@ -301,6 +331,11 @@ async function capture({ status, auth, publicAccount }) {
   };
   parentPort.on('message', handleControl);
   try {
+    if (!cwdConfirmed()) {
+      captureStage = 'cwd-confirmation';
+      throw new Error('Copilot did not confirm the exact working directory.');
+    }
+    captureStage = 'turn-execution';
     started = true;
     const submission = session.send({ prompt: input.task });
     await bounded(Promise.all([submission, done]), input.timeoutMs ?? 2147483647, stop.signal);
@@ -315,10 +350,12 @@ async function run() {
     out = openSync(paths.stdoutPath, 'wx', 0o600);
     err = openSync(paths.stderrPath, 'wx', 0o600);
     installSpawn(out, err);
+    if (operation === 'capture') captureStage = 'startup';
     const initialized = await initialize();
     result = operation === 'capture' ? await capture(initialized) : await metadata(initialized);
   } catch (error) {
     failure = processFailure ?? (truncated ? 'Copilot native output limit reached.' : stop.signal.aborted ? 'Copilot operation cancelled.'
+      : captureStage ? captureFailures[captureStage]
       : /^Copilot |^Unrecognized Copilot |^Selected Copilot |^Unexpected Copilot |^Unsafe Copilot |^Remove ambient Copilot /.test(error.message)
         ? error.message : 'Copilot native operation failed.');
   } finally {
@@ -340,7 +377,7 @@ async function run() {
     if (err !== undefined) closeSync(err);
     cp.spawn = originalSpawn;
     syncBuiltinESMExports();
-    send({ type: 'result', value: { result, failure, started, processIdentity, output: { bytes, truncated },
+    send({ type: 'result', value: { result, failure, ...(failure && captureStage ? { failureStage: captureStage } : {}), started, processIdentity, output: { bytes, truncated },
       shutdown: { groupTerminated, sdkStopJoined, childClosed, abortAcknowledged, trackedProcesses: tracked.size, ancestryCoverage: 'sampled', ancestryUncertain: !groupTerminated } } });
     parentPort.close();
   }

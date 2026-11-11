@@ -23,7 +23,7 @@ async function fixture(t, loginMode = 'failure') {
 function runSetup(f, replies) {
   const child = spawn(process.execPath, ['--loader', loader, '--import', ttyBootstrap, cli,
     '--store', f.store, 'profile', 'create', 'sample', '--apply', '--base', f.base, '--codex', f.executable], {
-    env: { ...process.env, HOME: f.root }, stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, HOME: f.root, PATH: f.root + ':/usr/bin:/bin' }, stdio: ['pipe', 'pipe', 'pipe'],
   });
   let stdout = '', stderr = '';
   child.stdout.setEncoding('utf8').on('data', chunk => {

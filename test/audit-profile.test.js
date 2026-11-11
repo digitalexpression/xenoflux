@@ -24,6 +24,9 @@ async function fixture(t) {
   await store.update(data => { const profile = create(data, 'Research'); profile.repositories.push({ path: repository }); });
   await registerHome(store, 'Research', native.root, { executable, version: '0.162.0' });
   const profileStore = await readFile(store.file);
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${root}:/usr/bin:/bin`;
+  t.after(() => { process.env.PATH = previousPath; });
   return { root, executable, native, repository, store, profileStore };
 }
 
@@ -39,7 +42,7 @@ test('named execution profile reuses the bound home and keeps only approved envi
   assert.equal(profile.environmentId, (await f.store.read()).profiles[0].native.environmentId);
   assert.equal(profile.bindingRepository, f.repository);
   assert.equal(profile.executable, f.executable);
-  assert.equal(profile.version, '0.162.0');
+  assert.equal(profile.version, null);
   assert.equal(profile.env.CODEX_HOME, f.native.home);
   assert.equal(profile.env.CODEX_SQLITE_HOME, f.native.home);
   assert.equal(profile.env.HOME, f.native.userHome);
@@ -115,7 +118,9 @@ test('Default needs an existing trusted repository entry and explicit executable
   assert.equal(profile.bindingRepository, f.repository);
   assert.equal(profile.env.CODEX_HOME, home);
   assert.equal(profile.env.OPENAI_API_KEY, undefined);
-  await assert.rejects(resolveAuditExecutionProfile(f.store, 'Default', { repository: f.repository, defaultUserHome: userHome }), /explicit Codex executable/);
+  const current = await resolveAuditExecutionProfile(f.store, 'Default', { repository: f.repository, defaultUserHome: userHome });
+  assert.equal(current.executable, f.executable);
+  assert.equal(current.version, null);
   await writeFile(join(home, 'config.toml'), `${stringify({ projects: { [f.repository]: { trust_level: 'untrusted' } } })}\n`, { mode: 0o600 });
   await assert.rejects(resolveAuditExecutionProfile(f.store, input, { repository: f.repository, defaultUserHome: userHome }), /existing trusted repository entry/);
 });
@@ -124,11 +129,11 @@ test('ordinary execution resolves the saved profile without a version probe and 
   const f = await fixture(t);
   const accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
   const profile = await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository,
-    terminalEnvironment: { PATH: '/usr/bin:/bin', TERM: 'xterm-256color' } });
+    terminalEnvironment: { PATH: `${f.root}:/usr/bin:/bin`, TERM: 'xterm-256color' } });
   assert.equal(profile.executionMode, 'profile');
   assert.equal(profile.cwd, f.repository);
   assert.equal(profile.executable, f.executable);
-  assert.equal(profile.version, '0.162.0');
+  assert.equal(profile.version, null);
   assert.equal(profile.bindingRepository, f.repository);
   assert.equal(profile.env.CODEX_SQLITE_HOME, f.native.home);
   assert.equal(profile.settingsSnapshot.status, 'ready');
@@ -144,19 +149,38 @@ test('ordinary execution resolves the saved profile without a version probe and 
   });
   assert.deepEqual(profile.launchArgs, ['-c', `sqlite_home=${JSON.stringify(profile.home)}`]);
   const fresh = await recheckProfileExecutionProfile(f.store, profile, { repository: f.repository,
-    terminalEnvironment: { PATH: '/usr/bin:/bin', TERM: 'xterm-256color' }, accessOptions });
+    terminalEnvironment: { PATH: `${f.root}:/usr/bin:/bin`, TERM: 'xterm-256color' }, accessOptions });
   assert.equal(fresh.executableIdentity, profile.executableIdentity);
   await writeFile(join(f.native.home, 'config.toml'), `${await readFile(join(f.native.home, 'config.toml'), 'utf8')}\nmodel = "changed"\n`, { mode: 0o600 });
   await assert.rejects(recheckProfileExecutionProfile(f.store, profile, { repository: f.repository,
-    terminalEnvironment: { PATH: '/usr/bin:/bin', TERM: 'xterm-256color' }, accessOptions }), { code: 'profile-settings-changed' });
+    terminalEnvironment: { PATH: `${f.root}:/usr/bin:/bin`, TERM: 'xterm-256color' }, accessOptions }), { code: 'profile-settings-changed' });
+  assert.deepEqual(await readFile(f.store.file), f.profileStore);
+});
+
+test('a CLI update keeps the profile usable and invalidates an older prepared action', async t => {
+  const f = await fixture(t);
+  const preview = await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository });
+  await rename(f.executable, `${f.executable}.registered`);
+  const currentBin = join(f.root, 'current-bin');
+  await mkdir(currentBin, { mode: 0o700 });
+  const executable = join(currentBin, 'codex');
+  await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const options = { repository: f.repository, terminalEnvironment: { PATH: `${currentBin}:/usr/bin:/bin` } };
+  const fresh = await resolveProfileExecutionProfile(f.store, 'Research', options);
+  assert.equal(fresh.executable, executable);
+  assert.equal(fresh.version, null);
+  assert.equal((await resolveAuditExecutionProfile(f.store, 'Research', options)).executable, executable);
+  await assert.rejects(recheckProfileExecutionProfile(f.store, preview, { ...options,
+    accessOptions: { inspectResources: async () => assert.fail('stale action must refuse before access') } }),
+  { code: 'profile-preview-changed' });
   assert.deepEqual(await readFile(f.store.file), f.profileStore);
 });
 
 test('serialized ordinary profile previews recheck by metadata identity across restart boundaries', async t => {
   const f = await fixture(t), accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
   const preview = JSON.parse(JSON.stringify(await resolveProfileExecutionProfile(f.store, 'Research', { repository: f.repository })));
-  assert.equal(preview.versionSource, 'registered');
-  assert.equal(preview.executableSource, 'registered');
+  assert.equal(preview.versionSource, 'unavailable');
+  assert.equal(preview.executableSource, 'path');
   const fresh = await recheckProfileExecutionProfile(f.store, preview, { repository: f.repository, accessOptions });
   assert.equal(fresh.executableIdentity, preview.executableIdentity);
   await writeFile(join(f.native.home, 'config.toml'), `${await readFile(join(f.native.home, 'config.toml'), 'utf8')}\nmodel = "changed"\n`, { mode: 0o600 });

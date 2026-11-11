@@ -23,6 +23,7 @@ async function record(path, value) {
 
 export async function launchPlan(store, name, terminalEnvironment = process.env, { repository, resumeId } = {}) {
   const { profile, native, environment } = await resolveHome(store, name);
+  const binary = await discoverCodexExecutable(terminalEnvironment);
   let cwd = environment.cwd;
   if (repository !== undefined) {
     if (typeof repository !== 'string' || !repository.trim() || /[\x00-\x1f\x7f]/.test(repository)) throw new Error('Invalid repository path');
@@ -52,8 +53,8 @@ export async function launchPlan(store, name, terminalEnvironment = process.env,
     if (typeof value === 'string' && value.length <= 128 && /^[A-Za-z0-9_.@:+-]+$/.test(value)) env[key] = value;
   }
   return { profileId: profile.id, name: profile.name, nativeRoot: native.root,
-    environmentId: environment.id, home: environment.home, executable: native.executable,
-    executableIdentity: native.executableIdentity, version: native.version, cwd,
+    environmentId: environment.id, home: environment.home, executable: binary.executable,
+    executableIdentity: binary.executableIdentity, version: null, cwd,
     native: structuredClone(profile.native),
     args: [...(resumeId ? ['resume', resumeId] : []), '--no-alt-screen', '--cd', cwd, '-c', `sqlite_home=${JSON.stringify(environment.home)}`], env,
     operation: resumeId ? 'resume' : 'launch', ...(resumeId ? { resumeId } : {}),
@@ -100,7 +101,8 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     const fresh = await launchPlan(store, plan.profileId, terminalEnvironment, { repository, resumeId });
     if (fresh.nativeRoot !== plan.nativeRoot || fresh.environmentId !== plan.environmentId || fresh.home !== plan.home || fresh.cwd !== plan.cwd)
       throw Object.assign(new Error('Home binding changed'), { code: 'HOME_CHANGED' });
-    if (fresh.executableIdentity !== plan.executableIdentity) throw Object.assign(new Error('Executable changed'), { code: 'EXECUTABLE_CHANGED' });
+    if (fresh.executable !== plan.executable || fresh.executableIdentity !== plan.executableIdentity)
+      throw Object.assign(new Error('Executable changed'), { code: 'EXECUTABLE_CHANGED' });
     plan = fresh;
     report.version = version; report.configurationChangedSinceRegistration = plan.configurationChangedSinceRegistration;
     await ramLogs.prepareHome({ home: plan.home, key: plan.environmentId, signal });

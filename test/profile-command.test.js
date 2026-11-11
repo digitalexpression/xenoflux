@@ -39,7 +39,7 @@ async function fixture(t) {
   const runtime = { assertExternal: async () => calls.push('external'), assertIdle: async () => calls.push('idle'), inspectApp: async () => app };
   const clientRuntime = () => runtime;
   const options = { '--apply': true, '--base': base, '--codex': executable };
-  const signin = exitCode => args => startHomeSignIn({ ...args, probe: async () => '0.153.4', ramLogs: { prepareHome: async () => calls.push('ram') }, run: async () => ({ exitCode }) });
+  const signin = exitCode => args => startHomeSignIn({ ...args, terminalEnvironment: { PATH: root + ':/usr/bin:/bin' }, probe: async () => '0.153.4', ramLogs: { prepareHome: async () => calls.push('ram') }, run: async () => ({ exitCode }) });
   return { root, store, base, defaultUserHome, executable, runtime, clientRuntime, options, calls, signin };
 }
 

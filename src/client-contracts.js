@@ -38,7 +38,7 @@ export function createEnvironmentBinding(input) {
   const settings = input.settingsIdentity;
   if (settings !== null) {
     record(settings, 'settings identity');
-    if (settings.algorithm !== 'sha256-file-stat-metadata-v1' || !/^[a-f0-9]{64}$/.test(settings.digest))
+    if (!['sha256-file-stat-metadata-v1', 'sha256-settings-metadata-v2'].includes(settings.algorithm) || !/^[a-f0-9]{64}$/.test(settings.digest))
       throw new Error('Invalid settings identity');
   }
   return {

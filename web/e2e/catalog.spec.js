@@ -72,6 +72,26 @@ test('profile and workspace changes discard catalog choices and preserve default
   expect(app.calls.captures).toEqual([]);
 });
 
+test('a changed setup explains discarded discovery and requires another explicit refresh', async ({ page, app }) => {
+  let refreshes = 0;
+  await page.route('**/api/catalog/refresh', async route => {
+    const response = await route.fetch();
+    refreshes++;
+    await route.fulfill({ response, json: refreshes === 1
+      ? { ...(await response.json()), status: 'unavailable', models: [], reason: 'catalog-context-changed' }
+      : await response.json() });
+  });
+  await openForm(page, app);
+  await page.getByRole('button', { name: 'Refresh models', exact: true }).first().click();
+  await expect(page.getByText('Profile setup changed during discovery. Refresh models again before choosing a model.')).toBeVisible();
+  await expect(page.getByLabel('Model ID').first().getByRole('option')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Refresh models', exact: true }).first()).toBeEnabled();
+  expect(refreshes).toBe(1);
+  await refreshFirst(page);
+  expect(refreshes).toBe(2);
+  expect(app.calls.captures).toEqual([]);
+});
+
 
 test('explicit refresh cancellation reaps discovery and leaves inherited run preview available', async ({ page, app }) => {
   await openForm(page, app);

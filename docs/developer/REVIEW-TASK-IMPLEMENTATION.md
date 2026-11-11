@@ -27,7 +27,7 @@ provider, permissions, sandbox, instructions, skills, integrations, hooks and me
 | Native launch | Launch the native executable in the selected cwd with an explicit prompt and fresh session. Let `thread/start` inherit the process cwd, verify its reported cwd before any turn, and send that verified cwd to `turn/start`; explicit thread cwd can persist native project trust and invalidate other previews. Omit thread/turn `sandbox`, `sandboxPolicy`, `approvalPolicy` and general config overrides. Reject audit-only options. No `prepareAuditStartup`, `sandbox-exec`, audit-private SQLite/log/TMP, no-op sandbox probe or injected telemetry. Preserve ordinary launcher routing, including SQLite; normal history/auth refresh writes are expected. |
 | Preparation | Read-only profile/workspace resolution runs no native version probe. Never close clients, sign in, change bindings/trust/settings, borrow another account, copy source, provision isolation or grant extra reads. Missing prerequisites use existing setup guidance; unsafe access/ownership is refused. |
 | Workspace | Named profile: saved cwd or explicitly selected bound repository; report repository only if available/bound. Default: explicitly selected trusted repository and existing executable discovery. No silent historical checkout. Show cwd/executable and private input paths before Start. |
-| Start recheck | Recheck profile/home, executable identity, cwd and metadata-only settings identity, including after serialization. Refuse changed previews before model work; versions are provenance. |
+| Start recheck | Recheck profile/home, executable identity, cwd and settings identity, including after serialization. Refuse changed previews before model work; versions are provenance. |
 | Participants | Canonical `.run-lock` memberships span controllers; comparisons/reviews may join verified managed Desktop. Guard membership changes; release only the exact participant after confirmed shutdown. Recognized legacy owner/Desktop-review records remain readable. Mutations/new Desktop startup retain exclusive admission. |
 | Desktop quit | Reconcile without signalling; verified durable participants may retain handles. Comparison client-preservation checks remain. Uncertain ownership preserves reservations. Retain terminal responses through release contention; retry confirmed-stopped cleanup on a later read. |
 | Process checkpoint | After native initialization, require the same PID/start/host across exec; checkpoint the initialized executable identity and use it for later ownership checks. |
@@ -67,7 +67,12 @@ using the public custom-process option, normal user/project/local sources, and
 the Claude Code system prompt. Preserve implicit Default versus explicit
 `CLAUDE_CONFIG_DIR`, even for identical paths. Refuse ambient credential or
 provider overrides, signed-out routes and unexpected executable or SDK launch
-arguments. Preparation reads only binding and settings metadata.
+arguments. Preparation reads binding and settings metadata. A validated native
+skill-sync container manifest uses a bounded, no-follow hash of every original
+byte so native timestamp touches do not invalidate unchanged settings. Only its
+validated round-freshness stamp is excluded; real skill resources remain
+protected. Manifest bodies and credential/account data are never retained in
+the settings identity. Malformed or unsafe sync metadata fails closed.
 
 Startup verifies the owned process and its inherited cwd, checks native
 subscription and advertised explicit choices, and durably checkpoints the fresh

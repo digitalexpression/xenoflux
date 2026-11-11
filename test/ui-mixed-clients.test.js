@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
 import test from 'node:test';
@@ -10,6 +10,11 @@ import { readAuditRecord } from '../src/audit-experiment-store.js';
 async function httpFixture(t) {
   const app = await createMixedClientFixture();
   t.after(() => app.close());
+  for (const [command, executable] of [
+    ['codex', app.executable],
+    ['claude', app.profiles['claude-code'].native.executable],
+    ['copilot', app.profiles.copilot.native.executable],
+  ]) assert.equal(await realpath(join(app.root, command)), await realpath(executable));
   const headers = { origin: app.origin, 'content-type': 'application/json', 'x-xenoflux-request': '1' };
   const token = new URLSearchParams(new URL(app.url).hash.slice(1)).get('launch');
   const auth = await fetch(app.origin + '/api/session', { method: 'POST', headers, body: JSON.stringify({ token }) });

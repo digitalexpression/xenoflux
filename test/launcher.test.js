@@ -28,9 +28,9 @@ async function fixture(t) {
   b.native = profiles.profiles.find(profile => profile.name === 'B').native;
   const ramCalls = [];
   const ramLogs = { prepareHome: async options => { ramCalls.push(options); } };
-  return { root, executable, a, b, store, ramCalls, ramLogs };
+  return { root, executable, a, b, store, ramCalls, ramLogs, terminalEnvironment: { PATH: root + ':' + dirname(process.execPath) + ':/usr/bin:/bin' } };
 }
-const launch = (f, name, options = {}) => launchHome(f.store, name, { ramLogs: f.ramLogs, ...options });
+const launch = (f, name, options = {}) => launchHome(f.store, name, { ramLogs: f.ramLogs, terminalEnvironment: f.terminalEnvironment, ...options });
 
 const taskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
@@ -46,20 +46,20 @@ async function task(environment, cwd = environment.cwd, rollout) {
 
 test('repository launches require an explicit binding and preserve the same fixed native home', async t => {
   const f = await fixture(t), repo = join(f.root, 'work'); await mkdir(repo);
-  await assert.rejects(launchPlan(f.store, 'A', undefined, { repository: repo }), /Bind this repository/);
+  await assert.rejects(launchPlan(f.store, 'A', f.terminalEnvironment, { repository: repo }), /Bind this repository/);
   await f.store.update(data => bind(data, 'A', repo));
   const alias = join(f.root, 'alias'); await symlink(repo, alias);
-  const plan = await launchPlan(f.store, 'A', undefined, { repository: alias });
+  const plan = await launchPlan(f.store, 'A', f.terminalEnvironment, { repository: alias });
   assert.equal(plan.cwd, repo); assert.equal(plan.home, f.a.home);
   assert.equal(plan.env.CODEX_SQLITE_HOME, plan.home);
-  await assert.rejects(launchPlan(f.store, 'B', undefined, { repository: repo }), /Bind this repository/);
+  await assert.rejects(launchPlan(f.store, 'B', f.terminalEnvironment, { repository: repo }), /Bind this repository/);
 });
 
 test('resume selects the exact source home even when both homes contain the same task ID', async t => {
   const f = await fixture(t);
   for (const e of [f.a, f.b]) await task(e);
   for (const label of ['A','B']) {
-    const plan = await launchPlan(f.store, label, undefined, { resumeId: taskId });
+    const plan = await launchPlan(f.store, label, f.terminalEnvironment, { resumeId: taskId });
     assert.equal(plan.operation, 'resume'); assert.equal(plan.resumeId, taskId);
     assert.equal(plan.home, label === 'A' ? f.a.home : f.b.home);
     assert.deepEqual(plan.args.slice(0,2), ['resume',taskId]);
@@ -69,7 +69,7 @@ test('resume selects the exact source home even when both homes contain the same
     }});
     assert.equal(result.resumeId, taskId); assert.equal(result.status, 'exited');
   }
-  const {stdout} = await promisify(execFile)(process.execPath,[cli,'--store',f.store.directory,'resume','A',taskId,'--dry-run','--json']);
+  const {stdout} = await promisify(execFile)(process.execPath,[cli,'--store',f.store.directory,'resume','A',taskId,'--dry-run','--json'], { env: { ...process.env, ...f.terminalEnvironment } });
   assert.equal(JSON.parse(stdout).home, f.a.home);
 });
 
@@ -86,7 +86,7 @@ test('resume refuses transcript paths outside the selected home without translat
   const db = join(f.a.home, 'state_5.sqlite');
   await promisify(execFile)('/usr/bin/sqlite3', [db,
     `UPDATE threads SET rollout_path='${external.replaceAll("'", "''")}';`]);
-  await assert.rejects(launchPlan(f.store, 'A', undefined, { resumeId: taskId }), /transcript is unavailable/);
+  await assert.rejects(launchPlan(f.store, 'A', f.terminalEnvironment, { resumeId: taskId }), /transcript is unavailable/);
   const recorded = (await promisify(execFile)('/usr/bin/sqlite3', ['-readonly', db, 'SELECT rollout_path FROM threads;'])).stdout.trim();
   assert.equal(recorded, external);
   await assert.rejects(access(join(f.a.root, 'launches')), { code: 'ENOENT' });
@@ -105,8 +105,8 @@ test('history CLI reads combined fixture metadata without creating a launch reco
 
 test('preview fixes all native paths without inheriting parent credentials or creating launch state', async t => {
   const f = await fixture(t);
-  const a = await launchPlan(f.store, 'A', { CODEX_HOME: '/wrong', OPENAI_API_KEY: 'secret', TERM: 'screen-256color', LANG: 'en_US.UTF-8', COLORTERM: '\u001bunsafe' });
-  const b = await launchPlan(f.store, 'B');
+  const a = await launchPlan(f.store, 'A', { ...f.terminalEnvironment, CODEX_HOME: '/wrong', OPENAI_API_KEY: 'secret', TERM: 'screen-256color', LANG: 'en_US.UTF-8', COLORTERM: '\u001bunsafe' });
+  const b = await launchPlan(f.store, 'B', f.terminalEnvironment);
   assert.equal(a.env.CODEX_HOME, f.a.home);
   assert.equal(a.env.CODEX_SQLITE_HOME, a.env.CODEX_HOME);
   assert.equal(a.env.HOME, f.a.userHome);
@@ -136,7 +136,7 @@ test('launch accepts a newer probed CLI, journals only metadata, and retains nat
   assert.equal((await lstat(result.reportPath)).mode & 0o777, 0o600);
   assert.doesNotMatch(await readFile(result.reportPath, 'utf8'), /not-read-or-recorded|native-choice/);
   await assert.rejects(access(join(f.a.root, '.run-lock')), { code: 'ENOENT' });
-  assert.equal((await launchPlan(f.store, 'Renamed')).configurationChangedSinceRegistration, false);
+  assert.equal((await launchPlan(f.store, 'Renamed', f.terminalEnvironment)).configurationChangedSinceRegistration, false);
 });
 
 test('launch refuses changed executable and releases its lock before native interaction', async t => {
@@ -180,13 +180,13 @@ test('native sqlite redirection fails preflight and postflight and never becomes
     return { exitCode: 0, signal: null, shutdown };
   } });
   assert.equal(result.status, 'incomplete'); assert.equal(result.postflight, 'failed');
-  await assert.rejects(launchPlan(f.store, 'A'), /Native configuration must use the bound file credential store/);
+  await assert.rejects(launchPlan(f.store, 'A', f.terminalEnvironment), /Native configuration must use the bound file credential store/);
   assert.equal((await listHomes(f.store))[0].state, 'unavailable');
 });
 
 test('CLI supports noninteractive dry-run and rejects interactive launch or picker without a TTY', async t => {
   const f = await fixture(t);
-  const run = args => promisify(execFile)(process.execPath, [cli, '--store', join(f.root, 'store'), ...args]);
+  const run = args => promisify(execFile)(process.execPath, [cli, '--store', join(f.root, 'store'), ...args], { env: { ...process.env, ...f.terminalEnvironment } });
   const plan = JSON.parse((await run(['launch', 'A', '--dry-run', '--json'])).stdout);
   assert.equal(plan.home, f.a.home);
   for (const args of [['launch', 'A'], ['pick'], ['profile', 'list', '--dry-run']]) await assert.rejects(run(args));

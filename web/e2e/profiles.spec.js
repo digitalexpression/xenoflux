@@ -291,6 +291,7 @@ test('Claude creation previews and cancels without launching; selected copy and 
   await expect(card.getByText('Account independence: not verified.')).toBeVisible();
   await card.getByRole('button', { name: 'Native setup and sign-in' }).click();
   await expect(card.getByText(/CLAUDE_CONFIG_DIR=.*auth login/)).toBeVisible();
+  await expect(card.getByText('This command uses the currently installed Claude Code.', { exact: false })).toBeVisible();
   await card.getByRole('button', { name: 'Check sign-in for claude-parts' }).click();
   await expect(card.getByText(/Claude Code · Signed out/)).toBeVisible();
   expect(await readFile(app.nativeProfileLog, 'utf8')).toBe('--version\nauth status\n');

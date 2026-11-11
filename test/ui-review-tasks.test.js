@@ -15,7 +15,7 @@ const waitFor = async (fn, predicate, message) => {
 };
 
 async function fixture(t, { delayed = false, nativeRequest = false, responseOverride, observeProcess, releaseFailures = 0,
-  realReservations = false, onRequest, onCapture } = {}) {
+  realReservations = false, onRequest, onCapture, client, captureOverride } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-review-task-')));
   await mkdir(join(directory, 'profile'), { mode: 0o700 });
   const store = { directory };
@@ -23,7 +23,7 @@ async function fixture(t, { delayed = false, nativeRequest = false, responseOver
     nativeRoot: join(directory, 'profile'), reservationRoot: join(directory, 'profile'), environmentId: 'fixture',
     executable: '/fixture/codex', executableIdentity: 'fixture-identity', executableSource: 'registered',
     version: 'fixture', versionSource: 'registered', cwd: directory, env: { HOME: directory, PATH: '/usr/bin' },
-    settingsIdentity: { fingerprint: 'fixture' } };
+    settingsIdentity: { fingerprint: 'fixture' }, ...(client ? { client } : {}) };
   const calls = { capture: 0, acquired: 0, released: 0, profileReleased: 0 };
   let continueCapture, releaseRequested = false, currentComparison = comparison;
   const lockOptions = { lockPath: join(directory, 'desktop.lock'), isAlive: () => false };
@@ -33,36 +33,88 @@ async function fixture(t, { delayed = false, nativeRequest = false, responseOver
       if (releaseFailures > 0) { releaseFailures--; throw new Error('fixture release contention'); }
     },
   };
+  const capture = async input => {
+    calls.capture++;
+    onCapture?.(input);
+    await input.processOptions.onSpawn({ pid: 1234, processIdentity: { pid: 1234, started: 'fixture', host: 'fixture' } });
+    await input.onTurn({ threadId: 'fixture-thread', turnId: 'fixture-turn' });
+    if (captureOverride) return captureOverride(input);
+    if (nativeRequest) {
+      const request = { method: 'item/tool/requestUserInput', id: 'fixture-request', params: { threadId: 'fixture-thread', turnId: 'fixture-turn',
+        itemId: 'fixture-item', questions: [{ id: 'confirm', header: 'Confirm', question: 'May I proceed?', options: [{ label: 'Yes', description: 'Proceed once.' }] }] } };
+      onRequest?.(request);
+      await input.onNativeRequest(request, { signal: input.processOptions.signal, item: { id: 'fixture-item', kind: 'user-input' } });
+    }
+    if (delayed && !releaseRequested && !input.processOptions.signal?.aborted) await new Promise(resolve => {
+      continueCapture = resolve;
+      input.processOptions.signal?.addEventListener('abort', resolve, { once: true });
+    });
+    if (input.processOptions.signal?.aborted) return { process: { status: 'cancelled', exitCode: null, elapsedMs: 4, shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } },
+      run: { source: { threadId: 'fixture-thread' }, turns: [] }, capture: { status: 'unavailable' } };
+    return { process: { status: 'exited', exitCode: 0, elapsedMs: 4, shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } },
+      run: { source: { threadId: 'fixture-thread' }, turns: [{ turnId: 'fixture-turn' }] },
+      capture: { status: 'ready', effectiveSettings: { model: 'fixture model' } },
+      response: responseOverride ?? { status: 'complete', text: 'Scoped review response', threadId: 'fixture-thread', turnId: 'fixture-turn', source: 'recorded-assistant-turn' } };
+  };
   const service = createUiReviewTasks({ store, defaultUserHome: directory, resolveComparison: async ref => ({ value: currentComparison, title: `Report ${ref}` }),
     admission: { acquire: async () => { calls.acquired++; }, release: () => { calls.released++; } },
     context: { resolveProfile: async () => profile, recheckProfile: async () => profile,
       ...reservationOverrides, lockOptions, observeProcess: observeProcess ?? (async () => ({ status: 'unknown' })),
-      capture: async input => {
-        calls.capture++;
-        onCapture?.(input);
-        await input.processOptions.onSpawn({ pid: 1234, processIdentity: { pid: 1234, started: 'fixture', host: 'fixture' } });
-        await input.onTurn({ threadId: 'fixture-thread', turnId: 'fixture-turn' });
-        if (nativeRequest) {
-          const request = { method: 'item/tool/requestUserInput', id: 'fixture-request', params: { threadId: 'fixture-thread', turnId: 'fixture-turn',
-            itemId: 'fixture-item', questions: [{ id: 'confirm', header: 'Confirm', question: 'May I proceed?', options: [{ label: 'Yes', description: 'Proceed once.' }] }] } };
-          onRequest?.(request);
-          await input.onNativeRequest(request, { signal: input.processOptions.signal, item: { id: 'fixture-item', kind: 'user-input' } });
-        }
-        if (delayed && !releaseRequested && !input.processOptions.signal?.aborted) await new Promise(resolve => {
-          continueCapture = resolve;
-          input.processOptions.signal?.addEventListener('abort', resolve, { once: true });
-        });
-        if (input.processOptions.signal?.aborted) return { process: { status: 'cancelled', exitCode: null, elapsedMs: 4, shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } },
-          run: { source: { threadId: 'fixture-thread' }, turns: [] }, capture: { status: 'unavailable' } };
-        return { process: { status: 'exited', exitCode: 0, elapsedMs: 4, shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } },
-          run: { source: { threadId: 'fixture-thread' }, turns: [{ turnId: 'fixture-turn' }] },
-          capture: { status: 'ready', effectiveSettings: { model: 'fixture model' } },
-          response: responseOverride ?? { status: 'complete', text: 'Scoped review response', threadId: 'fixture-thread', turnId: 'fixture-turn', source: 'recorded-assistant-turn' } };
-      } } });
+      capture, ...(client ? { clientRuntimes: { [client]: { capture } } } : {}) } });
   t.after(async () => { releaseRequested = true; continueCapture?.(); await service.close(); await rm(directory, { recursive: true, force: true }); });
   return { directory, store, service, calls, setComparison: value => { currentComparison = value; }, profile, lockOptions,
     releaseCapture: () => { if (continueCapture) continueCapture(); else releaseRequested = true; } };
 }
+
+test('Claude review retains checkpoint and returned shutdown facts without raw diagnostics or inferred defaults', async t => {
+  for (const mode of ['checkpoint', 'cancelled', 'failed', 'missing']) await t.test(mode, async t => {
+    const proof = mode === 'failed'
+      ? { groupTerminated: false, mainCloseJoined: false, sdkIteratorJoined: false, inputIteratorJoined: null,
+        pendingApprovals: 1, interruptRequested: true, interruptAcknowledged: false, observationFailed: null }
+      : { groupTerminated: true, mainCloseJoined: true, sdkIteratorJoined: true, inputIteratorJoined: true,
+        pendingApprovals: 0, interruptRequested: mode === 'cancelled', interruptAcknowledged: mode === 'cancelled' ? false : null,
+        remainingPids: [], escapedDescendantsUnverified: true };
+    const expected = structuredClone(proof);
+    const run = { source: { threadId: 'fixture-thread' }, turns: [], events: [] };
+    const app = await fixture(t, { client: 'claude-code', captureOverride: async input => {
+      if (mode === 'checkpoint') {
+        await input.onSession(run, { checkpoint: 'final', shutdown: proof });
+        const atCheckpoint = JSON.parse(await readFile(join(app.directory, 'review-tasks', input.jobId, 'task.json'), 'utf8'));
+        assert.deepEqual(atCheckpoint.capture.shutdown, expected);
+        proof.sdkIteratorJoined = false; // The saved projection must be an independent copy.
+      }
+      if (mode === 'cancelled') await new Promise(resolve => {
+        if (input.processOptions.signal.aborted) resolve();
+        else input.processOptions.signal.addEventListener('abort', resolve, { once: true });
+      });
+      return { process: { status: mode === 'cancelled' ? 'cancelled' : mode === 'failed' ? 'shutdown-failed' : 'exited',
+        exitCode: mode === 'cancelled' ? null : 0, elapsedMs: 4, output: { bytes: 0, truncated: false },
+        shutdown: { groupTerminated: mode !== 'failed', sdkIteratorJoined: false, observationError: 'PRIVATE-PROCESS-DIAGNOSTIC' } },
+      run, capture: { status: 'partial', checkpoint: 'final', privateDebug: 'PRIVATE-CAPTURE-DIAGNOSTIC',
+        ...(['cancelled', 'failed'].includes(mode) ? { shutdown: proof } : {}) },
+      response: { status: ['cancelled', 'failed'].includes(mode) ? 'partial' : 'complete', text: 'Scoped review response',
+        threadId: 'fixture-thread', turnId: 'fixture-turn', source: 'recorded-assistant-turn' } };
+    } });
+    const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict', client: 'claude-code' });
+    const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
+    await waitFor(async () => app.calls.capture, count => count === 1, 'Review did not start');
+    const done = mode === 'cancelled' ? await app.service.cancelReviewTask({ id })
+      : await waitFor(() => app.service.reviewTask({ id }), value => ['completed', 'failed', 'uncertain'].includes(value.status), 'Review did not finish');
+    assert.equal(done.status, mode === 'cancelled' ? 'cancelled' : mode === 'failed' ? 'uncertain' : 'completed');
+    const saved = JSON.parse(await readFile(join(app.directory, 'review-tasks', id, 'task.json'), 'utf8'));
+    if (mode === 'missing') assert.equal(Object.hasOwn(saved.capture, 'shutdown'), false);
+    else assert.deepEqual(saved.capture.shutdown, expected);
+    assert.doesNotMatch(JSON.stringify(saved.capture), /PRIVATE-|observationError|privateDebug/);
+    if (mode === 'cancelled') {
+      assert.equal(saved.shutdown.groupTerminated, true);
+      assert.equal(saved.capture.shutdown.interruptAcknowledged, false);
+    }
+    if (mode === 'failed') {
+      assert.equal(saved.shutdown.status, 'uncertain');
+      assert.equal(app.calls.profileReleased, 0);
+    }
+  });
+});
 
 test('review preview is ephemeral and Start durably snapshots then returns while native capture runs', async t => {
   const app = await fixture(t, { delayed: true });

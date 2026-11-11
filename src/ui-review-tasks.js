@@ -442,6 +442,8 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         info.settingsEvidence = captureRecord?.settingsEvidence ?? info.settingsEvidence;
         info.captureCheckpoint = { status: session?.status ?? 'unknown', checkpoint: captureRecord?.checkpoint ?? null,
           eventCount: session?.events?.length ?? null, turnCount: session?.turns?.length ?? null };
+        if (freshProfile.client === 'claude-code' && captureRecord?.shutdown !== undefined)
+          info.capture = { ...info.capture, shutdown: structuredClone(captureRecord.shutdown) };
         await save(taskRoot, info);
       };
       const onTurn = async ({ threadId, turnId }) => {
@@ -480,8 +482,10 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       info.clientIdentity = captureResult.run?.clientIdentity ?? info.clientIdentity;
       info.nativeReference = captureResult.run?.nativeReference ?? info.nativeReference;
       info.settingsEvidence = captureResult.capture?.settingsEvidence ?? info.settingsEvidence;
-      info.capture = { status: captureResult.capture?.status ?? 'unavailable', checkpoint: captureResult.capture?.checkpoint ?? null,
-        errors: captureResult.capture?.errors ?? [], warnings: captureResult.run?.warnings ?? [] };
+      info.capture = { ...info.capture, status: captureResult.capture?.status ?? 'unavailable', checkpoint: captureResult.capture?.checkpoint ?? null,
+        errors: captureResult.capture?.errors ?? [], warnings: captureResult.run?.warnings ?? [],
+        ...(freshProfile.client === 'claude-code' && captureResult.capture?.shutdown !== undefined
+          ? { shutdown: structuredClone(captureResult.capture.shutdown) } : {}) };
       const nativeResponse = captureResult.response;
       const responseIdentityMatches = nativeResponse?.threadId === info.threadId && nativeResponse?.turnId === info.turnId;
       const responseTextUsable = typeof nativeResponse?.text === 'string' && nativeResponse.text.trim().length > 0;

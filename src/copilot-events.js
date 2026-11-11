@@ -49,7 +49,7 @@ export function copilotDecision(answer) {
 }
 
 export function createCopilotDecoder({ sessionId, cwd }) {
-  const events = [], turns = [], messages = [], replayMessages = [], tools = new Map(), shells = new Map(), ids = new Set(), usage = [];
+  const events = [], turns = [], messages = [], replayEvents = [], tools = new Map(), shells = new Map(), ids = new Set(), usage = [];
   let current = null, idle = null, error = null, lastUsage = null, finalTurn = null;
   function consume(event) {
     if (event?.agentId || event?.data?.agentId || event?.checkpoint === true || event?.data?.checkpoint === true) return;
@@ -61,25 +61,35 @@ export function createCopilotDecoder({ sessionId, cwd }) {
     ids.add(event.id);
     const at = Number.isFinite(Date.parse(event.timestamp)) ? new Date(event.timestamp).toISOString() : null;
     const base = { kind: event.type, itemId: event.id, agentId: sessionId, turnId: copilotId(data.turnId) ? data.turnId : null, recordedAt: at };
+    const replay = (kind, label, fields = {}) => replayEvents.push({
+      id: event.id, turnId: base.turnId, at, kind, label, ...fields,
+    });
     switch (event.type) {
       case 'assistant.turn_start':
         if (idle || current || !copilotId(data.turnId) || turns.some(turn => turn.turnId === data.turnId)) throw new Error('Unexpected Copilot turn start.');
         current = { agentId: sessionId, turnId: data.turnId, status: 'in-progress', observedStartedAt: at };
         turns.push(current);
+        events.push(base);
+        replay('turn', 'Copilot turn started', { status: 'started', text: JSON.stringify({ nativeTurnId: data.turnId }) });
         lastUsage = null;
         return { turnId: current.turnId };
       case 'assistant.turn_end':
         if (!current || current.turnId !== data.turnId) throw new Error('Unmatched Copilot turn end.');
         Object.assign(current, { status: 'completed', observedCompletedAt: at });
         finalTurn = current.turnId;
+        events.push(base);
+        replay('turn', 'Copilot turn completed', { status: 'completed', text: JSON.stringify({ nativeTurnId: data.turnId }) });
         current = null;
         break;
       case 'user.message':
-        if (typeof data.content === 'string') replayMessages.push({ id: event.id, text: data.content, role: 'user', at });
+        if (typeof data.content === 'string') replay('message', 'User message', { text: data.content, role: 'user' });
         break;
       case 'assistant.message':
         if (!current || data.turnId !== current.turnId) throw new Error('Unmatched Copilot assistant message.');
-        if (typeof data.content === 'string') replayMessages.push({ id: event.id, text: data.content, role: 'assistant', at, turnId: current.turnId });
+        events.push(base);
+        if (typeof data.content === 'string') replay('message', data.phase === 'final_answer' ? 'Assistant final answer' : 'Assistant message',
+          { text: data.content, role: 'assistant' });
+        if (!current.model && copilotId(data.model) && data.model !== 'auto') current.model = data.model;
         if (typeof data.content === 'string' && (data.phase === 'final_answer'
           || data.phase == null && Array.isArray(data.toolRequests) && data.toolRequests.length === 0))
           messages.push({ id: event.id, turnId: current.turnId, text: data.content, phase: data.phase ?? null, model: copilotId(data.model) ? data.model : null });
@@ -88,6 +98,8 @@ export function createCopilotDecoder({ sessionId, cwd }) {
         if (!current) break;
         lastUsage = { model: [data.responseModel, data.model].find(value => copilotId(value) && value !== 'auto') ?? null,
           reasoningEffort: copilotId(data.reasoningEffort) ? data.reasoningEffort : null, auto: typeof data.isAuto === 'boolean' ? data.isAuto : null };
+        if (lastUsage.model !== null) current.model = lastUsage.model;
+        if (lastUsage.reasoningEffort !== null) current.reasoningEffort = lastUsage.reasoningEffort;
         usage.push({ source: event.type, nativeEventId: event.id, agentId: sessionId, turnId: current.turnId, ...lastUsage,
           inputTokens: Number.isSafeInteger(data.inputTokens) && data.inputTokens >= 0 ? data.inputTokens : null,
           outputTokens: Number.isSafeInteger(data.outputTokens) && data.outputTokens >= 0 ? data.outputTokens : null });
@@ -104,6 +116,9 @@ export function createCopilotDecoder({ sessionId, cwd }) {
         }
         tools.set(data.toolCallId, tool);
         events.push({ ...base, toolName: tool.name, nativeToolCallId: data.toolCallId });
+        replay('tool-call', tool.name, { callId: data.toolCallId, status: 'started', phase: 'started',
+          ...(tool.name === 'bash' && typeof data.arguments?.command === 'string'
+            ? { text: JSON.stringify({ command: data.arguments.command }) } : {}) });
         break;
       }
       case 'tool.execution_complete': {
@@ -128,7 +143,10 @@ export function createCopilotDecoder({ sessionId, cwd }) {
           tool.shell.exitCode = exit.exitCode;
           tool.shell.endedAt = at;
         }
-        events.push({ ...base, toolName: tool.name, nativeToolCallId: data.toolCallId, functionSucceeded: data.success === true,
+        replay('tool-result', tool.name, { callId: data.toolCallId, status: data.success === true ? 'completed' : data.success === false ? 'failed' : 'unknown', phase: 'completed',
+          text: JSON.stringify({ functionSucceeded: typeof data.success === 'boolean' ? data.success : null,
+            ...(tool.shell ? { shellId: tool.shell.id, exitCode: tool.shell.exitCode } : {}) }) });
+        events.push({ ...base, toolName: tool.name, nativeToolCallId: data.toolCallId, functionSucceeded: typeof data.success === 'boolean' ? data.success : null,
           shell: tool.shell ? { id: tool.shell.id, exitCode: tool.shell.exitCode, state: tool.shell.exitCode === null ? 'yielded' : 'exited' } : null });
         break;
       }
@@ -147,6 +165,9 @@ export function createCopilotDecoder({ sessionId, cwd }) {
         if (idle) throw new Error('Duplicate Copilot idle event.');
         idle = { id: event.id, at, aborted: Object.hasOwn(data, 'aborted') ? data.aborted : null,
           normal: !Object.hasOwn(data, 'aborted') || data.aborted === false };
+        events.push(base);
+        replay('session', 'Copilot root idle', { status: 'unknown', text: JSON.stringify({ aborted: idle.aborted,
+          abortedFieldPresent: Object.hasOwn(data, 'aborted') }) });
         return { idle };
     }
   }
@@ -164,7 +185,9 @@ export function createCopilotDecoder({ sessionId, cwd }) {
         observedCompletedAtMs: tool.endedAt && (!command || exitCode !== null) ? Date.parse(tool.shell?.endedAt ?? tool.endedAt) : null,
         source: 'copilot-sdk:tool.execution_start/tool.execution_complete' };
     });
-    return { events, turns, usage, invocations, replayMessages, idle, complete, turnId: current?.turnId ?? finalTurn,
+    return { events, turns, usage, invocations,
+      replayEvents: replayEvents.map(row => row.id === idle?.id ? { ...row, status: complete ? 'completed' : idle.aborted === true ? 'cancelled' : 'unknown' } : row),
+      idle, complete, turnId: current?.turnId ?? finalTurn,
       observed: last.length ? { source: 'assistant.message/assistant.usage', model: [lastUsage?.model, last.at(-1).model].find(value => value && value !== 'auto') ?? null,
         reasoningEffort: lastUsage?.reasoningEffort ?? null, route: lastUsage?.auto === true ? 'auto' : null } : null,
       response: { status: complete ? 'complete' : 'partial', threadId: sessionId, turnId: finalTurn, source: 'copilot-sdk:assistant.message',

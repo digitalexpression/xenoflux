@@ -7,7 +7,7 @@ import { create, find, strictDescendant } from './profiles.js';
 import { acquire, privateDirectory, release } from './metadata.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { assertNoLegacyAuditLease } from './profile-reservations.js';
-import { canonicalClaudeDirectory, claudeEnvironment, discoverClaudeExecutable, inspectClaudeExecutable, resolveClaudeProfile } from './claude-profile.js';
+import { canonicalClaudeDirectory, claudeEnvironment, discoverClaudeExecutable, resolveClaudeProfile } from './claude-profile.js';
 import { assertCopilotEnvironment, copilotAccountRoute, COPILOT_SDK_VERSION, inspectCopilotExecutable, resolveCopilotExecutable, resolveCopilotProfile } from './copilot-profile.js';
 import { nativePath } from './node-runtime.js';
 import { probeClaudeAccount, probeNativeProfileVersion } from './version-probe.js';
@@ -98,7 +98,14 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
 
   async function qualifiedCopilot(options) {
     const profile = await resolveProfile('copilot', options.selected, options);
-    if (options.selected) profile.accountQualification = (await observed(profile))?.qualification;
+    if (options.selected) {
+      profile.accountQualification = (await observed(profile))?.qualification;
+      if (profile.accountQualification) {
+        profile.version = profile.accountQualification.runtimeVersion;
+        profile.versionSource = 'observed';
+        profile.environmentBinding.executable.version = profile.version;
+      }
+    }
     return profile;
   }
 
@@ -111,7 +118,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
     const command = ['cd', shellWord(cwd), '&& /usr/bin/env -i',
       ...Object.entries(env).map(([key, value]) => shellWord(key + '=' + value)), shellWord(profile.executable), ...args].join(' ');
     return { command, executable: profile.executable, configRoot: profile.home,
-      rootMode: profile.rootMode, version: profile.version };
+      rootMode: profile.rootMode, version: (await observed(profile))?.runtimeVersion ?? profile.version ?? 'not observed' };
   }
 
   async function check(name, client) {
@@ -139,7 +146,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
       });
       else profile = await resolveProfile(client, null, client === 'copilot' ? { workspace: scratch } : {});
       const roots = await routeIdentity(profile);
-      let status, qualification;
+      let status, qualification, runtimeVersion;
       if (client === 'claude-code') {
         const cwd = selected ? join(profile.reservationRoot, 'workspace') : scratch;
         await privateDirectory(cwd);
@@ -153,6 +160,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
           return result;
         };
         const managed = await read(profile, 'selected');
+        runtimeVersion = managed.version;
         status = { state: managed.state, route: managed.route };
         if (selected && managed.state === 'signed-in') {
           const stock = await (resolveStockCopilot ?? (options => resolveProfile(client, null, options)))({ workspace: scratch });
@@ -161,7 +169,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
             throw new Error('Stock Copilot does not match the selected executable and independent root.');
           const implicit = await read(stock, 'stock');
           if (implicit.state === 'signed-in' && managed.token && implicit.token === managed.token
-            && managed.version === implicit.version && managed.version === profile.version) {
+            && managed.version === implicit.version) {
             qualification = { scope: 'shared', authType: 'gh-cli', sdk: COPILOT_SDK_VERSION, runtimeVersion: managed.version,
               rootMode: profile.rootMode, executableIdentity: profile.executableIdentity,
               route: copilotAccountRoute(profile.environmentBinding), expiresAt: Date.now() + freshnessMs,
@@ -169,10 +177,10 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
           } else status = { state: 'unverified' };
         }
       }
-      const current = client === 'claude-code' ? await inspectClaudeExecutable(profile.executable) : await inspectCopilotExecutable(profile.executable);
+      const current = await binary(client);
       if (profile.executable !== current.executable || profile.executableIdentity !== current.executableIdentity
         || !same(roots, await routeIdentity(profile))) throw new Error('The native account binding changed during the check.');
-      observations.set(key, { ...status, qualification, roots, binary: [profile.executable, profile.executableIdentity],
+      observations.set(key, { ...status, qualification, runtimeVersion, roots, binary: [profile.executable, profile.executableIdentity],
         expiresAt: qualification?.expiresAt ?? Date.now() + freshnessMs });
       return { ...status, accountScope: client === 'claude-code' ? 'per-root' : qualification ? 'shared' : 'unverified',
         accountIndependence: 'not verified' };

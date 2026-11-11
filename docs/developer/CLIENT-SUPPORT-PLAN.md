@@ -171,7 +171,9 @@ Account checks for 4.0.0:
    record both roots' and the stock client's sign-in state. After the user signs
    out of that root through the native client, verify the companion and stock
    client stay signed in; the user then signs the test root back in. This establishes
-   independence rather than assuming it; cover restart and native token refresh.
+   independence rather than assuming it; cover restart. Native token-refresh
+   qualification follows the [current release scope](AUDIT-GOAL.md#planned-multi-client-scope)
+   and is not a 4.0.0 gate.
    The [roadmap](ROADMAP.md#recorded-user-instructions-2026-11-10) records the
    approved user-operated checkpoint. Shared: the second root runs with its own
    configuration and sessions under the labelled shared account; never sign out
@@ -563,19 +565,17 @@ For each new client:
   unknown.
 - Cancel pending and running work while a second job survives and completes.
   Complete an ordinary report review, verify its frozen inputs and exact
-  response association, and reopen it. A killed controller leaves an active job
-  interrupted or uncertain with retained evidence and no resend.
+  response association, and reopen it. Keep controller-interruption/no-resend
+  fixtures; its additional native review qualification is deferred under the
+  [current scope](AUDIT-GOAL.md#planned-multi-client-scope).
 - Pass account checks 1 and 2, including the user-operated per-root checkpoint
-  when applicable. Use existing qualification tasks to prove copied setup loads
-  from the destination root: a harmless distinctive instruction/skill marker is
-  absent from the task prompt and observed in native execution. Retain loading
-  evidence and any observed skill invocation separately from configuration or
-  copy success; a missing observation cannot pass the loading assertion. Fixtures
-  include a missing/wrong-scope marker control.
+  when applicable. Copied-setup native loading is deferred; retain copy/Undo
+  preservation and missing/wrong-scope marker fixtures. Configuration or copy
+  success must not be described as observed loading or skill invocation.
 
-Complete one mixed pair for each new client against Codex and one Claude versus
-Copilot pair. Complete one Codex pair with different supported permission modes
-per side. B supplies the Codex runtime regression; reuse it only while its source
+Complete one native mixed-client pair. The remaining pair/mode cross-product
+and repeated concurrency stress are deferred; retain all fixture coverage.
+B supplies the Codex runtime regression; reuse it only while its source
 and behaviour remain applicable. All submitted attempts consume the roadmap's
 client-specific allowances.
 
@@ -623,9 +623,12 @@ allowances, limits, used counts and authorization for necessary cap increases.
   records the usage each client reported beside it; a prompt count and an output
   cap bound neither tokens nor billed cost. Stopped results and raw receipts stay
   unchanged; a corrected assessment is a separate derived record.
-- **Watch version drift.** When a selected CLI or SDK pin changes, rerun the
-  zero-prompt smoke (initialize, catalog, sign-in status, stored-session read)
-  and treat affected native results as build-bound until rerun.
+- **Use current installations.** Profiles are not pinned to CLI/Desktop
+  versions. Resolve the selected current installation and verify capabilities
+  on each fresh operation; an update invalidates stale observations, not the
+  profile. Keep preview-to-execution identity checks and record observed
+  versions. Rerun affected zero-prompt smoke after a change, not a historical
+  version matrix. SDK dependency changes retain their source/effects checks.
 
 Discovery must not enable models, borrow ambient credentials, change
 account/policy settings or infer a usage budget from sign-in. Previous Codex

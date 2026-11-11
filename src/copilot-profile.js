@@ -155,18 +155,16 @@ export async function resolveCopilotProfile({ selected, stored = selected, repos
     throw new Error('Select a persisted Copilot profile with an explicit canonical root.');
   const home = managed ? stored.native.configRoot : join(userHome, '.copilot');
   const reservationRoot = managed ? stored.native.root : home;
-  const executable = managed ? stored.native.executable : await resolveCopilotExecutable(terminalEnvironment);
+  const executable = await resolveCopilotExecutable(terminalEnvironment);
   if (!isAbsolute(executable ?? '') || await realpath(executable) !== executable)
     throw new Error('Select the canonical installed Copilot CLI executable.');
   const { executableIdentity } = await inspectCopilotExecutable(executable);
-  if (managed && stored.native.executableIdentity !== undefined && stored.native.executableIdentity !== executableIdentity)
-    throw new Error('The bound Copilot executable has changed.');
   const profileId = managed ? stored.id : 'default-copilot';
   const rootMode = managed ? 'explicit' : 'implicit';
   const environmentBinding = createEnvironmentBinding({
     client: 'copilot', surface: 'cli', executionLocation: 'local', profileId, rootMode,
     roots: { config: home, reservation: reservationRoot, runtime: managed ? home : null, user: userHome },
-    workspace, executable: { path: executable, identity: executableIdentity, version: stored?.native.version ?? null }, settingsIdentity: null,
+    workspace, executable: { path: executable, identity: executableIdentity, version: null }, settingsIdentity: null,
   });
   await assertCopilotRoots(environmentBinding);
   environmentBinding.settingsIdentity = await settingsIdentity(environmentBinding);
@@ -176,8 +174,8 @@ export async function resolveCopilotProfile({ selected, stored = selected, repos
     profileId, profileName: managed ? stored.name : 'Default', environmentId: stored?.native.environmentId ?? null,
     home, userHome, nativeRoot: managed ? reservationRoot : null, reservationRoot, rootMode, bindingRepository: bindingRepository ?? null,
     cwd: workspace, executable, executableIdentity, version: environmentBinding.executable.version,
-    versionSource: managed && environmentBinding.executable.version ? 'registered' : 'unavailable',
-    executableSource: managed ? 'registered' : 'path', env, settingsIdentity: environmentBinding.settingsIdentity,
+    versionSource: 'unavailable',
+    executableSource: 'path', env, settingsIdentity: environmentBinding.settingsIdentity,
     environmentBinding, accountQualification };
 }
 

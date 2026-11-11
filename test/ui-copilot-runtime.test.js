@@ -31,6 +31,8 @@ async function setup(t, { wrongCwd = false, escapedDescendant = false, defaultRu
   await copyFile(nativeFixture('cli.cjs'), executable);
   await copyFile(nativeFixture('events.json'), join(root, 'events.json'));
   await chmod(executable, 0o700);
+  await symlink(executable, join(root, 'copilot'));
+  const terminalEnvironment = { ...process.env, PATH: root + ':' + process.env.PATH };
   const managed = [], invocationLog = join(root, 'copilot-invocations.jsonl');
   for (const label of ['Copilot A', 'Copilot B']) {
     const rootPath = join(root, label), configRoot = join(rootPath, 'config'), reviewPath = join(root, label + ' review');
@@ -91,9 +93,9 @@ async function setup(t, { wrongCwd = false, escapedDescendant = false, defaultRu
   } : undefined;
   const provider = createEngineProvider({ store, defaultUserHome, reportsRoot: base.reportsRoot,
     lockOptions: { lockPath: join(root, 'operation') },
-    runContext: { ...base.runContext, ...fixtureResolvers, clientRuntimes },
-    reviewContext: { ...fixtureResolvers, accessOptions, clientRuntimes, lockOptions: { lockPath: join(root, 'operation') } },
-    catalogContext: fixtureResolvers, accountContext });
+    runContext: { ...base.runContext, terminalEnvironment, ...fixtureResolvers, clientRuntimes },
+    reviewContext: { terminalEnvironment, ...fixtureResolvers, accessOptions, clientRuntimes, lockOptions: { lockPath: join(root, 'operation') } },
+    catalogContext: { terminalEnvironment, ...fixtureResolvers }, accountContext });
   t.after(() => provider.close());
   return { ...base, store, provider, managed, defaultRoot, invocationLog, reservations };
 }
@@ -179,6 +181,21 @@ test('managed Copilot refresh, comparison and independently owned reviews use th
   assert.equal(first.report.settingsEvidence.sent.model, 'auto');
   assert.equal(first.report.settingsEvidence.confirmed.permissionMode, 'manual');
   assert.equal(first.report.coverage.skills, 'unavailable');
+  const replay = first.report.sessionReplay.sessions[0].events;
+  assert.equal(replay.at(-1).kind, 'session');
+  assert.equal(replay.at(-1).status, 'completed');
+  assert.ok(replay.some(event => event.label === 'Assistant final answer'));
+  assert.equal(first.report.taskEnd.captureComplete, true);
+  assert.equal(first.report.taskEnd.timing, 'task-end');
+  assert.equal(first.report.coverage.agents, 'partial');
+  assert.equal(first.report.capture.shutdown.groupTerminated, true);
+  assert.equal(first.report.capture.shutdown.sdkStopJoined, true);
+  assert.equal(first.report.capture.shutdown.childClosed, true);
+  assert.equal(first.report.capture.shutdown.abortAcknowledged, false);
+  assert.equal(first.report.capture.shutdown.nativeAbortedIdle, false);
+  assert.equal(first.report.capture.shutdown.ancestryCoverage, 'sampled');
+  assert.equal(first.report.capture.shutdown.ancestryUncertain, false);
+  assert.ok(first.report.capture.shutdown.trackedProcesses >= 1);
   assert.notEqual(first.report.environmentBinding.workspace, app.repository);
 
   const startReview = async profile => {
@@ -280,6 +297,14 @@ test('uncertain Copilot shutdown leaves the exact reservation and skips verifica
   const run = await readAuditRecord(app.store, experiment.state.runs[0].id);
   assert.equal(run.state.nativeShutdownPending, true);
   assert.equal(run.state.workspace.active, true);
+  assert.equal(run.report, null);
+  assert.equal(run.captureCheckpoint.capture.checkpoint, 'final');
+  assert.equal(run.captureCheckpoint.capture.shutdown.groupTerminated, false);
+  assert.equal(run.captureCheckpoint.capture.shutdown.sdkStopJoined, true);
+  assert.equal(run.captureCheckpoint.capture.shutdown.childClosed, true);
+  assert.equal(run.captureCheckpoint.capture.shutdown.ancestryCoverage, 'sampled');
+  assert.equal(run.captureCheckpoint.capture.shutdown.ancestryUncertain, true);
+  assert.ok(run.captureCheckpoint.capture.shutdown.trackedProcesses >= 2);
   const { root, owner } = run.state.reservation;
   await assert.rejects(inspectAuditReservation({ root, owner }), /shutdown is uncertain/);
   await assert.rejects(releaseAuditProfileReservation({ root, owner }), /shutdown is uncertain/);

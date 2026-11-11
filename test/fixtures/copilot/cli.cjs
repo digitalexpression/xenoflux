@@ -40,12 +40,7 @@ function handle({ method, id, params }) {
       { id: 'fusion', type: 'fusion', status: { enabled: false, pickerVisible: true } },
     ] }, imageModels: [{ id: 'fixture-image-model' }] }); break;
     case 'sessions.list': reply({ sessions: [metadata(sessionId)] }); break;
-    case 'session.getMetadata':
-      if (config.wrongCwd && config.escapedDescendant) {
-        spawnEscapedDescendant();
-        setTimeout(() => reply({ session: metadata(params.sessionId) }), 400);
-      } else reply({ session: metadata(params.sessionId) });
-      break;
+    case 'session.getMetadata': reply(config.noMetadata ? {} : { session: metadata(params.sessionId) }); break;
     case 'sessions.readPersistedEvents':
       reply({ cursor: 'fixture-cursor', cursorStatus: 'ok', hasMore: false, events: [
         { id: 'stored-1', type: 'user.message', data: { content: 'Stored prompt.' } },
@@ -55,7 +50,23 @@ function handle({ method, id, params }) {
     case 'session.create':
       if (params.workingDirectory != null || params.trustWorkingDirectory != null) process.exit(3);
       activeId = params.sessionId;
+      if (config.wrongCwd && config.escapedDescendant) spawnEscapedDescendant();
+      const start = () => {
+        if (config.noSessionStart) return;
+        const startEvent = { id: 'fixture-session-start', type: 'session.start', data: {
+          sessionId: config.wrongStartSession ? sessionId : activeId,
+          context: { cwd: config.wrongCwd ? '/' : workspace },
+        } };
+        if (config.childSessionStart) startEvent.agentId = 'fixture-child';
+        event(startEvent);
+        if (config.duplicateSessionStart) event({ ...startEvent, id: 'fixture-duplicate-start' });
+      };
+      if (config.startBeforeResponse) start();
       reply({ sessionId: activeId, workspacePath: null });
+      if (!config.startBeforeResponse) {
+        if (config.wrongCwd && config.escapedDescendant) setTimeout(start, 400);
+        else start();
+      }
       break;
     case 'session.model.getCurrent': reply({ modelId: 'auto', autoTier: 'balance' }); break;
     case 'session.permissions.getMode': reply({ mode }); break;
@@ -75,6 +86,10 @@ function handle({ method, id, params }) {
         break;
       }
       const lastPermission = transcript.findLastIndex(value => value.type === 'permission.requested');
+      if (lastPermission < 0) {
+        for (const value of transcript) event(value);
+        break;
+      }
       for (const value of transcript.slice(0, lastPermission + 1)) event(value);
       rest = transcript.slice(lastPermission + 1);
       break;

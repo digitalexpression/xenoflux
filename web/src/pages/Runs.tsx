@@ -63,8 +63,8 @@ function RunForm() {
   useEffect(() => {
     if (!data) return;
     const ready = data.profiles.filter(p => p.ready).map(optionKey);
-    if (!a) setA(ready[0] ?? '');
-    if (!b) setB(ready[1] ?? ready[0] ?? '');
+    setA(current => current || ready[0] || '');
+    setB(current => current || ready[1] || ready[0] || '');
     if (!repository && data.repositories[0]) { setRepository(data.repositories[0].path); setCommit(data.repositories[0].commit); }
   }, [data]);
 

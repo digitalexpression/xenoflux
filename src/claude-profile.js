@@ -58,9 +58,7 @@ export async function resolveClaudeProfile({ selected, repository, defaultUserHo
     || descendant(reservationRoot, stock) || descendant(stock, reservationRoot)))
     throw new Error('Claude configuration is outside the selected managed profile');
   const env = claudeEnvironment(terminalEnvironment, { userHome, home, rootMode });
-  const binary = selected ? await inspectClaudeExecutable(selected.native.executable) : await discoverClaudeExecutable(env);
-  if (selected && selected.native.executableIdentity !== binary.executableIdentity)
-    throw new Error('The bound Claude executable has changed');
+  const binary = await discoverClaudeExecutable(env);
   const cwd = sessionOnly ? null : repository ?? selected?.repositories?.[0]?.path;
   if (!cwd && !sessionOnly) throw new Error('Select a workspace for Claude Code');
   const canonical = cwd === null ? null : await canonicalClaudeDirectory(await realpath(cwd), 'Claude workspace');
@@ -69,6 +67,6 @@ export async function resolveClaudeProfile({ selected, repository, defaultUserHo
   return { ...binary, profileId: selected?.id ?? 'default-claude-code', profileName: selected?.name ?? 'Default',
     client: CLAUDE_CLIENT, surface: 'cli', executionLocation: 'local', rootMode, home, userHome,
     nativeRoot: selected ? reservationRoot : null, reservationRoot, environmentId: selected?.native.environmentId ?? null,
-    version: selected?.native.version ?? null, versionSource: selected ? 'registered' : 'unavailable',
-    executableSource: selected ? 'registered' : 'path', bindingRepository: canonical, cwd: canonical, env };
+    version: null, versionSource: 'unavailable',
+    executableSource: 'path', bindingRepository: canonical, cwd: canonical, env };
 }

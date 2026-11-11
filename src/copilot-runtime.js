@@ -275,36 +275,37 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
         run.source.model = decoded.observed.model;
         run.source.reasoningEffort = decoded.observed.reasoningEffort;
       }
-      if (COPILOT_SESSION_ID.test(sessionId) && decoded.replayMessages.length) {
-        const records = decoded.replayMessages.slice(0, Math.min(2000, REPLAY_LIMITS.records));
+      if (COPILOT_SESSION_ID.test(sessionId) && decoded.replayEvents.length) {
+        const records = decoded.replayEvents.slice(0, Math.min(2000, REPLAY_LIMITS.records));
         let retainedBytes = 0;
-        const rows = records.map(({ id: itemId, text, at: timestamp, turnId, role }, index) => {
-          const bodyBytes = Buffer.byteLength(text);
-          const included = bodyBytes <= REPLAY_LIMITS.bodyBytes && retainedBytes + bodyBytes <= 1024 * 1024
+        const rows = records.map(({ id: itemId, text, at: timestamp, turnId, ...fields }, index) => {
+          const bodyBytes = typeof text === 'string' ? Buffer.byteLength(text) : 0;
+          const included = typeof text === 'string' && bodyBytes <= REPLAY_LIMITS.bodyBytes && retainedBytes + bodyBytes <= 1024 * 1024
             && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(text);
           if (included) retainedBytes += bodyBytes;
-          return { itemId, timestamp, role, turnId: COPILOT_SESSION_ID.test(turnId ?? '') ? turnId : null,
-            kind: 'message', label: role === 'user' ? 'User message' : 'Assistant message',
+          return { ...fields, itemId, timestamp, turnId: COPILOT_SESSION_ID.test(turnId ?? '') ? turnId : null,
             sessionId, sourceLine: index + 1, body: included ? text : null, bodyBytes, bodyStatus: included ? 'included' : 'omitted' };
         });
         const fingerprint = createHash('sha256').update(JSON.stringify(rows)).digest('hex');
         run.sessionReplay = normalizeSessionReplay({ schemaVersion: 1, kind: 'session-replay', sessions: [{
           id: sessionId, parentId: null, depth: 0, status: 'partial', source: { fingerprint },
-          limits: [{ kind: 'capture-boundary', message: 'Public message text from the owned live Copilot event stream. Source lines are message projection ordinals.' }],
+          limits: [{ kind: 'capture-boundary', message: 'Public messages, turns, tool metadata and root idle from the owned Copilot stream. Source lines are projection ordinals. Opaque native turn IDs remain in turn bodies; tool output and child history are omitted.' }],
           events: rows.map(row => ({ ...row, id: `${sessionId}:${fingerprint}:${row.sourceLine}` })),
         }] });
         run.replayCapture = { status: 'partial', capturedAt: new Date().toISOString(), sourceFingerprint: fingerprint,
           boundary: 'owned-copilot-live-message-projection' };
       }
     }
-    if (reason) capture.errors.push({ code: 'copilot-capture-partial', message: reason });
+    if (reason) capture.errors.push({ code: 'copilot-capture-partial', message: reason,
+      ...(result.failureStage ? { stage: result.failureStage } : {}) });
+    capture.shutdown = { ...process.shutdown };
     capture.checkpoint = 'final';
     capture.rootResponse = completed ? 'complete' : 'partial';
     capture.nativeReference = run.nativeReference;
     await onPhase?.('capture');
     if (sessionId && !controls.signal.aborted) await onSession(run, capture);
     if (decoded?.idle && process.shutdown.groupTerminated) await onTaskEnd?.({ nativeEndedAt: decoded.idle.at, at: new Date().toISOString(),
-      complete: false, rootComplete: completed, childAgentsComplete: false,
+      complete: completed && decoded.toolsComplete, rootComplete: completed, childAgentsComplete: false,
       processGroupStopped: process.shutdown.groupTerminated, boundary: 'owned-copilot-process-ancestry-checked', run });
     const response = decoded?.response ? { ...decoded.response, status: completed ? 'complete' : 'partial' } : undefined;
     return { run, capture, process, response, capabilities: capture.capabilities };

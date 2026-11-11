@@ -60,7 +60,8 @@ const SAFE_ERROR_TEXT = {
   cancelled: 'The experiment was cancelled.',
   'capture-incomplete': 'Required capture evidence is incomplete.',
   'required-context-unavailable': 'Required loaded context was not verified in the audit workspace.',
-  'task-failed': 'The Codex task process did not complete successfully.',
+  'task-failed': 'The task process did not complete successfully.',
+  'claude-native-rate-limit': 'Claude Code reached its native usage limit. The task did not complete.',
   'copilot-task-failed': 'The Copilot task did not record a completed response.',
   'setup-failed': 'A setup command failed.',
   'process-shutdown-failed': 'A process group could not be confirmed stopped.',
@@ -718,7 +719,9 @@ export async function runAuditExperiment(store, input, context = {}) {
         if (processStatus === 'cancelled' || controller.signal.aborted)
           throw Object.assign(new Error(SAFE_ERROR_TEXT.cancelled), { code: 'cancelled' });
         if (taskStatus === 'failed') {
-          const code = profile.client === 'copilot' ? 'copilot-task-failed' : 'task-failed';
+          const rateLimited = profile.client === 'claude-code'
+            && captured?.capture?.errors?.some(error => error?.code === 'claude-native-rate-limit');
+          const code = rateLimited ? 'claude-native-rate-limit' : profile.client === 'copilot' ? 'copilot-task-failed' : 'task-failed';
           throw Object.assign(new Error(SAFE_ERROR_TEXT[code]), { code });
         }
         const checkStart = Date.now();

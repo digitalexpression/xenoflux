@@ -119,7 +119,7 @@ test('two fixed-home desktops coexist with the original and two simultaneously r
   const a = await f.surface.open('A'), b = await f.surface.open('B');
   let releaseCli; const hold = new Promise(resolve => { releaseCli = resolve; });
   let bothStarted; const ready = new Promise(resolve => { bothStarted = resolve; }); let count = 0;
-  const launches = ['C', 'D'].map(name => launchHome(f.store, name, { ramLogs: f.ramLogs, probe: async () => '0.153.4', run: async args => {
+  const launches = ['C', 'D'].map(name => launchHome(f.store, name, { terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' }, ramLogs: f.ramLogs, probe: async () => '0.153.4', run: async args => {
     assert.equal(args.env.CODEX_HOME, f.homes[name].home);
     assert.equal(args.env.CODEX_SQLITE_HOME, f.homes[name].home);
     await args.onSpawn(name === 'C' ? 100 : 101);
@@ -146,7 +146,7 @@ test('reopening focuses one owned instance; same-profile CLI and registry remova
   assert.equal(again.status, 'focused'); assert.equal(again.main.pid, a.main.pid);
   assert.equal(f.calls.filter(call => call.operation === 'open').length, 1);
   await f.surface.focus('A');
-  await assert.rejects(launchHome(f.store, 'A', { ramLogs: f.ramLogs, run: async () => { throw new Error('must not launch'); } }), /in use/);
+  await assert.rejects(launchHome(f.store, 'A', { terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' }, ramLogs: f.ramLogs, run: async () => { throw new Error('must not launch'); } }), /in use/);
   await assert.rejects(removeProfile(f.store, 'A', f.options), /unfinished desktop instance/);
   await assert.rejects(unbindNativeHome(f.store, 'A', f.options), /unfinished desktop instance/);
 });

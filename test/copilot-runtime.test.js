@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { copyFile, chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { copyFile, chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -19,6 +19,7 @@ async function setup(t) {
   const executable = join(root, 'fixture.js');
   await copyFile(fixture('cli.cjs'), executable);
   await chmod(executable, 0o700);
+  await symlink(executable, join(root, 'copilot'));
   await copyFile(fixture('events.json'), join(root, 'events.json'));
   const workspace = join(root, 'workspace');
   await mkdir(workspace);
@@ -28,7 +29,7 @@ async function setup(t) {
     await writeFile(join(home, 'fixture.json'), JSON.stringify({ label, ...settings }), { mode: 0o600 });
     const profile = await resolveCopilotProfile({
       stored: { id: label, name: label, client: 'copilot', native: { root: reservation, configRoot: home, rootMode: 'explicit', executable } },
-      workspace,
+      workspace, terminalEnvironment: { ...process.env, PATH: root + ':' + process.env.PATH },
     });
     profile.accountQualification = { scope: 'shared', authType: 'gh-cli', sdk,
       rootMode: 'explicit', executableIdentity: profile.executableIdentity, runtimeVersion: '1.0.107',
@@ -121,26 +122,27 @@ async function runCapture(t, settings = {}) {
   const profile = await profileFor('Bound', settings);
   const paths = await evidence('capture');
   const controller = new AbortController();
-  const requests = [], turns = [], checkpoints = [];
+  const requests = [], turns = [], checkpoints = [], taskEnds = [];
   let resolveQueued;
   const queued = new Promise(resolve => { resolveQueued = resolve; });
   const runtime = createClientRuntime({ runtimes: { copilot: createCopilotRuntime() } });
   const result = runtime.capture({ jobId: 'fixture-job', executionMode: 'profile', profile, workspace,
     execution: { model: 'auto', permissionMode: 'manual' }, task: 'Exact fixture task.',
     processOptions: { ...paths, env: profile.env, timeoutMs: 4000, signal: controller.signal },
-    onSession: async (run, evidence) => { checkpoints.push([run.nativeReference?.sessionId, evidence.checkpoint]); },
+    onSession: async (run, evidence) => { checkpoints.push([run.nativeReference?.sessionId, evidence.checkpoint, evidence.shutdown && { ...evidence.shutdown }]); },
     onTurn: async turn => { turns.push(turn); },
+    onTaskEnd: async evidence => { taskEnds.push(evidence); },
     onNativeRequest: (request, { signal }) => new Promise((resolve, reject) => {
       requests.push({ request, resolve });
       signal.addEventListener('abort', () => reject(Error('Stopped fixture')), { once: true });
       if (requests.length === 2) resolveQueued();
     }),
   });
-  return { controller, requests, turns, checkpoints, result, queued: Promise.race([queued, result.then(value => assert.fail(value.run.reason))]), paths };
+  return { controller, requests, turns, checkpoints, taskEnds, result, queued: Promise.race([queued, result.then(value => assert.fail(value.run.reason))]), paths };
 }
 
 test('qualified capture queues path and command approvals and distinguishes shell yield from typed exit', async t => {
-  const { requests, turns, checkpoints, queued, result, paths } = await runCapture(t);
+  const { requests, turns, checkpoints, taskEnds, queued, result, paths } = await runCapture(t);
   await queued;
   assert.deepEqual(requests.map(row => row.request.params.category), ['path', 'commands']);
   assert.equal(requests[0].request.params.itemId, requests[1].request.params.itemId);
@@ -150,17 +152,28 @@ test('qualified capture queues path and command approvals and distinguishes shel
   requests[1].resolve({ kind: 'reject' });
   const capture = await result;
   assert.equal(capture.process.shutdown.groupTerminated, true);
+  assert.deepEqual(capture.capture.shutdown, capture.process.shutdown);
+  assert.deepEqual(checkpoints.at(-1).slice(1), ['final', capture.process.shutdown]);
   assert.equal(capture.response.text, 'Synthetic final answer.');
   assert.equal(capture.response.status, 'complete');
   assert.equal(capture.run.nativeReference.turnId, turns.at(-1).turnId);
   assert.equal(capture.run.settingsEvidence.sent.model, 'auto');
   assert.equal(capture.run.settingsEvidence.confirmed.route, 'balance');
   assert.equal(capture.run.settingsEvidence.observed.model, 'fixture-routed-model');
-  assert.equal(capture.run.sessionReplay.sessions[0].events.at(-1).body, 'Synthetic final answer.');
+  assert.equal(capture.run.sessionReplay.sessions[0].events.filter(row => row.role === 'assistant').at(-1).body, 'Synthetic final answer.');
   assert.equal(capture.run.toolInvocations.find(tool => tool.toolName === 'bash').exitCode, 0);
   assert.deepEqual(capture.run.events.filter(row => row.shell).map(row => [row.toolName, row.shell.state, row.shell.exitCode]),
     [['bash', 'yielded', null], ['read_bash', 'exited', 0]]);
   assert.equal(checkpoints[0][1], 'native-session-started');
+  const replay = capture.run.sessionReplay.sessions[0].events;
+  assert.equal(replay.at(-1).kind, 'session');
+  assert.equal(replay.at(-1).status, 'completed');
+  assert.ok(replay.some(event => event.kind === 'tool-call'));
+  assert.ok(replay.some(event => event.kind === 'tool-result'));
+  assert.equal(taskEnds.length, 1);
+  assert.equal(taskEnds[0].complete, true);
+  assert.equal(taskEnds[0].processGroupStopped, true);
+  assert.equal(taskEnds[0].childAgentsComplete, false);
   const wire = await paths.log();
   assert.equal(wire.filter(row => row.method === 'session.send').length, 1);
   assert.equal(wire.find(row => row.method === 'session.send').params.prompt, 'Exact fixture task.');
@@ -179,6 +192,7 @@ test('cancel aborts the owned session before teardown and ignores stale decision
   assert.equal(capture.process.shutdown.abortAcknowledged, true);
   assert.equal(capture.process.shutdown.nativeAbortedIdle, true);
   assert.equal(capture.process.shutdown.groupTerminated, true);
+  assert.deepEqual(capture.capture.shutdown, capture.process.shutdown);
   const methods = (await paths.log()).map(row => row.method);
   assert.ok(methods.indexOf('session.abort') < methods.indexOf('session.detach'));
   assert.equal(methods.includes('session.permissions.handlePendingPermissionRequest'), false);
@@ -240,6 +254,26 @@ test('an observed out-of-group descendant keeps shutdown uncertain after the CLI
   assert.equal(capture.process.shutdown.childClosed, true);
   assert.equal(capture.process.shutdown.groupTerminated, false);
   assert.ok(capture.process.shutdown.trackedProcesses >= 2);
+  assert.deepEqual(capture.capture.shutdown, capture.process.shutdown);
+  assert.equal(capture.capture.shutdown.ancestryUncertain, true);
+});
+
+test('final capture retains false shutdown facts without inventing missing worker fields', async t => {
+  const { workspace, profileFor, evidence } = await setup(t);
+  const profile = await profileFor('Missing shutdown facts');
+  const shutdown = { groupTerminated: false, sdkStopJoined: false, childClosed: false };
+  const runtime = createCopilotRuntime({ launch: () => ({ result: Promise.resolve({
+    failure: 'Fixture stopped before session', shutdown, output: {},
+  }) }) });
+  const result = await runtime.capture({ executionMode: 'profile', profile, workspace,
+    execution: { model: 'auto', permissionMode: 'manual' }, task: 'Fixture task.',
+    processOptions: { ...await evidence('missing-facts'), env: profile.env }, onSession: async () => {} });
+  assert.deepEqual(result.capture.shutdown, result.process.shutdown);
+  assert.equal(result.capture.checkpoint, 'final');
+  assert.equal(result.capture.shutdown.sdkStopJoined, false);
+  assert.equal(result.capture.shutdown.childClosed, false);
+  for (const key of ['abortAcknowledged', 'trackedProcesses', 'ancestryCoverage', 'ancestryUncertain'])
+    assert.equal(Object.hasOwn(result.capture.shutdown, key), false);
 });
 
 test('a different current auth route stops before Copilot discovery or submission', async t => {

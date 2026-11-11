@@ -1,11 +1,12 @@
 // Offline fixture preparation only. There is deliberately no paid-run entry point.
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath, symlink, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Store, create, bind } from '../../src/profiles.js';
 import { registerHome } from '../../src/homes.js';
+import { resolveAuditExecutionProfile } from '../../src/audit-profile.js';
 import { previewAuditSeries } from '../../src/audit-series.js';
 import { validateAuditSpec } from '../../src/audit-spec.js';
 import { auditQualityFingerprint } from '../../src/audit-quality.js';
@@ -50,6 +51,8 @@ export async function prepareEvaluation(output) {
     GIT_AUTHOR_DATE: '2000-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2000-01-01T00:00:00Z' };
   const fake = join(output, 'blocked-codex.mjs'), version = '0.0.0-evaluation-fixture';
   await writeFile(fake, `#!${process.execPath}\nif (process.argv.length === 3 && process.argv[2] === '--version') console.log('codex ${version}');\nelse { console.error('Paid execution is not authorized; this is a blocked preparation fixture.'); process.exitCode = 78; }\n`, { mode: 0o700, flag: 'wx' });
+  await symlink(fake, join(output, 'codex'));
+  const terminalEnvironment = { PATH: output + ':' + dirname(process.execPath) + ':/usr/bin:/bin' };
   const store = new Store(join(output, 'private-store'));
   const names = ['EvalBaseline', 'EvalWorkflow'], homes = [];
   for (const name of names) {
@@ -113,7 +116,9 @@ export async function prepareEvaluation(output) {
   await json(manifestPath, manifest);
   const previews = [];
   for (const task of manifest.tasks) {
-    const preview = await previewAuditSeries(store, JSON.parse(await readFile(task.specPath)));
+    const preview = await previewAuditSeries(store, JSON.parse(await readFile(task.specPath)), {
+      resolveProfile: (store, selection, options) => resolveAuditExecutionProfile(store, selection, { ...options, terminalEnvironment }),
+    });
     await json(join(output, 'specs', `${task.id}.preview.json`), preview);
     if (preview.status !== 'ready' || preview.plannedRuns !== 4) throw new Error('fixture-preview-not-ready');
     previews.push({ id: task.id, plannedRuns: preview.plannedRuns, schedule: preview.schedule.map(slot => slot.profileOrder) });

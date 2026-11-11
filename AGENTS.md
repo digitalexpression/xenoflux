@@ -35,6 +35,11 @@ Preserve original data/evidence and others' edits. Live profile/client operation
 model runs, publication and installed updates need current authorization covering
 their effects; do not re-request steps already covered by an explicit grant.
 
+Profiles must not be pinned to CLI or Desktop versions. Follow the
+[provider version policy](docs/developer/AUDIT-GOAL.md#evolution-and-provider-version-policy):
+resolve the current selected installation and validate capabilities; retain
+versions as provenance and executable identity for each prepared operation.
+
 ## Documentation budget
 
 Keep one owner per fact. Prefer a short rule or lookup table over repeated narrative.

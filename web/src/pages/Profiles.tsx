@@ -175,7 +175,7 @@ function ProfileCardView({ profile, canCompare, onClient, onMenu, onCompare }:
             <p>{profile.client === 'claude-code' ? 'Run this command in Terminal to sign in with your Claude subscription.'
               : 'Sign in to GitHub CLI separately with gh auth login if needed. Run this command to open this profile. A shared login change affects other profiles.'}</p>
             <code className="block font-mono text-ui wrap-anywhere whitespace-pre-wrap">{profile.setup.command}</code>
-            <p className="hint">Bound CLI version {profile.setup.version}. Return here and check sign-in when ready.</p>
+            <p className="hint">This command uses the currently installed {clientLabels[profile.client ?? 'codex']}. Return here and check sign-in when ready.</p>
           </div>
         </Disclosure> : null}
       </div>}

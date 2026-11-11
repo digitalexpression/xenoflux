@@ -1,8 +1,8 @@
 // Normal controller with disposable Git, profile roots and inert native wire peers.
 import { randomUUID } from 'node:crypto';
-import { chmod, copyFile, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { inspectClaudeExecutable, resolveClaudeProfile } from '../src/claude-profile.js';
 import { copilotAccountRoute, inspectCopilotExecutable, resolveCopilotProfile } from '../src/copilot-profile.js';
 import { create } from '../src/profiles.js';
@@ -19,7 +19,7 @@ export async function createMixedClientFixture() {
   const fixtureHome = join(base.root, 'default-user-home');
   const { homedir, username } = userInfo();
   const terminalEnvironment = { HOME: homedir, USER: username, LOGNAME: username, TMPDIR: '/private/tmp',
-    PATH: [base.root, dirname(process.execPath), '/usr/bin', '/bin'].join(':') };
+    PATH: [base.root, '/usr/bin', '/bin'].join(':') };
   const executable = join(base.root, 'copilot-fixture.js');
   const claude = join(base.root, 'claude');
   let server, provider;
@@ -28,6 +28,7 @@ export async function createMixedClientFixture() {
     await copyFile(new URL('../test/fixtures/copilot/cli.cjs', import.meta.url), executable);
     await copyFile(new URL('../test/fixtures/copilot/events.json', import.meta.url), join(base.root, 'events.json'));
     await chmod(executable, 0o700);
+    await symlink(executable, join(base.root, 'copilot'));
     const script = await readFile(new URL('./mixed-codex-app-server.cjs', import.meta.url), 'utf8');
     await writeFile(base.executable, '#!' + await realpath(process.execPath) + '\n' + script, { mode: 0o700 });
     for (const [client, name, version, binary] of [

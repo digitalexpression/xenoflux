@@ -100,7 +100,9 @@ export function ExecutionFields({ profile, client, workspace, value, onChange, d
   const message = state.context !== context ? 'Checking saved model catalog…' : state.message || (expired
     ? 'Saved model catalog expired. Refresh to verify explicit choices.'
     : snapshot?.status === 'ready' ? models.length ? `${models.length} models available.` : 'The catalog returned no visible models.'
-      : snapshot?.status === 'cancelled' ? 'Model refresh cancelled.' : snapshot ? 'Model catalog unavailable. Refresh models to try again.' : 'No saved model catalog. Refresh to discover models.');
+      : snapshot?.status === 'cancelled' ? 'Model refresh cancelled.'
+        : snapshot?.reason === 'catalog-context-changed' ? 'Profile setup changed during discovery. Refresh models again before choosing a model.'
+          : snapshot ? 'Model catalog unavailable. Refresh models to try again.' : 'No saved model catalog. Refresh to discover models.');
 
   return <div className="flex flex-col gap-3 min-w-0">
     <div className="flex flex-wrap gap-3">

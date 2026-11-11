@@ -27,6 +27,8 @@ printf '%s\\n' 'GitHub Copilot CLI 1.0.107.' "Run 'copilot update' to check for 
   let stockToken = 'matching-fixture-token';
   const statusRoutes = [];
   const provider = createEngineProvider({ store, profilesBase, reportsRoot: join(root, 'reports'),
+    runContext: { terminalEnvironment: { ...process.env, PATH: root + ':/usr/bin:/bin' } },
+    catalogContext: { terminalEnvironment: { ...process.env, PATH: root + ':/usr/bin:/bin' } },
     lockOptions: { lockPath: join(root, 'operation') }, copyRuntime: () => ({ assertIdle: async () => {} }),
     accountContext: {
       terminalEnvironment: { ...process.env, PATH: root + ':/usr/bin:/bin' },

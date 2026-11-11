@@ -6,7 +6,7 @@ import { editProfileRegistry, removeProfile } from '../src/profile-removal.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
 import { auditCommand, compareAuditProfiles } from '../src/audit.js';
 import { renderAudit } from '../src/audit-report.js';
-import { registerHome, unbindHome, listHomes } from '../src/homes.js';
+import { registerHome, unbindHome, listHomes, resolveHome } from '../src/homes.js';
 import { launchPlan, launchHome } from '../src/launcher.js';
 import { pickProfile } from '../src/picker.js';
 import { findHistory, listHistory } from '../src/history.js';
@@ -342,7 +342,14 @@ try {
         else if (operation === 'list') result = await listHomes(store);
         else if (operation === 'inspect') {
           const inventory = await inspectProfile(store, profile);
-          result = profile.toLowerCase() === 'default' ? { name: 'Default', home: inventory.profile.home } : await launchPlan(store, profile);
+          if (profile.toLowerCase() === 'default') result = { name: 'Default', home: inventory.profile.home };
+          else {
+            const { profile: stored, native, environment } = await resolveHome(store, profile);
+            result = { profileId: stored.id, name: stored.name, nativeRoot: native.root,
+              environmentId: environment.id, home: environment.home, cwd: environment.cwd,
+              registration: { executable: native.executable, version: native.version,
+                executableIdentity: native.executableIdentity } };
+          }
           result.inventory = inventory;
           result.logStorage = await createLogStorage().inspect({ home: result.home, key: result.environmentId ?? 'default' });
         } else if (operation === 'delete') result = await removeProfile(store, profile);

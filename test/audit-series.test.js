@@ -250,3 +250,33 @@ test('series recovery and cleanup lifecycle calls do not advance pending slots',
   assert.deepEqual(afterCleanup.map(item => ({ id: item.experimentId, status: item.status })),
     before.map(item => ({ id: item.experimentId, status: item.status })));
 });
+
+
+test('unknown versions preserve inherited CLI selection while resume still guards executable identity', async t => {
+  const f = await fixture(t);
+  for (const profile of f.profiles) profile.version = null;
+  const { series } = await startAtPreparedSlot(f);
+  for (const selection of series.record.spec.profiles) {
+    assert.equal(Object.hasOwn(selection, 'executable'), false, 'inherited selection must not become an explicit override');
+    assert.equal(Object.hasOwn(selection, 'version'), false, 'an unobserved version is omitted from spec text');
+  }
+  assert.equal(series.record.profiles[0].version, null);
+  assert.equal(series.record.profiles[0].executable, f.profiles[0].executable);
+  const identity = f.profiles[0].executableIdentity;
+  f.profiles[0].executableIdentity = { ...identity, ino: 999 };
+  let calls = 0;
+  const context = { ...f.context, runTrial: async (_store, spec, options) => {
+    calls++;
+    return fakeTrialReport(spec, options.experimentId);
+  } };
+  const blocked = await resumeAuditSeries(f.store, series.id, context);
+  assert.equal(blocked.status, 'blocked');
+  assert.ok(blocked.warnings.some(warning => warning.code === 'series-profile-identity-changed'));
+  assert.equal(calls, 0, 'changed current executable cannot advance an unused slot');
+  assert.equal((await readAuditRecord(f.store, series.id)).state.trials[1].status, 'not-started');
+  f.profiles[0].executableIdentity = identity;
+  const resumed = await resumeAuditSeries(f.store, series.id, context);
+  assert.notEqual(resumed.status, 'blocked', JSON.stringify(resumed));
+  assert.equal(calls, 1, 'only the unused slot runs after the original identity is restored');
+  assert.equal(resumed.coverage.missingSlots, 1, 'the interrupted started slot is never replayed');
+});

@@ -1,8 +1,8 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { Store, create, bind } from '../src/profiles.js';
 import { createExperiment, createExperimentRun, writeAuditState } from '../src/audit-experiment-store.js';
 import { validateAuditSpec } from '../src/audit-spec.js';
@@ -34,6 +34,7 @@ export async function createUiRunsFixture({
   let delayedRelease;
   let releaseRequested = false;
   try {
+    await symlink(await realpath(process.execPath), join(root, 'node'));
     const executable = join(root, 'codex');
     await writeFile(executable, '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "codex 0.153.4\\n"; exit 0; fi\nexit 99\n', { mode: 0o700 });
     const repository = join(root, 'repository');
@@ -55,7 +56,8 @@ export async function createUiRunsFixture({
     await registerHome(store, 'strict-review', strict.root, { executable, version: '0.153.4' });
     const defaultUserHome = join(root, 'default-user-home');
     await mkdir(join(defaultUserHome, '.codex'), { recursive: true, mode: 0o700 });
-    let terminalEnvironment;
+    const terminalEnvironment = { HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME,
+      PATH: root + ':/usr/bin:/bin', TZ: 'UTC' };
     if (mode.mixedClaude) {
       await writeFile(join(defaultUserHome, '.codex', 'config.toml'),
         `[projects.${JSON.stringify(repository)}]
@@ -65,7 +67,6 @@ trust_level = "trusted"
       const fixture = (await readFile(new URL('../test/fixtures/claude-runtime-cli.mjs', import.meta.url), 'utf8')).replace(
         '/* CLAUDE_SANITIZED_NATIVE_FRAMES */ null', await readFile(new URL('../test/fixtures/claude-sanitized-native.json', import.meta.url), 'utf8'));
       await writeFile(join(root, 'claude'), '#!' + await realpath(process.execPath) + '\n' + fixture, { mode: 0o700 });
-      terminalEnvironment = { PATH: root + ':' + dirname(process.execPath) + ':/usr/bin:/bin', TZ: 'UTC' };
     }
 
     const capture = async input => {

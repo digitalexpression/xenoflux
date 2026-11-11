@@ -47,6 +47,21 @@ later scope, not a 4.0.0 gate. Xenoflux never collects, stores or routes
 credentials. API keys, custom gateways/BYOK, SSH and cloud execution are later
 scope and cannot substitute for the subscription journey.
 
+**Release decision, 2026-11-11:** native token-refresh qualification is deferred
+from 4.0.0 to the next release. Keep it explicitly unverified; successful
+sign-in, restart or a task does not establish refresh. Native clients still
+own credential renewal. This defers an acceptance check, not account/root
+isolation, credential privacy or failure handling.
+
+**Native qualification scope, 2026-11-11:** retain normal local catalog/task
+execution per advertised client, exact approvals and stale-answer refusal,
+pending/running cancellation with safe shutdown and surviving work for each
+new client, ordinary reviews, owned-session import/export/reopen, and one
+native mixed-client pair. Defer the remaining native pair/mode cross-product,
+repeated concurrency stress, controller-kill review qualification and copied-
+setup native loading to the next release. Keep their fixture coverage and
+state the narrower native evidence; no deferred check is reported as passed.
+
 Claude and Copilot profiles are created empty or from selected parts of another
 profile of the same client under the [profile copy policy](PROFILE-COPY-POLICY.md).
 Cross-client copying is later scope.
@@ -217,6 +232,16 @@ protocols, fields, ownership and accounting semantics; unfamiliar versions alone
 do not reject profiles/comparisons. Unsupported metrics remain unknown without
 blocking supported inspection. Xfx's own versioned report schemas remain valid;
 assess existing exact-version guards when relevant rather than extending them.
+
+Profiles bind a client, root and selected installation, never a fixed CLI or
+Desktop version/build. Resolve the current installation at each fresh operation
+and use observed capabilities instead of a pinned version matrix. An update may
+invalidate cached account/catalog observations and require a fresh preview; it
+does not invalidate the profile. Keep executable/root identity checks between
+preview and execution so a replacement during one prepared action refuses
+before effects. Record actual runtime versions in evidence. Locked SDK
+dependencies and source-bound historical receipts are separate from profile
+admission and remain reproducible.
 
 Reuse existing code and normal local permissions. Containers, VMs, whole-client
 isolation and generic recovery platforms are not dependencies. Keep original user

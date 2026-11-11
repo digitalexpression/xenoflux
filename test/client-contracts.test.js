@@ -67,3 +67,15 @@ test('capability absence stays unknown and settings evidence never fills another
   for (const value of [{ confirmed: true }, { observed: [] }, { effective: {} }])
     assert.throws(() => createSettingsEvidence(value));
 });
+
+test('settings v1 frozen identities remain unchanged and v2 content identities are separately supported', () => {
+  const old = environment();
+  const bytes = JSON.stringify(old);
+  assert.deepEqual(createEnvironmentBinding(old).settingsIdentity, old.settingsIdentity);
+  const current = environment({ settingsIdentity: { algorithm: 'sha256-settings-metadata-v2', digest: 'a'.repeat(64) } });
+  assert.deepEqual(createEnvironmentBinding(current).settingsIdentity, current.settingsIdentity);
+  assert.throws(() => assertEnvironmentBinding(old, current), /does not match/);
+  assert.equal(JSON.stringify(old), bytes);
+  assert.throws(() => createEnvironmentBinding(environment({ settingsIdentity: {
+    algorithm: 'sha256-settings-metadata-v3', digest: 'a'.repeat(64) } })), /Invalid settings identity/);
+});

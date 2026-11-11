@@ -2,7 +2,7 @@
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const retained = /* CLAUDE_SANITIZED_NATIVE_FRAMES */ null;
 const argv = process.argv.slice(2);
@@ -17,9 +17,38 @@ const models = [{ value: 'sonnet', resolvedModel: 'claude-fixture-sonnet', displ
   { value: 'haiku', displayName: 'Haiku' }, { value: 'unsupported', displayName: 'Unsupported', supportsEffort: false }];
 const response = (id, value) => emit({ type: 'control_response', response: { subtype: 'success', request_id: id, response: value } });
 const io = createInterface({ input: process.stdin });
+if (['fixture-native-bookkeeping', 'fixture-native-trust-change'].some(name => existsSync(join(process.env.HOME, name)))) {
+  const accepted = existsSync(join(process.env.HOME, 'fixture-native-trust-change'));
+  writeFileSync(join(process.env.CLAUDE_CONFIG_DIR ?? process.env.HOME, '.claude.json'),
+    JSON.stringify({ numStartups: 2, projects: { [process.cwd()]: { hasTrustDialogAccepted: accepted } } }), { mode: 0o600 });
+}
+
+if (existsSync(join(process.env.HOME, 'fixture-session-hook'))) {
+  const hook = { hook_id: randomUUID(), hook_name: 'SessionStart:startup', hook_event: 'SessionStart' };
+  frame({ type: 'system', subtype: 'hook_started', ...hook });
+  frame({ type: 'system', subtype: 'hook_response', ...hook, stdout: '', stderr: '', output: 'fixture hook output', exit_code: 0, outcome: 'success' });
+  frame({ type: 'system', subtype: 'commands_changed', commands: [] });
+  frame({ type: 'system', subtype: 'status', status: null, permissionMode: 'default' });
+  frame({ type: 'system', subtype: 'plugin_install', status: 'completed' });
+}
+if (existsSync(join(process.env.HOME, 'fixture-early-assistant')))
+  frame({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'text', text: 'early' }] } });
+if (existsSync(join(process.env.HOME, 'fixture-foreign-hook')))
+  emit({ type: 'system', subtype: 'hook_started', hook_id: randomUUID(), hook_name: 'SessionStart:startup',
+    hook_event: 'SessionStart', uuid: randomUUID(), session_id: randomUUID() });
+for (const [marker, value] of [
+  ['fixture-unknown-startup', { subtype: 'future_task_activity' }],
+  ['fixture-startup-invalid-mode', { subtype: 'status', status: null, permissionMode: 'not-a-mode' }],
+  ['fixture-startup-requesting', { subtype: 'status', status: 'requesting' }],
+  ['fixture-malformed-commands', { subtype: 'commands_changed', commands: 'not-an-array' }],
+  ['fixture-startup-init', { subtype: 'init', cwd: process.cwd(), apiKeySource: 'none' }],
+  ['fixture-startup-task', { subtype: 'task_started', task_id: 'unexpected-task' }],
+  ['fixture-malformed-hook', { subtype: 'hook_started' }],
+]) if (existsSync(join(process.env.HOME, marker))) frame({ type: 'system', ...value });
 let promptId, mode, tools = [], decisions = new Set();
 const result = (error = false) => frame({ ...retained[error ? 'interrupt' : 'companion'].at(-1),
   user_message_uuid: promptId, duration_ms: 100,
+  ...(mode === 'closing-response' ? { result: 'Claude fixture final response.' } : {}),
   ...(mode === 'late-turn' ? { turn_id: 'opaque-turn-fixture' } : {}),
   ...(mode?.includes('usage') ? { usage: { input_tokens: 11, output_tokens: 3 } } : {}) });
 const toolResult = (tool, error, content) => frame({ type: 'user', parent_tool_use_id: null,
@@ -44,10 +73,33 @@ for await (const line of io) {
         if (!path || !readFileSync(path, 'utf8').trim()) throw new Error('Frozen review input missing');
       }
     }
+    if (mode.startsWith('captured-')) {
+      frame({ type: 'system', subtype: 'session_state_changed', state: 'running', sdk_host_only: true });
+      for (const state of ['queued', 'started']) frame({ type: 'command_lifecycle', command_uuid: promptId, state });
+    }
     frame({ ...retained.companion[0], cwd: process.cwd(), apiKeySource: 'none', model, permissionMode: arg('--permission-mode') ?? 'default' });
+    if (mode.startsWith('captured-')) {
+      const failed = mode !== 'captured-success-work';
+      if (failed) frame({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', isUsingOverage: false } });
+      frame({ type: 'assistant', parent_tool_use_id: null, user_message_uuid: promptId,
+        ...(failed ? { error: 'rate_limit', is_api_error_message: true, api_error_status: 429, api_error_origin: 'first_party', api_error: 'Fixture rate limit.' } : {}),
+        message: { role: 'assistant', model: failed ? '<synthetic>' : 'claude-fixture-sonnet', stop_reason: 'stop_sequence',
+          content: [{ type: 'text', text: failed ? 'Fixture rate limit.' : 'Fixture completion.' }] } });
+      const terminal = { type: 'result', subtype: 'success', is_error: failed, user_message_uuid: promptId,
+        result: failed ? 'Fixture rate limit.' : 'Fixture completion.', stop_reason: 'stop_sequence',
+        terminal_reason: failed ? 'api_error' : 'end_turn', queued_turn_count: 0, result_index: 0,
+        ...(failed ? { api_error_status: 429, api_error_origin: 'first_party', api_error: 'Fixture rate limit.' } : {}) };
+      frame(terminal);
+      if (mode.endsWith('-work')) frame({ type: 'assistant', parent_tool_use_id: null,
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Unexpected later work.' }] } });
+      else if (mode.endsWith('-repeat-result')) frame(terminal);
+      else if (!mode.endsWith('-no-trailing')) frame({ type: 'command_lifecycle', command_uuid: promptId, state: 'cancelled',
+        ...(mode.endsWith('-foreign') ? { session_id: randomUUID() } : {}) });
+      continue;
+    }
     if (!['queue', 'pending-cancel', 'running-cancel', 'mismatch'].includes(mode)) {
       frame({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', model: 'claude-fixture-sonnet',
-        content: [{ type: 'text', text: 'Claude fixture completed.' }] } });
+        content: [{ type: 'text', text: mode === 'closing-response' ? 'Claude fixture progress.' : 'Claude fixture completed.' }] } });
       result();
       continue;
     }
