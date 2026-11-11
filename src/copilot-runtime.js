@@ -302,7 +302,7 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
     capture.rootResponse = completed ? 'complete' : 'partial';
     capture.nativeReference = run.nativeReference;
     await onPhase?.('capture');
-    if (!controls.signal.aborted) await onSession(run, capture);
+    if (sessionId && !controls.signal.aborted) await onSession(run, capture);
     if (decoded?.idle && process.shutdown.groupTerminated) await onTaskEnd?.({ nativeEndedAt: decoded.idle.at, at: new Date().toISOString(),
       complete: false, rootComplete: completed, childAgentsComplete: false,
       processGroupStopped: process.shutdown.groupTerminated, boundary: 'owned-copilot-process-ancestry-checked', run });

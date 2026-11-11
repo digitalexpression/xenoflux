@@ -185,10 +185,13 @@ test('cancel aborts the owned session before teardown and ignores stale decision
 });
 
 test('wrong native working directory prevents initial submission', async t => {
-  const { result, paths, queued } = await runCapture(t, { wrongCwd: true });
+  const { result, paths, queued, checkpoints } = await runCapture(t, { wrongCwd: true });
   queued.catch(() => {});
   const capture = await result;
   assert.match(capture.run.reason, /exact working directory/);
+  assert.equal(capture.process.shutdown.groupTerminated, true);
+  assert.equal(capture.run.nativeReference?.sessionId ?? null, null);
+  assert.deepEqual(checkpoints, []);
   assert.ok(!(await paths.log()).some(row => row.method === 'session.send'));
 });
 

@@ -21,6 +21,11 @@ const event = value => write({ method: 'session.event', params: { sessionId: act
 const metadata = id => ({ sessionId: id, startTime: '2026-01-01T00:00:00.000Z', modifiedTime: '2026-01-01T00:00:01.000Z',
   summary: config.label, context: { cwd: config.wrongCwd ? '/' : workspace }, isRemote: false });
 
+function spawnEscapedDescendant() {
+  const sleeper = spawn('/bin/sleep', ['3'], { detached: true, stdio: 'ignore' });
+  sleeper.unref();
+}
+
 function handle({ method, id, params }) {
   appendFileSync(join(dirname(logDir), 'fixture-rpc.jsonl'), JSON.stringify({ method, params, cwd: workspace, root }) + '\n', { mode: 0o600 });
   const reply = result => write({ id, result });
@@ -35,7 +40,12 @@ function handle({ method, id, params }) {
       { id: 'fusion', type: 'fusion', status: { enabled: false, pickerVisible: true } },
     ] }, imageModels: [{ id: 'fixture-image-model' }] }); break;
     case 'sessions.list': reply({ sessions: [metadata(sessionId)] }); break;
-    case 'session.getMetadata': reply({ session: metadata(params.sessionId) }); break;
+    case 'session.getMetadata':
+      if (config.wrongCwd && config.escapedDescendant) {
+        spawnEscapedDescendant();
+        setTimeout(() => reply({ session: metadata(params.sessionId) }), 400);
+      } else reply({ session: metadata(params.sessionId) });
+      break;
     case 'sessions.readPersistedEvents':
       reply({ cursor: 'fixture-cursor', cursorStatus: 'ok', hasMore: false, events: [
         { id: 'stored-1', type: 'user.message', data: { content: 'Stored prompt.' } },
@@ -54,10 +64,7 @@ function handle({ method, id, params }) {
       if (sent || params.sessionId !== activeId) process.exit(4);
       sent = true;
       reply({ messageId: 'fixture-message' });
-      if (config.escapedDescendant) {
-        const sleeper = spawn('/bin/sleep', ['3'], { detached: true, stdio: 'ignore' });
-        sleeper.unref();
-      }
+      if (config.escapedDescendant) spawnEscapedDescendant();
       if (config.rateLimited) {
         event({ id: 'fixture-rate-limit', type: 'session.error', data: { errorType: 'rate_limit' } });
         break;

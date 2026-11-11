@@ -23,7 +23,7 @@ async function waitFor(action, match, label) {
   assert.fail(label + ' ' + JSON.stringify(value));
 }
 
-async function setup(t, { escapedDescendant = false, defaultRuntime = false, productRouting = false } = {}) {
+async function setup(t, { wrongCwd = false, escapedDescendant = false, defaultRuntime = false, productRouting = false } = {}) {
   const base = await createUiRunsFixture();
   t.after(() => base.close());
   const { root, repository } = base;
@@ -36,7 +36,7 @@ async function setup(t, { escapedDescendant = false, defaultRuntime = false, pro
     const rootPath = join(root, label), configRoot = join(rootPath, 'config'), reviewPath = join(root, label + ' review');
     await mkdir(configRoot, { recursive: true, mode: 0o700 });
     await mkdir(reviewPath, { mode: 0o700 });
-    await writeFile(join(configRoot, 'fixture.json'), JSON.stringify({ label, escapedDescendant, ...(productRouting && { noTools: true, invocationLog }) }), { mode: 0o600 });
+    await writeFile(join(configRoot, 'fixture.json'), JSON.stringify({ label, wrongCwd, escapedDescendant, ...(productRouting && { noTools: true, invocationLog }) }), { mode: 0o600 });
     managed.push({ id: randomUUID(), name: label, description: '', revision: 1, client: 'copilot', repositories: [{ path: repository }, { path: reviewPath }],
       native: { root: rootPath, configRoot, rootMode: 'explicit', executable,
         executableIdentity: copilotExecutableIdentity(await lstat(executable)), environmentId: randomUUID(), version: '1.0.107' } });
@@ -285,6 +285,64 @@ test('uncertain Copilot shutdown leaves the exact reservation and skips verifica
   await assert.rejects(releaseAuditProfileReservation({ root, owner }), /shutdown is uncertain/);
   await assert.rejects(releaseAuditProfileReservation({ root, owner: { ...owner, generation: randomUUID() } }), /durable run owner/);
   assert.equal(JSON.parse(await readFile(join(root, '.run-lock', 'owner.json'), 'utf8')).runId, run.id);
+});
+
+
+async function assertNoCopilotSend(directory) {
+  const log = await readFile(join(directory, 'fixture-rpc.jsonl'), 'utf8');
+  const methods = log.trim().split('\n').map(line => JSON.parse(line).method);
+  assert.equal(methods.filter(method => method === 'session.create').length, 1);
+  assert.equal(methods.filter(method => method === 'session.send').length, 0);
+  assert.ok(methods.includes('runtime.shutdown'));
+}
+
+test('joined Copilot failure before the session checkpoint releases the comparison reservation', async t => {
+  const app = await setup(t, { wrongCwd: true });
+  const started = await startComparison(app, compareInput(app));
+  const done = await waitFor(() => app.provider.run(started), terminalRun, 'Joined pre-session failure');
+  assert.equal(done.state, 'failed', JSON.stringify(done));
+  const experiment = await readAuditRecord(app.store, started.id);
+  const leg = await readAuditRecord(app.store, experiment.state.runs[0].id);
+  assert.equal(leg.state.nativeShutdownPending, false);
+  assert.equal(leg.state.reservation, null);
+  assert.equal(leg.captureCheckpoint ?? null, null);
+  assert.match(leg.report.capture.errors[0].message, /exact working directory/);
+  await assertNoCopilotSend(leg.directory);
+  await assert.rejects(lstat(join(app.managed[0].native.root, '.run-lock')), { code: 'ENOENT' });
+});
+
+test('unjoined Copilot failure before the session checkpoint preserves comparison ownership', async t => {
+  const app = await setup(t, { wrongCwd: true, escapedDescendant: true });
+  const started = await startComparison(app, { ...compareInput(app), checks: [{ name: 'fixture check', command: 'true' }] });
+  const done = await waitFor(() => app.provider.run(started), terminalRun, 'Unjoined pre-session failure');
+  assert.equal(done.state, 'cannot-tidy', JSON.stringify(done));
+  assert.deepEqual(app.calls.checks, []);
+  const experiment = await readAuditRecord(app.store, started.id);
+  const leg = await readAuditRecord(app.store, experiment.state.runs[0].id);
+  assert.equal(leg.state.phase, 'process-shutdown');
+  assert.equal(leg.state.nativeShutdownPending, true);
+  assert.equal(leg.state.workspace.active, true);
+  assert.equal(leg.captureCheckpoint ?? null, null);
+  await assertNoCopilotSend(leg.directory);
+  await assert.rejects(releaseAuditProfileReservation(leg.state.reservation), /shutdown is uncertain/);
+});
+
+test('joined Copilot failure before the session checkpoint remains a failed ordinary review', async t => {
+  const app = await setup(t, { wrongCwd: true });
+  const comparison = await startComparison(app, { ...compareInput(app, 'strict-review'), clients: {} });
+  await waitFor(() => app.provider.run(comparison), terminalRun, 'Review source');
+  const ref = 'e.' + comparison.id, [profile] = app.managed;
+  const preview = await app.provider.previewReviewTask({ ref, profile: profile.name, client: 'copilot', cwd: profile.repositories[1].path });
+  const started = await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
+  const task = await waitFor(() => app.provider.reviewTask(started), value => ['failed', 'uncertain'].includes(value.status), 'Pre-session review');
+  assert.equal(task.status, 'failed');
+  assert.equal(task.threadId, null);
+  assert.equal(task.nativeReference?.sessionId ?? null, null);
+  assert.match(task.error, /exact working directory/);
+  assert.equal(task.shutdown.groupTerminated, true);
+  assert.equal(task.shutdown.sdkStopJoined, true);
+  await assertNoCopilotSend(join(app.store.directory, 'review-tasks', started.id));
+  await assert.rejects(lstat(join(profile.native.root, '.run-lock')), { code: 'ENOENT' });
 });
 
 test('authenticated Copilot list and import bind opaque tokens to their exact roots and workspaces', async t => {
