@@ -1,7 +1,7 @@
 # Install, update and remove Xenoflux
 
-Audience: users. Building and publishing packages is covered in the
-[developer release guide](../developer/LOCAL-RELEASE.md).
+Audience: users. This guide covers installation, updates and removal.
+Contributor checks are in the [developer guide](../developer/README.md).
 
 Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
 
@@ -141,5 +141,5 @@ If RAM-log setup fails after the managed CLI has been replaced, the error report
 the installed version separately; check `xfx ramlogs status` and retry log setup
 rather than reinstalling an already installed CLI.
 
-For a disposable verification of the npm global flow, see
-[the developer isolated-install check](../developer/LOCAL-RELEASE.md#test-global-npm-installation-in-isolation).
+For contributor verification and fixture limits, see the
+[developer checks](../developer/README.md#checkout-and-checks).

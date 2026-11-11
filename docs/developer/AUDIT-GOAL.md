@@ -1,13 +1,13 @@
-# Xenoflux UI release: shared product goal
+# Xenoflux product goal
 
-Goal ID: `XFX-AUDIT`. This file owns product behavior and acceptance. The
-[roadmap](ROADMAP.md) owns current status and delivery order; user instructions
-determine authorization. A goal or historical grant does not authorize operations.
+This file owns supported product behavior. The [roadmap](ROADMAP.md) owns product
+direction and [acceptance criteria](AUDIT-ACCEPTANCE.md) define verification.
+Current user instructions determine authorization; documentation grants none.
 
 ## Current release boundary
 
-The locally bundled browser UI supports **Codex on macOS**, launched with
-`xfx ui`. Users can:
+The locally bundled browser UI supports **Codex, Claude Code and GitHub Copilot
+CLI on macOS**, launched with `xfx ui`. Users can:
 
 1. Create an empty profile or one from selected supported parts of another.
 2. Run the same task on two comparison sides and read the report. Both sides may use one profile.
@@ -19,77 +19,52 @@ Review is optional for users but required as a product capability. Normal use
 requires neither a development server, authored JSON nor manual transfer to an AI.
 CLI-backed execution is sufficient; a separate Desktop runner, fresh direct-client
 tasks and repetition campaigns are not prerequisites. Existing capabilities may
-be retained or simplified; they do not expand these three outcomes. Additional
-providers, benchmark/cohort builders, generic config editing and desktop-shell
-packaging are outside this release.
+be retained or simplified without expanding these
+outcomes. Additional providers, benchmark/cohort builders, generic configuration
+editing and desktop-shell packaging are outside the current boundary.
 
-## Planned multi client scope
+## Client scope
 
-**Target: release 4.0.0. Product decisions recorded 2026-11-10.** Claude Code and
-GitHub Copilot CLI reach parity with Codex CLI on local macOS: profiles,
-model/effort discovery, comparison, native approvals, cancellation, report and AI
-review, including mixed-client pairs. The [client support plan](CLIENT-SUPPORT-PLAN.md)
-owns architecture, native interfaces, work packages and their checks. The roadmap
-owns delivery status; the current release boundary above describes shipped behavior.
+Each CLI client supports profiles, context-scoped catalogs, comparison, native
+approvals, cancellation, reports and ordinary AI review, including mixed-client
+pairs. Client identity is independent of the model vendor: a model selected
+inside Copilot remains a Copilot run with Copilot's tools, permissions and account.
 
-Each managed profile has its own configuration root. Sign-in is performed by the
-user in the unmodified native client, and each client has a recorded **account
-scope**: *per-root* when a root holds its own sign-in (expected for Claude Code),
-or *shared* when the native client resolves one login for every root (expected
-for Copilot through the GitHub CLI login). **The same account may be used in
-several profiles.** Where the scope is per-root, a profile never borrows another
-profile's or the stock client's sign-in, and a signed-out profile is reported as
-signed out. Where it is shared, profiles differ only in setup and the UI says the
-account is shared. Environment tokens and provider overrides are refused for
-every client. Independence between profiles' accounts is shown as *not verified*
-until two distinct accounts pass the isolation checks; that qualification is
-later scope, not a 4.0.0 gate. Xenoflux never collects, stores or routes
-credentials. API keys, custom gateways/BYOK, SSH and cloud execution are later
-scope and cannot substitute for the subscription journey.
+Profiles bind their client, surface, root mode and selected native installation.
+Represent implicit Default and explicit managed roots separately even when their
+paths match. Sign-in happens in the unmodified native client. Record account
+scope as per-root or shared; a signed-out per-root profile cannot borrow another
+login, and shared routes must be labelled. Separate roots do not prove distinct
+accounts. Account independence remains unverified. Xenoflux does not collect,
+store or route credentials; ambient tokens/provider overrides are refused.
+Custom endpoints, BYOK, SSH and cloud execution are outside this boundary.
 
-**Release decision, 2026-11-11:** native token-refresh qualification is deferred
-from 4.0.0 to the next release. Keep it explicitly unverified; successful
-sign-in, restart or a task does not establish refresh. Native clients still
-own credential renewal. This defers an acceptance check, not account/root
-isolation, credential privacy or failure handling.
+Native credential refresh remains unverified and deferred. Successful sign-in,
+restart or a task does not establish renewal. Native clients own credentials
+and refresh; this limit does not relax account isolation or failure handling.
+The remaining native pair/mode combinations, repeated overlap stress,
+controller-kill reviews and copied-setup native loading are also deferred
+qualification. Keep fixture coverage and disclose those limits without claiming
+native passes.
 
-**Native qualification scope, 2026-11-11:** retain normal local catalog/task
-execution per advertised client, exact approvals and stale-answer refusal,
-pending/running cancellation with safe shutdown and surviving work for each
-new client, ordinary reviews, owned-session import/export/reopen, and one
-native mixed-client pair. Defer the remaining native pair/mode cross-product,
-repeated concurrency stress, controller-kill review qualification and copied-
-setup native loading to the next release. Keep their fixture coverage and
-state the narrower native evidence; no deferred check is reported as passed.
+Copy only selected supported parts between profiles of the same client under
+the [copy policy](PROFILE-COPY-POLICY.md). Cross-client transfer is unsupported.
+Setup inspection covers settings, instructions, skills, agents/rules, hooks,
+MCP and plugins with origin/scope; wider discovery never widens copy eligibility.
+Recent-session listing submits no task or session activation.
 
-Claude and Copilot profiles are created empty or from selected parts of another
-profile of the same client under the [profile copy policy](PROFILE-COPY-POLICY.md).
-Cross-client copying is later scope.
+Per-job permission overrides use only the client's supported non-bypass modes.
+Requested, sent, confirmed and turn-reported settings remain separate. Native
+approval requests require explicit matching user responses; no automatic approval.
+After restart, retain interrupted/uncertain evidence without reattaching,
+resending or resuming work.
 
-Setup comparison and selected-parts copy read each client's instructions, skills,
-agents or rules, settings, hooks, MCP servers and plugins with origin and scope,
-as they do for Codex. Reading more does not widen copying; the copy policy still
-decides what transfers.
-
-Each profile lists its recent native sessions so two can be chosen for a session
-comparison. Listing submits no task and activates no session; titles and folders
-stay local.
-
-Each side may override the permission mode for its job, next to model and effort,
-limited to the non-bypass modes its client offers. Requested, sent and applied
-mode are recorded separately, and Xenoflux never answers a native request itself.
-
-After a controller restart, a job is interrupted or uncertain with its retained
-evidence, for every client; nothing is resent or resumed. Reattaching to live
-work through a detached job host is planned for 4.1.
-
-Desktop support stays as built on this branch: verified stock app opening,
-read-only Claude Code and Copilot conversation import and Copilot session
-navigation. Opening a stock Claude or Copilot app uses that app's existing native
-account. Verify its signed identity again before opening; app opening selects no
-managed profile or logical Chat/Code/Cowork surface and submits no task. Managed
-desktop profiles, exact-session handoff, desktop automation, Claude Chat and
-Cowork are later scope and do not gate 4.0.0.
+Stock desktop opening and supported read-only conversation import/navigation
+are separate capabilities. Verify signed app identity before opening. Opening
+selects no managed Claude/Copilot profile or logical surface and submits no task.
+Managed desktop profiles, exact-session handoff, desktop automation, Claude Chat
+and Cowork execution remain outside the current scope. CLI support does not
+establish desktop account isolation.
 
 | Target outcome | Acceptance |
 | --- | --- |
@@ -137,7 +112,7 @@ Preserve unrelated profiles, clients, workspaces and original evidence. Show:
 - Inspectable session replay, delegation, stable references and missing evidence.
 - Supported time/token usage and the limits on quality judgments.
 
-### Session replay direction — 2026-10-29
+### Session replay
 
 Keep side-by-side replay with each side's order and actor ownership; invent neither
 event matches nor synchronized clocks. Retain available messages/actions/results,
@@ -154,7 +129,8 @@ source stays unavailable rather than being fetched from today's checkout.
 
 ## AI review
 
-From the report, choose a profile/workspace and optional per-review model and effort, then inspect/edit the prompt and supplied
+From the report, choose a profile/workspace and optional per-review model and
+effort, then inspect/edit the prompt and supplied
 content, then explicitly Start. Use the selected profile's ordinary configuration,
 provider connection, permissions and integrations; explain potential model usage.
 Show native approval/input requests and accept explicit responses without silently
@@ -163,7 +139,8 @@ started tasks retain normal native history/authentication/runtime side effects.
 
 Retain exact frozen report inputs, selected profile, actual session/model when
 known, progress, failures/cancellation and the captured natural-language response.
-Keep the comparison and each other review unchanged. No separate isolation system, forced JSON, invented
+Keep the comparison and each other review unchanged. No separate isolation
+system, forced JSON, invented
 score, automatic retry or attachment to the newest unrelated session. The
 [review implementation contract](REVIEW-TASK-IMPLEMENTATION.md) owns execution,
 storage and recovery details. Ordinary task results are separate from optional
@@ -188,15 +165,14 @@ Verify these outcomes on a source-bound installable candidate with explicit limi
 | Overlap jobs | Run two comparisons and two report reviews together on one profile with separate selections and workspaces. Verify independent approvals, cancellation, results, restart and mutation exclusion. Verify shared native state separately on a disposable profile. |
 | Deliver safely | Required checks and affected regressions pass; the bundled UI works by keyboard and at applicable narrow layouts in both themes. Detached package smoke, preservation, recovery, local web security and export privacy pass. |
 
-Use real Codex evidence for changed launch/result paths and fixtures for failures
-and edge cases. Reuse source-applicable native profile/comparison evidence; test
-counts or simulations do not prove the whole journey. A fresh coding pair is needed
-only if applicable comparison proof is missing, not before implementing review.
-By product-owner preference, 200% browser zoom and VoiceOver testing are excluded
-from future verification. Do not treat their absence as an acceptance gap or
-recurring follow-up item. Uncoached participant studies remain excluded. Required commands
-are in the [developer guide](README.md#checkout-and-checks); retained results and
-performance limits live in the [release summaries](AUDIT-ACCEPTANCE.md).
+Use source-applicable native evidence for changed launch/result paths and
+fixtures for failures and edge cases. Test counts and simulations do not prove
+the complete native journey. A fresh task pair is needed when applicable proof
+is missing, not as a prerequisite to unrelated implementation. Verification
+scope excludes 200% browser zoom, VoiceOver and participant studies; do not turn
+those exclusions into outstanding work. Required checks are in the
+[developer guide](README.md#checkout-and-checks), with reusable criteria in
+[AUDIT-ACCEPTANCE.md](AUDIT-ACCEPTANCE.md).
 
 ## Evidence and privacy contracts
 
@@ -218,14 +194,11 @@ performance limits live in the [release summaries](AUDIT-ACCEPTANCE.md).
 
 ## Evolution and provider version policy
 
-**3.0 permits breaking changes, legacy removal and cleanup. Backward compatibility
-and migrations are not requirements.** Remove obsolete paths/formats/adapters and
-their obsolete tests; do not retain shims, dual readers/writers or fallbacks merely
-for old contracts. Document supported contracts, removals and fresh-start paths.
-Leave unsupported old data untouched and explain the limitation; preserving data
-does not promise that 3.0 can read/resume/import/undo every older record. Do not
-convert, delete or relabel originals automatically. Current-format evidence
-integrity, export/reopen, safe mutation and recovery remain required.
+Breaking changes may remove obsolete paths, formats and adapters. Do not retain
+shims or dual readers/writers merely for old contracts. Document supported read,
+export/reopen and fresh-start boundaries. Leave unsupported older data untouched;
+preservation does not promise automatic conversion, resume, import or Undo.
+Current-format integrity, safe mutation and recovery remain required.
 
 Provider/client versions and revisions are provenance, not allowlists. Use supported
 protocols, fields, ownership and accounting semantics; unfamiliar versions alone
@@ -240,12 +213,11 @@ invalidate cached account/catalog observations and require a fresh preview; it
 does not invalidate the profile. Keep executable/root identity checks between
 preview and execution so a replacement during one prepared action refuses
 before effects. Record actual runtime versions in evidence. Locked SDK
-dependencies and source-bound historical receipts are separate from profile
-admission and remain reproducible.
+dependencies are separate from profile admission; retain dependency
+identity for reproducible builds.
 
 Reuse existing code and normal local permissions. Containers, VMs, whole-client
-isolation and generic recovery platforms are not dependencies. Keep original user
-data, raw receipts and published artifact identities intact; full record originals
-remain private when summaries are shortened. Live profile/client
-operations and model runs need current authorization covering effects and budget;
+isolation and generic recovery platforms are not dependencies. Keep original
+user data and published artifact identities intact. Live profile/client
+operations and model runs need current authorization covering their effects;
 do not re-request covered steps. Publication and installed updates remain separate.

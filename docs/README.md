@@ -30,21 +30,14 @@ Read other references only as needed.
 | --- | --- |
 | [Development](developer/README.md) | Set up the checkout and run checks. |
 | [Product goal](developer/AUDIT-GOAL.md) | Check supported behavior, acceptance and evidence boundaries. |
-| [Multi-client support plan](developer/CLIENT-SUPPORT-PLAN.md) | Implement the architecture-first refactor, dynamic catalogs and native client support for release 4.0.0 against package checks. |
-| [Review implementation](developer/REVIEW-TASK-IMPLEMENTATION.md) | Change review execution, persistence and recovery. |
-| [Release process](developer/LOCAL-RELEASE.md) | Build, verify and publish approved artifacts. |
+| [Client and review implementation](developer/REVIEW-TASK-IMPLEMENTATION.md) | Change client identity, catalogs, execution, persistence and recovery. |
 | [Desktop implementation](developer/DESKTOP-IMPLEMENTATION.md) | Understand signing, ownership, isolation and native verification. |
 | [Profile copy policy](developer/PROFILE-COPY-POLICY.md) | Change creation/copy behavior against its contract. |
 
-## Release records
+## Acceptance
 
-The [acceptance index](developer/AUDIT-ACCEPTANCE.md) links compact source-bound
-release summaries. Detailed operational receipts remain private.
-
-## Historical references
-
-Completed releases, dated assessments, native validation and earlier experiment
-summaries live in [history](developer/history/README.md). They preserve outcomes
-and limits, not active implementation requirements.
+Use the [acceptance criteria](developer/AUDIT-ACCEPTANCE.md) to verify observable
+behavior and understand fixture/native evidence limits. These are reusable
+requirements, not a history of completed checks or authority for operations.
 
 [Back to Xenoflux](../README.md).

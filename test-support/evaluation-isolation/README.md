@@ -1,6 +1,6 @@
 # Historical isolation test support
 
-Dormant campaign support, not a product prerequisite. [Outcome and limits](../../docs/developer/history/README.md#offline-isolation); full original runbook/receipts remain privately preserved. No paid execution or daemon startup is authorized here.
+Dormant campaign support, not a product prerequisite. Historical runbooks and receipts are not public source. No paid execution or daemon startup is authorized here.
 
 | Helper | Boundary |
 | --- | --- |

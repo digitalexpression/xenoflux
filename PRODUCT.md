@@ -97,8 +97,8 @@ interaction rules in [DESIGN.md](DESIGN.md); init does not replace them.
 - [User guide](docs/user/APP.md): supported journeys and user-facing terminology.
 - [Product goal](docs/developer/AUDIT-GOAL.md#evidence-and-privacy-contracts):
   evidence, privacy and interpretation contracts.
-- [Release records and verification](docs/developer/ROADMAP.md#current-work-and-stop-condition):
-  pointers to source-bound results and their limitations. Tests or illustrative
+- [Release scope and direction](docs/developer/ROADMAP.md#current-work-and-stop-condition):
+  supported scope and qualification limits. Tests or illustrative
   mockups do not establish unobserved native behavior or user-study outcomes.
 
 Do not invent customers, testimonials, comparative benchmarks or quality claims.

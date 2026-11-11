@@ -2,27 +2,18 @@
 
 Current launcher/ownership contract. Commands: [Desktop guide](../user/DESKTOP.md).
 Build/update procedure: [developer guide](README.md#change-the-native-launcher).
-Dated observations and legacy mechanisms: [history](history/DESKTOP-HISTORY.md).
-
-For the planned Claude and Copilot surfaces, follow the
-[desktop implementation checks](CLIENT-SUPPORT-PLAN.md#desktop-surfaces-and-implementation-checks).
-Those checks own app/config/data/callback bindings, independent surface
-capabilities and source/build-bound acceptance. Launcher or CLI fixtures cannot
-qualify another vendor's desktop isolation or exact-session handoff. The rules
-below describe current Codex Desktop behavior.
-
-Planned desktop delivery is incremental: proven opening/handoff/import may ship
-before isolation or automation. The [goal](AUDIT-GOAL.md#planned-multi-client-scope)
-requires native subscription login and independent accounts before a surface can
-claim managed-profile support; CLI qualification does not establish that boundary.
+Desktop capabilities are independent: app opening, session navigation/import,
+managed-profile isolation and automated execution each need their own supported
+route and evidence. CLI fixtures do not establish desktop account isolation or
+exact-session handoff. The rules below describe Codex Desktop; managed
+Claude/Copilot desktop profiles and automation are outside current scope.
 
 Ordinary stock Claude/Copilot opening is independent of managed profiles. The
 `stock-desktop-apps.js` boundary checks fixed canonical app paths, bundle IDs,
 vendor signing teams, executable identity and app build before `open -a`.
 An updated/replaced app invalidates the reviewed identity. It sends no prompt,
 selects no account or logical surface, and exposes no import, session-control or
-cloud-cancellation operation. The [roadmap](ROADMAP.md) and its source record own
-qualification; finding an installed app establishes no account isolation.
+cloud-cancellation operation. Finding an installed app establishes no account isolation or session association.
 
 ## Signed Desktop execution
 
@@ -68,6 +59,5 @@ When native testing is authorized, use disposable profiles and record exact app/
 versions. Cover CLI launch/repeat-open focus, two profile-routed vendor instances
 alongside ordinary Codex, two independent CLI profiles, profile/SQLite/UI/log
 routing and Default preservation. Check graceful/cancelled quit, late helpers,
-interrupted open and stopped recovery without disturbing other clients. Retest changed
-launch/activation paths after vendor updates; [release evidence](AUDIT-ACCEPTANCE.md)
-retains observed results and limits.
+interrupted open and stopped recovery without disturbing other clients. Retest changed launch/activation paths after vendor updates; use the
+[acceptance criteria](AUDIT-ACCEPTANCE.md) without inferring unobserved behavior.

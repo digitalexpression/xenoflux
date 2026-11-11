@@ -23,5 +23,10 @@ node_modules
 # Internal knowledge notes stay local and outside release history.
 /docs/knowledge/
 
-# Private historical handovers remain local after documentation reorganization.
-/docs/developer/history/private/
+# Historical evidence and internal delivery/release plans stay outside public source.
+/docs/developer/history/
+/docs/developer/CLIENT-SUPPORT-PLAN.md
+/docs/developer/LOCAL-RELEASE.md
+
+# Use the globally installed shadcn skill.
+/.agents/skills/shadcn/

@@ -4,7 +4,7 @@
 
 **Theme:** light + dark, following the system preference.
 
-**Status:** adopted design direction, 2026-10-27. This standalone guide covers Xenoflux's local web app. The [roadmap](docs/developer/ROADMAP.md#current-work-and-stop-condition) owns current implementation and built-app verification status; this design specification is not proof that its behavior has been verified.
+**Status:** adopted design direction. This standalone guide covers Xenoflux's local web app. The [roadmap](docs/developer/ROADMAP.md#current-work-and-stop-condition) owns release scope and direction; this design specification is not proof that its behavior has been verified.
 
 Xenoflux combines IBM Plex Sans, compact rounded controls and opaque layered surfaces. Cobalt identifies actions and links; Soft Mint supports the identity without implying success. Dark mode uses Obsidian `#0a0d16`, raised navy surfaces and lighter cobalt interaction cues. Content stays calm and readable, with technical character concentrated in typography and small header accents.
 
@@ -331,10 +331,8 @@ Use named header/navigation/breadcrumb/main landmarks and labelled supporting as
 
 Focus mounted page headings and export/opened-report summaries; in-page selection retains focus. Nonmodal inspectors receive focus only on explicit open and restore their trigger; delayed callbacks respect newer focus choices. Announce selection/filter/save/progress/apply/undo politely, not per event; alerts identify user-action errors.
 
-Static opaque-token checks (2026-10-27) met the selected text/status/action
-contrast thresholds and checked control/focus boundaries. They do not establish
-rendered accessibility, every state or image contrast. Full calculations remain
-in the private original.
+Static token checks do not establish rendered accessibility, every state or
+image contrast. Verify contrast in the rendered interface.
 
 Selected/hover fills (1.04:1 light) and canvas/surface (1.02:1 light) cannot carry
 meaning alone; retain text, icons, outlines and leading edges. Dark action fill

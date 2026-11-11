@@ -57,11 +57,10 @@ For version and distribution identity, see the [package manifest](package.json),
   [Copy settings](docs/user/ADVANCED-COPY.md), [Recovery](docs/user/PROFILE-RECOVERY.md)
   and [RAM logs](docs/user/RAM-LOGS.md).
 - **Developers:** [Development](docs/developer/README.md),
-  [Release process](docs/developer/LOCAL-RELEASE.md),
   [Desktop implementation](docs/developer/DESKTOP-IMPLEMENTATION.md)
   and [Copy policy](docs/developer/PROFILE-COPY-POLICY.md).
 
-The [documentation index](docs/README.md) includes the active roadmap and public release records.
+The [documentation index](docs/README.md) covers supported workflows and development contracts.
 
 ## License
 

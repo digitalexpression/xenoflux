@@ -4,9 +4,8 @@ Current transfer contract; [user commands](../user/ADVANCED-COPY.md). The [goal]
 
 ## Purpose
 
-The [client support plan](CLIENT-SUPPORT-PLAN.md#authentication-and-profile-storage)
-defines the client-specific profile boundaries. The allowlists below define
-transfer eligibility within those boundaries.
+The [client scope](AUDIT-GOAL.md#client-scope) defines profile and account
+boundaries. The allowlists below define transfer eligibility within them.
 
 Create fresh profiles or seed explicitly selected parts; profiles then evolve independently. Later copies are reviewed updates, not synchronization, effective-state clones, shared storage or a migration framework. Default is a source only.
 
@@ -80,5 +79,5 @@ enablement or the need to reinstall.
 
 Selected and category copying use the shared planner. Copy never scans project, history or memory stores. Claude Code and Copilot inventory uses bounded setup discovery to identify native integrations and their ownership; only allowlisted standalone files can enter the transaction. Empty/identical selections create no transaction or client preparation. Metadata versions describe sources, not installed/runtime state.
 
-[Historical copy/loading controls](history/README.md#profile-transfer-controls) and
-[release summaries](AUDIT-ACCEPTANCE.md) retain source-bound results and limits.
+The [acceptance criteria](AUDIT-ACCEPTANCE.md) define observable copy/Undo checks.
+Copy success alone does not establish that a native client loaded the setup.

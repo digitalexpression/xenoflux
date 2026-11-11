@@ -1,13 +1,12 @@
 # Develop Xenoflux
 
 Audience: contributors and maintainers. [User guides](../README.md#user-guides)
-cover installation and normal commands; this directory covers changing the source.
+cover normal operation; this directory covers changing the source.
 
-The UI presents shared engine/report data; keep eligibility and accounting in the
-engine. Serve bundled assets/API on loopback, validate API session/Host/Origin and
-expose only supported operations. Use the app guide for workflows and checkout
-`DESIGN.md` for interaction rules. Render native content as untrusted text; never
-execute embedded instructions or markup.
+Keep eligibility, ownership and accounting in the shared engine. The UI presents
+engine/report data and only supported operations. Serve bundled assets/API on
+loopback, validate session/Host/Origin, and render native content as untrusted
+text. Use the app guide for workflows and DESIGN.md for interaction rules.
 
 ## Checkout and checks
 
@@ -25,106 +24,63 @@ npm run check:ui
 
 `check` validates JavaScript syntax. `check:native` verifies the packaged universal
 helper's source/binary hashes, architectures, signature and lack of entitlements.
-The tests use disposable fixtures and mocked clients; native bootstrap fixtures
-may compile synthetic code and sign only their disposable bundles. They do not
-establish real profile sign-in, Dock behavior or reboot/RAM-service success.
+Tests use disposable fixtures and mocked native clients; synthetic bootstrap
+fixtures may compile and sign only their own bundles. They do not establish
+real account sign-in, Desktop activation or reboot/RAM-service behavior.
 
-If a managed environment places its temporary directory inside the account home,
-run fixture checks with `TMPDIR=/private/tmp` on macOS. This keeps project-ancestor
-discovery away from personal configuration. UI export folders can be displayed
-with `~`; filesystem assertions must expand that prefix before reading files.
+Use a temporary directory outside personal configuration ancestors, such as
+`TMPDIR=/private/tmp` on macOS. Keep process HOME, USER and LOGNAME consistent
+with the native account context; pass disposable client/controller paths through
+the fixtures rather than changing only the process HOME. Expand displayed `~`
+prefixes before filesystem assertions.
 
-`check:ui` verifies types, design tokens and bundled-build parity, then runs Chromium
-journeys against the real local server and engine. Each test uses disposable
-native-style homes, SQLite histories and export files; it checks visible results
-and actual filesystem effects without
-mocking API responses. Native executable version checks use a fixture executable,
-and the copy runtime sees an isolated process table so it cannot control the
-developer's clients. These checks do not establish live Codex integration.
+`check:ui` verifies types, design tokens and bundled-build parity, then runs
+Chromium journeys against the real local server/engine with disposable native-style
+homes, histories and exports. Mock client/version/process observation, not API
+responses. These checks do not establish live native integration.
 
-`test:ui` rebuilds and runs only the browser journeys. `dist/ui` is tracked because
-the app serves it and npm packages it; rebuild and verify it with
-`npm run build:ui` and `node scripts/check-ui-build.mjs` after
-UI source changes. Browser failures retain screenshots, server errors and
-Playwright traces under `test-results/ui-e2e/`; `npx playwright show-report`
-opens the HTML report. Run Playwright commands sequentially: separate runs that
-share `test-results/ui-e2e/` can race while cleaning traces and produce a
-trace-cleanup failure. CI uploads failure evidence. The CLI/engine fixture and
-security suites remain in `npm test`; UI-only unit/component tests have been
-replaced by these browser journeys. Report full-suite failures separately from
-targeted reruns: a passing targeted rerun resolves that case, but does not turn
-the original full-suite run into a clean pass.
+`dist/ui` is tracked and packaged. After UI changes, run `npm run build:ui` and
+`node scripts/check-ui-build.mjs`. `test:ui` rebuilds and runs browser journeys.
+Run browser/build commands sequentially when they share output directories.
+Playwright failure artifacts are under `test-results/ui-e2e/`; use
+`npx playwright show-report` to inspect them. Preserve failed full-check results
+separately from passing targeted reruns.
 
-The opt-in LaunchServices fixture runs only when explicitly enabled on macOS:
+The opt-in synthetic LaunchServices fixture opens/closes only its own windowless
+app on macOS:
 
 ```sh
 TZ=UTC XFX_NATIVE_PROFILE_OPEN=1 node --test test/native-profile-open.test.js
 ```
 
-It opens and closes its own windowless synthetic app. It does not control existing
-Codex instances. See [Desktop implementation and verification](DESKTOP-IMPLEMENTATION.md)
-for what that fixture proves and which checks require authorized native acceptance.
-
-## Prepare native acceptance
-
-The checkout-only `scripts/native-profile-ui-acceptance.mjs` harness automates
-empty/selected profile creation, cancel, selected setting/skill copy and exact
-Undo. Its default/help and grant-check paths do not start acceptance. Execution
-requires a separately approved, source-bound manifest and an independent
-Terminal with passing real client/idle guards before each mutation. It retains
-screenshots, a browser trace, filesystem/journal checks and shutdown receipts.
-An ambiguous in-flight request prevents automatic server termination. The engine
-suite exercises the journey using disposable homes and a fake version executable;
-that result does not replace native acceptance or a human usability check.
-
-Ordinary review follows the [review contract](REVIEW-TASK-IMPLEMENTATION.md).
-Retained results belong in their versioned release records; current authorization
-governs any real execution.
-
-For an explicitly uncapped **non-series** experiment, set both `limits.runMs`
-and `limits.experimentMs` to JSON `null` in its CLI spec. Omitting a limit retains
-the normal default. Cancellation, output bounds and setup/check timeouts still
-apply; reports retain the null limits and the UI omits a timed percentage.
-The Runs form still offers finite durations, and series retain their per-trial
-budgets. `nativeConfig["features.multi_agent"]: false` disables delegation through
-the native startup configuration; its effective native behavior needs acceptance.
+See [Desktop verification](DESKTOP-IMPLEMENTATION.md#verification-and-native-acceptance)
+for the limits of this fixture. Real profile/client operations need current
+authorization covering their effects and must preserve unrelated clients/data.
 
 ## Change the native launcher
 
-The package already contains a signed universal arm64/x86_64 launcher. Only
-maintainers need Swift and Xcode Command Line Tools. After changing its Swift source:
+The package contains a signed universal arm64/x86_64 launcher. Maintainer rebuilds
+need Swift and Xcode Command Line Tools:
 
 ```sh
 npm run build:native
 npm run check:native
 ```
 
-Commit the Swift source, binary and manifest together. Normal installation and
-profile preparation copy the prebuilt helper; they never compile it. Keep running
-instances' pinned caches intact when changing preparation behavior.
+Keep Swift source, binary and manifest consistent. Normal installation/profile
+preparation copy the prebuilt helper and never compile it. Preserve pinned caches
+needed by running instances.
 
-## Contracts and release records
+## Contracts
 
-Use the [roadmap checkpoint](ROADMAP.md#current-work-and-stop-condition) to start
-active work. Follow only the references needed for that slice:
+- [Product goal](AUDIT-GOAL.md): behavior, scope and provider-version policy.
+- [Acceptance criteria](AUDIT-ACCEPTANCE.md): observable verification requirements.
+- [Client and review implementation](REVIEW-TASK-IMPLEMENTATION.md): client identity,
+  catalogs, runtime ownership, persistence and recovery.
+- [Profile copy policy](PROFILE-COPY-POLICY.md): transfer eligibility and Undo.
+- [Desktop implementation](DESKTOP-IMPLEMENTATION.md): signed launch and isolation.
+- [Roadmap](ROADMAP.md): product direction and supported boundaries.
 
-- [Goal](AUDIT-GOAL.md): product behavior, acceptance and evolution policy.
-- [Client support plan](CLIENT-SUPPORT-PLAN.md) defines the planned architecture,
-  client/surface interfaces and slice acceptance.
-- [Review implementation](REVIEW-TASK-IMPLEMENTATION.md): ordinary execution,
-  durable task/API/recovery.
-- [Profile copy policy](PROFILE-COPY-POLICY.md): transfer behavior and eligibility.
-- [Acceptance index](AUDIT-ACCEPTANCE.md): compact release summaries and evidence limits.
-- [Release process](LOCAL-RELEASE.md): packaging and approved publication.
-- [Historical references](../README.md#historical-references): dated assessments and plans.
-
-Completed records and experiments live in [history](history/README.md). Private
-operational receipts remain outside public source; consult only for a specific gap.
-
-## Maintenance boundaries
-
-Follow the [release guide](LOCAL-RELEASE.md#documentation-ownership-and-release-closeout)
-for documentation ownership, archival summaries and package boundaries. Illustrative
-`output/design/` material is neither accepted UI nor verification. Apply the
-[evolution policy](AUDIT-GOAL.md#evolution-and-provider-version-policy) when retiring
-contracts; retain meaningful supported-behavior coverage.
+Keep private execution records, local acceptance results and operational grants
+outside public source. Reusable verification commands and behavior limits belong
+here; historical receipts do not authorize new effects.

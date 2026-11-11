@@ -42,14 +42,14 @@ test('npm package includes reviewed docs and excludes private receipts and unrev
   const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8'));
   await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'xfx-package-boundary-fixture', version: '1.0.0', files: manifest.files }));
   const publicPaths = ['bin/xfx.js', 'src/fixture.js', 'README.md', 'LICENSE', 'docs/user/AUDIT.md',
-    'docs/developer/AUDIT-ACCEPTANCE.md', 'docs/developer/history/README.md',
-    'docs/developer/DESKTOP-IMPLEMENTATION.md', 'docs/developer/history/DESKTOP-HISTORY.md',
-    'docs/developer/AUDIT-GOAL.md', 'docs/developer/ROADMAP.md', 'docs/developer/REVIEW-TASK-IMPLEMENTATION.md', 'docs/developer/history/PROFILE-UI-ASSESSMENT.md',
-    'docs/developer/history/evidence/audit-2.0.0-summary.json', 'docs/developer/history/evidence/profile-comparison-2026-10-14-summary.json',
-    'docs/developer/history/RELEASE-3.1.1.md', 'docs/developer/history/RELEASE-3.1.0.md',
-    'docs/developer/history/RELEASE-2.1.0.md', 'docs/developer/history/RELEASE-3.0.0.md', 'docs/developer/history/RELEASE-3.0.1.md', 'docs/developer/history/RELEASE-2.0.0.md',
-    'docs/developer/history/ROADMAP-2.1.0.md', 'docs/developer/history/PROFILE-ASSESSMENT-2.1.0.md'];
+    'docs/developer/README.md', 'docs/developer/AUDIT-ACCEPTANCE.md',
+    'docs/developer/DESKTOP-IMPLEMENTATION.md', 'docs/developer/PROFILE-COPY-POLICY.md',
+    'docs/developer/AUDIT-GOAL.md', 'docs/developer/ROADMAP.md', 'docs/developer/REVIEW-TASK-IMPLEMENTATION.md'];
   const privatePaths = [
+    'docs/developer/CLIENT-SUPPORT-PLAN.md', 'docs/developer/LOCAL-RELEASE.md',
+    'docs/developer/history/README.md', 'docs/developer/history/DESKTOP-HISTORY.md',
+    'docs/developer/history/RELEASE-3.1.1.md', 'docs/developer/history/evidence/audit-2.0.0-summary.json',
+    '.agents/skills/shadcn/SKILL.md', '.agents/skills/shadcn/assets/shadcn.png',
     'docs/developer/evidence/audit-private-canary.json', 'docs/developer/HANDOVER-macos-audit-release.md',
     'docs/developer/UNREVIEWED.md', 'docs/user/PRIVATE-NOTES.md',
     'docs/developer/history/private/canary.md', 'docs/developer/history/UNREVIEWED.md',

@@ -1,16 +1,67 @@
 # Ordinary review task — implementation contract
 
-Execution, persistence, API and recovery rules. [Goal](AUDIT-GOAL.md#ai-review): product
+Shared client execution, persistence, API and recovery rules. [Goal](AUDIT-GOAL.md#ai-review): product
 behavior; [roadmap](ROADMAP.md): status; [app guide](../user/APP.md#review-a-comparison): workflow.
 
-This contract describes current Codex execution. The
-[client support plan](CLIENT-SUPPORT-PLAN.md#architecture-and-interfaces) owns
-the planned runtime boundary and qualification for other clients and surfaces.
-Its [execution/evidence invariants](CLIENT-SUPPORT-PLAN.md#execution-and-evidence-invariants)
-own the extension's fenced checkpoints, exact stored-request identity,
-requested/sent/confirmed/observed settings and separate cancellation/join evidence.
-Apply those through the existing review entry point when each client slice is
-implemented; the shared job/report lifecycle below remains the baseline.
+## Shared client contracts
+
+The existing comparison/review coordinator owns admission, lifecycle, resource
+claims and durable publication. Client adapters own native path/configuration,
+protocol, account and event interpretation. Reuse the same report projection
+and persistence rather than adding another scheduler or record format.
+
+### Identity and ownership
+
+Bind each operation to client, surface, profile/root mode, canonical resource
+roots, selected executable/SDK identity, workspace/settings fingerprint and
+job/side ownership. Client identity is distinct from model vendor. Native session,
+turn, tool and request IDs are bounded opaque values qualified by client/job;
+missing native IDs remain null, never a local ID or a new session. Implicit
+Default and explicit roots remain distinct even for matching paths. Follow the
+[account boundary](AUDIT-GOAL.md#client-scope) and never retain credentials or
+credential hashes as identity evidence.
+
+Persist process and initialized session ownership before submitting once.
+Checkpoint writes, late callbacks and cleanup require the current owner/generation
+under the mutation gate. Serialize save/drop/terminal cleanup so stale owners
+cannot overwrite evidence or release another participant. Inspection and recovery
+submit no task; missing attached native state never becomes a replacement session.
+
+Native approval/input replies consume the exact stored request/action once on
+its live owned connection. Cancellation, terminal results, connection loss and
+ownership changes invalidate pending replies. A regenerated intent is not an
+approved request, and recovery never replays decisions. Record native completion,
+captured response, coverage, interrupt acknowledgement and physical shutdown as
+independent facts. Await exposed process/SDK/input joins; uncertain shutdown
+retains claims. A stopped process group does not prove escaped descendants stopped.
+
+### Catalogs and settings
+
+Catalogs are scoped to client/profile/root mode, executable/SDK, connection/account
+generation and effective workspace settings. Explicit discovery performs bounded
+initialization only: no task submission, login fallback or model-policy changes.
+Initialization may touch native state or run hooks; ordinary preview uses cached
+metadata. Reap owned probes on cancellation/timeout. Cache freshness is five
+minutes; setup/authentication changes invalidate it. Publish a late result only
+for the same current scope and refresh generation. Failure is unavailable, not
+an empty successful catalog; ambiguous startup/shutdown retains its claim.
+
+Preserve profile-default inheritance independently for model and effort. Model
+IDs and effort strings are native opaque choices; options can have holes and
+equal effort names do not imply equal computation across clients. A model change
+invalidates the prior explicit effort until rechecked. Copilot explicit models,
+Auto tiers and image-tool entries stay separate; disabled/hidden tiers are not
+explicit choices. Revalidate explicit selections on the initialized client before
+submission; never silently substitute a model or downgrade effort. Requested,
+sent, client-confirmed and turn-reported settings remain separately sourced,
+with missing observations unknown. Catalog membership is not proof of execution
+access or billing entitlement.
+
+Codex comparisons may freeze `approvalsReviewer: "user"` for the owned native
+session. An interactive handler and native confirmation of both `user` and
+`on-request` are required before submission. Missing or different confirmation
+refuses the task. Saved settings and ordinary reviews keep their native reviewer;
+record requested, sent and confirmed reviewer values separately.
 
 ## Execution with the selected profile's settings
 
@@ -22,9 +73,9 @@ provider, permissions, sandbox, instructions, skills, integrations, hooks and me
 
 | Boundary | Rule |
 | --- | --- |
-| Shared capture | `client-runtime.js` routes both entry points to `audit-capture.js`/`audit-process.js`: comparisons use `audit`, reviews use `profile`. Validate environment/job/native binding before durable callbacks. |
+| Shared capture | `client-runtime.js` dispatches both entry points to the selected client adapter; Codex uses `audit-capture.js`/`audit-process.js`. Comparisons use `audit`, reviews use `profile`. Validate environment/job/native binding before durable callbacks. |
 | Explicit model choices | Preview validates cached context; explicit Refresh separately owns initialization with no task or policy mutation. Start validates advertised model/effort on its initialized connection before thread/task submission, then requires native settings confirmation. Missing turn observations stay unknown. |
-| Native launch | Launch the native executable in the selected cwd with an explicit prompt and fresh session. Let `thread/start` inherit the process cwd, verify its reported cwd before any turn, and send that verified cwd to `turn/start`; explicit thread cwd can persist native project trust and invalidate other previews. Omit thread/turn `sandbox`, `sandboxPolicy`, `approvalPolicy` and general config overrides. Reject audit-only options. No `prepareAuditStartup`, `sandbox-exec`, audit-private SQLite/log/TMP, no-op sandbox probe or injected telemetry. Preserve ordinary launcher routing, including SQLite; normal history/auth refresh writes are expected. |
+| Codex native launch | Launch the native executable in the selected cwd with an explicit prompt and fresh session. Let `thread/start` inherit the process cwd, verify its reported cwd before any turn, and send that verified cwd to `turn/start`; explicit thread cwd can persist native project trust and invalidate other previews. Omit thread/turn `sandbox`, `sandboxPolicy`, `approvalPolicy` and general config overrides. Reject audit-only options. No `prepareAuditStartup`, `sandbox-exec`, audit-private SQLite/log/TMP, no-op sandbox probe or injected telemetry. Preserve ordinary launcher routing, including SQLite; normal history/auth refresh writes are expected. |
 | Preparation | Read-only profile/workspace resolution runs no native version probe. Never close clients, sign in, change bindings/trust/settings, borrow another account, copy source, provision isolation or grant extra reads. Missing prerequisites use existing setup guidance; unsafe access/ownership is refused. |
 | Workspace | Named profile: saved cwd or explicitly selected bound repository; report repository only if available/bound. Default: explicitly selected trusted repository and existing executable discovery. No silent historical checkout. Show cwd/executable and private input paths before Start. |
 | Start recheck | Recheck profile/home, executable identity, cwd and settings identity, including after serialization. Refuse changed previews before model work; versions are provenance. |
@@ -33,7 +84,7 @@ provider, permissions, sandbox, instructions, skills, integrations, hooks and me
 | Process checkpoint | After native initialization, require the same PID/start/host across exec; checkpoint the initialized executable identity and use it for later ownership checks. |
 | Session checkpoint | Durably save the native thread ID before `turn/start`; checkpoint failure sends no turn. Capture exact assistant output from that owned thread/turn, never newest history, commentary or exit status alone. |
 | Inputs/prompt | Export into the private task directory; fixed absolute paths are part of `effectivePrompt`. Hash/save/send it unchanged and keep ordinary cwd for project instructions. Unreadable inputs use normal native approval; failure stays visible. Embedded report instructions are evidence; report-only reasoning is a prompt, not enforced isolation. |
-| Native requests | Shared JSON-RPC distinguishes `id`+`method` requests from responses/notifications. Show actual action/question and native choices; accept only explicit validated replies on the owning live connection. No auto-approval, forced policy or synthetic denial. Unsupported methods fail visibly with name/partial output, without hanging/retrying/lowering policy. Validate protocol shape, not provider version. |
+| Codex native requests | Shared JSON-RPC distinguishes `id`+`method` requests from responses/notifications. Show actual action/question and native choices; accept only explicit validated replies on the owning live connection. No auto-approval, forced policy or synthetic denial. Unsupported methods fail visibly with name/partial output, without hanging/retrying/lowering policy. Validate protocol shape, not provider version. |
 | Limits | `timeoutMs: null` by default, with optional user cap; do not inherit comparison deadlines. Bound startup/RPC/shutdown and process output (8 MiB), reporting truncation/failure. No automatic retries or claimed dollar/token cap; show limits before Start. |
 
 ### Internal capture interface
@@ -93,12 +144,13 @@ child heartbeats and shutdown. Missing native turn IDs remain unknown.
 An optional five-field `command_lifecycle: completed` receipt is bookkeeping only:
 it must close the owned prompt's exact queued→started sequence after a validated
 successful result explicitly echoes that prompt, with no prior failure, once only.
-This narrow shape comes from owned producer evidence plus the SDK's post-result
-informational semantics; it is not declared in `SDKMessage`. Task work, unknown
+This exact optional producer shape is not declared in `SDKMessage`; do not
+generalize it to other post-result frames. Task work, unknown
 frames and mismatched/extra receipt fields retain their existing guards.
 One subsequent exact owned host-only `session_state_changed: idle` notification
 may be recorded as informational metadata; other states, payloads and repeats
-remain guarded. It adds no permission, task or completion authority.
+remain guarded. The host-only flag follows SDK runtime routing rather than its
+declared message interface. It adds no permission, task or completion authority.
 
 ### Copilot CLI ordinary review
 
