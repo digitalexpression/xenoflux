@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -12,12 +12,14 @@ import { claudeEnvironment } from '../src/claude-profile.js';
 test('Copilot creation, status qualification, copy and Undo use the real Store and authenticated controller', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-e1-fixture-')));
   const executable = join(root, 'copilot'), launches = join(root, 'launches.log');
+  const malformedBanner = join(root, 'malformed-banner');
   const stock = join(root, 'simulated-stock');
   await mkdir(stock, { mode: 0o700 });
   await writeFile(executable, `#!/bin/sh
 [ "$*" = --version ] && [ -d "$COPILOT_HOME" ] || exit 99
+if [ -f "${malformedBanner}" ]; then printf 'GitHub Copilot CLI 1.0.107.bad\\n'; exit; fi
 printf '%s\\n' "$COPILOT_HOME" >> "${launches}"
-printf 'GitHub Copilot CLI 1.0.107\\n'
+printf '%s\\n' 'GitHub Copilot CLI 1.0.107.' "Run 'copilot update' to check for updates."
 `, { mode: 0o700 });
   const store = new Store(join(root, 'store'));
   const profilesBase = join(root, 'profiles');
@@ -60,6 +62,15 @@ printf 'GitHub Copilot CLI 1.0.107\\n'
   await assert.rejects(lstat(launches), { code: 'ENOENT' });
   await json(post('/api/profiles/new', { name: 'Cancelled', client: 'claude-code', planToken: cancelled.planToken }), 409);
   assert.deepEqual(statusRoutes, []);
+
+  await writeFile(malformedBanner, '');
+  const malformed = await preview('Malformed');
+  const refused = await json(post('/api/profiles/new',
+    { name: 'Malformed', client: 'copilot', planToken: malformed.planToken, items: [] }), 422);
+  assert.equal(refused.error.code, 'native-profile-preparation-failed');
+  assert.deepEqual((await store.read()).profiles, []);
+  assert.deepEqual(await readdir(profilesBase), []);
+  await rm(malformedBanner);
 
   await create('Source', await preview('Source'));
   const source = (await new Store(store.directory).read()).profiles[0];

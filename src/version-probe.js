@@ -128,7 +128,7 @@ export async function probeNativeProfileVersion(client, options) {
   const { text } = await probeMetadata({ ...options, args: ['--version'] });
   const match = (client === 'claude-code'
     ? /^\s*v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s+\(Claude Code\)\s*$/i
-    : /^\s*(?:GitHub )?Copilot CLI(?: Version)?[: ]+v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s+.*)?\s*$/i).exec(text);
+    : /^\s*(?:GitHub )?Copilot CLI(?: Version)?[: ]+v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]*[0-9A-Za-z-])?)\.?(?:\s+.*)?\s*$/i).exec(text);
   if (!match) throw new Error('Unrecognized native CLI version');
   return match[1];
 }
