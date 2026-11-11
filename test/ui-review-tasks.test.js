@@ -15,7 +15,7 @@ const waitFor = async (fn, predicate, message) => {
 };
 
 async function fixture(t, { delayed = false, nativeRequest = false, responseOverride, observeProcess, releaseFailures = 0,
-  realReservations = false, onRequest, onCapture, client, captureOverride } = {}) {
+  realReservations = false, onRequest, onCapture, client, captureOverride, onAdmissionRelease } = {}) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-review-task-')));
   await mkdir(join(directory, 'profile'), { mode: 0o700 });
   const store = { directory };
@@ -57,7 +57,7 @@ async function fixture(t, { delayed = false, nativeRequest = false, responseOver
       response: responseOverride ?? { status: 'complete', text: 'Scoped review response', threadId: 'fixture-thread', turnId: 'fixture-turn', source: 'recorded-assistant-turn' } };
   };
   const service = createUiReviewTasks({ store, defaultUserHome: directory, resolveComparison: async ref => ({ value: currentComparison, title: `Report ${ref}` }),
-    admission: { acquire: async () => { calls.acquired++; }, release: () => { calls.released++; } },
+    admission: { acquire: async () => { calls.acquired++; }, release: () => { calls.released++; return onAdmissionRelease?.(); } },
     context: { resolveProfile: async () => profile, recheckProfile: async () => profile,
       ...reservationOverrides, lockOptions, observeProcess: observeProcess ?? (async () => ({ status: 'unknown' })),
       capture, ...(client ? { clientRuntimes: { [client]: { capture } } } : {}) } });
@@ -98,9 +98,11 @@ test('Claude review retains checkpoint and returned shutdown facts without raw d
     const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict', client: 'claude-code' });
     const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
     await waitFor(async () => app.calls.capture, count => count === 1, 'Review did not start');
+    const expectedStatus = mode === 'cancelled' ? 'cancelled' : mode === 'failed' ? 'uncertain' : 'completed';
     const done = mode === 'cancelled' ? await app.service.cancelReviewTask({ id })
-      : await waitFor(() => app.service.reviewTask({ id }), value => ['completed', 'failed', 'uncertain'].includes(value.status), 'Review did not finish');
-    assert.equal(done.status, mode === 'cancelled' ? 'cancelled' : mode === 'failed' ? 'uncertain' : 'completed');
+      // A failed outcome can be visible before controller ownership ends and the view becomes uncertain.
+      : await waitFor(() => app.service.reviewTask({ id }), value => value.status === expectedStatus, 'Review did not reach its expected settled view');
+    assert.equal(done.status, expectedStatus);
     const saved = JSON.parse(await readFile(join(app.directory, 'review-tasks', id, 'task.json'), 'utf8'));
     if (mode === 'missing') assert.equal(Object.hasOwn(saved.capture, 'shutdown'), false);
     else assert.deepEqual(saved.capture.shutdown, expected);
@@ -110,10 +112,61 @@ test('Claude review retains checkpoint and returned shutdown facts without raw d
       assert.equal(saved.capture.shutdown.interruptAcknowledged, false);
     }
     if (mode === 'failed') {
+      assert.equal(saved.status, 'failed');
       assert.equal(saved.shutdown.status, 'uncertain');
+      assert.equal(saved.shutdown.groupTerminated, false);
+      assert.equal(saved.reservation.status, 'held');
       assert.equal(app.calls.profileReleased, 0);
+      await assert.rejects(app.service.assertAvailable(), { code: 'review-uncertain' });
     }
   });
+});
+
+test('unknown shutdown retains ownership across the controlled controller-completion window', async t => {
+  let releaseAdmission;
+  const admissionGate = new Promise(resolve => { releaseAdmission = resolve; });
+  let observations = 0;
+  const proof = { groupTerminated: false, mainCloseJoined: false, sdkIteratorJoined: false,
+    inputIteratorJoined: null, pendingApprovals: 1, interruptRequested: true, interruptAcknowledged: false };
+  const app = await fixture(t, { client: 'claude-code', onAdmissionRelease: () => admissionGate,
+    observeProcess: async () => { observations++; return { status: 'unknown' }; },
+    captureOverride: async () => ({ process: { status: 'shutdown-failed', exitCode: 0, elapsedMs: 4,
+      shutdown: { groupTerminated: false }, output: { bytes: 0, truncated: false } },
+    run: { source: { threadId: 'fixture-thread' }, turns: [], events: [] }, capture: { status: 'partial', checkpoint: 'final', shutdown: proof },
+    response: { status: 'partial', text: 'Partial fixture response', threadId: 'fixture-thread', turnId: 'fixture-turn' } }) });
+  try {
+    const preview = await app.service.previewReviewTask({ ref: 'saved.report', profile: 'Strict', client: 'claude-code' });
+    const { id } = await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken });
+    await waitFor(async () => app.calls.released, count => count === 1, 'Controller did not reach admission release');
+    const owned = await app.service.reviewTask({ id });
+    assert.equal(owned.status, 'failed');
+    assert.equal(owned.error, 'response-unavailable');
+    assert.equal(owned.response.status, 'partial');
+    assert.equal(owned.shutdown.groupTerminated, false);
+    await assert.rejects(app.service.assertAvailable(), { code: 'review-uncertain' });
+    assert.equal(observations, 0, 'The still-owned operation must not be treated as coordinator loss');
+    const taskPath = join(app.directory, 'review-tasks', id, 'task.json');
+    const before = JSON.parse(await readFile(taskPath, 'utf8'));
+    assert.equal(before.status, 'failed');
+    assert.equal(before.processResult.exitCode, 0);
+    assert.equal(before.shutdown.status, 'uncertain');
+    assert.equal(before.reservation.status, 'held');
+    assert.deepEqual(before.capture.shutdown, proof);
+    releaseAdmission();
+    const settled = await waitFor(() => app.service.reviewTask({ id }), value => value.status === 'uncertain', 'Unconfirmed ownership did not remain uncertain');
+    assert.equal(settled.shutdown.groupTerminated, false);
+    assert.equal(settled.response.status, 'partial');
+    assert.ok(observations > 0);
+    await assert.rejects(app.service.assertAvailable(), { code: 'review-uncertain' });
+    const after = JSON.parse(await readFile(taskPath, 'utf8'));
+    assert.equal(after.status, 'failed');
+    assert.equal(after.error, before.error);
+    assert.deepEqual(after.capture.shutdown, proof);
+    assert.deepEqual(after.reservation, before.reservation);
+    assert.equal(app.calls.profileReleased, 0);
+    assert.deepEqual(await app.service.startReviewTask({ ref: 'saved.report', previewToken: preview.previewToken }), { id });
+    assert.equal(app.calls.capture, 1);
+  } finally { releaseAdmission(); }
 });
 
 test('review preview is ephemeral and Start durably snapshots then returns while native capture runs', async t => {
