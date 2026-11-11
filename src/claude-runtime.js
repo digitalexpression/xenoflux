@@ -141,6 +141,13 @@ function compareModel(model, selected) {
   return !selected || model === selected.model || model === selected.resolvedModel;
 }
 
+function ownedCommandReceipt(frame, sessionId, promptId) {
+  return frame.type === 'command_lifecycle' && frame.session_id === sessionId && frame.command_uuid === promptId
+    && Object.keys(frame).length === 5
+    && ['type', 'session_id', 'command_uuid', 'state', 'uuid'].every(key => Object.hasOwn(frame, key))
+    && typeof frame.uuid === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(frame.uuid);
+}
+
 export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownClaudeProcess,
   readCwd = claudeProcessCwd, readTrust = claudeWorkspaceTrust } = {}) {
   async function execute({ profile, workspace, task, execution = {}, processOptions, onProcessReady,
@@ -168,6 +175,7 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
     let pumpJoined = false, inputStarted = false, inputFinished = false, initializeFrames = 0, interruptFrames = 0;
     let version = null, interruption = null, account = { status: 'unverified', type: null, id: null }, models = [];
     let selectedModel, trustBefore, closing = false, sessionAck, checkpointedTurn;
+    let commandStage = 0, resultPromptMatched = false;
     const requestStop = error => {
       failure ??= error;
       actionAbort.abort(); cancelled.resolve();
@@ -214,10 +222,22 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
         }
         throw new Error('Claude emitted a session event before the task was submitted');
       }
+      const ownReceipt = ownedCommandReceipt(frame, sessionId, promptId);
+      if (!decoder.result && frame.type === 'command_lifecycle')
+        commandStage = ownReceipt && commandStage === 0 && frame.state === 'queued' ? 1
+          : ownReceipt && commandStage === 1 && frame.state === 'started' ? 2 : -1;
+      if (decoder.result?.complete && sessionObserved && resultPromptMatched && !failure && !nativeFailure
+        && commandStage === 2 && ownReceipt && frame.state === 'completed') {
+        // Optional scoped queue closure, observed in native stdout; not a new task/completion authority.
+        commandStage = 3;
+        capture.commandClosure = { source: 'claude-native-command-lifecycle', advisory: true, receiptCount: 1 };
+        return;
+      }
       decoder.consume(frame);
       if (frame.type === 'assistant' && frame.parent_tool_use_id == null && ASSISTANT_ERRORS.has(frame.error))
         assistantError = frame.error;
       if (frame.type === 'result') {
+        resultPromptMatched = frame.user_message_uuid === promptId;
         // SDK success-subtype results with is_error=true carry an API failure, not task success.
         capture.terminalResult = { source: 'claude-sdk-result', subtype: decoder.result.subtype,
           isError: frame.is_error === true, assistantError,

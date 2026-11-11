@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 import { setTimeout } from 'node:timers/promises';
 import { stripTypeScriptTypes } from 'node:module';
 import { join } from 'node:path';
@@ -76,6 +76,48 @@ test('ordinary Claude review uses the selected profile, frozen inputs and pinned
   assert.deepEqual(savedAgain.capture.shutdown, proof);
   assert.deepEqual(savedAgain.shutdown, saved.shutdown);
   assert.equal(savedAgain.inputsVerifiedAfterCompletion, true);
+});
+
+test('ordinary Claude survivor completes exact approvals, checks and lock release with an optional command closure', async t => {
+  const app = await createUiRunsFixture({ mode: { mixedClaude: true } });
+  t.after(() => app.close());
+  const preview = await app.provider.runPreview({ task: 'closure-controller', a: 'Default', b: 'Default',
+    clients: { a: 'claude-code', b: 'claude-code' }, repository: app.repository, commit: 'HEAD',
+    checks: [{ name: 'marker', command: '/bin/test -f xfx-local-marker.txt' }] });
+  assert.equal(preview.ready, true, JSON.stringify(preview));
+  const started = await app.provider.startRun({ previewToken: preview.previewToken });
+  for (let side = 0; side < 2; side++) {
+    const waiting = await until(() => app.provider.run(started), value => value.pendingRequests.length > 0 || value.state !== 'running', 'Closure approval');
+    assert.equal(waiting.pendingRequests.length, 1, JSON.stringify(waiting));
+    const request = waiting.pendingRequests[0];
+    assert.equal(request.method, 'claude/tool/requestApproval');
+    assert.equal(request.params.input.command, '/usr/bin/touch xfx-local-marker.txt');
+    assert.equal(request.params.itemId, request.item.id);
+    await app.provider.respondRun({ ...started, requestId: request.requestId, response: { decision: 'accept' } });
+    await assert.rejects(app.provider.respondRun({ ...started, requestId: request.requestId, response: { decision: 'accept' } }), { status: 409 });
+  }
+  const progress = await until(() => app.provider.run(started), value => value.state !== 'running', 'Closure survivor completion');
+  assert.ok(['finished', 'finished-partial'].includes(progress.state), JSON.stringify(progress));
+  const parent = await readAuditRecord(app.store, started.id);
+  assert.deepEqual(parent.report.failures, []);
+  assert.equal(app.calls.checks.length, 2);
+  for (const leg of parent.report.runs) {
+    assert.equal(leg.task.status, 'passed');
+    assert.equal(leg.checks[0].status, 'passed');
+    const child = await readAuditRecord(app.store, leg.id);
+    assert.equal(child.report.capture.commandClosure.receiptCount, 1);
+    assert.equal(child.report.capture.commandClosure.advisory, true);
+    assert.equal(child.report.capture.shutdown.groupTerminated, true);
+    assert.equal(child.state.reservation, null);
+    assert.equal(child.state.process, null);
+    assert.equal(await readFile(join(child.state.workspace.directory, 'xfx-local-marker.txt'), 'utf8'), 'fixture marker\n');
+  }
+  await assert.rejects(access(join(app.root, 'default-user-home', '.claude', '.run-lock')), { code: 'ENOENT' });
+  const report = await app.provider.report({ ref: 'e.' + started.id });
+  for (const side of ['a', 'b']) {
+    const replay = report.replay[side], root = replay.sessions.find(row => row.parentId === null);
+    assert.equal(deriveAgentSummaries(replay).get(root.id).result.text, 'Claude closure fixture completed.');
+  }
 });
 
 test('successful ordinary Claude comparison exposes its exact closing response and persisted shutdown proof', async t => {

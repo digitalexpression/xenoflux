@@ -90,6 +90,13 @@ not assume an absent main process proves the observed job's descendants stopped.
 Keep a matching terminal assistant response separate from capture gaps, advisory
 child heartbeats and shutdown. Missing native turn IDs remain unknown.
 
+An optional five-field `command_lifecycle: completed` receipt is bookkeeping only:
+it must close the owned prompt's exact queued→started sequence after a validated
+successful result explicitly echoes that prompt, with no prior failure, once only.
+This narrow shape comes from owned producer evidence plus the SDK's post-result
+informational semantics; it is not declared in `SDKMessage`. Task work, unknown
+frames and mismatched/extra receipt fields retain their existing guards.
+
 ### Copilot CLI ordinary review
 
 Run the selected installed CLI through the pinned `@github/copilot-sdk@1.0.29`

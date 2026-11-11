@@ -53,6 +53,32 @@ const result = (error = false) => frame({ ...retained[error ? 'interrupt' : 'com
   ...(mode?.includes('usage') ? { usage: { input_tokens: 11, output_tokens: 3 } } : {}) });
 const toolResult = (tool, error, content) => frame({ type: 'user', parent_tool_use_id: null,
   message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tool.id, is_error: error, content }] } });
+const finishClosure = () => {
+  if (mode === 'closure-after-progress') frame({ type: 'assistant', parent_tool_use_id: null,
+    message: { content: [{ type: 'tool_use', id: 'known-closure-tool', name: 'Bash', input: { command: '/bin/sleep 60' } }] } });
+  frame({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', model: 'claude-fixture-sonnet',
+    content: [{ type: 'text', text: 'Claude closure fixture completed.' }] } });
+  const terminal = { type: 'result', subtype: 'success', is_error: mode === 'closure-error',
+    result: 'Claude closure fixture completed.',
+    ...(!mode.includes('no-echo') && mode !== 'closure-no-result-echo' ? { user_message_uuid: promptId } : {}) };
+  frame(terminal);
+  if (mode === 'closure-no-receipt-no-echo') return;
+  const receipt = { type: 'command_lifecycle', command_uuid: mode === 'closure-wrong-command' ? randomUUID() : promptId,
+    state: mode === 'closure-wrong-state' ? 'cancelled' : 'completed',
+    ...(mode === 'closure-wrong-session' ? { session_id: randomUUID() } : {}),
+    ...(mode === 'closure-extra' ? { payload: {} } : {}), ...(mode === 'closure-bad-uuid' ? { uuid: 'not-a-uuid' } : {}),
+    ...(mode === 'closure-missing-uuid' ? { uuid: undefined } : {}) };
+  frame(receipt);
+  if (mode === 'closure-duplicate') frame(receipt);
+  if (mode === 'closure-after-assistant') frame({ type: 'assistant', parent_tool_use_id: null,
+    message: { content: [{ type: 'text', text: 'Unexpected later work.' }] } });
+  if (mode === 'closure-after-tool') frame({ type: 'assistant', parent_tool_use_id: null,
+    message: { content: [{ type: 'tool_use', id: 'later-tool', name: 'Bash', input: { command: '/bin/sleep 60' } }] } });
+  if (mode === 'closure-after-progress') frame({ type: 'tool_progress', tool_use_id: 'known-closure-tool',
+    tool_name: 'Bash', parent_tool_use_id: null, elapsed_time_seconds: 1 });
+  if (mode === 'closure-after-result') frame(terminal);
+  if (mode === 'closure-after-unknown') frame({ type: 'system', subtype: 'future_task_activity' });
+};
 for await (const line of io) {
   const message = JSON.parse(line);
   if (message.type === 'control_request') {
@@ -73,11 +99,29 @@ for await (const line of io) {
         if (!path || !readFileSync(path, 'utf8').trim()) throw new Error('Frozen review input missing');
       }
     }
+    if (mode.startsWith('closure-')) {
+      const states = mode === 'closure-reversed' ? ['started', 'queued']
+        : mode === 'closure-duplicate-queued' ? ['queued', 'queued', 'started'] : ['queued', 'started'];
+      for (const state of states) {
+        if (mode === 'closure-missing-' + state) continue;
+        frame({ type: 'command_lifecycle', command_uuid: promptId, state,
+          ...(mode === 'closure-sequence-extra' && state === 'queued' ? { extra: true } : {}) });
+      }
+    }
     if (mode.startsWith('captured-')) {
       frame({ type: 'system', subtype: 'session_state_changed', state: 'running', sdk_host_only: true });
       for (const state of ['queued', 'started']) frame({ type: 'command_lifecycle', command_uuid: promptId, state });
     }
     frame({ ...retained.companion[0], cwd: process.cwd(), apiKeySource: 'none', model, permissionMode: arg('--permission-mode') ?? 'default' });
+    if (mode.startsWith('closure-')) {
+      if (mode === 'closure-controller') {
+        tools = [{ type: 'tool_use', id: 'tool-fixture-0', name: 'Bash', input: { command: '/usr/bin/touch xfx-local-marker.txt' } }];
+        frame({ type: 'assistant', parent_tool_use_id: null, message: { content: tools } });
+        emit({ type: 'control_request', request_id: 'request-fixture-0', request: { subtype: 'can_use_tool',
+          tool_name: 'Bash', tool_use_id: tools[0].id, input: tools[0].input } });
+      } else finishClosure();
+      continue;
+    }
     if (mode.startsWith('captured-')) {
       const failed = mode !== 'captured-success-work';
       if (failed) frame({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', isUsingOverage: false } });
@@ -116,6 +160,14 @@ for await (const line of io) {
     if (!tool || decisions.has(index) || reply.subtype !== 'success' || reply.response.toolUseID !== tool.id)
       throw new Error('Invalid exact response');
     decisions.add(index);
+    if (mode === 'closure-controller') {
+      if (reply.response.behavior !== 'allow' || reply.response.updatedInput?.command !== tool.input.command || reply.response.updatedPermissions)
+        throw new Error('Unexpected closure fixture approval');
+      writeFileSync(join(process.cwd(), 'xfx-local-marker.txt'), 'fixture marker\n');
+      toolResult(tool, false, '');
+      finishClosure();
+      continue;
+    }
     if (reply.response.behavior === 'allow') {
       if (mode === 'running-cancel') {
         const helper = spawn('/bin/sleep', ['10'], { detached: true, stdio: 'ignore' });

@@ -119,6 +119,52 @@ test('captured API-error terminal provenance survives trailing lifecycle rejecti
   });
 });
 
+test('one exact owned command closure is optional bookkeeping after a matching successful result', async t => {
+  const f = await fixture(t), result = await f.capture('closure-valid');
+  assert.equal(result.failure, null, JSON.stringify(result.failure));
+  assert.equal(result.response.status, 'complete');
+  assert.equal(result.response.text, 'Claude closure fixture completed.');
+  assert.deepEqual(result.capture.commandClosure, { source: 'claude-native-command-lifecycle', advisory: true, receiptCount: 1 });
+  assert.equal(result.capture.shutdown.groupTerminated, true);
+  assert.equal(result.capture.shutdown.sdkIteratorJoined, true);
+  assert.equal(result.run.coverage.agents, 'partial');
+  assert.equal(result.run.nativeReference.turnId, null);
+  const ordinary = await f.capture('closure-no-receipt-no-echo');
+  assert.equal(ordinary.failure, null);
+  assert.equal(ordinary.response.status, 'complete');
+  assert.equal(ordinary.capture.commandClosure, undefined);
+});
+
+test('command closure refuses scope, shape, sequence and post-terminal work mismatches', async t => {
+  for (const mode of ['no-result-echo', 'wrong-command', 'wrong-session', 'extra', 'duplicate', 'wrong-state', 'bad-uuid', 'missing-uuid', 'duplicate-queued',
+    'missing-queued', 'missing-started', 'reversed', 'sequence-extra', 'after-assistant', 'after-tool', 'after-progress', 'after-result', 'after-unknown', 'error'])
+    await t.test(mode, async t => {
+      const f = await fixture(t), result = await f.capture('closure-' + mode);
+      assert.notEqual(result.failure, null, mode);
+      assert.notEqual(result.response.status, 'complete', mode);
+      assert.notEqual(result.run.outcome.status, 'completed', mode);
+      if (mode === 'error') {
+        assert.equal(result.failure.code, 'claude-native-task-failed');
+        assert.equal(result.capture.errors[1].message, 'Claude event arrived after the terminal result');
+      } else assert.match(result.failure.message, mode === 'wrong-session' ? /does not match the owned session/ : /after the terminal result/);
+      assert.equal(result.capture.shutdown.groupTerminated, true);
+    });
+});
+
+test('an existing failure prevents admitting even an otherwise matching command closure', async t => {
+  const f = await fixture(t, { processOwner(options) {
+    return ownClaudeProcess({ ...options, onFrame(frame) {
+      if (frame.type === 'command_lifecycle' && frame.state === 'completed')
+        options.stop(Object.assign(new Error('Claude fixture prior failure'), { code: 'claude-fixture-prior-failure' }));
+      options.onFrame(frame);
+    } });
+  } });
+  const result = await f.capture('closure-valid');
+  assert.equal(result.failure.code, 'claude-fixture-prior-failure');
+  assert.equal(result.capture.commandClosure, undefined);
+  assert.notEqual(result.response.status, 'complete');
+});
+
 test('work after a successful terminal still fails the protocol guard', async t => {
   const f = await fixture(t), result = await f.capture('captured-success-work');
   assert.match(result.failure?.message, /after the terminal result/);
