@@ -2,24 +2,26 @@
 
 <!-- impeccable:product-schema 1 -->
 
+Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
+
 ## Platform
 
 web
 
-The product interface is a locally bundled browser app for Codex on macOS,
-launched with `xfx ui`. Codex CLI and Desktop are part of its operating context;
-the interface is not a native macOS app.
+The product interface is a locally bundled browser app on macOS,
+launched with `xfx ui`. Codex, Claude Code and GitHub Copilot CLI provide task
+execution; native desktop apps are part of its operating context.
 
 ## Users
 
-Developers using Codex on macOS who want to compare how different setups perform
-on a real task. Task comparison is the primary job; independent profiles support
+Developers using Codex, Claude Code or GitHub Copilot CLI on macOS who want
+to compare how different setups perform on a real task. Task comparison is the primary job; independent profiles support
 that job by keeping setups separate. This priority was confirmed during init.
 
 ## Product Purpose
 
-Help users inspect what happened when Codex tackled a task under two recorded
-conditions, understand the results and evidence limits, and optionally request
+Help users inspect what happened when a native client tackled a task under
+two recorded conditions, understand the results and evidence limits, and optionally request
 an attributed AI review of the comparison.
 
 The core journey is create or choose profiles → compare a task → read the report
@@ -37,8 +39,8 @@ time or token usage alone does not establish better quality.
 
 ## Operating Context
 
-- Users work with local repositories, Codex profiles and recorded CLI or Desktop
-  sessions. The app runs on the user's Mac; explicitly started model tasks use
+- Users work with local repositories, client-qualified profiles and recorded
+  CLI or Desktop sessions. The app runs on the user's Mac; explicitly started model tasks use
   the selected profile's provider connection and normal permissions.
 - A new comparison has exactly two sides, which may use the same profile, with
   optional model and reasoning-effort overrides per side. Each side runs from
@@ -57,8 +59,8 @@ acceptance; the [roadmap](docs/developer/ROADMAP.md) owns current scope, status 
 delivery order. This record supplies durable product context, not new release
 requirements or operational authorization.
 
-- Profiles can start empty or copy selected supported parts of another profile.
-  Creation, authentication and opening a client are separate steps. Credentials,
+- Profiles can start empty or copy selected supported parts of another profile
+  of the same client. Creation, authentication and opening a client are separate steps. Credentials,
   generated memory and conversation history are not copied. The
   [profile copy policy](docs/developer/PROFILE-COPY-POLICY.md) owns eligibility,
   preview, preservation and recovery.
@@ -78,9 +80,10 @@ requirements or operational authorization.
   content is excluded by default; explicit inclusion uses redaction and size
   bounds. Private prose and code may remain, so exports need inspection before
   sharing. Evidence bound to a retained review cannot be silently removed.
-- The current product boundary is Codex on macOS. Additional providers, generic
-  configuration editing and desktop-shell packaging are outside the scope
-  recorded in the product goal, not implied future commitments.
+- The 4.0.0 boundary covers the three local CLI clients and mixed-client pairs.
+  Managed Claude/Copilot desktop profiles, cloud execution, generic configuration
+  editing and desktop-shell packaging remain outside that boundary. The
+  [app guide](docs/user/APP.md#400-scope-and-limits) records qualification limits.
 
 ## Brand Commitments
 

@@ -3,14 +3,18 @@
 Audience: users. Building and publishing packages is covered in the
 [developer release guide](../developer/LOCAL-RELEASE.md).
 
+Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
+
 ## Requirements
 
 - macOS 13 or later for the packaged launcher; the installed Codex app's own
   requirements also apply.
 - Node.js 22.15.0 or later in the 22.x line, or Node.js 23.8.0 or later,
   available on `PATH`. Node.js 23.0–23.7 is unsupported.
-- A supported Codex CLI executable to create or run CLI profiles, discovered
-  through `PATH`, a registered profile or an explicit `--codex` path.
+- The selected native CLI installed separately: Codex, Claude Code or GitHub
+  Copilot CLI. Codex discovery uses `PATH`, a registered profile or `--codex`.
+  Profiles follow the current selected installation and observed capabilities,
+  not a pinned CLI/Desktop version. Versions are retained as provenance.
 - The installed Codex desktop app if you use desktop profiles.
 - An external interactive terminal for commands that apply native profile or
   managed-installation changes.
@@ -36,19 +40,24 @@ bin setup. Plain `npm install xenoflux` installs locally; use `npm exec -- xfx`
 for that project-local installation.
 
 Global npm installation does not close Codex clients, prepare a profile, enable
-RAM logs or create the standalone managed app. Profile setup is a separate step:
+RAM logs or create the standalone managed app. Profile setup is a separate step.
+For Codex CLI/Desktop:
 
 ```sh
 xfx profile create Research --apply --close-clients
 xfx desktop open Research
 ```
 
+For Claude Code or GitHub Copilot CLI, open `xfx ui`, select the client in
+**Create profile**, then follow its native sign-in guidance. See the
+[account and qualification limits](APP.md#400-scope-and-limits).
+
 Setup may ask to close supported clients before applying changes. The package
 includes its launcher; installation does not need Swift compilation.
 
 ## Optional managed installation
 
-Use `xfx install` when you want Xenoflux to copy its app and dependency into
+Use `xfx install` when you want Xenoflux to copy its app and dependencies into
 `~/.xfx/app`, create `~/.local/bin/xfx`, and configure the optional RAM-log service.
 It installs from the version of xfx you invoke:
 
@@ -76,7 +85,11 @@ reports RAM logs disabled; see [RAM logs](RAM-LOGS.md).
 ## Install an offline release bundle
 
 Download all four files from the same [GitHub release](https://github.com/digitalexpression/xenoflux/releases):
-`xenoflux-VERSION.tgz`, `smol-toml-VERSION.tgz`, `manifest.json`, and `install.mjs`.
+`xenoflux-VERSION.tgz`, `xenoflux-runtime-VERSION-darwin-ARCH.tgz`,
+`manifest.json`, and `install.mjs`. Select the runtime for your Node architecture
+(`arm64` or `x64`). The bundle includes locked SDK dependencies, required peers
+and the matching Koffi native library; optional SDK CLI binaries are excluded.
+Your selected native CLIs must be installed separately.
 Place them together in one directory and keep the tarballs compressed. From an
 external terminal in that directory:
 

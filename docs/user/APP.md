@@ -1,6 +1,8 @@
 # The Xenoflux app
 
-`xfx ui` opens a local web app for comparing Codex profiles and sessions. It runs
+Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
+
+`xfx ui` opens the local app for profiles, tasks and sessions. It runs
 on this Mac only: the server listens on `127.0.0.1`, opens your default browser,
 and requires its launch link to establish a browser session.
 
@@ -13,11 +15,13 @@ it. Running `xfx ui` again while it is running reopens the same app.
 
 ## What you can do
 
-- **Create a profile.** Open Profiles and choose **Create profile**. Choose
+- **Create a profile.** Open Profiles and choose **Create profile**. Select
+  Codex, Claude Code or GitHub Copilot CLI. Choose
   **Empty** to create a profile without copying another profile’s setup, or
   **Selected parts of another profile** to select supported settings/content
   and review the copy before creating it. Empty profiles still have the minimal
-  files Xenoflux needs to manage them. Creation does not open Codex or complete
+  files Xenoflux needs to manage them. Copying stays within the same client.
+  Creation does not open a native client or complete
   sign-in; follow the native setup guidance before running model tasks.
 - **Compare setups.** Choose two profiles to see how their settings, instructions,
   skills, MCP servers, plugins, hooks and memory settings differ today. Each item
@@ -134,6 +138,33 @@ it. Running `xfx ui` again while it is running reopens the same app.
 Reports with your same-task declaration have private links that work while the
 server is running. Export the report to keep the declaration after stopping it.
 
+## 4.0.0 scope and limits
+
+- Profiles follow the current selected CLI/Desktop installation and observed
+  capabilities. They are never pinned to a version/build matrix. Versions are
+  provenance; a changed executable or root between preview and launch requires
+  a fresh preview. SDK dependencies remain separately locked.
+- Claude Code has an observed per-root, same-account sign-in route. Copilot has
+  a qualified shared GitHub CLI (`gh-cli`) account route: separate setup roots
+  do not establish separate accounts. Distinct-account independence remains
+  unverified. Shared sign-out was not exercised as an isolation check.
+- Native credential refresh is **unverified and deferred to the next release**.
+  Sign-in, restart and successful tasks do not prove renewal. Native clients
+  own credentials and refresh; Xenoflux does not transfer credentials.
+- Copilot Auto may route each turn differently, limiting reproducibility.
+  Applied effort, turn/phase attribution, timing and usage stay unknown when
+  the native client does not report them. Partial capture stays partial.
+  Sampled process ancestry does not prove that escaped descendants terminated.
+- Restart interrupts owned work; there is no automatic reattach, resend or
+  resume. Reopening retains saved evidence and associated review responses.
+- Native qualification covers the adopted core paths and one mixed-client
+  pair. The remaining pair/mode cross-product, repeated overlap stress,
+  controller-kill native reviews and copied-setup native loading are deferred
+  to the next release; fixture coverage remains. Copy success does not prove
+  that the native client loaded the copied setup.
+- CLI setup inspection uses `--surface cli|desktop`; the former
+  `--client cli|desktop` flag is removed. See the [audit guide](AUDIT.md).
+
 ## What the app never does
 
 - Close Codex or Terminal sessions. Copying and undoing require idle affected
@@ -240,7 +271,8 @@ Refreshing or closing the browser tab leaves an explicitly started task running.
 Reopen the app to see progress. **Cancel the run** stops only that experiment's
 owned work and retains a partial report; existing Codex and Terminal clients stay
 open. Stopping the local Xenoflux server interrupts its owned experiment and
-preserves the records. Reopening never restarts a model task automatically.
+preserves the records. Reopening never restarts a model task automatically or
+reattaches to live work.
 
 After an interruption, open the task under Recent. If recovery is needed, inspect
 the preview before choosing **Tidy up and keep the record**. Recovery only

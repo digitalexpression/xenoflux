@@ -1,4 +1,4 @@
-# Audit profiles and Codex runs
+# Audit profiles and native client runs
 
 `profiles`, `show`, `diff` and `export` inspect evidence without starting model tasks. `run` executes an explicitly started experiment. For the browser workflow, use [the app guide](APP.md).
 

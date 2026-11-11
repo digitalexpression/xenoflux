@@ -12,7 +12,7 @@ Version identity is recorded in the [package manifest](../package.json),
 | [Installation](user/INSTALLATION.md) | Install, update, remove or use the offline bundle. |
 | [The Xenoflux app](user/APP.md) | Create profiles, compare tasks, read reports and request AI review. |
 | [Profiles](user/PROFILES.md) | Create, sign in, inspect, launch and manage profiles. |
-| [Audit profiles and Codex runs](user/AUDIT.md) | Inspect setups and sessions, compare results and export evidence. |
+| [Audit profiles and native client runs](user/AUDIT.md) | Inspect setups and sessions, compare results and export evidence. |
 | [Controlled experiments](user/AUDIT-EXPERIMENTS.md) | Author CLI experiments, run, recover and clean them. |
 | [Evidence and capture](user/AUDIT-EVIDENCE.md) | Understand replay, provenance, telemetry and capture limits. |
 | [Repeated trials and external reviews](user/AUDIT-REVIEWS.md) | Run series/cohorts and attach external review or check records. |

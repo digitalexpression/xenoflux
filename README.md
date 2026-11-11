@@ -1,6 +1,6 @@
 # Xenoflux
 
-A Codex profile manager for macOS.
+Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
 
 ## Install
 
@@ -12,7 +12,7 @@ npm install -g xenoflux
 
 ## Create a profile
 
-Replace `Research` with your profile name:
+For Codex CLI/Desktop, replace `Research` with your profile name:
 
 ```sh
 xfx profile create Research --apply --close-clients
@@ -24,7 +24,9 @@ does not. Repeated `desktop open` focuses the running profile. To preview setup 
 run `xfx profile create Research` without `--apply`.
 
 npm's global bin directory must already be on `PATH`. You need supported Node.js
-and a Codex CLI executable; desktop profiles also need Codex desktop. See
+and the selected native CLI installed separately; Codex desktop profiles also need
+Codex desktop. For Claude Code and GitHub Copilot CLI, choose the client in the
+app’s **Create profile** flow and follow its native sign-in guidance. See
 [Installation](docs/user/INSTALLATION.md) for requirements,
 managed/offline setup and updates, and [Profiles](docs/user/PROFILES.md) to continue an
 interrupted sign-in. Use `xfx --help` for all commands.
@@ -37,11 +39,13 @@ The local browser app supports:
 xfx ui
 ```
 
-Create empty or from-source profiles, run a task comparison and read its report
+Create empty or from-source profiles for any of the three CLI clients, run a
+same-client or mixed-client task comparison and read its report
 in a local browser app. It also supports setup/session comparisons
 and external review import. From a report, start an ordinary AI review with a
 selected profile and read its captured response. See
-[The Xenoflux app](docs/user/APP.md).
+[The Xenoflux app](docs/user/APP.md), including its
+[4.0.0 limits](docs/user/APP.md#400-scope-and-limits).
 
 For version and distribution identity, see the [package manifest](package.json),
 [GitHub releases](https://github.com/digitalexpression/xenoflux/releases) and

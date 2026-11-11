@@ -1,7 +1,7 @@
 {
   "name": "xenoflux",
-  "version": "3.1.1",
-  "description": "Codex profile manager for macOS",
+  "version": "4.0.0",
+  "description": "Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.",
   "type": "module",
   "bin": {
     "xfx": "bin/xfx.js"
