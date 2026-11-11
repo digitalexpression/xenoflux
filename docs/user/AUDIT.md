@@ -5,9 +5,13 @@
 ## Compare profile setup for a repository
 
 ```sh
-xfx audit profiles Default Research --repo /path/to/repository --client cli
-xfx audit profiles Default Research --repo /path/to/repository --client desktop
+xfx audit profiles Default Research --repo /path/to/repository --surface cli
+xfx audit profiles Default Research --repo /path/to/repository --surface desktop
 ```
+
+Use `--surface` for the CLI or Desktop setup surface. Xenoflux 4.0 removes
+the former `--client cli|desktop` flag. Update command lines and scripts that
+use it. Existing saved reports and profiles stay on disk as written.
 
 Compare settings, instructions, agents, skills/package resources, rules, integrations and memory settings with origin, readable differences and explicit gaps. Client applicability may be unknown. Discovery is independent of copy eligibility; it proves neither native loading nor runtime availability.
 

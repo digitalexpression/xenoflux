@@ -197,3 +197,20 @@ test('finalized replay keeps all normalized report evidence fixed as native hist
     assert.equal(buildAuditExplanation(projected, counterpart).findings.find(finding => finding.rule === 'editable-file-boundary').classification, 'similar');
   }
 });
+
+test('an inherited executable can reopen exact retained evidence while a refused join preserves the frozen core', async () => {
+  const f = fixture();
+  delete f.parent.record.spec.profiles[0].executable;
+  f.current.report.comparisonEvidence = freezeAuditComparisonEvidence(f.current.report);
+  const projected = await projectRetainedAuditRun({}, f.current, f.adapters);
+  assert.equal(projected.reportProjection.context, 'verified');
+  assert.equal(freezeAuditComparisonEvidence(projected).verification.nativeCompletion, 'completed');
+
+  f.current.record.profile = { ...f.current.record.profile, executable: '/fixture/different' };
+  let reads = 0;
+  const refused = await projectRetainedAuditRun({}, f.current, { ...f.adapters, readNative: async () => { reads++; } });
+  assert.equal(reads, 0);
+  assert.equal(refused.reportProjection.context, 'unavailable');
+  assert.deepEqual(refused.comparisonEvidence, f.current.report.comparisonEvidence);
+  assert.equal(freezeAuditComparisonEvidence(refused).verification.nativeCompletion, 'completed');
+});

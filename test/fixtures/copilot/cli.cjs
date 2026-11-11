@@ -38,7 +38,7 @@ function handle({ method, id, params }) {
     case 'sessions.readPersistedEvents':
       reply({ cursor: 'fixture-cursor', cursorStatus: 'ok', hasMore: false, events: [
         { id: 'stored-1', type: 'user.message', data: { content: 'Stored prompt.' } },
-        { id: 'stored-2', type: 'assistant.message', data: { content: config.label } },
+        { id: 'stored-2', type: 'assistant.message', data: { content: config.storedText ?? config.label } },
       ] });
       break;
     case 'session.create':
@@ -56,6 +56,10 @@ function handle({ method, id, params }) {
       if (config.escapedDescendant) {
         const sleeper = spawn('/bin/sleep', ['3'], { detached: true, stdio: 'ignore' });
         sleeper.unref();
+      }
+      if (config.rateLimited) {
+        event({ id: 'fixture-rate-limit', type: 'session.error', data: { errorType: 'rate_limit' } });
+        break;
       }
       if (config.noTools) {
         const final = transcript.findLast(value => value.type === 'assistant.message');

@@ -4,7 +4,7 @@ import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { selectionKey, validateAuditSpec } from './audit-spec.js';
+import { CODEX_PERMISSION_MODES, selectionKey, validateAuditSpec } from './audit-spec.js';
 import { inspectAuditRepository, authorizeAuditWorkspaceParent, createAuditWorkspace,
   snapshotAuditWorkspace, setAuditWorkspaceActive } from './audit-workspace.js';
 import { createExperiment, createExperimentRun, writeAuditState, finalizeAuditRecord,
@@ -250,7 +250,8 @@ export async function previewAuditExperiment(store, input, context = {}) {
       const requested = selection, codex = (profile.client ?? 'codex') === 'codex';
       if (requested.execution?.permissionMode && !(profile.client === 'claude-code'
         ? ['default', 'acceptEdits', 'plan'].includes(requested.execution.permissionMode)
-        : profile.client === 'copilot' && COPILOT_PERMISSION_MODES.includes(requested.execution.permissionMode))
+        : profile.client === 'copilot' ? COPILOT_PERMISSION_MODES.includes(requested.execution.permissionMode)
+          : codex && CODEX_PERMISSION_MODES.includes(requested.execution.permissionMode))
         || requested.execution?.route && profile.client !== 'copilot')
         throw new Error('The selected client does not support this execution override');
       if (!codex && spec.captureRequirements?.context)
@@ -578,7 +579,7 @@ export async function runAuditExperiment(store, input, context = {}) {
             process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname(), ...(info.nativeAncestry ? { nativeAncestry: info.nativeAncestry } : {}) },
             workspace: { ...workspaceIntent, active: true } }) },
           limits: { id: runRecord.id },
-          sandbox: spec.sandbox,
+          sandbox: (profile.client ?? 'codex') === 'codex' ? selection.execution?.permissionMode ?? spec.sandbox : spec.sandbox,
           ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
           onPhase: async phase => captureState({ phase }),
           onTaskEnd: async evidence => {

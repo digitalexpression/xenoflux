@@ -44,7 +44,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   profile rename NAME NEW_NAME | profile delete NAME
   profile bind NAME REPOSITORY
   profile unbind NAME [REPOSITORY]        Remove the native binding, or only the supplied repository binding
-  audit profiles LEFT RIGHT [--repo DIRECTORY] [--client cli|desktop]
+  audit profiles LEFT RIGHT [--repo DIRECTORY] [--surface cli|desktop]
   audit show --profile NAME --id TASK_ID | audit show REPORT.json
   audit diff --left-profile NAME --left-id TASK_ID --right-profile NAME --right-id TASK_ID
     [--same-task LABEL] [--variables LABEL,LABEL] [--expect-model MODEL --expect-effort EFFORT]
@@ -56,7 +56,7 @@ Usage: xfx [--store DIRECTORY] [--json] COMMAND
   audit evaluate UUID|REPORT.json [--spec REVIEWS.json]  Save a review packet or reviewed revision
   audit recover EXPERIMENT_UUID [--apply]  Reconcile interruption without restarting tasks
   audit clean EXPERIMENT_UUID [--apply]    Remove verified inactive owned checkouts
-  audit export [UUID | REPORT.json | profiles LEFT RIGHT | native selection flags]
+  audit export [UUID | REPORT.json | profiles LEFT RIGHT [--surface cli|desktop] | native selection flags]
     --output FILE [--format json|markdown]  Freeze observed evidence without copying native transcripts
     [--include-content]                   Include redacted source text in a profile setup export
     [--include-replay-content]            Include recorded messages and tool bodies in a session export
@@ -102,7 +102,7 @@ try {
     if (value.startsWith('--')) {
       const equals = value.indexOf('=');
       const flag = equals < 0 ? value : value.slice(0, equals);
-      if (!['--store', '--description', '--repo', '--base', '--from', '--codex', '--codex-version', '--profile', '--id', '--search', '--limit', '--include', '--background-path', '--key', '--expect-model', '--expect-effort', '--same-task', '--variables', '--left-profile', '--left-id', '--right-profile', '--right-id', '--client', '--output', '--format', '--spec', '--port'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
+      if (!['--store', '--description', '--repo', '--base', '--from', '--codex', '--codex-version', '--profile', '--id', '--search', '--limit', '--include', '--background-path', '--key', '--expect-model', '--expect-effort', '--same-task', '--variables', '--left-profile', '--left-id', '--right-profile', '--right-id', '--surface', '--output', '--format', '--spec', '--port'].includes(flag)) throw new Error(`Unknown option: ${flag}`);
       if (options[flag] !== undefined) throw new Error(`Repeated option: ${flag}`);
       if (equals < 0 && (argv[i + 1] === undefined || argv[i + 1].startsWith('--'))) throw new Error(`Missing value for ${flag}`);
       const argument = equals < 0 ? argv[++i] : value.slice(equals + 1);
@@ -143,7 +143,7 @@ try {
       '--include-content': command === 'audit' && params[0] === 'export',
       '--left-profile': command === 'audit', '--left-id': command === 'audit',
       '--right-profile': command === 'audit', '--right-id': command === 'audit',
-      '--client': command === 'audit', '--format': command === 'audit', '--output': command === 'audit',
+      '--surface': command === 'audit', '--format': command === 'audit', '--output': command === 'audit',
       '--spec': command === 'audit' && ['run', 'cohort', 'evaluate'].includes(params[0]),
       '--demo': command === 'ui', '--no-open': command === 'ui', '--port': command === 'ui',
     };

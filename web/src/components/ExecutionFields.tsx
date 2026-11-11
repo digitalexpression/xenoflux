@@ -1,13 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { apiGet, apiPost } from '@/api/client';
-import type { ExecutionSelection, ModelCatalogSnapshot, NativeClientId } from '@/api/types';
+import type { ExecutionSelection, ModelCatalogSnapshot, NativeClientId, PermissionMode } from '@/api/types';
 import { Button } from '@/components/ui/button';
 
 type CatalogState = { context: string; snapshot: ModelCatalogSnapshot | null; busy: boolean; message: string };
 
-export function ExecutionFields({ profile, client, workspace, value, onChange, disabled }: {
+export function ExecutionFields({ profile, client, workspace, value, onChange, disabled, allowPermissionMode = true }: {
   profile: string; client?: NativeClientId; workspace: string; value: ExecutionSelection;
-  onChange: (value: ExecutionSelection) => void; disabled?: boolean;
+  onChange: (value: ExecutionSelection) => void; disabled?: boolean; allowPermissionMode?: boolean;
 }) {
   const id = useId();
   const context = JSON.stringify([profile, client, workspace]);
@@ -15,9 +15,6 @@ export function ExecutionFields({ profile, client, workspace, value, onChange, d
   currentContext.current = context;
   const generation = useRef(0);
   const activeRefresh = useRef<string | null>(null);
-  const change = useRef(onChange);
-  change.current = onChange;
-  const previousContext = useRef(context);
   const [state, setState] = useState<CatalogState>({ context, snapshot: null, busy: false, message: '' });
   const [now, setNow] = useState(Date.now());
   const [cancelling, setCancelling] = useState(false);
@@ -25,8 +22,6 @@ export function ExecutionFields({ profile, client, workspace, value, onChange, d
   useEffect(() => {
     const owner = ++generation.current;
     setCancelling(false);
-    if (previousContext.current !== context) change.current({});
-    previousContext.current = context;
     setState({ context, snapshot: null, busy: false, message: profile ? 'Checking saved model catalog…' : 'Choose a profile to discover its models.' });
     if (profile) {
       apiGet<ModelCatalogSnapshot>('/api/catalog', { profile, workspace, ...(client ? { client } : {}) }).then(snapshot => {
@@ -44,7 +39,7 @@ export function ExecutionFields({ profile, client, workspace, value, onChange, d
         activeRefresh.current = null;
       }
     };
-  }, [context, profile, workspace]);
+  }, [context, client, profile, workspace]);
 
   const snapshot = state.context === context ? state.snapshot : null;
   useEffect(() => {
@@ -57,8 +52,11 @@ export function ExecutionFields({ profile, client, workspace, value, onChange, d
   }, [snapshot]);
   const expired = snapshot?.expiresAt ? Date.parse(snapshot.expiresAt) <= now : false;
   const ready = snapshot?.status === 'ready' && !expired;
-  const models = ready ? snapshot.models.filter(model => !model.hidden) : [];
+  const models = ready ? snapshot.models.filter(model => !model.hidden && model.selectable !== false) : [];
   const selected = value.model ? models.find(model => model.model === value.model) : models.find(model => model.isDefault);
+  const routes = ready && client === 'copilot' ? snapshot.auto?.tiers.filter(tier => tier.type === 'auto' && tier.enabled && tier.visible) ?? [] : [];
+  const defaultRoute = routes.find(route => route.id === snapshot?.auto?.defaultTier);
+  const modes = (!client || client === 'codex' || ready) ? snapshot?.permissionModes ?? snapshot?.capabilities?.permissionModes ?? [] : [];
   const efforts = selected?.supportedReasoningEfforts ?? [];
   const busy = state.context === context && state.busy;
 
@@ -109,9 +107,11 @@ export function ExecutionFields({ profile, client, workspace, value, onChange, d
       <div className="flex-1 min-w-[140px]">
         <label className="field-label" htmlFor={`${id}-model`}>Model ID</label>
         <select id={`${id}-model`} className="input font-mono" value={value.model ?? ''} disabled={disabled}
-          aria-describedby={`${id}-catalog`} onChange={event => onChange({ model: event.target.value || undefined })}>
+          aria-describedby={`${id}-catalog`} onChange={event => onChange({ permissionMode: value.permissionMode, model: event.target.value || undefined,
+            ...(event.target.value === 'auto' && !defaultRoute ? { route: routes[0]?.id } : {}) })}>
           <option value="">Use profile default</option>
-          {value.model && !models.some(model => model.model === value.model) ? <option value={value.model} disabled>{value.model} · unverified</option> : null}
+          {routes.length ? <option value="auto">Auto · Copilot routing</option> : null}
+          {value.model && !(value.model === 'auto' && routes.length) && !models.some(model => model.model === value.model) ? <option value={value.model} disabled>{value.model} · unverified</option> : null}
           {models.map(model => <option key={model.id} value={model.model}>{model.displayName || model.model} · {model.model}</option>)}
         </select>
       </div>
@@ -126,6 +126,25 @@ export function ExecutionFields({ profile, client, workspace, value, onChange, d
         <p id={`${id}-effort-hint`} className="hint mt-1">{selected?.supportedReasoningEfforts === null ? 'Effort support is unknown.' : selected && !efforts.length ? 'No explicit efforts advertised.' : !selected ? 'Refresh models to verify effort choices.' : 'Efforts advertised for this model.'}</p>
       </div>
     </div>
+    {value.model === 'auto' ? <div>
+      <label className="field-label" htmlFor={`${id}-route`}>Auto route</label>
+      <select id={`${id}-route`} className="input" value={value.route ?? ''} disabled={disabled} onChange={event => onChange({ ...value, route: event.target.value || undefined })}>
+        {defaultRoute ? <option value="">Default · {defaultRoute.displayName}</option> : null}
+        {value.route && !routes.some(route => route.id === value.route) ? <option disabled value={value.route}>{value.route} · unverified</option> : null}
+        {routes.map(route => <option key={route.id} value={route.id}>{route.displayName}</option>)}
+      </select>
+      <p className="hint">Copilot can route each turn to a different model. Repeating this comparison may produce a different route.</p>
+    </div> : null}
+    {allowPermissionMode ? <div>
+      <label className="field-label" htmlFor={`${id}-permission`}>Permission mode</label>
+      <select id={`${id}-permission`} className="input" value={value.permissionMode ?? ''} disabled={disabled}
+        aria-describedby={`${id}-permission-hint`} onChange={event => onChange({ ...value, permissionMode: (event.target.value || undefined) as PermissionMode | undefined })}>
+        <option value="">Use {client && client !== 'codex' ? 'profile default' : 'default permissions'}</option>
+        {value.permissionMode && !modes.includes(value.permissionMode) ? <option value={value.permissionMode} disabled>{value.permissionMode} · unverified</option> : null}
+        {modes.map(mode => <option key={mode} value={mode}>{mode}</option>)}
+      </select>
+      <p id={`${id}-permission-hint`} className="hint">{modes.length ? 'Applies only to this job.' : 'Explicit permission choices are unavailable for this context.'}</p>
+    </div> : null}
     <div className="flex flex-wrap gap-3 items-center">
       <Button onClick={() => void refresh()} disabled={disabled || !profile || busy} busy={busy} busyLabel="Refreshing models…">Refresh models</Button>
       {busy ? <Button onClick={() => void cancel()} disabled={cancelling}>Cancel model refresh</Button> : null}

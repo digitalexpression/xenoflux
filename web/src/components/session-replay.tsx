@@ -16,7 +16,7 @@ import type { AgentEvidence } from '@/lib/replay-agent-summary';
 import { ReplayAgentPanel } from '@/components/replay-agent-panel';
 
 type Side = 'a' | 'b';
-type ReplaySide = { side: Side; profile: string; replay: SessionReplay | null };
+type ReplaySide = { side: Side; profile: string; client?: string; replay: SessionReplay | null };
 type Row = { side: Side; profile: string; replay: SessionReplay; session: ReplaySession; event: ReplayEvent; key: string; at: number | null; elapsedMs: number | null };
 type ReplayLocation = { selectedKey: string; query: string; inspecting: boolean; revealed: boolean; originSide: Side; originScroll: number; inspectorScroll: number; openDetails: boolean[] };
 const NAVIGATION_LIMIT = 8;
@@ -530,7 +530,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
               ? <details><summary className="cursor-pointer text-ui">Show full recorded content ({selected.event.body.length.toLocaleString()} characters)</summary>
                 <pre className="code-block whitespace-pre-wrap break-words">{selected.event.body}</pre></details>
               : <pre className="code-block whitespace-pre-wrap break-words">{selected.event.body}</pre> : null}
-            <details><summary className="cursor-pointer text-ui">Source and event details</summary><div className="flex flex-col gap-2 pt-2">            <p className="hint">Recorded label: {selected.event.label}</p><p className="hint">{selected.event.kind} · session {selected.event.sessionId} · turn {selected.event.turnId ?? 'not recorded'} · source line {selected.event.sourceLine ?? 'not recorded'}</p>
+            <details><summary className="cursor-pointer text-ui">Source and event details</summary><div className="flex flex-col gap-2 pt-2">            <p className="hint">Client: {sides.find(side => side.side === selected.side)?.client ?? 'not recorded'} · Recorded label: {selected.event.label}</p><p className="hint">{selected.event.kind} · session {selected.event.sessionId} · turn {selected.event.turnId ?? 'not recorded'} · source line {selected.event.sourceLine ?? 'not recorded'}</p>
             <p className="hint">Source fingerprint: <code>{selected.session.source.fingerprint ?? 'not available'}</code></p>
             <p className="hint">Event reference: <code>{selected.event.id}</code></p>
             {selected.event.status ? <p className="hint">Recorded status: {selected.event.status}</p> : null}

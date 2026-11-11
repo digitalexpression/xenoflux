@@ -1,6 +1,7 @@
 import { Link, type RouteObject } from 'react-router';
 import { Page, PageTitle } from './components/layout';
 import { BrowseSessions } from './pages/BrowseSessions';
+import { NativeSessions } from './pages/NativeSessions';
 import { ChooseSessions } from './pages/ChooseSessions';
 import { CopyPreview } from './pages/CopyPreview';
 import { Export } from './pages/Export';
@@ -30,6 +31,7 @@ export const routes: RouteObject[] = [
   { path: '/profiles/:name/copy', element: <CopyPreview mode="copy" /> },
   { path: '/compare/setups', element: <SetupComparison /> },
   { path: '/compare/setups/skills/:skill', element: <SkillDetail /> },
+  { path: '/compare/sessions/native', element: <NativeSessions /> },
   { path: '/compare/sessions', element: <ChooseSessions /> },
   { path: '/sessions', element: <BrowseSessions /> },
   { path: '/reports/open', element: <OpenSaved /> },

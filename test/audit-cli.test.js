@@ -78,7 +78,7 @@ test('audit profiles reports resources independently of profile-copy support and
 
   const env = { HOME: f.root };
   // No profile-copy eligibility is involved: the audit inventories all known origins.
-  const result = audit(f, ['profiles', 'A', 'B', '--repo', repo, '--client', 'cli'], { extraEnv: env });
+  const result = audit(f, ['profiles', 'A', 'B', '--repo', repo, '--surface', 'cli'], { extraEnv: env });
   assert.ok([0, 2].includes(result.status), result.stderr);
   const value = result.value;
   assert.equal(value.kind, 'audit-profile-comparison');
@@ -95,7 +95,7 @@ test('audit profiles reports resources independently of profile-copy support and
   await assert.rejects(stat(f.marker), { code: 'ENOENT' });
 
   const snapshotPath = join(f.root, 'profiles.json');
-  const saved = audit(f, ['export', 'profiles', 'A', 'B', '--repo', repo, '--client', 'cli', '--format', 'json', '--output', snapshotPath], { extraEnv: env });
+  const saved = audit(f, ['export', 'profiles', 'A', 'B', '--repo', repo, '--surface', 'cli', '--format', 'json', '--output', snapshotPath], { extraEnv: env });
   assert.ok([0, 2].includes(saved.status), saved.stderr);
   assert.equal(saved.value.kind, 'audit-export');
   assert.equal(saved.value.sourceKind, 'audit-profile-comparison');
@@ -292,7 +292,7 @@ test('audit validates selectors and options, and retired comparison commands are
     assert.equal(result.status, 1);
     assert.equal(result.stdout, '');
   }
-  const result = audit(f, ['profiles', 'A', 'B', '--repo', 'relative/project', '--client', 'cli']);
+  const result = audit(f, ['profiles', 'A', 'B', '--repo', 'relative/project', '--surface', 'cli']);
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
 });
@@ -466,4 +466,14 @@ test('setup comparison proves removals only from complete matching inventories',
   assert.ok(!unknown.removed.some(row => row.category === 'memory-setting'));
   assert.ok(unknown.unavailable.some(row => row.category === 'memory-setting' && row.name === 'memories.enabled'));
   await assert.rejects(stat(f.marker), { code: 'ENOENT' });
+});
+
+test('CLI surface flag names the Codex surface and retires the old flag', async t => {
+  const f = await fixture(t);
+  const old = audit(f, ['profiles', 'A', 'B', '--client', 'cli']);
+  assert.notEqual(old.status, 0);
+  assert.match(old.stderr, /Unknown option: --client/);
+  const unsupported = audit(f, ['profiles', 'A', 'B', '--surface', 'claude-code']);
+  assert.notEqual(unsupported.status, 0);
+  assert.match(unsupported.stderr, /Choose --surface cli or desktop/);
 });

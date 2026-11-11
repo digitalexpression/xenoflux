@@ -13,7 +13,7 @@ test('previews and runs Codex Default versus Claude Code Default through the rea
     await page.getByRole('textbox', { name: /Codex program/ }).fill(fixture.executable);
     await page.getByRole('button', { name: 'Review before starting' }).click();
     await expect(page.getByText('Ready to start')).toBeVisible();
-    await expect(page.getByText('Claude Code uses its native permission rules.', { exact: false })).toBeVisible();
+    await expect(page.getByText('These sides use different native permission rules.', { exact: false })).toBeVisible();
     expect(fixture.calls.captures).toEqual([]);
     await page.getByRole('button', { name: 'Start 2 model runs' }).first().click();
     await expect(page.getByRole('region', { name: 'Tasks completed · evidence partial' })).toBeVisible({ timeout: 15000 });

@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { createClientCatalog, discoverCodexModels, validateCatalogSelection } from './client-catalog.js';
 import { discoverCopilotModels } from './copilot-runtime.js';
 import { discoverClaudeModels } from './claude-runtime.js';
+import { CODEX_PERMISSION_MODES } from './audit-spec.js';
 import { resolveProfileExecutionProfile } from './audit-profile.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { acquire, privateDirectory, readJSON, record, release } from './metadata.js';
@@ -59,15 +60,28 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
   const guard = (profile, action) => withProfileOperation(store, profile.profileId,
     { waitMs: 5000, recovery: true, ...context.lockOptions }, action);
 
+  const withPermissions = (snapshot, client) => client === 'codex' ? { ...snapshot, permissionModes: CODEX_PERMISSION_MODES } : snapshot;
   async function get(input) {
     const chosen = await selected(input);
     const snapshot = cache.get(chosen) ?? unavailable('catalog-not-refreshed', chosen.profile.client);
-    return snapshot.status === 'stale' ? { ...snapshot, status: 'unavailable' } : snapshot;
+    const view = snapshot.status === 'stale' ? { ...snapshot, status: 'unavailable' } : snapshot;
+    return withPermissions(view, chosen.profile.client ?? 'codex');
   }
   async function validate(input, execution) {
-    if (!execution?.model && !execution?.reasoningEffort) return { status: 'inherited' };
+    if (!execution?.model && !execution?.reasoningEffort && !execution?.permissionMode && !execution?.route) return { status: 'inherited' };
     const snapshot = await get(input);
-    try { return validateCatalogSelection(snapshot, execution); }
+    try {
+      const client = snapshot.scope?.environmentBinding?.client ?? input.client ?? 'codex';
+      const modes = client === 'codex' ? snapshot.permissionModes
+        : snapshot.status === 'ready' ? snapshot.permissionModes ?? snapshot.capabilities?.permissionModes : null;
+      if (execution.permissionMode && !modes?.includes(execution.permissionMode))
+        throw new UiError(422, 'The selected permission mode is unavailable. Refresh the catalog or use the profile default.', 'catalog-permission-unavailable');
+      if (input.executable && (execution.model || execution.reasoningEffort)
+        && snapshot.scope?.environmentBinding?.executable?.path !== input.executable)
+        throw new UiError(422, 'The model catalog belongs to another executable. Use the profile executable or inherit its settings.', 'catalog-context-changed');
+      return execution.model || execution.reasoningEffort || execution.route
+        ? validateCatalogSelection(snapshot, execution) : { status: 'validated' };
+    }
     catch (error) {
       if (typeof error.code === 'string' && error.code.startsWith('catalog-'))
         throw new UiError(422, error.message, error.code);
@@ -120,7 +134,7 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
         onBeforeDiscover: () => { assertOpen(work); work.discoveryAttempted = true; } });
       state.shutdown = result.process?.shutdown ?? state.shutdown; state.status = result.status;
       await save();
-      return result;
+      return withPermissions(result, profile.client ?? 'codex');
     } catch (error) {
       state.status = work.discoveryAttempted && state.shutdown?.groupTerminated !== true ? 'uncertain' : 'unavailable';
       state.reason = typeof error.code === 'string' ? error.code : 'catalog-discovery-failed';

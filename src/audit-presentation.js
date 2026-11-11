@@ -15,8 +15,15 @@ import { projectAuditWorkspacePatch } from './audit-workspace-patch.js';
 const list = value => Array.isArray(value) ? value : [];
 const MAX_PRESENTED_STEPS = 80;
 const CAPTURE_FAILURE_TEXT = Object.freeze({
+  'requested-permission-unconfirmed': 'Codex did not confirm the requested permission mode. The model task did not start.',
   'startup-command-sandbox-unavailable': 'The native command sandbox could not be verified, so the model task did not start.',
 });
+export function nativeLimitReached(run) {
+  const reports = [run?.reason, ...list(run?.capture?.errors).map(error => error?.code)];
+  return reports.some(value => typeof value === 'string'
+    && /(?:^|[ _.-])(?:rate[ _-]*limit(?:ed|[ _-]*reached)?|usage[ _-]*limit|quota[ _-]*(?:exceeded|exhausted)|resource[ _-]*exhausted)(?:$|[ _.-])/i.test(value));
+}
+
 function knownCaptureFailures(run) {
   const errors = [...list(run?.capture?.errors), ...list(run?.captureCheckpoint?.capture?.errors)];
   const codes = [...new Set(errors.map(error => error?.code).filter(code => Object.hasOwn(CAPTURE_FAILURE_TEXT, code)))];
@@ -24,14 +31,18 @@ function knownCaptureFailures(run) {
     || [run?.outcome?.nativeTurnStatus, run?.outcome?.task?.nativeTurnStatus, run?.task?.nativeTurnStatus,
       run?.comparisonEvidence?.verification?.nativeCompletion].some(status => ['completed', 'failed', 'interrupted', 'cancelled', 'aborted'].includes(status))
     || list(run?.outcome?.checks).length > 0 || list(run?.checks).length > 0;
-  return codes.map(code => ({ code, text: hasNativeActivity
-    ? 'Native command sandbox preflight reported an unavailable check.' : CAPTURE_FAILURE_TEXT[code] }));
+  return [
+    ...codes.map(code => ({ code, text: code === 'startup-command-sandbox-unavailable' && hasNativeActivity
+      ? 'Native command sandbox preflight reported an unavailable check.' : CAPTURE_FAILURE_TEXT[code] })),
+    ...(nativeLimitReached(run) ? [{ code: 'native-limit-reached', text: 'The native client reported a usage or rate limit.' }] : []),
+  ];
 }
 
 /** Completion is distinct from check results and capture coverage. */
 export function presentRunExecution(run) {
-  if (knownCaptureFailures(run).some(failure => failure.text === CAPTURE_FAILURE_TEXT['startup-command-sandbox-unavailable'])
+  if (knownCaptureFailures(run).some(failure => failure.text === CAPTURE_FAILURE_TEXT['startup-command-sandbox-unavailable'] || failure.code === 'requested-permission-unconfirmed')
     || run?.status === 'not-started') return { state: 'not-started', text: 'Model task did not start' };
+  if (nativeLimitReached(run)) return { state: 'failed', text: 'Native usage or rate limit reached' };
   const native = freezeAuditComparisonEvidence(run ?? {}).verification?.nativeCompletion;
   if (native === 'completed') return { state: 'completed', text: 'Model task completed' };
   if (native === 'failed') return { state: 'failed', text: 'Model task failed or stopped' };
@@ -326,9 +337,43 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
   const notStarted = executions.every(item => item.state === 'not-started');
   const completed = executions.every(item => item.state === 'completed');
   if (names.a === names.b) { names.a = `${names.a} (left)`; names.b = `${names.b} (right)`; }
-  const side = (key, run) => ({ side: key === 'left' ? 'a' : 'b', profile: key === 'left' ? names.a : names.b,
-    client: CLIENT_TEXT[run.source?.client ?? value.selection?.[key]?.client] ?? 'Client not known', time: sessionTime(run),
-    session: run.source?.nativeSessionId ?? value.selection?.[key]?.sessionId ?? run.id ?? 'not recorded' });
+  const nativeClient = run => run.clientIdentity?.client ?? run.nativeReference?.client ?? run.profile?.client ?? null;
+  const clientText = (key, run) => ({ 'claude-code': 'Claude Code CLI', copilot: 'GitHub Copilot CLI' }[nativeClient(run)]
+    ?? CLIENT_TEXT[run.source?.client ?? value.selection?.[key]?.client] ?? (nativeClient(run) === 'codex' ? 'Codex CLI' : 'Client not known'));
+  const side = (key, run) => {
+    const readContext = run.source?.readContext;
+    const context = readContext ?? run.environmentBinding ?? run.profile;
+    const surface = readContext?.surface ?? run.clientIdentity?.surface ?? context?.surface;
+    const executionLocation = readContext?.executionLocation ?? run.clientIdentity?.executionLocation ?? context?.executionLocation;
+    const provenance = readContext || run.clientIdentity || run.environmentBinding ? {
+      basis: readContext ? 'Import read context' : 'Execution context',
+      ...(typeof readContext?.profileName === 'string' ? { profileName: readContext.profileName } : {}),
+      surface: ['cli', 'desktop'].includes(surface) ? surface : null,
+      rootMode: ['implicit', 'explicit'].includes(context?.rootMode) ? context.rootMode : null,
+      executionLocation: ['local', 'ssh', 'cloud'].includes(executionLocation) ? executionLocation : null,
+    } : null;
+    const settings = run.settingsEvidence;
+    const permission = source => {
+      const mode = source?.permissionMode;
+      return typeof mode === 'string' ? mode : typeof mode?.value === 'string' ? mode.value : null;
+    };
+    const auto = nativeClient(run) === 'copilot' && (settings?.requested?.model === 'auto' || settings?.confirmed?.model === 'auto'
+      || settings?.observed?.route === 'auto' || list(run.usage?.observations).some(row => row.auto === true));
+    const autoTurns = auto ? list(run.turns).map(turn => {
+      const models = list(run.usage?.observations).filter(row => row.turnId === turn.turnId).map(row => row.model);
+      if (turn.model) models.push(turn.model);
+      if (!models.some(Boolean) && settings?.observed?.model && turn.turnId === run.nativeReference?.turnId) models.push(settings.observed.model);
+      return { turnId: turn.turnId, models: [...new Set(models.filter(model => model && model !== 'auto'))] };
+    }) : null;
+    return { side: key === 'left' ? 'a' : 'b', profile: key === 'left' ? names.a : names.b,
+      client: clientText(key, run), nativeClient: nativeClient(run), time: sessionTime(run),
+      session: run.nativeReference?.sessionId ?? run.source?.nativeSessionId ?? value.selection?.[key]?.sessionId ?? run.id ?? 'not recorded',
+      provenance,
+      permissions: settings ? { requested: permission(settings.requested), sent: permission(settings.sent),
+        confirmed: permission(settings.confirmed), observed: permission(settings.observed) } : null,
+      autoTurns,
+    };
+  };
   const rootContext = run => {
     const rootId = run.source?.threadId ?? run.source?.nativeSessionId;
     const roots = list(run.agents).filter(agent => agent.parentId === null
@@ -363,13 +408,18 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
   const rows = conditions.fields.map(field => ({ key: field.key, name: CONDITION[field.key] ?? field.key,
     label: field.status === 'different' ? 'different' : field.status === 'match' ? 'same' : 'cannot-compare',
     a: valueText(field.key, field.left), b: valueText(field.key, field.right) }));
-  const clients = ['left', 'right'].map(key => (key === 'left' ? left : right).source?.client ?? value.selection?.[key]?.client ?? null);
-  rows.push({ key: 'client', name: 'Client', label: clients.includes(null) ? 'cannot-compare' : clients[0] === clients[1] ? 'same' : 'different',
-    a: CLIENT_TEXT[clients[0]] ?? 'Not recorded', b: CLIENT_TEXT[clients[1]] ?? 'Not recorded' });
+  const clientNames = [clientText('left', left), clientText('right', right)];
+  rows.push({ key: 'client', name: 'Client', label: clientNames.includes('Client not known') ? 'cannot-compare' : clientNames[0] === clientNames[1] ? 'same' : 'different',
+    a: clientNames[0], b: clientNames[1] });
   const differing = rows.filter(row => row.label === 'different').map(row => ({ ...row, intent: declared.has(row.name) ? 'intended' : 'not-marked' }));
   const same = rows.filter(row => row.label === 'same').length, unknown = rows.filter(row => row.label === 'cannot-compare').length;
 
+  const sides = [side('left', left), side('right', right)];
   const limits = [];
+  if (nativeClient(left) && nativeClient(right) && nativeClient(left) !== nativeClient(right))
+    limits.push('These sides use different native permission rules.');
+  if (sides.some(side => side.autoTurns))
+    limits.push('Copilot Auto can select a different model per turn. This pair may not be reproducible.');
   if (!['recorded', 'user-declared'].includes(explanation.conditions.taskAssociation?.status))
     limits.push('Whether both sessions got the same task — the records don’t show it.');
   for (const key of Object.keys(COVERAGE)) {
@@ -488,7 +538,7 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
   });
   return {
     title: title || 'Session comparison',
-    a: side('left', left), b: side('right', right),
+    a: sides[0], b: sides[1],
     replayRootContext: { a: rootContext(left), b: rootContext(right) },
     replay: { a: left.sessionReplay ?? null, b: right.sessionReplay ?? null },
     attempt: {
@@ -616,6 +666,12 @@ export function comparisonSummaryLines(report) {
   return {
     conditions: [
       `${report.a.profile} (${report.a.client}, ${report.a.time}) vs ${report.b.profile} (${report.b.client}, ${report.b.time}).`,
+      ...[report.a, report.b].flatMap(side => [
+        ...(side.provenance ? [row(`${side.profile} · ${side.provenance.basis} · ${[side.provenance.profileName, side.provenance.surface,
+          side.provenance.rootMode, side.provenance.executionLocation].filter(Boolean).join(' · ')}`)] : []),
+        ...(side.permissions ? [row(`${side.profile} permission mode · requested ${side.permissions.requested ?? 'inherited'} · sent ${side.permissions.sent ?? 'not recorded'} · confirmed ${side.permissions.confirmed ?? 'not recorded'} · turn reported ${side.permissions.observed ?? 'not recorded'}`)] : []),
+        ...list(side.autoTurns).map((turn, index) => row(`${side.profile} Auto turn ${index + 1} · ${turn.models.join(', ') || 'model not recorded'}`)),
+      ]),
       `${report.association.title}. ${report.association.text}`,
       ...report.conditions.rows.map(r => row(`${r.name}: ${report.a.profile} ${r.a} → ${report.b.profile} ${r.b} · ${r.intent === 'intended' ? 'you meant to vary this' : 'not marked as intended'}`)),
       row(report.conditions.footer), 'Technical detail:',

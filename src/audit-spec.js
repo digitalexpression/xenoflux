@@ -25,6 +25,8 @@ export function validateAuditApprovalsReviewer(value) {
   return value;
 }
 
+export const CODEX_PERMISSION_MODES = Object.freeze(['read-only', 'workspace-write']);
+
 export function validateExecution(value) {
   if (value === undefined) return undefined;
   allowed(value, ['model', 'reasoningEffort', 'permissionMode', 'route'], 'execution settings');
@@ -32,7 +34,7 @@ export function validateExecution(value) {
   if (value.reasoningEffort !== undefined && !plain(value.reasoningEffort, 1024))
     throw new Error('Reasoning effort must be a bounded native option');
   if (value.route !== undefined && (value.model !== 'auto' || !plain(value.route, 1024))) throw new Error('Select Copilot Auto with a bounded route ID');
-  if (value.permissionMode !== undefined && !['default', 'acceptEdits', 'plan', 'manual', 'assisted'].includes(value.permissionMode))
+  if (value.permissionMode !== undefined && !['default', 'acceptEdits', 'plan', 'manual', 'assisted', 'read-only', 'workspace-write'].includes(value.permissionMode))
     throw new Error('Permission mode is not a supported per-job override');
   return { ...(value.route !== undefined ? { route: value.route } : {}), ...(value.permissionMode !== undefined ? { permissionMode: value.permissionMode } : {}), ...(value.model !== undefined ? { model: value.model } : {}),
     ...(value.reasoningEffort !== undefined ? { reasoningEffort: value.reasoningEffort } : {}) };

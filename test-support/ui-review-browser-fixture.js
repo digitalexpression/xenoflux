@@ -50,7 +50,7 @@ export async function createUiReviewBrowserFixture({ mode = 'complete' } = {}) {
   }
 }
 
-async function seedNativeHistory(app, profileName, threadId, label) {
+export async function seedNativeHistory(app, profileName, threadId, label) {
   const home = app.homes[profileName === 'baseline' ? 'baseline' : 'strict'].home;
   const rolloutPath = join(home, 'sessions', '2026', '11', '02', `rollout-${threadId}.jsonl`);
   const turnId = label === 'baseline' ? '00000000-0000-4000-8000-000000000101' : '00000000-0000-4000-8000-000000000102';

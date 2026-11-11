@@ -12,6 +12,7 @@ import { resolveAuditRepositoryCommit } from './audit-workspace.js';
 import { resolveAuditExecutionProfile, snapshotAuditProfileSettings, compareAuditProfileSettings } from './audit-profile.js';
 import { readAuditRecord } from './audit-experiment-store.js';
 import { showAuditRecord, recoverAuditExperiment } from './audit-experiment.js';
+import { nativeLimitReached } from './audit-presentation.js';
 import { compareAuditRuns } from './audit-report.js';
 import { resolveAuditProfile } from './audit-discovery.js';
 import { buildAuditComparisonConditions } from './audit-conditions.js';
@@ -29,6 +30,7 @@ const checkedId = id => { if (!UUID.test(id ?? '')) throw new UiError(400, 'Choo
 function requestSpec(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Describe the task first.');
   const advanced = request.advanced ?? {};
+  if (Object.hasOwn(advanced, 'sandbox')) throw new Error('Choose permission mode on each comparison side.');
   const execution = request.execution, clients = request.clients;
   if (clients !== undefined && (!clients || typeof clients !== 'object' || Array.isArray(clients)
     || Object.entries(clients).some(([side, client]) => !['a', 'b'].includes(side) || !['codex', 'claude-code', 'copilot'].includes(client))))
@@ -51,7 +53,7 @@ function requestSpec(request) {
       ...(clients?.[sideId] ? { client: clients[sideId] } : {}),
       ...(advanced.program && (!clients?.[sideId] || clients[sideId] === 'codex') ? { executable: advanced.program } : {}), execution: execution && Object.hasOwn(execution, sideId) ? execution[sideId] : defaultExecution })),
     limits: { runMs, ...(runMs === null ? { experimentMs: null } : {}), outputBytes: (advanced.outputMiB ?? 8) * 1024 * 1024, maxRuns: 2 },
-    checks: commandList(request.checks), setup: commandList(advanced.setup), sandbox: advanced.sandbox ?? 'workspace-write',
+    checks: commandList(request.checks), setup: commandList(advanced.setup),
     ...(Object.hasOwn(advanced, 'approvalsReviewer') ? { approvalsReviewer: advanced.approvalsReviewer } : {}),
     allowIncompleteCapture: true, ...(files.length ? { taskContract: { id: 'ui-task', editableFiles: files } } : {}) });
 }
@@ -99,7 +101,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
   }
   async function inspect(spec) {
     for (const selection of spec.profiles)
-      await context.validateSelection?.({ profile: selection.name, ...(selection.client ? { client: selection.client } : {}), workspace: spec.repository }, selection.execution);
+      await context.validateSelection?.({ profile: selection.name, ...(selection.client ? { client: selection.client } : {}), workspace: spec.repository, executable: selection.executable }, selection.execution);
     const profiles = [], snapshots = [];
     const preview = await previewAuditExperiment(store, spec, { ...baseContext,
       resolveProfile: async (...args) => { const value = await baseContext.resolveProfile(...args); profiles.push(identity(value)); return value; },
@@ -146,15 +148,13 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       try { const repo = await resolveAuditRepositoryCommit(path, 'HEAD'); return { path, commit: repo.commit }; }
       catch { return { path, commit: 'HEAD' }; }
     }));
-    const profiles = homes.map(home => ({ name: home.name, ready: home.state === 'ready',
+    const profiles = homes.map(home => ({ name: home.name, surface: 'cli', rootMode: 'explicit', executionLocation: 'local', ready: home.state === 'ready',
       readiness: home.state === 'ready' ? 'Profile available; sign-in and access are checked before Start.' : home.reason ?? 'Set up this profile in Profiles first.' })),
       defaults = { timeMinutes: 15, access: 'its workspace copy, no network', outputCap: '8 MiB', outputMiB: 8, program: '' };
-    const claudeDefault = await lstat(join(defaultUserHome, '.claude')).then(info => info.isDirectory(), () => false);
-    if (await lstat(join(defaultUserHome, '.codex')).then(info => info.isDirectory(), () => false)) profiles.push({ name: 'Default', ...(claudeDefault ? { label: 'Codex Default' } : {}), ready: false,
+    const otherClients = await context.nativeExecutionOptions?.() ?? [];
+    if (await lstat(join(defaultUserHome, '.codex')).then(info => info.isDirectory(), () => false)) profiles.push({ name: 'Default', surface: 'cli', rootMode: 'explicit', executionLocation: 'local', ...(otherClients.length ? { label: 'Codex Default' } : {}), ready: false,
       readiness: 'Choose the Codex program in Advanced settings to preview Default. Its saved setup is not changed.' });
-    if (claudeDefault)
-      profiles.push({ name: 'Default', client: 'claude-code', label: 'Claude Code Default', ready: true,
-        readiness: 'Uses the installed Claude CLI and its native Default profile. Sign-in is checked before the task.' });
+    profiles.push(...otherClients);
     return { profiles, repositories, defaults, simulated: false };
   }
 
@@ -165,23 +165,27 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const reviewed = await inspect(spec), { preview } = reviewed;
     const ready = preview.status === 'ready', token = ready ? randomUUID() : null;
     if (ready) boundedSet(previews, token, { ...reviewed, spec, at: Date.now() });
-    const hasClaude = preview.profiles.some(profile => profile.client === 'claude-code');
-    const hasCopilot = preview.profiles.some(profile => profile.client === 'copilot');
+    const mixed = new Set(preview.profiles.map(profile => profile.client)).size > 1;
     const profileText = profile => `${profile.executable ?? 'Native CLI unavailable'} · ${profile.version ?? 'version not known'} · ${profile.status}${profile.busy ? ' · existing clients stay open' : ''}`;
     return { ready, previewToken: token, blocked: ready ? null : { title: 'This task cannot start yet',
       reason: preview.failures.map(failure => `${failure.profile ? `${failure.profile}: ` : ''}${failure.message}`).join(' ') },
       summary: `2 model runs, one after the other · ${minutes(spec.limits.experimentMs)}`, limit: minutes(spec.limits.experimentMs),
       task: spec.task, files: spec.taskContract?.editableFiles.join(', ') ?? '',
       ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
-      runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: profileLabel(profile, preview.profiles), text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'}` })),
+      runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: profileLabel(profile, preview.profiles), text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'} · Permissions: ${spec.profiles[index].execution.permissionMode ?? ((profile.client ?? 'codex') === 'codex' ? spec.sandbox : 'profile default')} · ${[profile.client, profile.surface, profile.rootMode, profile.executionLocation].filter(Boolean).join(' / ')}` })),
       where: [preview.baseline?.repository ?? spec.repository, `Pinned commit: ${preview.baseline?.commit ?? 'not available'}`,
         'Each profile starts in a separate checkout of this commit. Uncommitted edits and untracked or ignored files are excluded.',
         'Workspace preparation preserves the source checkout. Task, setup and check commands can have effects outside their copy.'],
       checks: spec.checks.map(check => `${check.name}: ${check.argv[2]} (up to ${minutes(check.timeoutMs)})`),
       limits: [`${minutes(spec.limits.runMs)} per profile; ${minutes(spec.limits.experimentMs)} overall.`,
-        `Codex access: ${spec.sandbox}; network disabled inside the sandbox. ${spec.approvalsReviewer ? 'Codex must confirm approval routing to you before a task starts.' : 'Approval routing follows the native profile settings.'} Output per program: ${spec.limits.outputBytes / 1024 / 1024} MiB.`,
-        ...(hasClaude ? ['Claude Code uses its native permission rules. The Codex access setting does not apply to that side.'] : []),
-        ...(hasCopilot ? ['Copilot CLI uses its native permission rules. The Codex access setting does not apply to that side.'] : []),
+        `Output per program: ${spec.limits.outputBytes / 1024 / 1024} MiB. ${spec.approvalsReviewer ? 'Codex must confirm approval routing to you before a task starts.' : 'Each side uses its client’s approval routing.'}`,
+        ...preview.profiles.flatMap((profile, index) => (profile.client ?? 'codex') === 'codex' ? [
+          `${index ? 'Right' : 'Left'} Codex permission mode: ${spec.profiles[index].execution.permissionMode ?? spec.sandbox}; network disabled in its sandbox.`,
+        ] : []),
+        ...(mixed ? ['These sides use different native permission rules.'] : []),
+        ...(preview.profiles.some((profile, index) => profile.client && profile.client !== 'codex' && !spec.profiles[index].execution.permissionMode)
+          ? ['Inherited permissions can allow native actions without asking. The profile’s effective permission mode is unknown before launch.'] : []),
+        ...(spec.profiles.some(profile => profile.execution.model === 'auto') ? ['Copilot Auto can select a different model per turn. This pair may not be reproducible.'] : []),
         ...spec.setup.map(command => `Setup before each task: ${command.name}: ${command.argv[2]} (ordinary program outside the Codex sandbox).`),
         'Native skill-use capture is best effort; incomplete evidence stays explicit. No automatic review or rating is run.'],
       willDo: ['Start exactly two real model tasks using the selected profiles’ sign-ins.', 'Run only the setup and verification commands listed here.', 'Retain the evidence and open the shared comparison report.'],
@@ -313,7 +317,9 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         || ['completed', 'failed'].includes(nativeStatus) || checks.length > 0;
       const startupSandboxUnavailable = !hasNativeActivity && captureErrors.some(error => error?.code === 'startup-command-sandbox-unavailable');
       const reviewerUnavailable = !hasNativeActivity && captureErrors.some(error => error?.code === 'requested-approval-reviewer-unconfirmed');
-      const preflightUnavailable = startupSandboxUnavailable || reviewerUnavailable;
+      const settingsUnavailable = !hasNativeActivity && captureErrors.some(error => ['requested-execution-unconfirmed', 'requested-permission-unconfirmed'].includes(error?.code));
+      const preflightUnavailable = startupSandboxUnavailable || reviewerUnavailable || settingsUnavailable;
+      const limitReached = nativeLimitReached(outcome) || nativeLimitReached(record?.captureCheckpoint?.run);
       const started = phase !== 'not-started' && Boolean(outcome.sourceWorkspace?.directory || record?.state.workspace?.finalFingerprint
         || (['setup', 'task', 'capture', 'checks', 'complete'].includes(phase) && record?.state.workspace?.directory));
       // Process elapsed time is not evidence that a native model turn began or completed.
@@ -328,7 +334,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
         { text: spec?.setup?.length ? 'Setup commands' : 'No setup commands selected', state: !spec?.setup?.length ? 'skipped'
           : setup.some(item => item.status === 'failed') ? 'failed' : phaseState(1, phaseAt > 1 || (setup.length === spec.setup.length && setup.every(item => item.status === 'passed'))) },
         { text: neverStarted ? 'Model task not started' : preflightUnavailable ? 'Model task did not start' : !live && !taskCompleted ? 'Model task stopped; completion not recorded' : 'Model task',
-          state: neverStarted ? 'skipped' : preflightUnavailable || nativeStatus === 'failed' ? 'failed' : phaseState(2, taskCompleted) },
+          state: neverStarted ? 'skipped' : preflightUnavailable || limitReached || nativeStatus === 'failed' ? 'failed' : phaseState(2, taskCompleted) },
         { text: !spec?.checks?.length ? 'No verification checks selected' : preflightUnavailable ? 'Verification checks skipped' : 'Verification checks', state: preflightUnavailable || !spec?.checks?.length ? 'skipped'
           : checks.some(item => item.status === 'failed') ? 'failed' : phaseState(3, checks.length === spec.checks.length && checks.every(item => item.status === 'passed')) },
         { text: 'Evidence saved', state: record?.finalized ? 'done' : phaseState(4, false) },
@@ -336,9 +342,9 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
       const side = index ? 'b' : 'a';
       const waitingForUser = live && [...work.pendingRequests.values()].some(request => request.side === side);
       return { side, profile, state: waitingForUser ? 'Waiting for your response' : record?.state.status ?? 'Not started',
-        failure: startupSandboxUnavailable ? 'The native command sandbox could not be verified, so the model task did not start.'
+        failure: limitReached ? 'The native client reported a usage or rate limit.' : startupSandboxUnavailable ? 'The native command sandbox could not be verified, so the model task did not start.'
           : reviewerUnavailable ? 'Codex did not confirm user approval routing, so the model task did not start.'
-          : captureErrors.some(error => error?.code === 'requested-execution-unconfirmed') ? 'Codex did not confirm the requested model or reasoning effort. The model turn did not start.'
+          : settingsUnavailable ? 'The native client did not confirm the requested settings. The model turn did not start.'
             : captureErrors.some(error => error?.code === 'native-request-failed') ? 'The native approval or input request could not be handled.' : null,
         steps };
     });
@@ -358,6 +364,8 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     const work = active.get(id), request = work?.pendingRequests.get(requestId);
     if (!request || request.signal.aborted || work.controller.signal.aborted)
       throw new UiError(409, 'This comparison request is no longer waiting for an answer.', 'stale-run-request');
+    if (work.pendingRequests.keys().next().value !== requestId)
+      throw new UiError(409, 'Answer the earlier native request first.', 'run-request-queued');
     if (!isDeepStrictEqual(request.request, request.sourceRequest) || !isDeepStrictEqual(request.item, request.sourceItem))
       throw new UiError(409, 'The native request action changed.', 'stale-run-request');
     try { validateClientNativeResponse(request.client, request.request, response); }

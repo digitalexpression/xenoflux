@@ -33,6 +33,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  if(m.method==='thread/start'){
    if(process.argv[2]==='unsupported')return send({id:m.id,error:{code:-32602,message:'unknown approval reviewer option'}});
    return reply({cwd:process.cwd(),thread:{id:threadId,cwd:process.cwd()},approvalPolicy:m.params.approvalPolicy,
+     sandbox:{type:m.params.sandbox==='read-only'?'readOnly':'workspaceWrite',networkAccess:false},
      ...(process.argv[2]==='missing'?{}:{approvalsReviewer:process.argv[2]})});
  }
  if(m.method==='turn/start'){
@@ -52,7 +53,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     } } });
   t.after(() => service.close());
   return { app, service, captures, input: { task: 'Run the exact marker fixture.', a: 'baseline', b: 'strict-review', repository: app.repository,
-    commit: 'HEAD', checks: [], advanced: { sandbox: 'read-only', approvalsReviewer: 'user' } },
+    commit: 'HEAD', checks: [], execution: { a: { permissionMode: 'read-only' }, b: { permissionMode: 'read-only' } }, advanced: { approvalsReviewer: 'user' } },
   messages: async () => (await readFile(wire, 'utf8')).trim().split('\n').map(JSON.parse) };
 }
 

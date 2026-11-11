@@ -61,7 +61,8 @@ async function waitFor(read, predicate, message) {
 test('run preview is read-only and binds exactly two profiles, commands and limits', async t => {
   const app = await fixture(t);
   const input = { ...request(app), files: 'README.md', checks: [{ name: 'smoke', command: 'true' }],
-    advanced: { timeMinutes: 2, outputMiB: 4, sandbox: 'read-only', program: '', reasoningEffort: 'max', setup: [{ name: 'prepare', command: 'true' }] } };
+    execution: { a: { reasoningEffort: 'max', permissionMode: 'read-only' }, b: { reasoningEffort: 'max' } },
+    advanced: { timeMinutes: 2, outputMiB: 4, program: '', setup: [{ name: 'prepare', command: 'true' }] } };
   for (const profile of ['baseline', 'strict-review'])
     await app.provider.refreshCatalog({ requestId: randomUUID(), profile, workspace: app.repository });
   const discoveries = app.calls.catalogs.length;

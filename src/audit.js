@@ -324,15 +324,15 @@ export async function auditCommand(store, params, flags, context = {}) {
   if (present('format') && !['json', 'markdown'].includes(flags['--format'])) throw new Error('Choose export --format json or markdown');
   const profileMode = operation === 'profiles' || (operation === 'export' && args[0] === 'profiles');
   if (profileMode && present('include-replay-content')) throw new Error('--include-replay-content requires a session report');
-  if (!profileMode && (present('repo') || present('client'))) throw new Error('--repo and --client are supported by audit profiles only');
-  if (present('client') && !['cli', 'desktop'].includes(flags['--client'])) throw new Error('Choose --client cli or desktop');
+  if (!profileMode && (present('repo') || present('surface'))) throw new Error('--repo and --surface are supported by audit profiles only');
+  if (present('surface') && !['cli', 'desktop'].includes(flags['--surface'])) throw new Error('Choose --surface cli or desktop');
   if (present('repo') && (!plain(flags['--repo']) || !isAbsolute(flags['--repo']) || resolve(flags['--repo']) !== flags['--repo']))
     throw new Error('Repository path must be absolute and normalized');
-  const options = { ...context, includeReplay: !profileMode, ...(present('repo') ? { repo: flags['--repo'] } : {}), ...(present('client') ? { client: flags['--client'] } : {}) };
+  const options = { ...context, includeReplay: !profileMode, ...(present('repo') ? { repo: flags['--repo'] } : {}), ...(present('surface') ? { client: flags['--surface'] } : {}) };
   let value;
   if (profileMode) {
     const names = operation === 'profiles' ? args : args.slice(1);
-    if (names.length !== 2 || native || paired || expectations || names.some(name => !plain(name))) throw new Error('Use audit profiles LEFT RIGHT [--repo DIRECTORY --client cli|desktop]');
+    if (names.length !== 2 || native || paired || expectations || names.some(name => !plain(name))) throw new Error('Use audit profiles LEFT RIGHT [--repo DIRECTORY --surface cli|desktop]');
     value = await compareAuditProfiles(store, ...names, options);
   } else if (native) {
     if (!present('profile') || !present('id') || args.length || operation === 'diff') throw new Error('Use audit show --profile NAME --id UUID');

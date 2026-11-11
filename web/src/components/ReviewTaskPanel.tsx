@@ -18,6 +18,12 @@ const knownPreStartRefusals = new Set(['review-preview-stale', 'review-profile-c
   'review-profile-access-blocked', 'review-profile-access-unavailable', 'review-profile-busy',
   'job-capacity', 'review-workspace-busy', 'run-active', 'review-active', 'review-uncertain', 'review-task-source-mismatch']);
 
+const clientLabel = { codex: 'Codex', 'claude-code': 'Claude Code', copilot: 'Copilot CLI' };
+const profileKey = (item: ReviewTaskOptions['profiles'][number]) => item.client ? `${item.client}:${item.name}` : item.name;
+
+const matchesProfile = (workspace: ReviewTaskOptions['workspaces'][number], profile: ReviewTaskOptions['profiles'][number] | undefined) =>
+  (!workspace.profile || workspace.profile === profile?.name) && (!workspace.client || workspace.client === (profile?.client ?? 'codex'));
+
 export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
   refId: string; title: string; options: ReviewTaskOptions; tasks: ReviewTaskSummary[]; demo: boolean;
 }) {
@@ -28,9 +34,11 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
   taskIdRef.current = taskId;
   const refIdRef = useRef(refId);
   refIdRef.current = refId;
-  const initialProfile = options.profiles.find(item => item.ready)?.name ?? options.profiles[0]?.name ?? '';
-  const [profile, setProfile] = useState(initialProfile);
-  const [cwd, setCwd] = useState(options.workspaces.find(item => item.available && (!item.profile || item.profile === initialProfile))?.path ?? '');
+  const initialProfile = options.profiles.find(item => item.ready) ?? options.profiles[0];
+  const [profileKeyValue, setProfile] = useState(initialProfile ? profileKey(initialProfile) : '');
+  const selectedProfile = options.profiles.find(item => profileKey(item) === profileKeyValue);
+  const profile = selectedProfile?.name ?? '';
+  const [cwd, setCwd] = useState(options.workspaces.find(item => item.available && matchesProfile(item, initialProfile))?.path ?? '');
   const [execution, setExecution] = useState<ExecutionSelection>({});
   const [prompt, setPrompt] = useState(options.prompt);
   const [includeContent, setIncludeContent] = useState(options.includeRecordedContent);
@@ -64,8 +72,9 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
     // Direct task links can load their record before the report's form defaults.
     if (formInitialized.current || !options.profiles.length) return;
     formInitialized.current = true;
-    const selected = options.profiles.find(item => item.ready)?.name ?? options.profiles[0]?.name ?? '';
-    setProfile(selected); setCwd(options.workspaces.find(item => item.available && (!item.profile || item.profile === selected))?.path ?? '');
+    const selected = options.profiles.find(item => item.ready) ?? options.profiles[0];
+    if (!selected) return;
+    setProfile(profileKey(selected)); setCwd(options.workspaces.find(item => item.available && matchesProfile(item, selected))?.path ?? '');
     setPrompt(options.prompt); setIncludeContent(options.includeRecordedContent);
     setCapped(options.defaults.timeoutMs !== null); setTimeoutMs(options.defaults.timeoutMs ?? 60000);
   }, [options]);
@@ -118,7 +127,7 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
     if (busyRef.current) return;
     setBusyNow(true); setError(null);
     const sourceRef = refId;
-    const request: ReviewTaskRequest = { profile, execution, ...(cwd ? { cwd } : {}), prompt, includeRecordedContent: includeContent, timeoutMs: capped ? timeoutMs : null };
+    const request: ReviewTaskRequest = { profile, execution, ...(selectedProfile?.client ? { client: selectedProfile.client } : {}), ...(cwd ? { cwd } : {}), prompt, includeRecordedContent: includeContent, timeoutMs: capped ? timeoutMs : null };
     try {
       const result = await apiPost<ReviewTaskPreview>(`${base}/preview`, request);
       if (mounted.current && refIdRef.current === sourceRef) setPreview(result);
@@ -143,7 +152,7 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
       if (!mounted.current || pendingStartId.current !== token || taskIdRef.current !== token) return;
       pendingStartId.current = null;
       const message = reason instanceof ApiError ? reason.message : String(reason);
-      if (reason instanceof ApiError && knownPreStartRefusals.has(reason.code)) {
+      if (reason instanceof ApiError && (knownPreStartRefusals.has(reason.code) || reason.code?.startsWith('catalog-'))) {
         setSearch({}, { replace: true }); setTask(null); setTaskError(null); setPreview(null); setError(message);
       } else {
         startOutcomeUnknown.current = true;
@@ -185,12 +194,13 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
     {actionError ? <div ref={actionErrorSummary} tabIndex={-1}><ErrorPanel title="Review task action failed">{actionError}</ErrorPanel></div> : null}
     {!task && !taskError ? <Loading label={pendingStartId.current === taskId ? 'Starting review…' : 'Reconnecting to review task…'} /> : null}
     {task ? <>
-      <p className="text-ui">{task.title} · profile <span className="font-medium">{task.profile}</span></p>
+      <p className="text-ui">{task.title} · profile <span className="font-medium">{task.profile}</span>{task.client ? ` · ${clientLabel[task.client]}` : ''}</p>
+      {task.context ? <p className="hint">{task.context.surface.toUpperCase()} · {task.context.rootMode} root · {task.context.executionLocation}</p> : null}
       <p className="hint">Working directory: <span className="font-mono">{task.cwd || 'Unavailable'}</span></p>
       <p className="hint">{task.threadId ? 'Native session recorded; its identifiers are available in task details.' : 'Native session identity has not been recorded.'}</p>
       <p className="hint">This task remains associated with the frozen comparison. <Link className="link" to={`/reports/${encodeURIComponent(task.reportRef)}`}>Open its comparison and evidence</Link></p>
       {task.pendingRequests.length && task.status !== 'waiting-for-user' ? <InfoNotice title="Native request unavailable"><p>The saved request is not waiting in a live native session and cannot be replayed.</p></InfoNotice> : null}
-      {task.pendingRequests.filter(request => task.status === 'waiting-for-user' && !unavailableRequests.includes(request.requestId)).map(request => <NativeReviewRequest key={request.requestId} request={request} busy={busy} onRespond={(response: ReviewTaskDecision) => respond(request, response)} />)}
+      {task.pendingRequests.filter(request => task.status === 'waiting-for-user' && !unavailableRequests.includes(request.requestId)).map(request => <NativeReviewRequest key={request.requestId} request={request} busy={busy || task.pendingRequests[0]?.requestId !== request.requestId} onRespond={(response: ReviewTaskDecision) => respond(request, response)} />)}
       {unavailableRequests.length ? <InfoNotice title="Native request unavailable"><p>This request is no longer active. No response was submitted; it cannot be replayed.</p></InfoNotice> : null}
       {task.response ? <section className="rounded-control p-3 flex flex-col gap-2" aria-labelledby="review-task-response" style={{ border: '1px solid var(--color-divider)' }}>
         <h3 id="review-task-response" className="text-body font-semibold">{task.response.status === 'complete' ? 'Captured response' : task.response.status === 'partial' ? 'Partial response' : 'Response unavailable'}</h3>
@@ -225,14 +235,16 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
     <p className="text-ui">Choose a profile and its normal workspace, inspect the prompt and retained report content, then preview the exact inputs. No model starts until you select Start review.</p>
     {demo ? <SimulatedNote>The demo uses this same form and shows a simulated review result. No model task starts.</SimulatedNote> : null}
     <form className="flex flex-col gap-3" onSubmit={prepare}>
-      <div><label htmlFor="review-profile" className="field-label">Profile</label><select id="review-profile" className="input font-mono" value={profile} disabled={busy} onChange={event => { const next = event.target.value; setProfile(next); setCwd(options.workspaces.find(item => item.available && (!item.profile || item.profile === next))?.path ?? ''); inputChanged(); }}>
-        {options.profiles.map(item => <option key={item.name} value={item.name}>{item.name}{item.ready ? '' : ` · ${item.readiness}`}</option>)}
+      <div><label htmlFor="review-profile" className="field-label">Profile</label><select id="review-profile" className="input font-mono" value={profileKeyValue} disabled={busy} onChange={event => { const next = event.target.value; setProfile(next); setExecution({});
+        const chosen = options.profiles.find(item => profileKey(item) === next);
+        setCwd(options.workspaces.find(item => item.available && matchesProfile(item, chosen))?.path ?? ''); inputChanged(); }}>
+        {options.profiles.map(item => <option key={profileKey(item)} value={profileKey(item)}>{item.label ?? item.name}{item.ready ? '' : ` · ${item.readiness}`}</option>)}
       </select></div>
-      <div><label htmlFor="review-cwd" className="field-label">Workspace</label><select id="review-cwd" className="input font-mono" value={cwd} disabled={busy} onChange={event => { setCwd(event.target.value); inputChanged(); }}>
-        <option value="">Profile default workspace</option>{options.workspaces.filter(item => !item.profile || item.profile === profile).map(item => <option key={`${item.profile ?? ''}:${item.path}`} value={item.path} disabled={!item.available}>{item.path}{item.available ? '' : ' · unavailable'}</option>)}
+      <div><label htmlFor="review-cwd" className="field-label">Workspace</label><select id="review-cwd" className="input font-mono" value={cwd} disabled={busy} onChange={event => { setCwd(event.target.value); setExecution({}); inputChanged(); }}>
+        <option value="">Profile default workspace</option>{options.workspaces.filter(item => matchesProfile(item, selectedProfile)).map(item => <option key={`${item.profile ?? ''}:${item.path}`} value={item.path} disabled={!item.available}>{item.path}{item.available ? '' : ' · unavailable'}</option>)}
       </select></div>
       <p className="hint">Choose a separate workspace for each simultaneous review.</p>
-      <ExecutionFields profile={profile} workspace={cwd} value={execution} disabled={busy} onChange={value => { setExecution(value); inputChanged(); }} />
+      <ExecutionFields profile={profile} client={selectedProfile?.client} workspace={cwd} allowPermissionMode={false} value={execution} disabled={busy} onChange={value => { setExecution(value); inputChanged(); }} />
       <div><label htmlFor="review-prompt" className="field-label">Review prompt</label><textarea id="review-prompt" className="input" rows={6} value={prompt} disabled={busy} onChange={event => { setPrompt(event.target.value); inputChanged(); }} /></div>
       <label className="flex gap-2 items-start text-ui"><input type="checkbox" checked={includeContent} disabled={busy} onChange={event => { setIncludeContent(event.target.checked); inputChanged(); }} />Include recorded report content</label>
       <fieldset className="flex flex-col gap-2"><legend className="field-label">Model turn time limit</legend>
@@ -247,7 +259,8 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
       {!preview.ready ? <WarningAlert title={preview.blocked?.title ?? 'Review is not ready'}>{preview.blocked?.reason ?? 'Resolve the reported issue before starting.'}</WarningAlert> : null}
       <InfoNotice title="Exact task inputs">
         <p>Source comparison: {title} · report reference <span className="font-mono">{refId}</span></p>
-        <p>Profile: <span className="font-mono">{preview.profile}</span></p>
+        <p>Profile: <span className="font-mono">{preview.profile}</span>{preview.client ? ` · ${clientLabel[preview.client]}` : ''}
+          {preview.surface ? ` · ${preview.surface.toUpperCase()} · ${preview.rootMode ? preview.rootMode + ' root' : 'root mode unknown'} · ${preview.executionLocation ?? 'location unknown'}` : ''}</p>
         <p>Working directory: <span className="font-mono break-all">{preview.cwd}</span></p>
         <p>Executable: <span className="font-mono">{preview.executable}</span></p>
         <p>Requested model {preview.model ?? 'profile default'} · reasoning effort {preview.reasoningEffort ?? 'profile default'}</p>
@@ -267,7 +280,7 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
     </section> : null}
     {tasks.length ? <section className="flex flex-col gap-2" aria-labelledby="prior-review-tasks"><h3 id="prior-review-tasks" className="text-body font-semibold">Ordinary review tasks</h3>
       {tasks.map(item => <div key={item.id} className="flex flex-wrap gap-2 items-center justify-between rounded-control p-3" style={{ border: '1px solid var(--color-divider)' }}>
-        <div className="min-w-0"><p className="text-ui m-0">{item.profile} · {labels[item.status]}</p><p className="hint">{item.createdAt}</p>
+        <div className="min-w-0"><p className="text-ui m-0">{item.profile}{item.client ? ` · ${clientLabel[item.client]}` : ''} · {labels[item.status]}</p><p className="hint">{item.createdAt}</p>
           {item.execution ? <p className="hint">Requested {item.execution.model ?? 'profile default'} · effort {item.execution.reasoningEffort ?? 'profile default'}</p> : null}
           {item.observedModel || item.observedEffort ? <p className="hint">Reported {item.observedModel ?? 'unknown model'} · effort {item.observedEffort ?? 'unknown'}</p> : null}
           <p className="text-ui m-0">{item.summary}</p></div><Button variant="secondary" aria-label={`Open review by ${item.profile} from ${item.createdAt}`} onClick={() => navigate(`/reports/r.${encodeURIComponent(item.id)}/reviews?task=${encodeURIComponent(item.id)}`)}>Open task</Button>

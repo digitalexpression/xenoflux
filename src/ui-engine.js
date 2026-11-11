@@ -40,6 +40,7 @@ import { resolveProfileExecutionProfile } from './audit-profile.js';
 import { importClaudeSession, listClaudeSessions } from './claude-sessions.js';
 import { importClaudeTranscript } from './claude-transcript.js';
 import { importCopilotTranscript } from './copilot-transcript.js';
+import { auditNativeSession } from './audit-session.js';
 import { compareAuditRuns } from './audit-report.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -117,7 +118,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   if (!Number.isSafeInteger(maxActiveJobs) || maxActiveJobs < 1) throw new Error('Invalid active job capacity');
   const admitted = new Set();
   const activeImports = new Set();
-  const claudeSelections = new Map(), copilotSelections = new Map();
+  const sessionSelections = { codex: new Map(), 'claude-code': new Map(), copilot: new Map() };
+  const claudeSelections = sessionSelections['claude-code'], copilotSelections = sessionSelections.copilot;
   const copilotRuntime = createCopilotRuntime();
   const nativeProfiles = managedNativeProfiles({ terminalEnvironment: runContext.terminalEnvironment ?? process.env,
     ...accountContext, store, profilesBase, defaultUserHome, copilotRuntime, lockOptions });
@@ -164,6 +166,54 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   }
   const resolveClaudeSource = name => resolveProfileExecutionProfile(store, { name, client: 'claude-code' },
     { defaultUserHome, sessionOnly: true, terminalEnvironment: runContext.terminalEnvironment ?? process.env });
+  async function codexSessionIdentity(entry) {
+    if (!entry?.rolloutPath) return null;
+    const identity = async path => {
+      const info = await lstat(path);
+      if (info.isSymbolicLink() || await realpath(path) !== path) throw new Error('The selected history source is no longer canonical.');
+      return [info.dev, info.ino, ...(info.isFile() ? [info.size, info.mtimeMs, info.ctimeMs] : [])];
+    };
+    const { profileId, environmentId, home, rolloutPath, id, indexSource } = entry;
+    return { profileId, environmentId, id, home, rolloutPath, indexSource, root: await identity(home), file: await identity(rolloutPath) };
+  }
+
+  async function importListedSession(client, token, directory, directories) {
+    const bound = sessionSelections[client].get(token);
+    if (!bound || bound.expiresAt < Date.now()) throw new Error('The selected session expired.');
+    if (client === 'codex') {
+      const { profileId, id } = bound.selection;
+      const verify = async () => {
+        const { entry } = await findHistory(store, profileArg(profileId), id, { defaultUserHome });
+        if (JSON.stringify(await codexSessionIdentity(entry)) !== JSON.stringify(bound.selection))
+          throw new Error('The selected Codex history source changed.');
+        return entry;
+      };
+      const entry = await verify();
+      const imported = await auditNativeSession(store, profileArg(profileId), id, { defaultUserHome, includeReplay: true });
+      await verify();
+      if (!['ready', 'partial'].includes(imported.status) || imported.profile?.profileId !== profileId)
+        throw new Error('The selected Codex history source is unavailable.');
+      return { ...imported, clientIdentity: { client }, source: { ...imported.source, readContext: {
+        client, profileId, profileName: entry.profileName, rootMode: profileId === 'default' ? 'implicit' : 'explicit',
+        surface: await recordedHistoryClient(entry.rolloutPath, entry.indexSource), executionLocation: 'local',
+      } } };
+    }
+    const profile = await (client === 'claude-code' ? resolveClaudeSource(bound.name) : resolveCopilotSource(bound.name));
+    let imported;
+    if (client === 'claude-code') {
+      imported = await importClaudeSession(profile, bound.selection, { directory, onArtifactCreated: artifact => directories.push(artifact) });
+    } else {
+      const readJournal = input => withCopilotMetadata(bound.name, profile, directory,
+        lifecycle => copilotRuntime.readJournal({ ...input, ...lifecycle }));
+      let artifact;
+      imported = await importCopilotTranscript({ sessionId: bound.selection.sessionId, selection: bound.selection },
+        { ...copilotImportContext, directory, onArtifactCreated: value => { artifact = value; }, profile, readJournal });
+      if (artifact) directories.push(artifact);
+    }
+    const { profileId, profileName, rootMode, surface, executionLocation } = profile;
+    return { ...imported, source: { ...imported.source, readContext: { ...imported.source.readContext,
+      client, profileId, profileName, rootMode, surface, executionLocation } } };
+  }
   let closing = false;
   const admission = {
     async acquire(id) {
@@ -174,8 +224,23 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   };
   const catalogs = createUiCatalog({ store, defaultUserHome, context: { lockOptions, ...catalogContext } });
   const validateSelection = (input, execution) => catalogs.validate(input, execution);
-  const runs = createUiRuns({ store, defaultUserHome, context: { validateSelection, ...runContext }, admission });
-  const reviewTasks = createUiReviewTasks({ store, defaultUserHome, context: { validateSelection, ...reviewContext }, admission,
+  async function nativeExecutionOptions() {
+    const data = await store.read();
+    const profiles = await Promise.all(data.profiles.filter(row => row.client && row.client !== 'codex').map(async selected => {
+      const { name, client } = selected;
+      const ready = await nativeProfiles.resolveProfile(client, selected).then(() => true, () => false);
+      return { name, client, label: `${name} · ${PROFILE_CLIENT_NAMES[client]}`, ready, surface: 'cli', executionLocation: 'local',
+        rootMode: 'explicit', readiness: ready ? 'Sign-in and access are checked before Start.' : 'The native root or executable is unavailable.' };
+    }));
+    for (const client of ['claude-code', 'copilot']) {
+      if (await nativeProfiles.hasStock(client)) profiles.push({ name: 'Default', client, label: `${PROFILE_CLIENT_NAMES[client]} Default`,
+        ready: true, surface: 'cli', executionLocation: 'local', rootMode: 'implicit',
+        readiness: 'Uses the existing stock setup. Sign-in and access are checked before Start.' });
+    }
+    return profiles;
+  }
+  const runs = createUiRuns({ store, defaultUserHome, context: { validateSelection, nativeExecutionOptions, ...runContext }, admission });
+  const reviewTasks = createUiReviewTasks({ store, defaultUserHome, context: { validateSelection, nativeExecutionOptions, ...reviewContext }, admission,
     resolveComparison: async ref => {
       // A Start rechecks current session evidence, not a previously cached view.
       if (ref.startsWith('s.') || ref.startsWith('p.')) cache.delete(ref);
@@ -316,11 +381,29 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     return { subject: value, reviews: null };
   }
 
-  async function setupFor(a, b) {
-    const key = JSON.stringify([a, b]), cached = setups.get(key);
+  const setupKey = (a, b, aClient, bClient) => aClient === 'codex' && bClient === 'codex'
+    ? JSON.stringify([a, b]) : JSON.stringify([a, b, aClient, bClient]);
+  async function setupFor(a, b, aClient = 'codex', bClient = 'codex') {
+    const key = setupKey(a, b, aClient, bClient), cached = setups.get(key);
     if (cached && Date.now() - cached.at < 30000) return cached.value;
     let value;
-    try { value = await compareAuditProfiles(store, a, b, { defaultUserHome, client: 'cli', includeSourceValues: true }); }
+    try {
+      const data = await store.read();
+      const optionsFor = async (name, clientId) => {
+        if (clientId === 'codex') {
+          const selected = data.profiles.find(profile => profile.name === name);
+          if (selected?.client && selected.client !== clientId) throw new Error('Choose the matching native client.');
+          return { clientId };
+        }
+        if (name === 'Default') return { clientId };
+        const selected = data.profiles.find(profile => profile.name === name && profile.client === clientId);
+        if (!selected) throw new Error('The selected native profile is unavailable.');
+        const { sourceBinding } = await copyOptions(name, null, clientId);
+        return { clientId, binding: sourceBinding };
+      };
+      const [leftOptions, rightOptions] = await Promise.all([optionsFor(a, aClient), optionsFor(b, bClient)]);
+      value = await compareAuditProfiles(store, a, b, { defaultUserHome, client: 'cli', includeSourceValues: true, leftOptions, rightOptions });
+    }
     catch (error) { throw new UiError(422, `Couldn’t read these setups: ${error.message}`, 'setup-failed'); }
     setups.set(key, { at: Date.now(), value });
     return value;
@@ -464,19 +547,16 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     const { value, selection, saved, execution } = await comparisonFor(ref);
     const { subject, reviews } = subjectOf(value);
     const view = presentComparison(subject, { title: execution ? 'Task comparison' : await titleFor(ref, selection, saved), reviews, sameTaskLabel: selection?.t });
-    for (const [side, run] of [['a', subject.left], ['b', subject.right]]) {
-      const client = run?.clientIdentity?.client ?? run?.profile?.client;
-      if (client === 'claude-code') view[side].client = 'Claude Code CLI';
-      if (client === 'copilot') view[side].client = 'GitHub Copilot CLI';
-      if (client === 'codex' && view[side].client === 'Client not known') view[side].client = 'Codex CLI';
-    }
     const quote = text => `"${String(text).replace(/(["\\$`])/g, '\\$1')}"`;
     const left = subject.selection?.left, right = subject.selection?.right;
-    const sameProfile = left?.profileName === right?.profileName;
+    const sameProfile = left?.profileName === right?.profileName && view.a.nativeClient === view.b.nativeClient;
+    const setupSelection = left && right && new URLSearchParams({ a: left.profileName, b: right.profileName,
+      ...(view.a.nativeClient && view.a.nativeClient !== 'codex' ? { aClient: view.a.nativeClient } : {}),
+      ...(view.b.nativeClient && view.b.nativeClient !== 'codex' ? { bClient: view.b.nativeClient } : {}) });
     return { ...view, ref, breadcrumb: saved ? 'Open saved report' : execution ? 'Run progress' : 'Choose sessions',
       ...(execution ? { progressHref: `/runs/${execution}` } : {}),
       saved: saved ? { recordedAt: view.a.time, savedAt: saved.savedAt ?? 'date not recorded', notInReport: ['a', 'b'].filter(side => view.outcome.patches?.[side]?.status !== 'available').map(side => `Task-end patch content for ${view[side].profile}`) } : null,
-      conditions: { ...view.conditions, setupHref: !saved && left && right && !sameProfile ? `/compare/setups?a=${encodeURIComponent(left.profileName)}&b=${encodeURIComponent(right.profileName)}` : null },
+      conditions: { ...view.conditions, setupHref: !saved && setupSelection && !sameProfile ? `/compare/setups?${setupSelection}` : null },
       verification: { ...view.verification, reviews: { text: view.verification.reviews.text,
         href: subject?.kind === 'audit-comparison' ? `/reports/${encodeURIComponent(ref)}/reviews` : null } },
       cliCommand: execution ? `xfx audit show ${execution}` : saved?.path ? `xfx audit show ${quote(saved.path)}`
@@ -628,7 +708,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       const { data, defaultHome } = await profileRecords();
       return {
         sessions: rows.map(({ updatedAt, ...row }) => row),
-        profiles: [...(defaultHome ? ['Default'] : []), ...data.profiles.map(p => p.name)],
+        profiles: [...(defaultHome ? ['Default'] : []), ...data.profiles.filter(p => !p.client || p.client === 'codex').map(p => p.name)],
         partial: unreadable.length ? { text: `${unreadable.map(home => `${home.profileName}’s history couldn’t be read${home.reason ? ` (${home.reason})` : ''}`).join('; ')}. Sessions from the other profiles are listed.`,
           help: 'macOS asks before an app reads some folders. If a profile lives in Documents, Desktop or Downloads, allow access for the terminal that runs xfx ui in System Settings › Privacy & Security › Files and Folders, then reload.' } : null,
         truncated };
@@ -659,22 +739,31 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       return { ref };
     },
 
-    async setupComparison({ a, b }) {
-      if (!plain(a) || !plain(b)) throw new UiError(400, 'Choose two profiles.', 'invalid-selection');
-      if (a === b) return { a: { name: a }, b: { name: b }, project: null, readAt: '', counts: { different: 0, same: 0, cannotCompare: 0 }, limits: null, groups: [], blocked: 'Choose two different profiles.' };
-      const value = await setupFor(a, b);
+    async setupComparison({ a, b, aClient = 'codex', bClient = 'codex' }) {
+      if (!plain(a) || !plain(b) || !PROFILE_CLIENTS.includes(aClient) || !PROFILE_CLIENTS.includes(bClient)) throw new UiError(400, 'Choose two profiles.', 'invalid-selection');
+      if (a === b && aClient === bClient) return { a: { name: a }, b: { name: b }, project: null, readAt: '', counts: { different: 0, same: 0, cannotCompare: 0 }, limits: null, groups: [], blocked: 'Choose two different profiles.' };
+      const value = await setupFor(a, b, aClient, bClient);
       const view = presentSetupComparison(value, { home: homedir() });
+      const mixed = value.comparison?.mode === 'separate';
+      const native = aClient !== 'codex' || bClient !== 'codex';
+      const describe = (name, client, profile) => ({ name, meta: `${PROFILE_CLIENT_NAMES[client]} CLI${native
+        ? ` · ${(profile?.rootMode ?? (name === 'Default' ? 'implicit' : 'explicit')) === 'implicit' ? 'stock root' : 'managed root'} · local` : ''}` });
+      const inventory = side => ({ status: side.status, warnings: side.warnings ?? [], resources: side.resources.map(resource => ({
+        name: resource.name, category: resource.category, scope: resource.scope, origin: resource.origin, status: resource.status,
+      })) });
       const target = a === 'Default' ? b : a, source = a === 'Default' ? a : b;
       const missingSourceState = source === a ? 'added' : 'removed';
       const href = id => `/profiles/${encodeURIComponent(target)}/copy?from=${encodeURIComponent(source)}&item=${encodeURIComponent(id)}`;
       const groups = view.groups.map(group => ({ ...group, items: group.items.map(item => ({ ...item, actions: {
-        ...(item.actions.copyable && item.exactState !== missingSourceState && target !== 'Default' ? { copy: { from: source === a ? 'a' : 'b', label: `Copy from ${source} into ${target}…`, href: href(item.id) } } : {}),
-        ...(item.actions.package ? { packageHref: `/compare/setups/skills/${encodeURIComponent(item.actions.package)}?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&item=${encodeURIComponent(item.id)}` } : {}),
-        ...(item.actions.guidance ? { guidance: item.actions.guidance } : {}),
+        ...(!native && item.actions.copyable && item.exactState !== missingSourceState && target !== 'Default' ? { copy: { from: source === a ? 'a' : 'b', label: `Copy from ${source} into ${target}…`, href: href(item.id) } } : {}),
+        ...(!native && item.actions.package ? { packageHref: `/compare/setups/skills/${encodeURIComponent(item.actions.package)}?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&item=${encodeURIComponent(item.id)}` } : {}),
+        ...(!native && item.actions.guidance ? { guidance: item.actions.guidance } : {}),
       } })) }));
-      return { a: { name: a, meta: 'Codex CLI' }, b: { name: b, meta: 'Codex CLI' }, project: null,
-        readAt: `Today’s setup, read ${new Date(setups.get(JSON.stringify([a, b])).at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`,
-        counts: view.counts, limits: view.limits, groups };
+      return { a: describe(a, aClient, value.left.profile), b: describe(b, bClient, value.right.profile), project: null,
+        readAt: `Today’s setup, read ${new Date(setups.get(setupKey(a, b, aClient, bClient)).at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`,
+        counts: view.counts, limits: view.limits, groups,
+        ...(mixed ? { separate: { reason: value.comparison.reason, a: inventory(value.left), b: inventory(value.right) } } : {}),
+        ...(!mixed && native && target !== 'Default' ? { copyHref: `/profiles/${encodeURIComponent(target)}/copy?from=${encodeURIComponent(source)}` } : {}) };
     },
 
     async skillDetail({ skill, a, b, item: selectedItem }) {
@@ -1074,6 +1163,54 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       } finally { await rm(temporary, { force: true }); }
       return register(value, { title: name.replace(/\.md\.audit\.json$|\.audit\.json$|\.json$/i, '') || 'Saved report', savedAt: null, path: null });
     },
+    async importListedComparison({ left, right } = {}) {
+      if (closing) throw new UiError(409, 'The app is stopping.', 'stopping');
+      if ([left, right].some(side => !side || typeof side !== 'object' || Object.keys(side).length !== 2
+        || !PROFILE_CLIENTS.includes(side.client) || typeof side.token !== 'string' || !UUID.test(side.token))
+        || left.token === right.token)
+        throw new UiError(400, 'Choose two distinct sessions from their profile lists.', 'invalid-session-selection');
+      const operation = (async () => {
+        const id = randomUUID(), directories = [];
+        await admission.acquire(id);
+        try {
+          const parent = join(store.directory, 'ui-imports');
+          await privateDirectory(store.directory, true);
+          await privateDirectory(parent, true);
+          const a = await importListedSession(left.client, left.token, join(parent, randomUUID()), directories);
+          const b = await importListedSession(right.client, right.token, join(parent, randomUUID()), directories);
+          const value = compareAuditRuns(a, b);
+          return register(value, { title: 'Imported native sessions', savedAt: null, path: null });
+        } catch {
+          for (const artifact of directories) {
+            const current = await lstat(artifact.directory).catch(() => null);
+            if (current?.dev === artifact.dev && current.ino === artifact.ino)
+              await rm(artifact.directory, { recursive: true, force: true });
+          }
+          throw new UiError(422, 'A selected session or its profile context is no longer available. List sessions again in the original profile.', 'session-selection-unavailable');
+        } finally { admission.release(id); }
+      })();
+      activeImports.add(operation);
+      try { return await operation; }
+      finally { activeImports.delete(operation); }
+    },
+    async codexSessions({ profile, limit = '30' } = {}) {
+      if (!plain(profile) || !/^\d{1,3}$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)
+        throw new UiError(400, 'Choose a Codex profile and a session limit from 1 to 100.', 'invalid-session-selection');
+      try {
+        const { entries, homes } = await listHistory(store, { profile, limit: Number(limit), defaultUserHome });
+        if (!homes.some(home => ['ready', 'partial'].includes(home.status))) throw new Error('Unavailable history');
+        const sessions = await Promise.all(entries.map(async entry => {
+          const selection = await codexSessionIdentity(entry).catch(() => null);
+          const token = selection ? randomUUID() : null;
+          if (token) sessionSelections.codex.set(token, { selection, expiresAt: Date.now() + 20 * 60_000 });
+          return { id: entry.id, title: entry.title, cwd: entry.cwd, modifiedAt: entry.updatedAt, token,
+            surface: await recordedHistoryClient(entry.rolloutPath, entry.indexSource) };
+        }));
+        while (sessionSelections.codex.size > 1000) sessionSelections.codex.delete(sessionSelections.codex.keys().next().value);
+        return { client: 'codex', profileId: homes[0].profileId, rootMode: homes[0].profileId === 'default' ? 'implicit' : 'explicit',
+          executionLocation: 'local', sessions };
+      } catch { throw new UiError(422, 'The selected Codex session list is unavailable.', 'codex-session-list-unavailable'); }
+    },
     async copilotSessions({ profile: name, limit } = {}) {
       if (closing) throw new UiError(409, 'The app is stopping.', 'stopping');
       if (!plain(name) || limit !== undefined && (!/^\d{1,3}$/.test(String(limit)) || Number(limit) < 1 || Number(limit) > 100))
@@ -1097,7 +1234,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           });
           while (copilotSelections.size > 1000) copilotSelections.delete(copilotSelections.keys().next().value);
           await rm(directory, { recursive: true, force: true });
-          return { client: 'copilot', profileId: profile.profileId, rootMode: profile.rootMode, sessions };
+          return { client: 'copilot', profileId: profile.profileId, rootMode: profile.rootMode, surface: profile.surface, executionLocation: profile.executionLocation, sessions };
         } catch {
           throw new UiError(422, 'The selected Copilot session list is unavailable.', 'copilot-session-list-unavailable');
         } finally { admission.release(id); }
@@ -1126,15 +1263,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
             const directory = join(parent, randomUUID());
             let artifact;
             const options = { ...copilotImportContext, directory, onArtifactCreated: created => { artifact = created; } };
-            if (Object.hasOwn(selected, 'token')) {
-              const bound = copilotSelections.get(selected.token);
-              if (!bound || bound.expiresAt < Date.now()) throw new Error('Copilot session selection expired');
-              const profile = await resolveCopilotSource(bound.name);
-              const readJournal = input => withCopilotMetadata(bound.name, profile, directory,
-                lifecycle => copilotRuntime.readJournal({ ...input, ...lifecycle }));
-              imported.push(await importCopilotTranscript({ sessionId: bound.selection.sessionId, selection: bound.selection },
-                { ...options, profile, readJournal }));
-            } else imported.push(await importCopilotTranscript(selected, options));
+            if (Object.hasOwn(selected, 'token')) imported.push(await importListedSession('copilot', selected.token, directory, directories));
+            else imported.push(await importCopilotTranscript(selected, options));
             if (artifact) directories.push(artifact);
           }
           const value = compareAuditRuns(imported[0], imported[1]);
@@ -1167,7 +1297,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           return { ...row, token };
         });
         while (claudeSelections.size > 1000) claudeSelections.delete(claudeSelections.keys().next().value);
-        return { client: 'claude-code', profileId: profile.profileId, rootMode: profile.rootMode, sessions, nextOffset: result.nextOffset };
+        return { client: 'claude-code', profileId: profile.profileId, rootMode: profile.rootMode, surface: profile.surface, executionLocation: profile.executionLocation, sessions, nextOffset: result.nextOffset };
       } catch {
         throw new UiError(422, 'The selected Claude Code session list is unavailable.', 'claude-session-list-unavailable');
       } finally { admission.release(id); }
@@ -1188,10 +1318,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
             const directory = join(parent, randomUUID());
             const options = { directory, onArtifactCreated: artifact => directories.push(artifact) };
             if (Object.hasOwn(selected, 'token')) {
-              const bound = claudeSelections.get(selected.token);
-              if (Object.keys(selected).length !== 1 || !bound || bound.expiresAt < Date.now())
-                throw new Error('Claude session selection expired');
-              imported.push(await importClaudeSession(await resolveClaudeSource(bound.name), bound.selection, options));
+              if (Object.keys(selected).length !== 1) throw new Error('Invalid Claude session selection');
+              imported.push(await importListedSession('claude-code', selected.token, directory, directories));
             } else imported.push(await importClaudeTranscript(selected, options));
           }
           const value = compareAuditRuns(imported[0], imported[1]);

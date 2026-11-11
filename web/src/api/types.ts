@@ -95,6 +95,10 @@ export interface SetupItem {
 }
 export interface SetupGroup { id: string; label: string; items: SetupItem[]; counts: Counts; meta: string; hiddenSame: number }
 export interface CoverageRow { area: string; a: string; b: string }
+interface SetupInventory {
+  status: string; warnings: string[];
+  resources: { name: string; category: string; scope: string; origin: string; status: string }[];
+}
 export interface SetupComparison {
   a: ProfileRef;
   b: ProfileRef;
@@ -103,6 +107,8 @@ export interface SetupComparison {
   counts: Counts;
   limits: { text: string; coverage: CoverageRow[] } | null;
   groups: SetupGroup[];
+  separate?: { reason: string; a: SetupInventory; b: SetupInventory };
+  copyHref?: string;
   blocked?: string;
 }
 export interface SkillFile {
@@ -163,7 +169,13 @@ export interface CompareRequest {
 }
 
 /* Report */
-export interface ReportSide { side: Side; profile: string; client: string; time: string; session: string }
+export interface ReportSide {
+  side: Side; profile: string; client: string; time: string; session: string;
+  nativeClient?: NativeClientId | null;
+  provenance?: { basis: string; profileName?: string; surface?: string; rootMode?: 'implicit' | 'explicit'; executionLocation?: string } | null;
+  permissions?: { requested: string | null; sent: string | null; confirmed: string | null; observed: string | null } | null;
+  autoTurns?: { turnId: string; models: string[] }[] | null;
+}
 export interface Condition {
   name: string;
   label: ComparisonLabel;
@@ -319,7 +331,7 @@ export interface ReviewPreviewView {
 export interface SavedReviewView { ref: string; title: string }
 export type ReviewTaskState = 'prepared' | 'starting' | 'running' | 'waiting-for-user' | 'completed'
   | 'failed' | 'cancelled' | 'interrupted' | 'uncertain';
-export interface ReviewTaskWorkspaceOption { path: string; profile?: string; available: boolean }
+export interface ReviewTaskWorkspaceOption { path: string; profile?: string; client?: NativeClientId; available: boolean }
 export interface ReviewTaskOptions {
   profiles: RunProfileOption[];
   workspaces: ReviewTaskWorkspaceOption[];
@@ -330,14 +342,18 @@ export interface ReviewTaskOptions {
 export interface ModelCatalogModel {
   id: string; model: string; displayName: string | null; hidden: boolean | null; isDefault: boolean | null;
   supportedReasoningEfforts: null | { reasoningEffort: string; description: string | null }[];
-  defaultReasoningEffort: string | null;
+  defaultReasoningEffort: string | null; selectable?: boolean;
 }
 export interface ModelCatalogSnapshot {
-  status: 'ready' | 'unavailable' | 'cancelled'; source: 'codex-model/list' | 'claude-agent-sdk/initialize' | 'native-catalog';
+  status: 'ready' | 'unavailable' | 'cancelled'; source: 'codex-model/list' | 'claude-agent-sdk/initialize' | 'copilot-models.list' | 'native-catalog';
+  permissionModes?: PermissionMode[];
+  capabilities?: { permissionModes?: PermissionMode[] };
+  auto?: { defaultTier: string; tiers: { id: string; displayName: string; type: string; enabled: boolean; visible: boolean }[] };
   models: ModelCatalogModel[]; scope: Record<string, unknown> | null;
   discoveredAt: string | null; expiresAt: string | null; reason?: string; generation?: number;
 }
-export interface ExecutionSelection { model?: string; reasoningEffort?: string; permissionMode?: 'default' | 'acceptEdits' | 'plan' }
+export type PermissionMode = 'read-only' | 'workspace-write' | 'default' | 'acceptEdits' | 'plan' | 'manual' | 'assisted';
+export interface ExecutionSelection { model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; route?: string }
 export interface ReviewTaskRequest {
   client?: NativeClientId;
   execution?: ExecutionSelection;
@@ -354,6 +370,7 @@ export interface ReviewTaskPreview {
   title: string;
   profile: string;
   client?: NativeClientId;
+  surface?: 'cli'; executionLocation?: 'local'; rootMode?: 'explicit' | 'implicit';
   cwd: string;
   prompt: string;
   effectivePrompt: string;
@@ -371,7 +388,7 @@ export interface ReviewTaskPreview {
   simulated: boolean;
 }
 export interface ReviewTaskSummary {
-  id: string; status: ReviewTaskState; createdAt: string; profile: string; summary: string;
+  id: string; status: ReviewTaskState; createdAt: string; profile: string; summary: string; client?: NativeClientId;
   execution?: ExecutionSelection; observedModel?: string | null; observedEffort?: string | null;
 }
 export interface ReviewTaskSummaries { tasks: ReviewTaskSummary[] }
@@ -384,6 +401,7 @@ export interface ReviewTaskPendingRequest {
 export interface ReviewTaskView {
   id: string;
   client?: NativeClientId | null;
+  context?: { surface: string; rootMode: string; executionLocation: string };
   nativeReference?: { client: NativeClientId; jobId: string; profileId: string; sessionId: string | null;
     turnId: string | null; itemId: string | null; requestId: string | null } | null;
   threadId: string | null;
@@ -413,6 +431,7 @@ export interface ReviewTaskView {
 }
 export interface ReviewTaskStartResponse { id: string }
 export interface ReviewTaskDecision {
+  kind?: 'approve-once' | 'reject';
   decision?: string | Record<string, unknown>;
   permissions?: Record<string, unknown>;
   scope?: 'turn' | 'session';
@@ -450,7 +469,9 @@ export interface SavedReportsView { recent: { id: string; title: string; savedAt
 
 /* Runs */
 export type NativeClientId = 'codex' | 'claude-code' | 'copilot';
-export interface RunProfileOption { name: string; label?: string; client?: NativeClientId; readiness: string; ready: boolean }
+export interface RunProfileOption { name: string; label?: string; client?: NativeClientId; readiness: string; ready: boolean;
+  surface?: 'cli'; executionLocation?: 'local'; rootMode?: 'explicit' | 'implicit';
+}
 export interface RunOptions {
   profiles: RunProfileOption[];
   repositories: { path: string; commit: string }[];
@@ -459,7 +480,6 @@ export interface RunOptions {
 }
 export interface RunAdvanced {
   timeMinutes: number | null;
-  sandbox: 'read-only' | 'workspace-write';
   outputMiB: number;
   program: string;
   reasoningEffort?: string;

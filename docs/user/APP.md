@@ -33,7 +33,10 @@ it. Running `xfx ui` again while it is running reopens the same app.
   no new task.
 - **Compare a task from existing sessions.** Tick two sessions you ran in Codex CLI
   or Desktop. The first one you tick is the left side of the report; **Swap sides**
-  changes that. Choosing sessions only reads their recorded history.
+  changes that. To select sessions across clients, choose **Choose recent sessions by profile**,
+  select a profile for each side and choose **List recent sessions**.
+  Listing and importing read stored history. A changed profile context requires
+  a fresh list and selection. List titles and folders stay local.
 - **Import Claude Code conversations.** On **Open saved report**, select two
   native UTF-8 UUID-named `.jsonl` transcripts, up to 8 MiB each, then choose
   **Compare stored conversations**. This reads private snapshots through the official
@@ -54,8 +57,14 @@ it. Running `xfx ui` again while it is running reopens the same app.
   history. Raw evidence remains private; inspect recorded text before sharing it.
 - **Run a new task.** Describe one task, choose a profile for each side and a
   repository, then review the pinned commit, limits and any commands you add.
-  Both sides can use the same profile. Each side can select its own model ID and
-  reasoning effort from its profile's advertised catalog; blank fields inherit saved settings.
+  Choose Codex, Claude Code or GitHub Copilot CLI profiles on either side.
+  Each side can select an advertised model, reasoning effort and permission
+  mode for that job. Claude Code and Copilot CLI can inherit profile permissions.
+  Codex comparisons default to workspace-write with network access disabled and
+  also offer read-only. Ordinary reviews keep the selected profile's permissions.
+  Mixed-client pairs use each client's own permission rules. Copilot Auto can
+  route to different models each turn, so a repeat may use a different model.
+  The report lists models reported by each turn where available.
   **Refresh models** initializes the native client without submitting a task or
   changing model policy. It may use sign-in, write native state or run configured
   startup hooks. Browsing uses cached metadata. Changing model clears explicit

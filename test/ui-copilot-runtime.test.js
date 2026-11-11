@@ -110,6 +110,7 @@ async function answerPair(ask, waiting, respond) {
   assert.equal(value.pendingRequests[0].params.itemId, value.pendingRequests[1].params.itemId);
   const [path, command] = value.pendingRequests;
   assert.notEqual(path.requestId, command.requestId);
+  await assert.rejects(respond(command.requestId, { kind: 'reject' }), error => error.status === 409);
   await assert.rejects(respond(path.requestId, { kind: 'approve-for-session' }), error => error.status === 400);
   await respond(path.requestId, { kind: 'approve-once' });
   await assert.rejects(respond(path.requestId, { kind: 'approve-once' }), error => error.status === 409);

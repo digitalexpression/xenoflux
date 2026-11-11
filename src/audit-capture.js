@@ -21,7 +21,7 @@ import { projectInstructionSources, compactInstructionSources } from './audit-in
 import { createResourceProvenance } from './audit-provenance.js';
 import { evaluateRequiredContext, validateRequiredContextRules } from './audit-context.js';
 import { prepareAuditStartup } from './audit-startup.js';
-import { validateExecution, validateAuditNativeConfig, validateAuditApprovalsReviewer } from './audit-spec.js';
+import { CODEX_PERMISSION_MODES, validateExecution, validateAuditNativeConfig, validateAuditApprovalsReviewer } from './audit-spec.js';
 import { captureAuditChildDiscovery } from './audit-session.js';
 import { createSettingsEvidence } from './client-contracts.js';
 import { readCodexModels, validateCatalogSelection } from './client-catalog.js';
@@ -80,7 +80,7 @@ function isolatedNativeOptions(env, paths) {
  * mode returns exact private response content; audit mode projects its evidence.
  */
 export async function runAuditCapture(options = {}) {
-  const { executionMode, profile, workspace, task, selectedSkills = [], sandbox = 'workspace-write', processOptions = {},
+  const { executionMode, profile, workspace, task, selectedSkills = [], sandbox: auditSandbox = 'workspace-write', processOptions = {},
     onSession, onPhase, onTaskEnd, onTurn, onNativeRequest, onProcessReady, requiredContext, preflightOnly = false, limits = {},
     telemetryFactory = startAuditTelemetry } = options;
   if (!['audit', 'profile'].includes(executionMode)) throw new TypeError('Select an explicit capture executionMode');
@@ -100,6 +100,11 @@ export async function runAuditCapture(options = {}) {
     || !profile?.env || !isDeepStrictEqual(processOptions.env, profile.env)))
     throw new TypeError('Profile execution requires the selected cwd/environment and a durable session checkpoint');
   const timeoutMs = processOptions.timeoutMs === undefined ? (ordinary ? null : 300000) : processOptions.timeoutMs;
+  const execution = validateExecution(options.execution);
+  const permissionMode = execution?.permissionMode;
+  if (execution?.route || permissionMode && (ordinary || !CODEX_PERMISSION_MODES.includes(permissionMode)))
+    throw new TypeError('Codex does not support this execution override');
+  const sandbox = permissionMode ?? auditSandbox;
   if (!profile || typeof profile.executable !== 'string' || !profile.executable.startsWith('/')
     || typeof workspace !== 'string' || !workspace.startsWith('/') || typeof task !== 'string' || task.length === 0
     || !['read-only', 'workspace-write', 'danger-full-access'].includes(sandbox)
@@ -108,7 +113,6 @@ export async function runAuditCapture(options = {}) {
     throw new TypeError('Invalid audit capture input');
   }
   const contextRules = requiredContext === undefined ? null : validateRequiredContextRules(requiredContext);
-  const execution = validateExecution(options.execution);
   const nativeConfig = { ...validateAuditNativeConfig(profile.nativeConfig),
     ...(execution?.model !== undefined ? { model: execution.model } : {}),
     ...(execution?.reasoningEffort !== undefined ? { model_reasoning_effort: execution.reasoningEffort } : {}) };
@@ -607,6 +611,7 @@ export async function runAuditCapture(options = {}) {
       // thread/start cwd makes native writable startup persist project trust in
       // the saved profile. Inherit the process cwd instead, preserving native
       // trust/config/managed-policy decisions, and verify it before any task.
+      if (!ordinary) capture.settingsEvidence.sent.permissionMode = { value: sandbox, source: 'thread/start' };
       if (approvalsReviewer) capture.settingsEvidence.sent.approvalsReviewer = { value: approvalsReviewer, source: 'thread/start' };
       let started;
       try {
@@ -631,6 +636,13 @@ export async function runAuditCapture(options = {}) {
       capture.effectiveSettings = Object.fromEntries(['model', 'modelProvider', 'reasoningEffort', 'approvalPolicy', 'sandbox']
         .map(key => [key, ordinary ? started[key] ?? null : safeText(started[key], 100)]));
       capture.settingsEvidence.confirmed = { source: 'thread/start', ...capture.effectiveSettings };
+      if (!ordinary) {
+        const expectedType = sandbox === 'read-only' ? 'readOnly' : 'workspaceWrite';
+        const confirmed = started.sandbox?.type === expectedType && started.sandbox.networkAccess === false;
+        if (permissionMode && !confirmed)
+          throw Object.assign(new Error('Codex did not confirm the requested permission mode with network disabled'), { code: 'requested-permission-unconfirmed' });
+        if (confirmed) capture.settingsEvidence.confirmed.permissionMode = { value: sandbox, source: 'thread/start' };
+      }
       if (approvalsReviewer) {
         const value = ['user', 'auto_review', 'guardian_subagent'].includes(started.approvalsReviewer) ? started.approvalsReviewer : null;
         capture.effectiveSettings.approvalsReviewer = value;
@@ -720,7 +732,7 @@ export async function runAuditCapture(options = {}) {
         return;
       }
       const turnResponse = await nativeRuntime.submit(nativeHandle, { threadId: rootThreadId, cwd: workspace,
-        ...(ordinary ? {} : { sandboxPolicy, approvalPolicy: auditApprovalPolicy }), input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, ordinary ? 30000 : timeoutMs);
+        ...(!ordinary ? { sandboxPolicy, approvalPolicy: auditApprovalPolicy } : {}), input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, ordinary ? 30000 : timeoutMs);
       rootTurnId = turnResponse?.turn?.id;
       if (!validId(rootTurnId)) throw new Error('turn-start-missing-id');
       capture.nativeReference = { sessionId: rootThreadId, turnId: rootTurnId };
@@ -1117,7 +1129,7 @@ export async function runAuditCapture(options = {}) {
         rootComplete: complete, childAgentsComplete: !childWaitIncomplete };
     } catch (error) {
       run.status = 'partial'; run.reason = ordinary ? `App-server capture failed: ${error.message}` : 'App-server capture failed';
-      const code = ['requested-execution-unconfirmed', 'requested-approval-reviewer-unconfirmed'].includes(error.code)
+      const code = ['requested-execution-unconfirmed', 'requested-permission-unconfirmed', 'requested-approval-reviewer-unconfirmed'].includes(error.code)
         ? error.code : 'app-server-capture-failed';
       if (code !== 'app-server-capture-failed') run.reason = error.message;
       capture.errors.push({ code });

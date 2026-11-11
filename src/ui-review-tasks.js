@@ -189,14 +189,14 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     if (defaultAvailable) profiles.push({ name: 'Default', ready: true, readiness: 'Uses the existing Default home and selected trusted workspace.' });
     const data = await store.read();
     const workspaces = [];
-    const addWorkspace = async (path, profileName) => {
-      if (workspaces.some(row => row.path === path && row.profile === profileName)) return;
+    const addWorkspace = async (path, profileName, client = 'codex') => {
+      if (workspaces.some(row => row.path === path && row.profile === profileName && row.client === client)) return;
       let available = false;
       try { const info = await lstat(path); available = info.isDirectory() && !info.isSymbolicLink() && await realpath(path) === path; } catch {}
-      workspaces.push({ path, profile: profileName, available });
+      workspaces.push({ path, profile: profileName, client, available });
     };
     for (const profile of data.profiles ?? []) {
-      for (const repo of profile.repositories ?? []) await addWorkspace(repo.path, profile.name);
+      for (const repo of profile.repositories ?? []) await addWorkspace(repo.path, profile.name, profile.client);
       try { const plan = await launchPlan(store, profile.name, context.terminalEnvironment ?? process.env); await addWorkspace(plan.cwd, profile.name); }
       catch { /* A profile without a safely resolvable saved workspace remains unavailable. */ }
     }
@@ -207,6 +207,11 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         for (const [path, settings] of Object.entries(config.projects ?? {}))
           if (settings?.trust_level === 'trusted' && path.startsWith('/')) await addWorkspace(path, 'Default');
       } catch { /* Default will be rejected during preview if its existing trusted workspace cannot be resolved. */ }
+    }
+    const otherClients = await context.nativeExecutionOptions?.() ?? [];
+    profiles.push(...otherClients);
+    for (const profile of otherClients.filter(row => row.name === 'Default')) {
+      for (const path of new Set(workspaces.map(row => row.path))) await addWorkspace(path, profile.name, profile.client);
     }
     return { profiles, workspaces, prompt: DEFAULT_PROMPT, includeRecordedContent: false, defaults: { timeoutMs: null } };
   }
@@ -226,7 +231,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
         const { task } = await readTask(name);
         if (task.sourceEvidenceFingerprint === evidenceFingerprint) {
           const response = await responseView(join(root, task.id), task.response);
-          tasks.push({ id: task.id, status: task.status, createdAt: task.createdAt, profile: task.profile?.name ?? 'Unknown profile',
+          tasks.push({ id: task.id, status: task.status, createdAt: task.createdAt, profile: task.profile?.name ?? 'Unknown profile', client: task.profile?.client,
             execution: task.execution, observedModel: task.profile?.client === 'copilot' ? task.settingsEvidence?.observed?.model ?? null
               : typeof task.nativeSettings?.model === 'string' ? task.nativeSettings.model : null,
             observedEffort: task.profile?.client === 'copilot' ? task.settingsEvidence?.observed?.reasoningEffort ?? null : typeof task.nativeSettings?.reasoningEffort === 'string' ? task.nativeSettings.reasoningEffort : null,
@@ -281,7 +286,8 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       { name: 'prompt.md', path: join(taskRoot, 'prompt.md'), bytes: Buffer.byteLength(exactPrompt), sha256: digest(Buffer.from(exactPrompt)), source: 'editable review prompt' },
     ];
     return { ready: true, previewToken: token, blocked: null, title: source.title, profile: profile.profileName, client: profile.client ?? 'codex', cwd: profile.cwd,
-      prompt, effectivePrompt: exactPrompt, includeRecordedContent, executable: profile.executable, model: execution.model ?? null, reasoningEffort: execution.reasoningEffort ?? null, timeoutMs,
+      prompt, effectivePrompt: exactPrompt, includeRecordedContent, executable: profile.executable, model: execution.model ?? null, reasoningEffort: execution.reasoningEffort ?? null,
+      surface: profile.surface, rootMode: profile.rootMode, executionLocation: profile.executionLocation, timeoutMs,
       inputs, contentChoice: includeRecordedContent ? 'Selected redacted replay and check evidence' : 'Recorded replay and check content omitted',
       summary: `One ordinary ${profile.client === 'claude-code' ? 'Claude Code' : profile.client === 'copilot' ? 'Copilot CLI' : 'Codex'} review using ${profile.profileName}; ${timeoutMs === null ? 'no time cap' : `time cap ${Math.ceil(timeoutMs / 60000)} minute(s)`}.`,
       limits: ['No token or dollar cap is available. Native safety limits, 8 MiB process output limit and cancellation remain.',
@@ -314,6 +320,8 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
           : error.code === 'profile-operation-busy' ? 'review-profile-busy' : 'review-profile-changed';
       throw new UiError(409, `Nothing started: ${errorMessage(error)}`, code);
     }
+    await context.validateSelection?.({ profile: preview.profileName, ...(freshProfile.client && freshProfile.client !== 'codex' ? { client: freshProfile.client } : {}),
+      workspace: preview.repository }, preview.execution);
     if (closing) throw new UiError(409, 'The app is stopping. Start it again before reviewing.', 'stopping');
     const taskRoot = join(root, id);
     await ensureRoot(true);
@@ -569,6 +577,8 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     const request = pending.get(id)?.get(requestId);
     if (!request || request.signal?.aborted || !active.has(id) || active.get(id).controller.signal.aborted) throw new UiError(409, 'This native request is no longer waiting for an answer.', 'stale-review-request');
     const work = active.get(id), task = work?.task;
+    if (work.answeringRequest || pending.get(id).keys().next().value !== requestId || task?.pendingRequests?.[0]?.requestId !== requestId)
+      throw new UiError(409, 'Answer the earlier native request first.', 'review-request-queued');
     const requestIsCurrent = () => !request.signal?.aborted && active.get(id) === work && !work.controller.signal.aborted && !task.cancellation
       && request.generation === work.generation && isDeepStrictEqual(request.request, request.sourceRequest)
       && isDeepStrictEqual(request.item, request.sourceItem)
@@ -585,9 +595,9 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     const previousPending = task?.pendingRequests;
     const previousStatus = task?.status, previousPhase = task?.phase;
     const previousDecisions = task?.nativeDecisions;
+    work.answeringRequest = true;
     request.answering = true;
     requests.delete(requestId);
-    if (!task) { requests.set(requestId, request); request.answering = false; throw new UiError(409, 'This native request is no longer active.', 'stale-review-request'); }
     task.pendingRequests = [...requests].map(([key, value]) => ({ requestId: key, nativeRequestId: value.request.id, generation: value.generation, method: value.request.method,
       params: value.request.params, item: value.item ?? null }));
     task.nativeDecisions = [...(task.nativeDecisions ?? []), { requestId, generation: request.generation,
@@ -608,7 +618,7 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
       requests.set(requestId, request); request.answering = false;
       task.pendingRequests = previousPending; task.status = previousStatus; task.phase = previousPhase; task.nativeDecisions = previousDecisions;
       throw error;
-    }
+    } finally { work.answeringRequest = false; }
     return publicTask(task, join(root, id));
   }
   async function reviewTask({ id } = {}) {
@@ -704,6 +714,9 @@ export function createUiReviewTasks({ store, defaultUserHome = homedir(), contex
     }
     return { id: task.id, status: task.status, phase: task.phase, createdAt: task.createdAt, updatedAt: task.updatedAt,
       profile: task.profile?.name ?? 'Unknown profile', client: task.profile ? task.profile.client ?? 'codex' : null, nativeReference, cwd: task.cwd, threadId: task.threadId ?? null, turnId: task.turnId ?? null, reportRef: `r.${task.id}`, title: task.sourceTitle ?? 'Task comparison',
+      ...(task.environmentBinding ? { context: {
+        surface: task.environmentBinding.surface, rootMode: task.environmentBinding.rootMode, executionLocation: task.environmentBinding.executionLocation,
+      } } : {}),
       response: await responseView(directory, task.response),
       ...(task.profile?.client === 'copilot' && task.settingsEvidence ? { settingsEvidence: Object.fromEntries(
         ['requested', 'sent', 'confirmed', 'observed'].map(stage => [stage, task.settingsEvidence[stage] == null ? null
