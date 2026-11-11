@@ -37,6 +37,9 @@ it. Running `xfx ui` again while it is running reopens the same app.
   select a profile for each side and choose **List recent sessions**.
   Listing and importing read stored history. A changed profile context requires
   a fresh list and selection. List titles and folders stay local.
+  For managed Copilot profiles, listing and importing use the first bound
+  repository as the native working directory. Bind a repository in Profiles
+  before listing sessions.
 - **Import Claude Code conversations.** On **Open saved report**, select two
   native UTF-8 UUID-named `.jsonl` transcripts, up to 8 MiB each, then choose
   **Compare stored conversations**. This reads private snapshots through the official

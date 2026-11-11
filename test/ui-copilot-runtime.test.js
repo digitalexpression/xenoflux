@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { chmod, copyFile, lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, readFile, readdir, rename, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout } from 'node:timers/promises';
@@ -204,8 +204,14 @@ test('uncertain Copilot shutdown leaves the exact reservation and skips verifica
   assert.equal(JSON.parse(await readFile(join(root, '.run-lock', 'owner.json'), 'utf8')).runId, run.id);
 });
 
-test('authenticated Copilot list and import bind opaque tokens to their exact roots', async t => {
+test('authenticated Copilot list and import bind opaque tokens to their exact roots and workspaces', async t => {
   const app = await setup(t);
+  const invocationLog = join(app.root, 'metadata-invocations.jsonl');
+  const launches = async () => (await readFile(invocationLog, 'utf8')).trim().split('\n').map(JSON.parse);
+  for (const profile of app.managed) {
+    profile.repositories.reverse();
+    await writeFile(join(profile.native.configRoot, 'fixture.json'), JSON.stringify({ label: profile.name, invocationLog }), { mode: 0o600 });
+  }
   const server = await startUiServer({ provider: app.provider, staticRoot: join(process.cwd(), 'dist', 'ui'), launchToken: 'copilot-route-fixture-token' });
   t.after(() => server.close());
   const headers = { origin: server.origin, 'content-type': 'application/json', 'x-xenoflux-request': '1' };
@@ -230,6 +236,33 @@ test('authenticated Copilot list and import bind opaque tokens to their exact ro
   assert.match(JSON.stringify(report), /Copilot A/);
   assert.match(JSON.stringify(report), /Copilot B/);
   const retained = await readdir(join(app.store.directory, 'ui-imports'));
+  const expected = app.managed.flatMap(profile => Array.from({ length: 2 }, () => ({
+    workspace: profile.repositories[0].path, home: homedir(), root: profile.native.configRoot,
+  })));
+  const order = rows => rows.map(row => JSON.stringify(row)).sort();
+  assert.deepEqual(order(await launches()), order(expected));
+
+  const [first, second] = app.managed.map(profile => profile.repositories[0].path);
+  const backup = first + ' original';
+  await rename(first, backup);
+  await mkdir(first, { mode: 0o700 });
+  assert.equal((await post({ token: a.token }, { token: b.token })).status, 422);
+  assert.deepEqual(order(await launches()), order(expected));
+  await rmdir(first);
+  await symlink(second, first);
+  assert.equal((await list('Copilot A')).status, 422);
+  assert.deepEqual(order(await launches()), order(expected));
+  await unlink(first);
+  await rename(backup, first);
+
+  const firstBinding = app.managed[0].repositories.shift();
+  assert.equal((await post({ token: a.token }, { token: b.token })).status, 422);
+  assert.deepEqual(order(await launches()), order(expected));
+  const lastBinding = app.managed[0].repositories.pop();
+  assert.equal((await list('Copilot A')).status, 422);
+  assert.deepEqual(order(await launches()), order(expected));
+  app.managed[0].repositories.push(firstBinding, lastBinding);
+
   await writeFile(join(app.managed[1].native.configRoot, 'settings.json'), '{}', { mode: 0o600 });
   assert.equal((await post({ token: a.token }, { token: b.token })).status, 422);
   assert.equal((await post({ token: a.token }, { sessionId: b.sessionId })).status, 422);

@@ -6,6 +6,7 @@ const logDir = process.argv[process.argv.indexOf('--log-dir') + 1];
 const root = process.env.COPILOT_HOME;
 const config = JSON.parse(readFileSync(join(root, 'fixture.json'), 'utf8'));
 const workspace = process.cwd();
+if (config.invocationLog) appendFileSync(config.invocationLog, JSON.stringify({ workspace, home: process.env.HOME, root }) + '\n', { mode: 0o600 });
 const sessionId = '00000000-0000-4000-8000-000000000001';
 const transcript = JSON.parse(readFileSync(join(__dirname, 'events.json'), 'utf8').replaceAll('@WORKSPACE@', workspace));
 let activeId;

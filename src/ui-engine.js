@@ -127,10 +127,23 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   runContext = { ...runContext, profileResolvers: resolvers(runContext) };
   reviewContext = { ...reviewContext, profileResolvers: resolvers(reviewContext) };
   catalogContext = { ...catalogContext, profileResolvers: resolvers(catalogContext) };
-  const resolveCopilotSource = name => resolveProfileExecutionProfile(store, { name, client: 'copilot' }, {
-    defaultUserHome, sessionOnly: true, terminalEnvironment: runContext.terminalEnvironment ?? process.env,
-    profileResolvers: runContext.profileResolvers,
-  });
+  async function resolveCopilotSource(name) {
+    const stock = name.trim().toLowerCase() === 'default';
+    const selected = stock ? null : find(await store.read(), name);
+    const repository = selected?.repositories[0]?.path;
+    if (!stock && !repository) throw new Error('Bind a workspace to the selected Copilot profile.');
+    const profile = await resolveProfileExecutionProfile(store, { name, client: 'copilot' }, {
+      defaultUserHome, sessionOnly: stock, repository, terminalEnvironment: runContext.terminalEnvironment ?? process.env,
+      profileResolvers: runContext.profileResolvers,
+    });
+    if (stock) return profile;
+    if (profile.profileId !== selected.id || profile.cwd !== repository || profile.bindingRepository !== repository)
+      throw new Error('The selected Copilot workspace binding changed.');
+    const info = await lstat(repository);
+    if (!info.isDirectory() || await realpath(repository) !== repository)
+      throw new Error('The selected Copilot workspace is no longer canonical.');
+    return { ...profile, metadataWorkspaceIdentity: `${info.dev}:${info.ino}` };
+  }
   async function withCopilotMetadata(name, profile, directory, read) {
     const guard = action => withProfileOperation(store, profile.profileId, { waitMs: 5000, recovery: true, ...lockOptions }, action);
     const lock = join(profile.reservationRoot, '.run-lock'), id = randomUUID();
@@ -145,6 +158,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         if (closing) throw new Error('Xenoflux is stopping');
         const fresh = await resolveCopilotSource(name);
         assertEnvironmentBinding(fresh.environmentBinding, profile.environmentBinding);
+        if (fresh.metadataWorkspaceIdentity !== profile.metadataWorkspaceIdentity)
+          throw new Error('The selected Copilot workspace changed.');
         if (JSON.stringify(fresh.accountQualification) !== JSON.stringify(profile.accountQualification))
           throw new Error('Copilot account qualification changed');
         await acquire(lock, owner, true);
@@ -203,6 +218,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     if (client === 'claude-code') {
       imported = await importClaudeSession(profile, bound.selection, { directory, onArtifactCreated: artifact => directories.push(artifact) });
     } else {
+      if (profile.metadataWorkspaceIdentity !== bound.workspaceIdentity)
+        throw new Error('The selected Copilot workspace changed.');
       const readJournal = input => withCopilotMetadata(bound.name, profile, directory,
         lifecycle => copilotRuntime.readJournal({ ...input, ...lifecycle }));
       let artifact;
@@ -1229,7 +1246,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
               stdoutPath: join(directory, 'native.stdout'), stderrPath: join(directory, 'native.stderr') }));
           const sessions = result.map(({ selection, ...row }) => {
             const token = randomUUID();
-            copilotSelections.set(token, { name, selection, expiresAt: Date.now() + 20 * 60_000 });
+            copilotSelections.set(token, { name, selection, workspaceIdentity: profile.metadataWorkspaceIdentity, expiresAt: Date.now() + 20 * 60_000 });
             return { ...row, token };
           });
           while (copilotSelections.size > 1000) copilotSelections.delete(copilotSelections.keys().next().value);
