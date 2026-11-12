@@ -1,78 +1,32 @@
 # Xenoflux
 
-Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
+Compare what Codex, Claude Code or GitHub Copilot CLI did on the same task, using
+independent profiles and inspectable evidence in a local macOS browser app.
 
-**4.0.0-beta.1 is an opt-in public beta.** End-user qualification is still in
-progress; read the [scope and limits](docs/user/APP.md#400-scope-and-limits).
-The [beta-exit checklist](docs/developer/AUDIT-ACCEPTANCE.md#beta-exit-checklist)
-defines the review required before a stable 4.0.0 release.
+The current release line is an opt-in beta. [Installation](docs/INSTALLATION.md)
+owns version/channel selection, requirements, updates and removal.
 
-## Install
-
-4.0.0 targets Apple Silicon Macs with arm64 Node. See the
-[requirements](docs/user/INSTALLATION.md#requirements).
-
-Opt in from an external terminal:
-
-```sh
-npm install -g xenoflux@beta
-```
-
-The `beta` npm channel is separate from stable `latest`. To select this exact beta, use
-`xenoflux@4.0.0-beta.1` instead.
-
-## Create a profile
-
-For Codex CLI/Desktop, replace `Research` with your profile name:
-
-```sh
-xfx profile create Research --apply --close-clients
-xfx desktop open Research
-```
-
-Profile setup guides sign-in and may ask to close Codex clients; npm installation
-does not. Repeated `desktop open` focuses the running profile. To preview setup first,
-run `xfx profile create Research` without `--apply`.
-
-npm's global bin directory must already be on `PATH`. You need supported Node.js
-and the selected native CLI installed separately; Codex desktop profiles also need
-Codex desktop. For Claude Code and GitHub Copilot CLI, choose the client in the
-app’s **Create profile** flow and follow its native sign-in guidance. See
-[Installation](docs/user/INSTALLATION.md) for requirements,
-managed/offline setup and updates, and [Profiles](docs/user/PROFILES.md) to continue an
-interrupted sign-in. Use `xfx --help` for all commands.
-
-## Open the app
-
-The local browser app supports:
+After installation:
 
 ```sh
 xfx ui
 ```
 
-Create empty or from-source profiles for any of the three CLI clients, run a
-same-client or mixed-client task comparison and read its report
-in a local browser app. It also supports setup/session comparisons
-and external review import. From a report, start an ordinary AI review with a
-selected profile and read its captured response. See
-[The Xenoflux app](docs/user/APP.md), including its
-[4.0.0 limits](docs/user/APP.md#400-scope-and-limits).
+Create or select two profiles, compare a task, inspect responses/checks/replay,
+and optionally request an AI review of the frozen report. Existing sessions can
+also be compared without starting another model task. Each comparison can use
+the same profile on both sides or mix supported CLI clients.
 
-For version and distribution identity, see the [package manifest](package.json),
+Reports distinguish observations, verification and reviewer judgments. Missing
+evidence stays visible; one pair does not establish a universal winner.
+
+| Read | For |
+| --- | --- |
+| [User guide](docs/GUIDE.md) | Profiles, comparisons, reports, reviews and recovery |
+| [CLI recipes](docs/CLI.md) | Terminal workflows, experiments and external reviews |
+| [Contributing on GitHub](https://github.com/digitalexpression/xenoflux/blob/main/CONTRIBUTING.md) | Source changes, checks and architecture |
+
 [GitHub releases](https://github.com/digitalexpression/xenoflux/releases) and
-[npm package](https://www.npmjs.com/package/xenoflux).
+[package metadata](package.json) identify distributed versions.
 
-## Documentation
-
-- **Users:** [The app](docs/user/APP.md), [Profiles](docs/user/PROFILES.md), [Desktop](docs/user/DESKTOP.md),
-  [Copy settings](docs/user/ADVANCED-COPY.md), [Recovery](docs/user/PROFILE-RECOVERY.md)
-  and [RAM logs](docs/user/RAM-LOGS.md).
-- **Developers:** [Development](docs/developer/README.md),
-  [Desktop implementation](docs/developer/DESKTOP-IMPLEMENTATION.md)
-  and [Copy policy](docs/developer/PROFILE-COPY-POLICY.md).
-
-The [documentation index](docs/README.md) covers supported workflows and development contracts.
-
-## License
-
-[MIT](LICENSE).
+[MIT license](LICENSE).

@@ -4,7 +4,7 @@
 
 **Theme:** light + dark, following the system preference.
 
-**Status:** adopted design direction. This standalone guide covers Xenoflux's local web app. The [roadmap](docs/developer/ROADMAP.md#current-work-and-stop-condition) owns release scope and direction; this design specification is not proof that its behavior has been verified.
+**Status:** adopted design direction. This standalone guide covers Xenoflux's local web app. The [user guide](docs/GUIDE.md#supported-clients-and-known-limits) owns supported scope and limits; this design specification is not proof that its behavior has been verified.
 
 Xenoflux combines IBM Plex Sans, compact rounded controls and opaque layered surfaces. Cobalt identifies actions and links; Soft Mint supports the identity without implying success. Dark mode uses Obsidian `#0a0d16`, raised navy surfaces and lighter cobalt interaction cues. Content stays calm and readable, with technical character concentrated in typography and small header accents.
 
@@ -325,7 +325,7 @@ Use brief 120–200ms transitions to explain state changes, without moving contr
 
 ## Accessibility
 
-Use WCAG 2.2 AA as the web accessibility target. Check normal text contrast of at least 4.5:1, qualifying large text at least 3:1, and essential control/graphic contrast at least 3:1. Support keyboard operation, visible unobscured focus, accessible names, status announcements and errors that do not rely on color. Check reflow at 320 CSS pixels, with appropriate exceptions for genuinely two-dimensional content. AA pointer targets are at least 24×24 CSS pixels or meet a permitted exception; the 40px control height above provides a more comfortable default for pointer use on macOS. These are selected checks, not a complete conformance checklist. Follow the [product goal's verification exclusions](docs/developer/AUDIT-GOAL.md#observable-acceptance); excluded checks are not outstanding work. See the [W3C reference](https://www.w3.org/WAI/WCAG22/quickref/).
+Use WCAG 2.2 AA as the web accessibility target. Check normal text contrast of at least 4.5:1, qualifying large text at least 3:1, and essential control/graphic contrast at least 3:1. Support keyboard operation, visible unobscured focus, accessible names, status announcements and errors that do not rely on color. Check reflow at 320 CSS pixels, with appropriate exceptions for genuinely two-dimensional content. AA pointer targets are at least 24×24 CSS pixels or meet a permitted exception; the 40px control height above provides a more comfortable default for pointer use on macOS. These are selected checks, not a complete conformance checklist. Follow the [verification exclusions](CONTRIBUTING.md#checkout-and-checks); excluded checks are not outstanding work. See the [W3C reference](https://www.w3.org/WAI/WCAG22/quickref/).
 
 Use named header/navigation/breadcrumb/main landmarks and labelled supporting asides. Keep one `h1` per page, `h2` sections and `h3` cards; report heading order follows its reading order. Menus support arrows, Home/End and Escape; native controls or equivalent accessible components retain their keyboard semantics.
 

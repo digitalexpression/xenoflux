@@ -16,6 +16,16 @@ function action(run, kind, targets, sourceLine, { subjects = [], exitCode = 0, c
     resultScope: 'action', invocationIndex: 0, exitCode, sourceFingerprint: run.agents[0].source.fingerprint };
 }
 
+test('contract read findings recognize consolidated and historical document names', () => {
+  for (const target of ['docs/CONTRACTS.md', 'CONTRIBUTING.md', 'docs/developer/AUDIT-GOAL.md']) {
+    const pair = bookingLedgerPair();
+    pair[0].actions = [action(pair[0], 'read', [target], 2), action(pair[0], 'edit', ['src/math.js'], 10)];
+    pair[1].actions = [];
+    const finding = buildAuditExplanation(...pair).findings.find(row => row.rule === 'named-contract-read-before-edit');
+    assert.equal(finding.left.assertion, 'read-invocation-before-edit-invocation', target);
+  }
+});
+
 test('paired evidence reports omitted steps and unresolved action references', () => {
   const pair = bookingLedgerPair();
   pair[0].actions = Array.from({ length: 81 }, (_, index) => action(pair[0], 'visible-test', ['test/math.test.js'], 10 + index,

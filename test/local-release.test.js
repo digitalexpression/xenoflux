@@ -38,11 +38,13 @@ test('npm package includes reviewed docs and excludes private receipts and unrev
   t.after(() => rm(directory, { recursive: true, force: true }));
   const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8'));
   await writeFile(join(directory, 'package.json'), JSON.stringify({ name: 'xfx-package-boundary-fixture', version: '1.0.0', files: manifest.files }));
-  const publicPaths = ['bin/xfx.js', 'src/fixture.js', 'README.md', 'LICENSE', 'docs/user/AUDIT.md',
+  const publicPaths = ['bin/xfx.js', 'src/fixture.js', 'dist/ui/index.html', 'README.md', 'LICENSE',
+    'docs/INSTALLATION.md', 'docs/GUIDE.md', 'docs/CLI.md'];
+  const privatePaths = [
+    'CONTRIBUTING.md', 'docs/CONTRACTS.md', 'docs/user/APP.md',
     'docs/developer/README.md', 'docs/developer/AUDIT-ACCEPTANCE.md',
     'docs/developer/DESKTOP-IMPLEMENTATION.md', 'docs/developer/PROFILE-COPY-POLICY.md',
-    'docs/developer/AUDIT-GOAL.md', 'docs/developer/ROADMAP.md', 'docs/developer/REVIEW-TASK-IMPLEMENTATION.md'];
-  const privatePaths = [
+    'docs/developer/AUDIT-GOAL.md', 'docs/developer/ROADMAP.md', 'docs/developer/REVIEW-TASK-IMPLEMENTATION.md',
     'docs/developer/CLIENT-SUPPORT-PLAN.md', 'docs/developer/LOCAL-RELEASE.md',
     'docs/developer/history/README.md', 'docs/developer/history/DESKTOP-HISTORY.md',
     'docs/developer/history/RELEASE-3.1.1.md', 'docs/developer/history/evidence/audit-2.0.0-summary.json',

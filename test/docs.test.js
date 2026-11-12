@@ -3,7 +3,22 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { checkPackagedDocs } from '../scripts/check-docs.mjs';
+import { checkDocumentationPolicy, checkPackagedDocs } from '../scripts/check-docs.mjs';
+
+test('documentation policy rejects duplicate owners, contributor payloads and misplaced channel notices', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-doc-policy-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'docs'));
+  const users = ['README.md', 'docs/INSTALLATION.md', 'docs/GUIDE.md', 'docs/CLI.md'];
+  const sources = [...users, 'CONTRIBUTING.md', 'docs/CONTRACTS.md'];
+  for (const path of sources) await writeFile(join(root, path), '# Document\n');
+  assert.deepEqual(await checkDocumentationPolicy(root, sources, [...users, 'node_modules/sdk/README.md']), []);
+  await writeFile(join(root, 'docs/README.md'), '# Duplicate index\n');
+  assert.match((await checkDocumentationPolicy(root, [...sources, 'docs/README.md'], users)).join('\n'), /Consolidate docs\/README/);
+  assert.match((await checkDocumentationPolicy(root, sources, [...users, 'CONTRIBUTING.md'])).join('\n'), /out of npm/);
+  await writeFile(join(root, 'docs/GUIDE.md'), '# Beta workflow\n');
+  assert.match((await checkDocumentationPolicy(root, sources, users)).join('\n'), /channel wording belongs/);
+});
 
 test('packaged docs reject omitted local targets and broken headings, ignoring example code and remote URLs', async t => {
   const root = await mkdtemp(join(tmpdir(), 'xfx-docs-test-'));

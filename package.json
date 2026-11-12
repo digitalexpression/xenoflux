@@ -12,25 +12,9 @@
     "dist/ui",
     "LICENSE",
     "README.md",
-    "docs/README.md",
-    "docs/user/PROFILE-RECOVERY.md",
-    "docs/user/RAM-LOGS.md",
-    "docs/user/INSTALLATION.md",
-    "docs/user/ADVANCED-COPY.md",
-    "docs/user/APP.md",
-    "docs/user/AUDIT.md",
-    "docs/user/AUDIT-EXPERIMENTS.md",
-    "docs/user/AUDIT-EVIDENCE.md",
-    "docs/user/AUDIT-REVIEWS.md",
-    "docs/user/DESKTOP.md",
-    "docs/user/PROFILES.md",
-    "docs/developer/README.md",
-    "docs/developer/AUDIT-GOAL.md",
-    "docs/developer/ROADMAP.md",
-    "docs/developer/REVIEW-TASK-IMPLEMENTATION.md",
-    "docs/developer/PROFILE-COPY-POLICY.md",
-    "docs/developer/DESKTOP-IMPLEMENTATION.md",
-    "docs/developer/AUDIT-ACCEPTANCE.md"
+    "docs/INSTALLATION.md",
+    "docs/GUIDE.md",
+    "docs/CLI.md"
   ],
   "engines": {
     "node": ">=22.15.0 <23 || >=23.8.0"

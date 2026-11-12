@@ -570,7 +570,7 @@ export function buildAuditExplanation(left, right, options = {}) {
     invocationIndex: action.invocationIndex, resultIndex: action.resultIndex }));
   const categoryFor = target => {
     const base = target.split('/').at(-1);
-    if (['AGENTS.md', 'README.md', 'AUDIT-GOAL.md', 'AUDIT-ACCEPTANCE.md', 'PROFILE-COPY-POLICY.md'].includes(base)) return 'contract';
+    if (['AGENTS.md', 'README.md', 'CONTRIBUTING.md', 'CONTRACTS.md', 'AUDIT-GOAL.md', 'AUDIT-ACCEPTANCE.md', 'PROFILE-COPY-POLICY.md'].includes(base)) return 'contract';
     if (/^(src|lib)\//.test(target)) return 'source';
     if (/^(test|tests)\//.test(target)) return 'test';
     return null;
