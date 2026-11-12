@@ -3,8 +3,16 @@
 Compare what Codex, Claude Code or GitHub Copilot CLI did on the same task, using
 independent profiles and inspectable evidence in a local macOS browser app.
 
-The current release line is an opt-in beta. [Installation](docs/INSTALLATION.md)
-owns version/channel selection, requirements, updates and removal.
+Choose a release channel:
+
+| Channel | Install |
+| --- | --- |
+| Stable | `npm install -g xenoflux@latest` |
+| Opt-in beta | `npm install -g xenoflux@beta` |
+
+These guides describe the 4.0 line, currently in beta; stable features may differ.
+[Installation](docs/INSTALLATION.md) covers requirements, version selection,
+updates and removal.
 
 After installation:
 

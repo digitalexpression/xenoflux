@@ -1,8 +1,8 @@
 # Install, update and remove Xenoflux
 
-These guides describe the 4.0 line. Install `xenoflux@beta` for that opt-in channel,
-or `xenoflux@4.0.0-beta.1` for the exact release. Plain `xenoflux` and `@latest`
-select stable, whose supported features may differ. Check the
+Choose stable with `xenoflux@latest` or the opt-in channel with `xenoflux@beta`.
+Plain `xenoflux` also selects stable. These guides describe the 4.0 line, currently
+in beta; stable features may differ. Check the
 [known limits](GUIDE.md#supported-clients-and-known-limits) before choosing.
 
 ## Requirements
@@ -21,15 +21,25 @@ Profiles follow the current selected installation; versions are provenance.
 
 ## Install with npm
 
+Run one install command:
+
+| Channel | Install |
+| --- | --- |
+| Stable | `npm install -g xenoflux@latest` |
+| Opt-in beta | `npm install -g xenoflux@beta` |
+
+For an exact version, use its full version, such as `xenoflux@4.0.0-beta.1`.
+Then open the app:
+
 ```sh
-npm install -g xenoflux@beta
 xfx --help
 xfx ui
 ```
 
 npm links `xfx` under `$(npm prefix -g)/bin` on macOS. Put that directory on PATH
 if the command is missing. No separate `xfx install` step is required. A local
-`npm install xenoflux@beta` can be used through `npm exec -- xfx`.
+`npm install xenoflux@latest` can be used through `npm exec -- xfx`; substitute
+`@beta` to choose that channel.
 
 npm installation does not close native clients, sign in or create profiles.
 Continue in the [user guide](GUIDE.md), or use the [CLI recipes](CLI.md).
@@ -45,8 +55,10 @@ xfx install --close-clients
 Without a global installation:
 
 ```sh
-npm exec --yes --package=xenoflux@beta -- xfx install --close-clients
+npm exec --yes --package=xenoflux@latest -- xfx install --close-clients
 ```
+
+Use `--package=xenoflux@beta` instead to install the beta channel.
 
 Run this from an external terminal. It may request graceful shutdown; close
 standalone Codex terminal sessions manually when asked. It never force-kills
@@ -61,8 +73,9 @@ without one, installation uses disk logs and reports RAM logs disabled. See
 ## Install an offline bundle
 
 Download `xenoflux-VERSION.tgz`, `manifest.json` and `install.mjs` from the same
-[GitHub prerelease](https://github.com/digitalexpression/xenoflux/releases).
-For this beta, `VERSION` is `4.0.0-beta.1`; preserve the suffix. No separate SDK
+[GitHub release](https://github.com/digitalexpression/xenoflux/releases).
+Choose a stable release or an opt-in prerelease and preserve the full version,
+including any beta suffix, in `VERSION`. No separate SDK
 runtime archive is needed. Keep the three files together and the tarball compressed.
 From an external terminal in that directory:
 
@@ -76,14 +89,16 @@ that same installer. Node and the chosen native CLIs are still prerequisites.
 
 ## Update or remove
 
+Repeat your chosen [npm install command](#install-with-npm) to update or switch
+channels. To remove the npm installation:
+
 ```sh
-npm install -g xenoflux@beta
 npm uninstall -g xenoflux
 ```
 
 These commands update/remove npm's package and link, preserving `~/.xfx` profiles
 and controller data. They do not update/remove a separate managed copy. The update
-stays on the beta channel and changes no registry tags. Use `command -v xfx` to
+uses the selected channel and changes no registry tags. Use `command -v xfx` to
 identify the executable your shell resolves.
 
 Update a managed copy using a newer package/bundle's installer. `xfx install`
