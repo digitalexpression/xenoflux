@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
+import { CLAUDE_REQUEST, validateClaudeDecision } from './claude-decoder.js';
+import { COPILOT_REQUEST, copilotDecision } from './copilot-events.js';
 
 // Validate supported server-initiated app-server requests before showing them
 // and validate the user's explicit response before writing it to that socket.
@@ -235,4 +237,12 @@ export function validateNativeResponse(request, result) {
     }
   }
   return result;
+}
+
+/** Validate a decision using the live request's owning native client. */
+export function validateClientNativeResponse(client, request, answer) {
+  if (client === 'codex') return validateNativeResponse(request, answer);
+  if (client === 'claude-code' && request?.method === CLAUDE_REQUEST) return validateClaudeDecision(request, answer);
+  if (client === 'copilot' && request?.method === COPILOT_REQUEST) return copilotDecision(answer);
+  throw new Error('Native request does not match the selected client.');
 }

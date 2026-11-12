@@ -68,6 +68,34 @@ test('mismatched native source is not frozen into a completed run', async () => 
   assert.equal(captured.sessionReplay.sessions[0].status, 'unavailable');
 });
 
+test('qualified missing or foreign native state never falls back to a Codex history read', async () => {
+  let reads = 0;
+  const deps = { readReplay: async () => { reads++; return native(replay([])); } };
+  const profile = { profileId: 'profile', client: 'claude-code' };
+  const reference = { client: 'claude-code', jobId: 'run', profileId: 'profile', sessionId: root };
+  const run = { id: 'run', source: { threadId: root }, nativeReference: reference };
+  const missingReader = await captureFrozenSessionReplay(deps, {}, profile, run, undefined);
+  assert.equal(missingReader.replayCapture.status, 'unavailable');
+  assert.match(missingReader.sessionReplay.sessions[0].reason, /no retained native history reader/);
+  const missingId = await captureFrozenSessionReplay(deps, {}, { ...profile, client: 'codex' },
+    { ...run, nativeReference: { ...reference, client: 'codex', sessionId: null } }, undefined);
+  assert.equal(missingId.replayCapture.status, 'unavailable');
+  assert.equal(missingId.sessionReplay, undefined);
+  assert.equal(reads, 0);
+});
+
+test('reopen preserves a foreign client record even when its compatibility thread ID looks like Codex', async () => {
+  const original = { id: 'run', source: { kind: 'native-app-server-v2', threadId: root },
+    clientIdentity: { client: 'claude-code' },
+    nativeReference: { client: 'claude-code', jobId: 'run', profileId: 'profile', sessionId: root } };
+  let reads = 0;
+  const report = await projectRetainedAuditRun({}, { id: 'run', report: original,
+    record: { kind: 'audit-experiment-run', profile: { profileId: 'profile', client: 'claude-code' } } },
+  { read: async () => { reads++; }, readNative: async () => { reads++; } });
+  assert.deepEqual(report, original);
+  assert.equal(reads, 0);
+});
+
 test('new capture requires agreement between indexed, app-server, and replay actor sets', async () => {
   const childAgent = { id: child, parentId: root };
   const discovery = { schemaVersion: 1, kind: 'native-child-discovery', rootId: root, complete: true,

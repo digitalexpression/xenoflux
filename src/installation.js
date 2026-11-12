@@ -1,5 +1,5 @@
 import { cp, lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { userInfo } from 'node:os';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
@@ -15,6 +15,53 @@ const APP_MARKER = '.xfx-install.json';
 const APP_OWNER = 'com.xenoflux.app.v1';
 const ENTRY_MARKER = '# xenoflux-managed-entry-v1';
 const SERVICE = 'com.xenoflux.ramlogs';
+
+export function koffiPlatformPackage() {
+  return `@koromix/koffi-${process.platform}-${process.arch}`;
+}
+
+export async function copyRuntimeDependencies(source, destination) {
+  const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+  const roots = [join(source, 'node_modules')];
+  if (basename(dirname(source)) === 'node_modules') roots.push(dirname(source));
+  const copied = new Map();
+
+  async function copyDependency(parent, name, { version, optional } = {}) {
+    if (!/^(?:@[\w.-]+\/)?[\w-][\w.-]*$/.test(name)) throw new Error(`Invalid dependency name: ${name}`);
+    for (const modules of createRequire(join(parent, 'package.json')).resolve.paths(name) ?? []) {
+      const directory = join(modules, name);
+      const location = roots.map(root => relative(root, directory)).find(path =>
+        path && !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`));
+      if (!location || !(await kind(directory))?.isDirectory()) continue;
+      const dependency = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
+      if (dependency.name !== name || (version && dependency.version !== version))
+        throw new Error(`Installed runtime dependency does not match its manifest: ${name}`);
+      const previous = copied.get(location);
+      if (previous === directory) return;
+      if (previous) throw new Error(`Conflicting installed runtime dependencies at ${location}`);
+      copied.set(location, directory);
+      const target = join(destination, 'node_modules', location);
+      await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+      await cp(directory, target, { recursive: true, force: false, errorOnExist: true,
+        filter: path => basename(path) !== 'node_modules' });
+      for (const child of Object.keys({ ...dependency.peerDependencies, ...dependency.dependencies })) {
+        if (Object.hasOwn(dependency.optionalDependencies ?? {}, child)) continue;
+        await copyDependency(directory, child, {
+          optional: !Object.hasOwn(dependency.dependencies ?? {}, child) && dependency.peerDependenciesMeta?.[child]?.optional,
+        });
+      }
+      // Copilot's SDK imports Koffi even when Xenoflux supplies an external CLI.
+      const platformPackage = koffiPlatformPackage();
+      if (name === 'koffi' && dependency.optionalDependencies?.[platformPackage])
+        await copyDependency(directory, platformPackage, { version: dependency.optionalDependencies[platformPackage], optional: true });
+      return;
+    }
+    if (!optional) throw new Error(`Missing installed runtime dependency: ${name}`);
+  }
+
+  for (const [name, version] of Object.entries(manifest.dependencies ?? {}))
+    await copyDependency(source, name, { version });
+}
 
 function shellQuote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -121,15 +168,9 @@ export function createInstallation({ home, source = new URL('..', import.meta.ur
       for (const name of ['bin', 'src', 'dist/ui', 'LICENSE', 'package.json']) {
         await cp(join(sourceRoot, name), join(stage, name), { recursive: true, force: false, errorOnExist: true });
       }
-      await mkdir(join(stage, 'node_modules'), { mode: 0o700 });
-      const dependencyRoot = dirname(dirname(createRequire(join(sourceRoot, 'package.json')).resolve('smol-toml')));
-      const dependency = JSON.parse(await readFile(join(dependencyRoot, 'package.json'), 'utf8'));
       const manifest = JSON.parse(await readFile(join(sourceRoot, 'package.json'), 'utf8'));
       installedVersion = manifest.version;
-      if (dependency.name !== 'smol-toml' || dependency.version !== manifest.dependencies['smol-toml'])
-        throw new Error('The installed TOML dependency does not match the package manifest');
-      await cp(dependencyRoot, join(stage, 'node_modules', 'smol-toml'),
-        { recursive: true, force: false, errorOnExist: true });
+      await copyRuntimeDependencies(sourceRoot, stage);
       await writeFile(join(stage, APP_MARKER), `${JSON.stringify({ owner: APP_OWNER, schemaVersion: 1 })}\n`, { flag: 'wx', mode: 0o600 });
       await execute('node', [join(stage, 'bin', 'xfx.js'), '--help'], { env });
       const hadApp = await ownedApp(target.app);

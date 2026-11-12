@@ -2,7 +2,10 @@
 
 Audience: users. This guide covers inspection, selective copying and undo. For profile setup, see [Profiles](PROFILES.md).
 
-Use `xfx profile inspect Default` or `xfx profile inspect Research --json` to inspect a profile. The inventory reports discovered contents and their origin. It does not prove that Codex loaded every item into a particular task.
+Use `xfx profile inspect Default` or `xfx profile inspect Research --json` to inspect a profile. The inventory reports discovered contents and their origin. It does not prove that the selected native client loaded every item into a task.
+Use the app for same-client Codex, Claude Code or GitHub Copilot CLI copy flows.
+Cross-client copying is unsupported; copied-setup native loading remains
+unverified for the deferred 4.0.0 qualification. The commands below show Codex examples.
 
 Full profile inspection considers known project locations automatically. Copy selection reads supported settings and standalone resources without scanning project folders, conversation history, memories or plugin caches. Project-local resources remain associated with their projects: inspecting them does not copy repositories, grant trust, or change project files. Filesystem metadata entries `.DS_Store`, `.git`, and `.tmp` are omitted from inventory and counts without changing files on disk. Legitimate hidden resources such as `.system` remain discoverable. Missing paths, unsupported formats and scan limits are reported rather than treated as empty inventories.
 

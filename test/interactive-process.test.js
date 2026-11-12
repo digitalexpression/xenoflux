@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import test from 'node:test';
 import { existsSync } from 'node:fs';
-import { access, chmod, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -175,6 +175,7 @@ printf 'OWNED_READY\\n'
 while :; do sleep 1; done
 `, { mode: 0o700 });
   await chmod(f.path, 0o700);
+  await symlink(f.path, join(f.root, 'codex'));
   const native = await prepareNativeHome({ directory: join(f.root, 'native'), executable: f.path, codexVersion: '0.153.4' });
   const store = new Store(join(f.root, 'store'));
   await store.update(data => { create(data, 'A'); });
@@ -193,7 +194,7 @@ exec /bin/kill -HUP [exp_pid]
 require {Codex incomplete (CANCELLED).}
 expect { eof {} timeout { puts stderr "missing eof"; exit 1 } }
 exit 0`;
-  await runFile('/usr/bin/expect', ['-c', expectProgram], { timeout: 10_000 });
+  await runFile('/usr/bin/expect', ['-c', expectProgram], { timeout: 10_000, env: { ...process.env, PATH: f.root + ':/usr/bin:/bin' } });
   await assert.rejects(access(join(native.root, '.run-lock')), { code: 'ENOENT' });
   const launches = await readdir(join(native.root, 'launches'));
   assert.equal(launches.length, 1);

@@ -150,3 +150,48 @@ The gate proves reported logical source references, not bytes, precedence, stabi
 ## Captured task-end patch content
 
 Retain at most 256 KiB redacted text per side, bound to source baseline, post-setup fingerprint and task-end snapshot. Baseline-to-task-end patches may include setup changes; ignored/unchanged/binary/oversized contents are absent or explicitly limited. After-process fallback timing remains labelled. Imports never fetch missing historical code from recorded paths. Body export opt-in and review fingerprint preservation follow [export rules](AUDIT.md#export-a-frozen-report); [the app](APP.md#inspect-captured-code-changes) exposes the UI.
+
+
+## Read-only client conversation imports
+
+Import is distinct from execution, managed-profile isolation and desktop session
+association. Both sides must pass admission before publication. Retain immutable
+private sources separately from sanitized projection hashes; export/reopen uses
+the frozen projection without rereading vendor history. Missing profile/account,
+surface/location, completion, usage or applied effort stays unknown. A historical
+resume/shutdown event is not an operation performed by the reader.
+
+### Claude Code
+
+Select two UTF-8 UUID-named JSONL files, each at most 8 MiB and 10,000 records.
+Admission validates identity/shape and retains a private snapshot. The pinned
+Agent SDK's public stored-session reader runs in a bounded helper against only
+that isolated snapshot, with native credentials excluded and subprocess, network
+and write entry points guarded before SDK loading. It initializes no agent.
+Do not replace this boundary with a private-format semantic decoder; SDK changes
+require renewed reader-effects, malformed-input and privacy checks.
+
+Only SDK-selected public user/assistant text enters replay. Thinking, signatures,
+tools, system content and oversized bodies remain explicit omissions. Projection
+line ordinals do not claim to be original JSONL line numbers. Raw JSONL never
+enters the public report; explicit body exports still use redaction and bounds.
+
+### Copilot CLI
+
+Select two explicit local session IDs. The pinned SDK's public
+`sessions.readPersistedEvents` uses the selected installed CLI and validated root
+without creating, resuming or activating a session. Preserve native user context;
+refuse ambient token/provider/root overrides before startup, including empty
+`COPILOT_PROVIDERS_CONFIG` and `COPILOT_PROVIDER_*` values. Import performs no
+sign-in, model-policy change, task, tool or model prompt.
+
+Pin one journal generation and page sequentially, at most eight 200-event pages;
+require `cursorStatus: ok` and final `hasMore: false`. Expiry, unsupported RPCs,
+changed scope or bounds fail without a replacement read. Each owned read has
+30 seconds plus 18 seconds cleanup, an 8 MiB combined native-output bound and a
+separate 8 MiB retained-snapshot bound. Rollback removes only newly owned files.
+
+Only public user/assistant `data.content` text enters replay. Retain available
+native event IDs, timestamps and assistant model observations; reasoning, tools,
+system/transformed content, assets and opaque fields are omitted. Raw pages stay
+private. Successful reader shutdown does not establish historical task completion.

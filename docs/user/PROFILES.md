@@ -2,6 +2,17 @@
 
 Audience: users. Start with [Installation](INSTALLATION.md) if `xfx` is not available.
 
+Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
+
+Use `xfx ui` to choose a client when creating an empty profile or copying selected
+parts of a same-client profile. Follow the native client’s sign-in guidance.
+Claude’s observed route is per-root with the same account; Copilot’s qualified
+GitHub CLI login is shared. Separate setup roots do not prove account independence.
+See [scope and limits](APP.md#400-scope-and-limits), including unverified credential
+refresh and current-installation handling.
+
+The commands and native-history details below describe Codex profiles.
+
 ## Create and sign in
 
 Preview a profile before applying setup:

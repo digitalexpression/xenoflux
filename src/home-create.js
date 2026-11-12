@@ -12,6 +12,8 @@ import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { acquire, exists, readJSON, release } from './metadata.js';
 import { probeVersion } from './version-probe.js';
 import { createLogStorage } from './log-storage.js';
+import { discoverCodexExecutable } from './launcher.js';
+import { nativePath } from './node-runtime.js';
 
 const MARKER = '.xfx-home-setup.json';
 const own = process.getuid?.();
@@ -246,7 +248,8 @@ export async function inspectHomeCreation({ store, name, base } = {}) {
 }
 
 /** Run the native Codex login command in the registered home's isolated environment. */
-export async function startHomeSignIn({ store, name, base, signal, run = runInteractive, probe = probeVersion, ramLogs = createLogStorage() } = {}) {
+export async function startHomeSignIn({ store, name, base, signal, terminalEnvironment = process.env,
+  run = runInteractive, probe = probeVersion, ramLogs = createLogStorage() } = {}) {
   homeName(name);
   if (typeof run !== 'function') fail('Invalid native login runner');
   if (typeof probe !== 'function' || !ramLogs || typeof ramLogs.prepareHome !== 'function') fail('Invalid native login preparation');
@@ -266,19 +269,21 @@ export async function startHomeSignIn({ store, name, base, signal, run = runInte
     if (!setup || setup.profileId !== fresh.id || !['registered', 'login-failed', 'login-cancelled'].includes(setup.phase))
       fail('Native home is not prepared for sign-in');
     const { environment, native } = await resolveHome(store, fresh.id);
+    const binary = await discoverCodexExecutable(terminalEnvironment);
     if (native.root !== root || environment.home !== join(root, 'codex-home')) fail('Native home binding changed');
     setup = { ...setup, phase: 'login-running' }; await writeMarker(root, setup);
     enteredLogin = true;
-    const launchEnv = environment.launch.env;
-    const observedVersion = await probe({ executable: environment.launch.executable, cwd: environment.launch.cwd, env: launchEnv, signal });
+    const launchEnv = { ...environment.launch.env, PATH: nativePath(terminalEnvironment) };
+    const observedVersion = await probe({ executable: binary.executable, cwd: environment.launch.cwd, env: launchEnv, signal });
     const afterProbe = await resolveHome(store, fresh.id);
+    const currentBinary = await discoverCodexExecutable(terminalEnvironment);
     if (afterProbe.native.environmentId !== native.environmentId || afterProbe.environment.id !== environment.id || afterProbe.environment.home !== environment.home)
       throw Object.assign(new Error('Native home binding changed'), { code: 'HOME_CHANGED' });
-    if (afterProbe.native.executableIdentity !== native.executableIdentity)
+    if (currentBinary.executable !== binary.executable || currentBinary.executableIdentity !== binary.executableIdentity)
       throw Object.assign(new Error('Codex executable changed'), { code: 'EXECUTABLE_CHANGED' });
-    const currentEnv = afterProbe.environment.launch.env;
+    const currentEnv = { ...afterProbe.environment.launch.env, PATH: launchEnv.PATH };
     await ramLogs.prepareHome({ home: afterProbe.environment.home, key: afterProbe.environment.id, signal });
-    const result = await run({ executable: afterProbe.environment.launch.executable, args: ['login'], cwd: afterProbe.environment.launch.cwd,
+    const result = await run({ executable: currentBinary.executable, args: ['login'], cwd: afterProbe.environment.launch.cwd,
       env: currentEnv, signal });
     const phase = signal?.aborted || result?.signal ? 'login-cancelled' : result?.exitCode === 0 ? 'login-completed' : 'login-failed';
     setup = { ...setup, phase }; await writeMarker(root, setup);

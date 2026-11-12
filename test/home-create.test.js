@@ -18,7 +18,7 @@ async function fixture(t) {
   return { root, base, store, executable };
 }
 const options = f => ({ store: f.store, name: 'new', base: f.base, executable: f.executable, version: '0.153.4' });
-const loginOptions = f => ({ store: f.store, name: 'new', base: f.base, probe: async () => '0.153.4', ramLogs: { prepareHome: async () => {} } });
+const loginOptions = f => ({ store: f.store, name: 'new', base: f.base, terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' }, probe: async () => '0.153.4', ramLogs: { prepareHome: async () => {} } });
 
 test('previews then prepares a private minimal stable-ID home, registered but pending native login', async t => {
   const f = await fixture(t), preview = await planHomeCreation(options(f));
@@ -178,7 +178,7 @@ test('cancelled returned login never reports completion and probe/RAM preparatio
   const f = await fixture(t), made = await createHome(options(f));
   const controller = new AbortController();
   let prepared = false;
-  const outcome = await startHomeSignIn({ store: f.store, name: 'new', base: f.base, signal: controller.signal,
+  const outcome = await startHomeSignIn({ store: f.store, name: 'new', base: f.base, terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' }, signal: controller.signal,
     probe: async () => '0.153.4', ramLogs: { prepareHome: async ({ home, key }) => { prepared = home === made.home && Boolean(key); } },
     run: async () => { controller.abort(); return { exitCode: 0 }; } });
   assert.equal(outcome.login.state, 'cancelled');

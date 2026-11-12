@@ -1,41 +1,47 @@
 # Xenoflux roadmap
 
-**3.1.1 released. Updated 2026-11-09.** This file owns delivery status; the
-[goal](AUDIT-GOAL.md) owns behavior and acceptance, and the
-[review contract](REVIEW-TASK-IMPLEMENTATION.md) owns execution and persistence.
-
 ## Current work and stop condition
 
-**The authorized 3.1.1 release batch is complete.** The
-[release record](history/RELEASE-3.1.1.md#published-identity-and-verification) owns tested
-source, publication identities, artifact hashes and isolated installation checks.
-No further release batch, installed update or live campaign is active.
+The 4.0.0 line is an opt-in public beta. Complete the
+[beta-exit review](AUDIT-ACCEPTANCE.md#beta-exit-checklist) before stable promotion.
 
-The [3.1.0 native validation summary](history/NATIVE-VALIDATION-3.1.0.md) records
-the observed same-profile concurrency behavior and its limits. Natural signed-token
-expiry, exhaustive skill-use capture and escaped-descendant proof remain outside
-the established native evidence. Historical grants authorize no new operations.
+Xenoflux supports local Apple Silicon macOS profile management and task comparison for Codex,
+Claude Code and GitHub Copilot CLI. The core journey is create a profile, compare
+a task, inspect its report and optionally request an ordinary AI review.
 
-## Delivery order
+Prioritize reliable ownership, exact user approvals, truthful evidence and safe
+recovery across these clients. Complete changes against the [product goal](AUDIT-GOAL.md)
+and [acceptance criteria](AUDIT-ACCEPTANCE.md). Development completion does not
+authorize publication or installed updates; those require current user instructions.
 
-No delivery slice is active. Completed releases and their source-bound evidence
-are listed in the [acceptance index](AUDIT-ACCEPTANCE.md). Choose the next scope
-against the [goal's release boundary](AUDIT-GOAL.md#current-release-boundary).
+## Product direction
 
-## Verification and release gates
+- Keep profile creation, same-client selected-parts copy and Undo explicit and
+  reversible. Discovery and copying remain separate capabilities.
+- Follow the current selected native installation. Validate capabilities and
+  prepared-operation identity without pinning profiles to CLI/Desktop versions.
+- Preserve client-qualified sessions, independent job ownership and captured
+  responses across same-client and mixed-client comparisons.
+- Improve inspection and recovery without automatic reattach, resend or resume.
+  Saved evidence must remain readable without starting model work.
+- Keep capture gaps, account scope, routed models and uncertain shutdown visible.
 
-Run affected and required final checks from the [developer guide](README.md#checkout-and-checks).
-Rebuild bundled UI after source changes and run browser suites sequentially.
-Documentation changes require packed-document membership, local-link checks and
-public-text review. Follow the [release procedure](LOCAL-RELEASE.md) for packaging.
+## Supported boundaries
 
-Reuse evidence only where source and behavior still apply; fixtures do not prove
-unobserved native behavior. Publication, installed updates and live operations
-require current authorization covering their effects.
+The [client scope](AUDIT-GOAL.md#client-scope) and
+[app guide](../user/APP.md#400-scope-and-limits) describe supported surfaces and
+qualification limits. Credential refresh and distinct-account independence remain
+unverified. The remaining native pair/mode combinations, repeated overlap stress,
+controller-kill reviews and copied-setup native loading are deferred qualification.
+Fixture coverage does not turn those checks into native passes.
 
-## Historical records
+Managed Claude/Copilot desktop profiles, cloud execution, cross-client setup copy
+and generic configuration editing are outside the current boundary. An app-open
+or import capability does not imply managed isolation or automated execution.
 
-Published records, tags, artifacts and original receipts retain their identities.
-Private history, branch-cleanup manifests and recovery bundles remain preserved
-outside public source. The [historical assessments and plans](../README.md#historical-references)
-are references, not current work or additional release gates.
+## Contributor references
+
+Use the [developer guide](README.md) for checks, the
+[client and review contract](REVIEW-TASK-IMPLEMENTATION.md) for execution and
+persistence, and the [profile copy policy](PROFILE-COPY-POLICY.md) for transfer
+rules. Keep verification results and operational records outside public source.

@@ -34,10 +34,15 @@ export interface Overview {
 export interface RecentItem { kind: 'task' | 'setup' | 'saved'; title: string; meta: string; href: string }
 
 /* Profiles */
+export type ProfileClient = 'codex' | 'claude-code' | 'copilot';
 export type ClientState = 'running' | 'not-running' | 'unknown' | 'unavailable';
 export interface ClientInfo { state: ClientState; text: string }
 export interface ProfileCard {
   name: string;
+  client?: ProfileClient;
+  accountScope?: 'per-root' | 'shared' | 'unverified';
+  accountIndependence?: 'not verified';
+  setup?: { command: string; executable: string; configRoot: string; rootMode: 'explicit'; version: string };
   isDefault: boolean;
   state: 'ready' | 'unbound' | 'unavailable';
   reason: string | null;
@@ -52,7 +57,13 @@ export interface ProfileCard {
 export interface ClientAction { id: string; label: string; kind?: 'primary' | 'secondary'; conflict?: ClientConflict }
 export interface ClientConflict { title: string; body: string }
 export interface MenuAction { id: 'copy' | 'binding' | 'rename' | 'remove'; label: string; detail?: string; disabledReason?: string }
-export interface ProfilesView { profiles: ProfileCard[]; notes: string[]; simulated: boolean }
+export interface NativeAppEntry {
+  client: 'claude' | 'copilot'; name: string; status: 'available' | 'unavailable';
+  appKey?: string; version?: string; build?: string; reason?: string; sessionNavigation?: 'available' | 'unavailable';
+}
+export interface NativeAppsView { apps: NativeAppEntry[] }
+export interface NativeAppOpenResult { status: 'opened' | 'link-opened'; message: string }
+export interface ProfilesView { profiles: ProfileCard[]; copySources?: Record<ProfileClient, string[]>; notes: string[]; simulated: boolean }
 export interface ClientActionResult { status: StatusKind; message: string; profile?: ProfileCard }
 
 /* Setup comparison */
@@ -84,6 +95,10 @@ export interface SetupItem {
 }
 export interface SetupGroup { id: string; label: string; items: SetupItem[]; counts: Counts; meta: string; hiddenSame: number }
 export interface CoverageRow { area: string; a: string; b: string }
+interface SetupInventory {
+  status: string; warnings: string[];
+  resources: { name: string; category: string; scope: string; origin: string; status: string }[];
+}
 export interface SetupComparison {
   a: ProfileRef;
   b: ProfileRef;
@@ -92,6 +107,8 @@ export interface SetupComparison {
   counts: Counts;
   limits: { text: string; coverage: CoverageRow[] } | null;
   groups: SetupGroup[];
+  separate?: { reason: string; a: SetupInventory; b: SetupInventory };
+  copyHref?: string;
   blocked?: string;
 }
 export interface SkillFile {
@@ -152,7 +169,13 @@ export interface CompareRequest {
 }
 
 /* Report */
-export interface ReportSide { side: Side; profile: string; client: string; time: string; session: string }
+export interface ReportSide {
+  side: Side; profile: string; client: string; time: string; session: string;
+  nativeClient?: NativeClientId | null;
+  provenance?: { basis: string; profileName?: string; surface?: string; rootMode?: 'implicit' | 'explicit'; executionLocation?: string } | null;
+  permissions?: { requested: string | null; sent: string | null; confirmed: string | null; observed: string | null } | null;
+  autoTurns?: { turnId: string; models: string[] }[] | null;
+}
 export interface Condition {
   name: string;
   label: ComparisonLabel;
@@ -308,7 +331,7 @@ export interface ReviewPreviewView {
 export interface SavedReviewView { ref: string; title: string }
 export type ReviewTaskState = 'prepared' | 'starting' | 'running' | 'waiting-for-user' | 'completed'
   | 'failed' | 'cancelled' | 'interrupted' | 'uncertain';
-export interface ReviewTaskWorkspaceOption { path: string; profile?: string; available: boolean }
+export interface ReviewTaskWorkspaceOption { path: string; profile?: string; client?: NativeClientId; available: boolean }
 export interface ReviewTaskOptions {
   profiles: RunProfileOption[];
   workspaces: ReviewTaskWorkspaceOption[];
@@ -316,8 +339,23 @@ export interface ReviewTaskOptions {
   includeRecordedContent: boolean;
   defaults: { timeoutMs: number | null };
 }
-export interface ExecutionSelection { model?: string; reasoningEffort?: string }
+export interface ModelCatalogModel {
+  id: string; model: string; displayName: string | null; hidden: boolean | null; isDefault: boolean | null;
+  supportedReasoningEfforts: null | { reasoningEffort: string; description: string | null }[];
+  defaultReasoningEffort: string | null; selectable?: boolean;
+}
+export interface ModelCatalogSnapshot {
+  status: 'ready' | 'unavailable' | 'cancelled'; source: 'codex-model/list' | 'claude-agent-sdk/initialize' | 'copilot-models.list' | 'native-catalog';
+  permissionModes?: PermissionMode[];
+  capabilities?: { permissionModes?: PermissionMode[] };
+  auto?: { defaultTier: string; tiers: { id: string; displayName: string; type: string; enabled: boolean; visible: boolean }[] };
+  models: ModelCatalogModel[]; scope: Record<string, unknown> | null;
+  discoveredAt: string | null; expiresAt: string | null; reason?: string; generation?: number;
+}
+export type PermissionMode = 'read-only' | 'workspace-write' | 'default' | 'acceptEdits' | 'plan' | 'manual' | 'assisted';
+export interface ExecutionSelection { model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; route?: string }
 export interface ReviewTaskRequest {
+  client?: NativeClientId;
   execution?: ExecutionSelection;
   profile: string;
   cwd?: string;
@@ -331,6 +369,8 @@ export interface ReviewTaskPreview {
   blocked: { title: string; reason: string } | null;
   title: string;
   profile: string;
+  client?: NativeClientId;
+  surface?: 'cli'; executionLocation?: 'local'; rootMode?: 'explicit' | 'implicit';
   cwd: string;
   prompt: string;
   effectivePrompt: string;
@@ -348,7 +388,7 @@ export interface ReviewTaskPreview {
   simulated: boolean;
 }
 export interface ReviewTaskSummary {
-  id: string; status: ReviewTaskState; createdAt: string; profile: string; summary: string;
+  id: string; status: ReviewTaskState; createdAt: string; profile: string; summary: string; client?: NativeClientId;
   execution?: ExecutionSelection; observedModel?: string | null; observedEffort?: string | null;
 }
 export interface ReviewTaskSummaries { tasks: ReviewTaskSummary[] }
@@ -360,6 +400,10 @@ export interface ReviewTaskPendingRequest {
 }
 export interface ReviewTaskView {
   id: string;
+  client?: NativeClientId | null;
+  context?: { surface: string; rootMode: string; executionLocation: string };
+  nativeReference?: { client: NativeClientId; jobId: string; profileId: string; sessionId: string | null;
+    turnId: string | null; itemId: string | null; requestId: string | null } | null;
   threadId: string | null;
   turnId: string | null;
   status: ReviewTaskState;
@@ -387,6 +431,7 @@ export interface ReviewTaskView {
 }
 export interface ReviewTaskStartResponse { id: string }
 export interface ReviewTaskDecision {
+  kind?: 'approve-once' | 'reject';
   decision?: string | Record<string, unknown>;
   permissions?: Record<string, unknown>;
   scope?: 'turn' | 'session';
@@ -410,6 +455,7 @@ export interface ExportPlan {
 }
 export interface ExportResult { warning?: string; folder: string; files: string[]; contentIncluded: string; replayContentIncluded?: string; reviewPacketFingerprint?: string; reviewPacketRef?: string }
 export interface SavedSummary {
+  origin?: 'claude-code-import' | 'copilot-import';
   id: string;
   title: string;
   recordedAt: string;
@@ -422,7 +468,10 @@ export interface SavedSummary {
 export interface SavedReportsView { recent: { id: string; title: string; savedAt: string; folder: string; sides?: { side: string; profile: string; state: string; detail: string; checks: string }[] | null }[] }
 
 /* Runs */
-export interface RunProfileOption { name: string; readiness: string; ready: boolean }
+export type NativeClientId = 'codex' | 'claude-code' | 'copilot';
+export interface RunProfileOption { name: string; label?: string; client?: NativeClientId; readiness: string; ready: boolean;
+  surface?: 'cli'; executionLocation?: 'local'; rootMode?: 'explicit' | 'implicit';
+}
 export interface RunOptions {
   profiles: RunProfileOption[];
   repositories: { path: string; commit: string }[];
@@ -431,13 +480,13 @@ export interface RunOptions {
 }
 export interface RunAdvanced {
   timeMinutes: number | null;
-  sandbox: 'read-only' | 'workspace-write';
   outputMiB: number;
   program: string;
   reasoningEffort?: string;
   setup: { name: string; command: string }[];
 }
 export interface RunRequest {
+  clients?: Partial<Record<'a' | 'b', NativeClientId>>;
   execution?: Record<'a' | 'b', ExecutionSelection>;
   task: string;
   files: string;
@@ -493,7 +542,11 @@ export interface CopyItem {
   note: string;
   selected: boolean;
 }
+export interface ManualCopyGuidance { id: string; label: string; steps: string[] }
 export interface CopyPlan {
+  client?: ProfileClient;
+  executable?: string;
+  manualOptions?: ManualCopyGuidance[];
   mode: 'copy' | 'create';
   source: string;
   target: string;
@@ -508,6 +561,7 @@ export interface CopyPlan {
   simulated: boolean;
 }
 export interface CopyResult {
+  guidance?: ManualCopyGuidance[];
   status: 'applied' | 'undone';
   title: string;
   changes: string[];

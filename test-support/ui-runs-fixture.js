@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store, create, bind } from '../src/profiles.js';
@@ -26,14 +26,15 @@ const execFile = promisify(execFileCallback);
  */
 export async function createUiRunsFixture({
   staticRoot = join(process.cwd(), 'dist', 'ui'),
-  mode = {}, reviewContext = {}, beforeCapture,
+  mode = {}, reviewContext = {}, catalogContext = {}, copilotImportContext = {}, beforeCapture,
 } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-runs-')));
   let server, provider;
-  const calls = { captures: [], checks: [] };
+    const calls = { captures: [], checks: [], catalogs: [] };
   let delayedRelease;
   let releaseRequested = false;
   try {
+    await symlink(await realpath(process.execPath), join(root, 'node'));
     const executable = join(root, 'codex');
     await writeFile(executable, '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "codex 0.153.4\\n"; exit 0; fi\nexit 99\n', { mode: 0o700 });
     const repository = join(root, 'repository');
@@ -55,6 +56,18 @@ export async function createUiRunsFixture({
     await registerHome(store, 'strict-review', strict.root, { executable, version: '0.153.4' });
     const defaultUserHome = join(root, 'default-user-home');
     await mkdir(join(defaultUserHome, '.codex'), { recursive: true, mode: 0o700 });
+    const terminalEnvironment = { HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME,
+      PATH: root + ':/usr/bin:/bin', TZ: 'UTC' };
+    if (mode.mixedClaude) {
+      await writeFile(join(defaultUserHome, '.codex', 'config.toml'),
+        `[projects.${JSON.stringify(repository)}]
+trust_level = "trusted"
+`, { mode: 0o600 });
+      await mkdir(join(defaultUserHome, '.claude'), { mode: 0o700 });
+      const fixture = (await readFile(new URL('../test/fixtures/claude-runtime-cli.mjs', import.meta.url), 'utf8')).replace(
+        '/* CLAUDE_SANITIZED_NATIVE_FRAMES */ null', await readFile(new URL('../test/fixtures/claude-sanitized-native.json', import.meta.url), 'utf8'));
+      await writeFile(join(root, 'claude'), '#!' + await realpath(process.execPath) + '\n' + fixture, { mode: 0o700 });
+    }
 
     const capture = async input => {
       calls.captures.push(input.profile.profileName);
@@ -154,6 +167,7 @@ export async function createUiRunsFixture({
     let accessChecks = 0;
     const runContext = {
       capture, process: runProcess,
+      ...(terminalEnvironment ? { terminalEnvironment } : {}),
       ...(mode.blockFinalPreflight ? { observeAccess: async () => ++accessChecks > 4
         ? { status: 'blocked', reason: 'fixture-access-changed', clients: [], sourceReservation: null }
         : { status: 'ready', clients: [], sourceReservation: null } } : {}),
@@ -166,7 +180,19 @@ export async function createUiRunsFixture({
     };
     const reportsRoot = join(root, 'reports');
     const serverLogs = [];
-    const makeProvider = () => createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'), runContext, reviewContext,
+    const makeProvider = () => createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'), runContext, reviewContext: { ...(terminalEnvironment ? { terminalEnvironment } : {}), ...reviewContext }, copilotImportContext,
+      catalogContext: { ...(terminalEnvironment ? { terminalEnvironment } : {}), discover: async ({ profile, workspace, signal }) => {
+        calls.catalogs.push({ profile: profile.profileName, workspace });
+        const models = [['fixture-left', ['low', 'max']], ['fixture-right', ['medium', 'high']]].map(([model, efforts], index) => ({
+          id: model, model, displayName: model, hidden: false, isDefault: index === 0,
+          supportedReasoningEfforts: efforts.map(reasoningEffort => ({ reasoningEffort, description: reasoningEffort })),
+          defaultReasoningEffort: efforts[0] }));
+        if (mode.catalog === 'delayed') await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        return { status: signal.aborted ? 'cancelled' : 'ready', source: 'codex-model/list', models: signal.aborted ? [] : models,
+          scope: { environmentBinding: profile.environmentBinding, workspace, account: { status: 'unverified', type: null, id: null } },
+          discoveredAt: new Date().toISOString(), capabilities: { models: 'supported', effort: 'supported' },
+          process: { status: signal.aborted ? 'cancelled' : 'exited', exitCode: 0, shutdown: { groupTerminated: true } } };
+      }, ...catalogContext },
       lockOptions: { lockPath: join(root, 'global.lock'), concurrentLockPath: join(root, 'desktop.lock') },
       copyRuntime: () => createDesktopRuntime({ concurrentLockPath: join(root, 'desktop.lock'),
         processSnapshot: async () => [{ pid: globalThis.process.pid, ppid: 1, uid: globalThis.process.getuid(), startedAt: 'fixture', executable: globalThis.process.execPath }] }),

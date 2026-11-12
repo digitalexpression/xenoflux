@@ -1,23 +1,158 @@
-import { useId } from 'react';
-import type { ExecutionSelection } from '@/api/types';
+import { useEffect, useId, useRef, useState } from 'react';
+import { apiGet, apiPost } from '@/api/client';
+import type { ExecutionSelection, ModelCatalogSnapshot, NativeClientId, PermissionMode } from '@/api/types';
+import { Button } from '@/components/ui/button';
 
-export function ExecutionFields({ value, onChange, disabled }: {
-  value: ExecutionSelection; onChange: (value: ExecutionSelection) => void; disabled?: boolean;
+type CatalogState = { context: string; snapshot: ModelCatalogSnapshot | null; busy: boolean; message: string };
+
+export function ExecutionFields({ profile, client, workspace, value, onChange, disabled, allowPermissionMode = true }: {
+  profile: string; client?: NativeClientId; workspace: string; value: ExecutionSelection;
+  onChange: (value: ExecutionSelection) => void; disabled?: boolean; allowPermissionMode?: boolean;
 }) {
   const id = useId();
-  return <div className="flex flex-wrap gap-3">
-    <div className="flex-1 min-w-[140px]">
-      <label className="field-label" htmlFor={`${id}-model`}>Model ID</label>
-      <input id={`${id}-model`} className="input font-mono" placeholder="Use profile default" maxLength={100}
-        value={value.model ?? ''} disabled={disabled} onChange={event => onChange({ ...value, model: event.target.value || undefined })} />
+  const context = JSON.stringify([profile, client, workspace]);
+  const currentContext = useRef(context);
+  currentContext.current = context;
+  const generation = useRef(0);
+  const activeRefresh = useRef<string | null>(null);
+  const [state, setState] = useState<CatalogState>({ context, snapshot: null, busy: false, message: '' });
+  const [now, setNow] = useState(Date.now());
+  const [cancelling, setCancelling] = useState(false);
+
+  useEffect(() => {
+    const owner = ++generation.current;
+    setCancelling(false);
+    setState({ context, snapshot: null, busy: false, message: profile ? 'Checking saved model catalog…' : 'Choose a profile to discover its models.' });
+    if (profile) {
+      apiGet<ModelCatalogSnapshot>('/api/catalog', { profile, workspace, ...(client ? { client } : {}) }).then(snapshot => {
+        if (currentContext.current === context && generation.current === owner)
+          setState({ context, snapshot, busy: false, message: '' });
+      }).catch(error => {
+        if (currentContext.current === context && generation.current === owner)
+          setState({ context, snapshot: null, busy: false, message: String(error.message) });
+      });
+    }
+    return () => {
+      generation.current++;
+      if (activeRefresh.current) {
+        void apiPost('/api/catalog/cancel', { requestId: activeRefresh.current }).catch(() => {});
+        activeRefresh.current = null;
+      }
+    };
+  }, [context, client, profile, workspace]);
+
+  const snapshot = state.context === context ? state.snapshot : null;
+  useEffect(() => {
+    setNow(Date.now());
+    if (!snapshot?.expiresAt) return;
+    const remaining = Date.parse(snapshot.expiresAt) - Date.now();
+    if (remaining <= 0) return;
+    const timer = setTimeout(() => setNow(Date.now()), Math.min(remaining + 1, 2147483647));
+    return () => clearTimeout(timer);
+  }, [snapshot]);
+  const expired = snapshot?.expiresAt ? Date.parse(snapshot.expiresAt) <= now : false;
+  const ready = snapshot?.status === 'ready' && !expired;
+  const models = ready ? snapshot.models.filter(model => !model.hidden && model.selectable !== false) : [];
+  const selected = value.model ? models.find(model => model.model === value.model) : models.find(model => model.isDefault);
+  const routes = ready && client === 'copilot' ? snapshot.auto?.tiers.filter(tier => tier.type === 'auto' && tier.enabled && tier.visible) ?? [] : [];
+  const defaultRoute = routes.find(route => route.id === snapshot?.auto?.defaultTier);
+  const modes = (!client || client === 'codex' || ready) ? snapshot?.permissionModes ?? snapshot?.capabilities?.permissionModes ?? [] : [];
+  const efforts = selected?.supportedReasoningEfforts ?? [];
+  const busy = state.context === context && state.busy;
+
+  async function refresh() {
+    if (activeRefresh.current || !profile) return;
+    const owner = ++generation.current, requestId = crypto.randomUUID();
+    activeRefresh.current = requestId;
+    setState({ context, snapshot: null, busy: true, message: 'Refreshing models…' });
+    try {
+      const result = await apiPost<ModelCatalogSnapshot>('/api/catalog/refresh', { profile, workspace, ...(client ? { client } : {}), requestId });
+      if (currentContext.current === context && generation.current === owner)
+        setState({ context, snapshot: result, busy: false, message: '' });
+    } catch (error) {
+      if (currentContext.current === context && generation.current === owner)
+        setState({ context, snapshot: null, busy: false, message: error instanceof Error ? error.message : 'Model discovery failed. Try refreshing again.' });
+    } finally {
+      if (activeRefresh.current === requestId && generation.current === owner) activeRefresh.current = null;
+    }
+  }
+  async function cancel() {
+    const requestId = activeRefresh.current;
+    if (!requestId || cancelling) return;
+    const owner = ++generation.current;
+    setCancelling(true);
+    setState({ context, snapshot: null, busy: true, message: 'Stopping model refresh…' });
+    try {
+      const result = await apiPost<{ status: string }>('/api/catalog/cancel', { requestId });
+      if (currentContext.current !== context || generation.current !== owner) return;
+      const stopped = result.status === 'cancelled' || result.status === 'stopped';
+      if (stopped) activeRefresh.current = null;
+      setState({ context, snapshot: null, busy: !stopped, message: stopped
+        ? 'Model refresh cancelled. Profile defaults remain available.'
+        : 'Model refresh stop is unconfirmed. Retry cancellation; profile defaults remain available.' });
+    } catch (error) {
+      if (currentContext.current === context && generation.current === owner)
+        setState({ context, snapshot: null, busy: true, message: `Could not confirm refresh cancellation. Retry cancellation. ${error instanceof Error ? error.message : ''}` });
+    } finally {
+      if (currentContext.current === context && generation.current === owner) setCancelling(false);
+    }
+  }
+  const message = state.context !== context ? 'Checking saved model catalog…' : state.message || (expired
+    ? 'Saved model catalog expired. Refresh to verify explicit choices.'
+    : snapshot?.status === 'ready' ? models.length ? `${models.length} models available.` : 'The catalog returned no visible models.'
+      : snapshot?.status === 'cancelled' ? 'Model refresh cancelled.'
+        : snapshot?.reason === 'catalog-context-changed' ? 'Profile setup changed during discovery. Refresh models again before choosing a model.'
+          : snapshot ? 'Model catalog unavailable. Refresh models to try again.' : 'No saved model catalog. Refresh to discover models.');
+
+  return <div className="flex flex-col gap-3 min-w-0">
+    <div className="flex flex-wrap gap-3">
+      <div className="flex-1 min-w-[140px]">
+        <label className="field-label" htmlFor={`${id}-model`}>Model ID</label>
+        <select id={`${id}-model`} className="input font-mono" value={value.model ?? ''} disabled={disabled}
+          aria-describedby={`${id}-catalog`} onChange={event => onChange({ permissionMode: value.permissionMode, model: event.target.value || undefined,
+            ...(event.target.value === 'auto' && !defaultRoute ? { route: routes[0]?.id } : {}) })}>
+          <option value="">Use profile default</option>
+          {routes.length ? <option value="auto">Auto · Copilot routing</option> : null}
+          {value.model && !(value.model === 'auto' && routes.length) && !models.some(model => model.model === value.model) ? <option value={value.model} disabled>{value.model} · unverified</option> : null}
+          {models.map(model => <option key={model.id} value={model.model}>{model.displayName || model.model} · {model.model}</option>)}
+        </select>
+      </div>
+      <div className="flex-1 min-w-[140px]">
+        <label className="field-label" htmlFor={`${id}-effort`}>Reasoning effort</label>
+        <select id={`${id}-effort`} className="input" value={value.reasoningEffort ?? ''} disabled={disabled}
+          aria-describedby={`${id}-effort-hint`} onChange={event => onChange({ ...value, reasoningEffort: event.target.value || undefined })}>
+          <option value="">Use profile default</option>
+          {value.reasoningEffort && !efforts.some(effort => effort.reasoningEffort === value.reasoningEffort) ? <option value={value.reasoningEffort} disabled>{value.reasoningEffort} · unverified</option> : null}
+          {efforts.map(effort => <option key={effort.reasoningEffort} value={effort.reasoningEffort}>{effort.reasoningEffort}{effort.description ? ` · ${effort.description}` : ''}</option>)}
+        </select>
+        <p id={`${id}-effort-hint`} className="hint mt-1">{selected?.supportedReasoningEfforts === null ? 'Effort support is unknown.' : selected && !efforts.length ? 'No explicit efforts advertised.' : !selected ? 'Refresh models to verify effort choices.' : 'Efforts advertised for this model.'}</p>
+      </div>
     </div>
-    <div className="flex-1 min-w-[140px]">
-      <label className="field-label" htmlFor={`${id}-effort`}>Reasoning effort</label>
-      <select id={`${id}-effort`} className="input" value={value.reasoningEffort ?? ''} disabled={disabled}
-        onChange={event => onChange({ ...value, reasoningEffort: event.target.value || undefined })}>
-        <option value="">Use profile default</option>
-        {['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].map(effort => <option key={effort}>{effort}</option>)}
+    {value.model === 'auto' ? <div>
+      <label className="field-label" htmlFor={`${id}-route`}>Auto route</label>
+      <select id={`${id}-route`} className="input" value={value.route ?? ''} disabled={disabled} onChange={event => onChange({ ...value, route: event.target.value || undefined })}>
+        {defaultRoute ? <option value="">Default · {defaultRoute.displayName}</option> : null}
+        {value.route && !routes.some(route => route.id === value.route) ? <option disabled value={value.route}>{value.route} · unverified</option> : null}
+        {routes.map(route => <option key={route.id} value={route.id}>{route.displayName}</option>)}
       </select>
+      <p className="hint">Copilot can route each turn to a different model. Repeating this comparison may produce a different route.</p>
+    </div> : null}
+    {allowPermissionMode ? <div>
+      <label className="field-label" htmlFor={`${id}-permission`}>Permission mode</label>
+      <select id={`${id}-permission`} className="input" value={value.permissionMode ?? ''} disabled={disabled}
+        aria-describedby={`${id}-permission-hint`} onChange={event => onChange({ ...value, permissionMode: (event.target.value || undefined) as PermissionMode | undefined })}>
+        <option value="">Use {client && client !== 'codex' ? 'profile default' : 'default permissions'}</option>
+        {value.permissionMode && !modes.includes(value.permissionMode) ? <option value={value.permissionMode} disabled>{value.permissionMode} · unverified</option> : null}
+        {modes.map(mode => <option key={mode} value={mode}>{mode}</option>)}
+      </select>
+      <p id={`${id}-permission-hint`} className="hint">{modes.length ? 'Applies only to this job.' : 'Explicit permission choices are unavailable for this context.'}</p>
+    </div> : null}
+    <div className="flex flex-wrap gap-3 items-center">
+      <Button onClick={() => void refresh()} disabled={disabled || !profile || busy} busy={busy} busyLabel="Refreshing models…">Refresh models</Button>
+      {busy ? <Button onClick={() => void cancel()} disabled={cancelling}>Cancel model refresh</Button> : null}
     </div>
+    <p id={`${id}-catalog`} className="hint break-words" role="status">{message}</p>
+    {snapshot?.discoveredAt ? <p className="hint break-words">Source: {snapshot.source} · Retrieved {snapshot.discoveredAt} · Account identity: unknown.</p> : null}
+    <p className="hint">Refresh initializes the native client and may use sign-in, write native state or run configured hooks. It sends no task and changes no model policy. Profile defaults remain available.</p>
   </div>;
 }

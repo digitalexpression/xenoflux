@@ -46,7 +46,7 @@ async function mutateProfile(store, name, action, { lockPath = globalLock(), rem
         const current = find(data, profile.id);
         if (current.native?.root !== profile.native?.root)
           throw new Error('Profile native binding changed during removal; retry');
-        if (removal) await prepareDesktopInstanceRemoval(store, current.id, { lockPath });
+        if (removal && (current.client ?? 'codex') === 'codex') await prepareDesktopInstanceRemoval(store, current.id, { lockPath });
         await referenced(store, current);
         if (current.native) {
           await privateDirectory(current.native.root);
@@ -56,7 +56,7 @@ async function mutateProfile(store, name, action, { lockPath = globalLock(), rem
           try { await acquire(runLock, owner); }
           catch { throw new Error('Profile native home is locked by a run or concurrent instance; finish it before changing the profile'); }
           runLockAcquired = true;
-          await assertNoLegacyAuditLease(store.directory, join(current.native.root, 'codex-home'));
+          await assertNoLegacyAuditLease(store.directory, current.native.configRoot ?? join(current.native.root, 'codex-home'));
         }
         return action(data, current);
       });

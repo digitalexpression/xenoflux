@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ArrowLeftRight } from 'lucide-react';
 import { ApiError, apiGet, apiPost } from '@/api/client';
-import type { ReviewTaskDecision, RunOptions, RunPreview, RunRequest, RunView } from '@/api/types';
+import type { ReviewTaskDecision, RunAdvanced, RunOptions, RunProfileOption, RunPreview, RunRequest, RunView } from '@/api/types';
 import { ExecutionFields } from '@/components/ExecutionFields';
 import { NativeReviewRequest } from '@/components/NativeReviewRequest';
 import { StatusBadge } from '@/components/badges';
@@ -14,6 +14,7 @@ import { useResource } from '@/lib/useResource';
 import { cn } from '@/lib/cn';
 
 const DRAFT = 'xenoflux-run-draft';
+const optionKey = (profile: Pick<RunProfileOption, 'client' | 'name'>) => profile.client ? `${profile.client}:${profile.name}` : profile.name;
 function notifyInfoChanged() { window.dispatchEvent(new Event('xenoflux-info-changed')); }
 function loadDraft(): RunRequest | null {
   try { const value = sessionStorage.getItem(DRAFT); return value ? JSON.parse(value) as RunRequest : null; } catch { return null; }
@@ -42,32 +43,39 @@ function RunForm() {
   const draft = loadDraft();
   const [task, setTask] = useState(draft?.task ?? '');
   const [files, setFiles] = useState(draft?.files ?? '');
-  const [a, setA] = useState(draft?.a ?? '');
-  const [b, setB] = useState(draft?.b ?? '');
+  const [a, setA] = useState(draft?.a ? optionKey({ name: draft.a, client: draft.clients?.a }) : '');
+  const [b, setB] = useState(draft?.b ? optionKey({ name: draft.b, client: draft.clients?.b }) : '');
   const inherited = { reasoningEffort: draft?.advanced?.reasoningEffort || undefined };
   const [execution, setExecution] = useState(draft?.execution ?? { a: inherited, b: inherited });
   const [repository, setRepository] = useState(draft?.repository ?? '');
   const [commit, setCommit] = useState(draft?.commit ?? '');
   const [checks, setChecks] = useState(draft?.checks ?? []);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [advanced, setAdvanced] = useState(draft?.advanced ?? null);
+  const [advanced, setAdvanced] = useState<RunAdvanced | null>(() => {
+    if (!draft?.advanced) return null;
+    const { timeMinutes, outputMiB, program, setup, reasoningEffort } = draft.advanced;
+    return { timeMinutes, outputMiB, program, setup, reasoningEffort };
+  });
   const [error, setError] = useState<string | null>(null);
   const [taskError, setTaskError] = useState(false);
   const ids = { task: useId(), files: useId(), a: useId(), b: useId(), repo: useId(), commit: useId(), taskError: useId(), advanced: useId(), repos: useId() };
   const data = options.data;
   useEffect(() => {
     if (!data) return;
-    const ready = data.profiles.filter(p => p.ready).map(p => p.name);
-    if (!a) setA(ready[0] ?? '');
-    if (!b) setB(ready[1] ?? ready[0] ?? '');
+    const ready = data.profiles.filter(p => p.ready).map(optionKey);
+    setA(current => current || ready[0] || '');
+    setB(current => current || ready[1] || ready[0] || '');
     if (!repository && data.repositories[0]) { setRepository(data.repositories[0].path); setCommit(data.repositories[0].commit); }
   }, [data]);
 
-  const note = (name: string) => data?.profiles.find(p => p.name === name);
+  const note = (name: string) => data?.profiles.find(p => optionKey(p) === name);
   function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!task.trim()) { setTaskError(true); document.getElementById(ids.task)?.focus(); return; }
-    const request: RunRequest = { task, files, a, b, repository, commit, checks, execution, ...(advanced ? { advanced } : {}) };
+    const left = note(a), right = note(b);
+    const clients = { a: left?.client, b: right?.client };
+    const request: RunRequest = { task, files, a: left?.name ?? a, b: right?.name ?? b,
+      ...(clients.a || clients.b ? { clients } : {}), repository, commit, checks, execution, ...(advanced ? { advanced } : {}) };
     saveDraft(request);
     navigate('/runs/new/review', { state: request });
   }
@@ -107,12 +115,12 @@ function RunForm() {
                   const slot = (
                     <div key={side} className={cn('flex-1 min-w-[220px] rounded-control p-3 flex flex-col gap-1', side === 'a' ? 'edge-a' : 'edge-b')}>
                       <label htmlFor={side === 'a' ? ids.a : ids.b} className="field-label"><SideText side={side}>{side === 'a' ? 'First' : 'Second'}</SideText> · {side === 'a' ? 'left' : 'right'} side of the report</label>
-                  <select id={side === 'a' ? ids.a : ids.b} className="input font-mono" value={value} onChange={event => set(event.target.value)}>
+                  <select id={side === 'a' ? ids.a : ids.b} className="input font-mono" value={value} onChange={event => { set(event.target.value); setExecution(current => ({ ...current, [side]: {} })); }}>
                     <option value="">Choose a profile</option>
-                        {data.profiles.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
+                        {data.profiles.map(p => <option key={optionKey(p)} value={optionKey(p)}>{p.label ?? p.name}</option>)}
                       </select>
-                      <ExecutionFields value={execution[side]} onChange={value => setExecution(old => ({ ...old, [side]: value }))} />
-                      {readiness ? <span className="text-ui" style={{ color: readiness.ready ? 'var(--color-text-muted)' : 'var(--color-warning)' }}>{readiness.readiness}</span> : null}
+                      <ExecutionFields profile={readiness?.name ?? value} client={readiness?.client} workspace={repository} value={execution[side]} onChange={value => setExecution(old => ({ ...old, [side]: value }))} />
+                      {readiness ? <span className="text-ui" style={{ color: readiness.ready ? 'var(--color-text-muted)' : 'var(--color-warning)' }}>{[readiness.surface?.toUpperCase(), readiness.rootMode ? readiness.rootMode + ' root' : null, readiness.executionLocation, readiness.readiness].filter(Boolean).join(' · ')}</span> : null}
                     </div>
                   );
                   return side === 'a' ? [slot, <Button key="swap" size="icon" aria-label="Swap the two sides" onClick={() => { setA(b); setB(a); setExecution({ a: execution.b, b: execution.a }); }}><ArrowLeftRight size={18} aria-hidden="true" /></Button>] : [slot];
@@ -126,7 +134,7 @@ function RunForm() {
                 <div className="flex-1 min-w-[220px]">
                   <label htmlFor={ids.repo} className="field-label">Repository</label>
                   <input id={ids.repo} list={ids.repos} className="input font-mono" value={repository} onChange={event => {
-                    setRepository(event.target.value);
+                    setRepository(event.target.value); setExecution({ a: {}, b: {} });
                     const match = data.repositories.find(item => item.path === event.target.value);
                     if (match) setCommit(match.commit);
                   }} />
@@ -157,16 +165,15 @@ function RunForm() {
             <section className="panel flex flex-col gap-3" aria-labelledby="advanced-heading">
               <h2 id="advanced-heading" className="text-body font-semibold">Advanced settings</h2>
               <button type="button" className="btn btn-link self-start text-left" aria-expanded={settingsOpen} aria-controls={ids.advanced} onClick={() => setSettingsOpen(value => !value)}>
-                {settingsOpen ? 'Hide advanced settings' : `${advanced?.timeMinutes ?? cap?.timeMinutes} min per run · ${advanced?.sandbox === 'read-only' ? 'read only' : cap?.access ?? 'workspace write'} · ${advanced?.outputMiB ?? cap?.outputMiB ?? 8} MiB output · ${advanced?.setup.length ?? 0} setup commands`}
+                {settingsOpen ? 'Hide advanced settings' : `${advanced?.timeMinutes ?? cap?.timeMinutes} min per run · ${advanced?.outputMiB ?? cap?.outputMiB ?? 8} MiB output · ${advanced?.setup.length ?? 0} setup commands`}
               </button>
               <div id={ids.advanced} hidden={!settingsOpen} className="flex flex-col gap-3 text-ui">
                 <div className="flex flex-wrap gap-3">
-                  <div className="flex-1 min-w-[140px]"><label className="field-label" htmlFor={`${ids.advanced}-time`}>Time per run (minutes)</label><input id={`${ids.advanced}-time`} type="number" min="1" max="240" className="input" value={advanced?.timeMinutes ?? cap?.timeMinutes ?? 15} onChange={event => setAdvanced(old => ({ timeMinutes: Number(event.target.value), sandbox: old?.sandbox ?? 'workspace-write', outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: old?.setup ?? [] }))} /></div>
-                  <div className="flex-1 min-w-[180px]"><label className="field-label" htmlFor={`${ids.advanced}-sandbox`}>Codex access</label><select id={`${ids.advanced}-sandbox`} className="input" value={advanced?.sandbox ?? 'workspace-write'} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, sandbox: event.target.value as 'read-only' | 'workspace-write', outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: old?.setup ?? [] }))}><option value="read-only">Read only</option><option value="workspace-write">Workspace write</option></select></div>
-                  <div className="flex-1 min-w-[140px]"><label className="field-label" htmlFor={`${ids.advanced}-output`}>Output cap (MiB)</label><input id={`${ids.advanced}-output`} type="number" min="1" max="64" className="input" value={advanced?.outputMiB ?? cap?.outputMiB ?? 8} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, sandbox: old?.sandbox ?? 'workspace-write', outputMiB: Number(event.target.value), program: old?.program ?? '', setup: old?.setup ?? [] }))} /></div>
+                  <div className="flex-1 min-w-[140px]"><label className="field-label" htmlFor={`${ids.advanced}-time`}>Time per run (minutes)</label><input id={`${ids.advanced}-time`} type="number" min="1" max="240" className="input" value={advanced?.timeMinutes ?? cap?.timeMinutes ?? 15} onChange={event => setAdvanced(old => ({ timeMinutes: Number(event.target.value), outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: old?.setup ?? [] }))} /></div>
+                  <div className="flex-1 min-w-[140px]"><label className="field-label" htmlFor={`${ids.advanced}-output`}>Output cap (MiB)</label><input id={`${ids.advanced}-output`} type="number" min="1" max="64" className="input" value={advanced?.outputMiB ?? cap?.outputMiB ?? 8} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, outputMiB: Number(event.target.value), program: old?.program ?? '', setup: old?.setup ?? [] }))} /></div>
                 </div>
                 <div className="flex flex-wrap gap-3">
-                  <div className="flex-1 min-w-[200px]"><label className="field-label" htmlFor={`${ids.advanced}-program`}>Codex program <span className="font-normal muted">(blank uses profile default)</span></label><input id={`${ids.advanced}-program`} placeholder={cap?.program || 'Profile default'} className="input font-mono" value={advanced?.program ?? ''} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, sandbox: old?.sandbox ?? 'workspace-write', outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: event.target.value, setup: old?.setup ?? [] }))} /></div>
+                  <div className="flex-1 min-w-[200px]"><label className="field-label" htmlFor={`${ids.advanced}-program`}>Codex program <span className="font-normal muted">(blank uses profile default)</span></label><input id={`${ids.advanced}-program`} placeholder={cap?.program || 'Profile default'} className="input font-mono" value={advanced?.program ?? ''} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: event.target.value, setup: old?.setup ?? [] }))} /></div>
                 </div>
                 {(advanced?.setup ?? []).map((item, index) => {
                   const nameId = `${ids.advanced}-setup-${index}-name`;
@@ -175,17 +182,17 @@ function RunForm() {
                     <div key={index} className="flex flex-wrap gap-3 items-end">
                       <div className="flex-1 min-w-[160px]">
                         <label className="field-label" htmlFor={nameId}>Setup name</label>
-                        <input id={nameId} className="input" value={item.name} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, sandbox: old?.sandbox ?? 'workspace-write', outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: (old?.setup ?? []).map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry) }))} />
+                        <input id={nameId} className="input" value={item.name} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: (old?.setup ?? []).map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry) }))} />
                       </div>
                       <div className="flex-[2] min-w-[220px]">
                         <label className="field-label" htmlFor={commandId}>Command</label>
-                        <input id={commandId} className="input font-mono" value={item.command} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, sandbox: old?.sandbox ?? 'workspace-write', outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: (old?.setup ?? []).map((entry, i) => i === index ? { ...entry, command: event.target.value } : entry) }))} />
+                        <input id={commandId} className="input font-mono" value={item.command} onChange={event => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: (old?.setup ?? []).map((entry, i) => i === index ? { ...entry, command: event.target.value } : entry) }))} />
                       </div>
                       <Button onClick={() => setAdvanced(old => old && ({ ...old, setup: old.setup.filter((_, i) => i !== index) }))}>Remove</Button>
                     </div>
                   );
                 })}
-                <div><Button className="border-dashed" onClick={() => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, sandbox: old?.sandbox ?? 'workspace-write', outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: [...(old?.setup ?? []), { name: '', command: '' }] }))}>Add setup command</Button></div>
+                <div><Button className="border-dashed" onClick={() => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: [...(old?.setup ?? []), { name: '', command: '' }] }))}>Add setup command</Button></div>
                 <p className="hint">Overrides apply to this run only; saved profile settings stay as they are.</p>
               </div>
             </section>
@@ -264,7 +271,7 @@ export function RunReview() {
                 <SideText side={run.side}>{index + 1} · {run.profile}</SideText><span className="text-ui wrap-anywhere">{run.text}</span>{run.note ? <span className="hint wrap-anywhere">{run.note}</span> : null}
               </li>))}</ol></section>
           <DetailList id="d-where" title="Where each run starts" items={data.where} />
-          <DetailList id="d-advanced" title="Run settings" items={request?.advanced ? [`Time limit: ${request.advanced.timeMinutes} minutes per run`, `Codex access: ${request.advanced.sandbox}`, `Output cap: ${request.advanced.outputMiB} MiB`, `Codex program: ${request.advanced.program || 'profile default'}`, ...(request.advanced.setup.length ? request.advanced.setup.map(item => `Setup ${item.name || '(unnamed)'}: ${item.command}`) : ['No setup commands'])] : ['Profile defaults apply.']} />
+          <DetailList id="d-advanced" title="Run settings" items={request?.advanced ? [`Time limit: ${request.advanced.timeMinutes} minutes per run`, `Output cap: ${request.advanced.outputMiB} MiB`, `Codex program: ${request.advanced.program || 'profile default'}`, ...(request.advanced.setup.length ? request.advanced.setup.map(item => `Setup ${item.name || '(unnamed)'}: ${item.command}`) : ['No setup commands'])] : ['Profile defaults apply.']} />
           <DetailList id="d-checks" title="Verification" items={data.checks.length ? [...data.checks, 'Runs your command in each profile’s copy after its task, as an ordinary program on this Mac, outside the Codex sandbox.'] : ['None selected. See the note at the top.']} />
           <DetailList id="d-limits" title="Limits" items={data.limits} />
           <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(260px, 100%), 1fr))' }}>
@@ -406,8 +413,8 @@ export function RunProgress() {
                 <div key={column.side} className="rounded-control p-4 flex flex-col gap-2" style={{ border: '1px solid var(--color-divider)', borderTop: `3px solid var(--color-side-${column.side})` }}>
                   <div className="flex flex-wrap justify-between gap-2"><SideText side={column.side}>{index + 1} · {column.profile}</SideText><span className="badge">{column.state}</span></div>
                   {data.pendingRequests?.filter(request => request.side === column.side).map(request =>
-                    <NativeReviewRequest key={request.requestId} request={request} busy={busy} onRespond={response => respond(request.requestId, response)} />)}
-                  {column.failure ? <ErrorPanel live={false} title="Model task did not start">{column.failure}</ErrorPanel> : null}
+                    <NativeReviewRequest key={request.requestId} request={request} busy={busy || data.pendingRequests?.[0]?.requestId !== request.requestId} onRespond={response => respond(request.requestId, response)} />)}
+                  {column.failure ? <ErrorPanel live={false} title={column.failure.includes("rate limit") ? "Native usage limit reached" : "Model task did not start"}>{column.failure}</ErrorPanel> : null}
                   <ol className="list-none p-0 flex flex-col gap-1 text-ui">
                     {column.steps.map(step => (
                       <li key={step.text} className={cn((step.state === 'waiting' || step.state === 'skipped') && 'muted', step.state === 'active' && 'font-semibold')}>

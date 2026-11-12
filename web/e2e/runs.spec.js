@@ -51,6 +51,33 @@ async function startRun(page) {
   await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/);
 }
 
+for (const side of ['first', 'second']) test(`preserves the ${side} profile chosen on the earliest form frame`, async ({ page, app }) => {
+  const chosen = side === 'first' ? 'strict-review' : 'baseline';
+  await page.evaluate(({ side, chosen }) => {
+    const observer = new MutationObserver(() => {
+      const profiles = [...document.querySelectorAll('select')].filter(select =>
+        [...select.options].some(option => option.value === 'strict-review'));
+      if (profiles.length !== 2) return;
+      observer.disconnect();
+      const select = profiles[side === 'first' ? 0 : 1];
+      window.profileInitProbe = { before: select.value, chosen };
+      select.value = chosen;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    observer.observe(document, { subtree: true, childList: true });
+  }, { side, chosen });
+  await page.getByRole('link', { name: 'Run a new task' }).click();
+  const profile = page.getByLabel(side === 'first' ? /left side of the report/i : /right side of the report/i);
+  await expect(profile).toHaveValue(chosen);
+  expect(await page.evaluate(() => window.profileInitProbe)).toEqual({ before: '', chosen });
+  await page.getByLabel('What should both profiles do?').fill('Preserve the explicitly selected fixture profile.');
+  await page.getByRole('button', { name: /min per run/ }).click();
+  await expect(profile).toHaveValue(chosen);
+  await page.getByRole('button', { name: 'Review before starting' }).click();
+  await expect(page.getByText('Ready to start')).toBeVisible();
+  expect(app.calls.captures).toEqual([]);
+});
+
 test('label advanced setup fields independently after removing a row', async ({ page }) => {
   await page.getByRole('link', { name: 'Run a new task' }).click();
   await page.getByRole('button', { name: /min per run/ }).click();
@@ -431,7 +458,11 @@ test('reviews and applies recovery for stopped runs opened from Recent', async (
   const progress = page.getByRole('region', { name: 'Interrupted' });
   await expect(progress.getByText('Before changing anything')).toBeVisible();
   await expect(progress.getByText('recoverable', { exact: false })).toHaveCount(2);
+  const recovered = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/recover'));
   await progress.getByRole('button', { name: 'Tidy up and keep the record' }).click();
+  const response = await recovered;
+  expect(response.ok()).toBe(true);
+  expect((await response.json()).recovery).toBeNull();
   await expect(page.getByRole('button', { name: 'Tidy up and keep the record' })).toHaveCount(0);
   await expect(page.getByRole('link', { name: 'Open the partial report' })).toBeVisible();
   expect(app.calls.captures).toHaveLength(0);
@@ -441,8 +472,12 @@ test('one profile can use separate model settings on both sides of a comparison'
   await page.getByRole('link', { name: 'Run a new task' }).click();
   await page.getByRole('textbox', { name: 'What should both profiles do?' }).fill('Compare the two fixture settings.');
   await page.getByLabel(/right side of the report/i).selectOption('baseline');
-  await page.getByLabel('Model ID').nth(0).fill('fixture-left');
-  await page.getByLabel('Model ID').nth(1).fill('fixture-right');
+  await page.getByRole('button', { name: 'Refresh models', exact: true }).nth(0).click();
+  await expect(page.getByLabel('Model ID').nth(0).getByRole('option', { name: /fixture-left/ })).toHaveCount(1);
+  await page.getByLabel('Model ID').nth(0).selectOption('fixture-left');
+  await page.getByRole('button', { name: 'Refresh models', exact: true }).nth(1).click();
+  await expect(page.getByLabel('Model ID').nth(1).getByRole('option', { name: /fixture-right/ })).toHaveCount(1);
+  await page.getByLabel('Model ID').nth(1).selectOption('fixture-right');
   await page.getByLabel('Reasoning effort').nth(0).selectOption('low');
   await page.getByLabel('Reasoning effort').nth(1).selectOption('high');
   await page.getByRole('button', { name: 'Review before starting' }).click();

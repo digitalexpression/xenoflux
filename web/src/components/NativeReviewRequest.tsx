@@ -8,7 +8,7 @@ type Question = { id: string; header: string; question: string; isOther?: boolea
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown) => typeof value === 'string' ? value : '';
 const labels: Record<string, string> = { accept: 'Allow once', acceptForSession: 'Allow for this session',
-  decline: 'Decline', cancel: 'Cancel native action' };
+  decline: 'Decline', 'approve-once': 'Approve once', reject: 'Reject', cancel: 'Cancel native action' };
 
 function decisionLabel(value: string | Record<string, unknown>) {
   if (typeof value === 'string') return labels[value] ?? value;
@@ -37,6 +37,10 @@ export function NativeReviewRequest({ request, busy, onRespond }: {
   const params = request.params;
   const input = request.method === 'item/tool/requestUserInput';
   const permissions = request.method === 'item/permissions/requestApproval';
+  const claude = request.method === 'claude/tool/requestApproval';
+  const copilot = request.method === 'copilot/permission';
+  const copilotTitle = params.category === 'path' ? 'Copilot CLI requests path access'
+    : params.category === 'commands' ? 'Copilot CLI requests command execution' : 'Copilot CLI requests permission';
   const files = request.method === 'item/fileChange/requestApproval';
   const command = request.method === 'item/commandExecution/requestApproval';
   const questions = input && Array.isArray(params.questions) ? params.questions as Question[] : [];
@@ -65,7 +69,7 @@ export function NativeReviewRequest({ request, busy, onRespond }: {
   }
 
   return <section className="flex flex-col gap-3 min-w-0" aria-label="Native request">
-    <h3 className="text-body font-semibold">{input ? 'Codex needs your input' : permissions ? 'Codex requests permissions' : files ? 'Codex requests file changes' : command ? 'Codex requests a command' : 'Unsupported native request'}</h3>
+    <h3 className="text-body font-semibold">{input ? 'Codex needs your input' : permissions ? 'Codex requests permissions' : files ? 'Codex requests file changes' : command ? 'Codex requests a command' : claude ? 'Claude Code requests a tool action' : copilot ? copilotTitle : 'Unsupported native request'}</h3>
     {text(params.reason) ? <p className="text-ui wrap-anywhere">{text(params.reason)}</p> : null}
     {text(params.cwd) ? <p className="text-ui wrap-anywhere"><strong>Working directory: </strong>{text(params.cwd)}</p> : null}
     {command ? <>
@@ -93,7 +97,19 @@ export function NativeReviewRequest({ request, busy, onRespond }: {
         <Button disabled={disabled} onClick={() => void respond({ permissions: {}, scope: 'turn' })}>Decline permissions</Button>
       </div>
     </> : null}
-    {command || files ? <>
+    {claude ? <>
+      {text(params.title) ? <p className="text-ui wrap-anywhere">{text(params.title)}</p> : null}
+      <p className="text-ui wrap-anywhere">{text(params.toolName)}</p>
+      {text(params.blockedPath) ? <p className="text-ui wrap-anywhere"><strong>Requested path: </strong>{text(params.blockedPath)}</p> : null}
+      <RecordedValue value={params.input} />
+    </> : null}
+    {copilot ? <>
+      <RecordedValue value={params.prompt} />
+      <Disclosure label="Inspect the native action" expandedLabel="Hide the native action"><RecordedValue value={params.action} /></Disclosure>
+      <div className="flex flex-wrap gap-2">{(['approve-once', 'reject'] as const).filter(kind => choices.includes(kind)).map(kind =>
+        <Button key={kind} disabled={disabled} onClick={() => void respond({ kind })}>{decisionLabel(kind)}</Button>)}</div>
+    </> : null}
+    {command || files || claude ? <>
       <div className="flex flex-col gap-3">{choices.map((decision, index) => <div key={index} className="flex flex-col gap-2 items-start">
         {typeof decision !== 'string' ? <RecordedValue value={decision} /> : null}
         <Button disabled={disabled || (files && !request.item)} onClick={() => void respond({ decision })}>{decisionLabel(decision)}</Button>

@@ -4,14 +4,14 @@ import assert from 'node:assert/strict';
 import { execFile as execFileCallback, spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { promisify } from 'node:util';
-import { appendFile, mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, mkdir, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, bind, create } from '../src/profiles.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome } from '../src/homes.js';
-import { observeAuditProfileAccess } from '../src/audit-profile.js';
+import { observeAuditProfileAccess, resolveAuditExecutionProfile } from '../src/audit-profile.js';
 import { previewAuditExperiment, runAuditExperiment } from '../src/audit-runner.js';
 import { cleanAuditExperiment, recoverAuditExperiment, showAuditRecord } from '../src/audit-experiment.js';
 import { readAuditRecord } from '../src/audit-experiment-store.js';
@@ -205,6 +205,9 @@ async function fixture(t, { pauseOnTurnStartMarker = null,
   const executable = join(root, 'fake-codex');
   await writeFile(executable, appServer(counter, protocolErrors, pauseOnTurnStartMarker,
     nativeVersion, contextSource === 'source' ? join(repo, 'AGENTS.md') : contextSource), { mode: 0o700 });
+  await symlink(executable, join(root, 'codex'));
+  const terminalEnvironment = { PATH: root + ':' + dirname(process.execPath) + ':/usr/bin:/bin' };
+  const resolveProfile = (store, selection, options) => resolveAuditExecutionProfile(store, selection, { ...options, terminalEnvironment });
   const native = await Promise.all(['alpha','beta'].map(name => prepareNativeHome({
     directory: join(root, `native-${name}`), executable, codexVersion: nativeVersion,
   })));
@@ -226,7 +229,7 @@ async function fixture(t, { pauseOnTurnStartMarker = null,
     profiles: [{ name: 'Alpha' }, { name: 'Beta' }], limits: { runMs: 30000, experimentMs: 90000, outputBytes: 1024 * 1024 },
     checks: [{ name: 'mutating-check', argv: [process.execPath, '-e', "const fs=require('node:fs');fs.appendFileSync('result.txt','check-end\\n');process.exit(fs.readFileSync('result.txt','utf8').includes('model-beta')?9:0)"], timeoutMs: 10000 }],
     sandbox: 'workspace-write', allowIncompleteCapture: true };
-  return { root, repo, commit, counter, protocolErrors, telemetry, executable, native, store, savedStore, savedConfigs, savedAuth, spec };
+  return { root, repo, commit, terminalEnvironment, resolveProfile, counter, protocolErrors, telemetry, executable, native, store, savedStore, savedConfigs, savedAuth, spec };
 }
 
 async function launchCount(path) {
@@ -240,7 +243,7 @@ test('relocated experiments require reported workspace context and persist denia
     const input = { ...f.spec, allowIncompleteCapture: true,
       captureRequirements: { context: [{ origin: 'repository', path: 'AGENTS.md', phase: 'before-task' }] },
       checks: [{ name: 'context-quality', argv: [process.execPath, '-e', "require('node:fs').writeFileSync('check-ran.txt','checked')"], timeoutMs: 10000 }] };
-    const result = await runAuditExperiment(f.store, input, { baseDirectory: join(f.store.directory, 'audits'),
+    const result = await runAuditExperiment(f.store, input, { resolveProfile: f.resolveProfile, baseDirectory: join(f.store.directory, 'audits'),
       observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store }) });
     assert.equal(result.runs.length, 2, JSON.stringify(result));
     assert.equal(result.status, contextSource === 'workspace' ? 'partial' : 'failed');
@@ -460,7 +463,7 @@ test('CLI rejects malformed experiment JSON without reflecting private input', a
 test('runs a real bounded two-profile experiment, retains task-end evidence before mutating checks, and supports resume-safe reports', async t => {
   const f = await fixture(t);
   const accessObservations = [];
-  const context = { baseDirectory: join(f.store.directory, 'audits'),
+  const context = { resolveProfile: f.resolveProfile, baseDirectory: join(f.store.directory, 'audits'),
     observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store,
       onObserved: observation => accessObservations.push(observation) }) };
   const preview = await previewAuditExperiment(f.store, f.spec, context);
@@ -613,6 +616,23 @@ test('runs a real bounded two-profile experiment, retains task-end evidence befo
   assert.equal(await launchCount(f.counter), launchCountAfterRuns);
 });
 
+test('recovery does not reinterpret another client’s saved native session as Codex', async t => {
+  const f = await fixture(t);
+  const experiment = await createExperiment(f.store, { spec: f.spec, task: 'Interrupted runtime fixture', profiles: [] });
+  const run = await createExperimentRun(f.store, { experimentId: experiment.id,
+    profile: { profileId: 'fixture-profile', profileName: 'Alpha', home: f.native[0].home, client: 'claude-code' } });
+  await writeAuditState(f.store, run.id, { status: 'running', phase: 'task', coordinator: {
+    pid: 987654321, started: 'fixture', host: hostname(),
+  }, nativeSessionId: '11111111-1111-4111-8111-111111111111' });
+  let reads = 0;
+  const recovered = await recoverAuditExperiment(f.store, run.id, { apply: true,
+    observeProcess: async () => ({ status: 'stopped' }), readNative: async () => { reads++; } });
+  assert.equal(recovered.status, 'recovered');
+  assert.equal(recovered.runs[0].execution.recovery, 'process-stopped-no-rerun');
+  assert.equal(recovered.runs[0].profile.client, 'claude-code');
+  assert.equal(reads, 0);
+});
+
 test('reconciles a dead coordinator from persisted workspace evidence without rerunning native work; preserves uncertain owners', async t => {
   const f = await fixture(t);
   const spec = { ...f.spec, profiles: [{ name: 'Alpha' }, { name: 'Beta' }], checks: [], setup: [] };
@@ -705,7 +725,7 @@ test('recovers after killing the owned coordinator at setup, task, capture, and 
     await writeFile(workerPath, coordinatorWorkerSource(), { flag: 'wx', mode: 0o600 });
     let stderr = '';
     let coordinator = spawn(process.execPath, [workerPath, f.store.directory, specPath, phase, readyPath, nativeStarted], {
-      stdio: ['pipe', 'ignore', 'pipe'],
+      env: { ...process.env, ...f.terminalEnvironment }, stdio: ['pipe', 'ignore', 'pipe'],
     });
     subtest.after(async () => {
       if (!coordinator || coordinator.exitCode !== null || coordinator.signalCode !== null) return;
@@ -815,14 +835,14 @@ test('executes three balanced quality trials and shows, exports, reopens, and ev
   const f = await fixture(t), spec = repeatedSpec(f);
   const before = { store: await readFile(f.store.file), configs: await Promise.all(f.native.map(home => readFile(join(home.home, 'config.toml')))),
     auth: await Promise.all(f.native.map(home => readFile(join(home.home, 'auth.json')))) };
-  const context = { baseDirectory: join(f.store.directory, 'audits'),
+  const context = { resolveProfile: f.resolveProfile, baseDirectory: join(f.store.directory, 'audits'),
     observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store }) };
   const report = await runAuditSeries(f.store, spec, context);
   assert.equal(report.kind, 'audit-series-report', JSON.stringify(report, null, 2));
   assert.equal(report.plan.length, 3);
   assert.deepEqual(report.plan.map(item => item.profileOrder), [['Alpha', 'Beta'], ['Beta', 'Alpha'], ['Alpha', 'Beta']]);
   assert.equal(report.coverage.plannedSlots, 3);
-  assert.equal(report.coverage.missingSlots, 0);
+  assert.equal(report.coverage.missingSlots, 0, JSON.stringify(report, null, 2));
   assert.equal(report.consistency.kind, 'audit-series-consistency');
   assert.equal(report.consistency.comparisons[0].coverage.plannedPairs, 3);
   assert.equal(report.consistency.comparisons[0].coverage.selectedPairs, 3);
@@ -948,7 +968,7 @@ test('SIGKILL after the first finalized child report resumes only unstarted stab
   const workerPath = join(f.root, 'series-coordinator.mjs'), readyPath = join(f.root, 'series-child-finalized.json');
   await writeFile(workerPath, seriesCoordinatorSource(), { flag: 'wx', mode: 0o600 });
   let stderr = '';
-  const coordinator = spawn(process.execPath, [workerPath, f.store.directory, specPath, readyPath], { stdio: ['pipe', 'ignore', 'pipe'] });
+  const coordinator = spawn(process.execPath, [workerPath, f.store.directory, specPath, readyPath], { env: { ...process.env, ...f.terminalEnvironment }, stdio: ['pipe', 'ignore', 'pipe'] });
   coordinator.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
   t.after(async () => {
     if (coordinator.exitCode !== null || coordinator.signalCode !== null) return;
@@ -968,13 +988,14 @@ test('SIGKILL after the first finalized child report resumes only unstarted stab
   const [, signal] = await once(coordinator, 'close');
   assert.equal(signal, 'SIGKILL');
   await waitForPidExit(coordinator.pid);
-  const resumed = invokeCLI(f.store.directory, 'audit', 'resume', ready.seriesId);
+  const resumed = spawnSync(process.execPath, [cliPath, '--store', f.store.directory, '--json', 'audit', 'resume', ready.seriesId],
+    { env: { ...process.env, ...f.terminalEnvironment }, encoding: 'utf8', timeout: 60000 });
   assert.ok([0, 2, 4].includes(resumed.status), resumed.stderr);
   const afterResume = JSON.parse(resumed.stdout);
   assert.equal(afterResume.id, ready.seriesId);
   assert.deepEqual(afterResume.plan.map(slot => slot.experimentId), plannedIds);
   assert.equal(afterResume.coverage.plannedSlots, 3);
-  assert.equal(afterResume.coverage.missingSlots, 0);
+  assert.equal(afterResume.coverage.missingSlots, 0, JSON.stringify(afterResume));
   assert.equal(afterResume.profiles.every(profile => profile.planned === 3 && profile.executed === 3), true);
   assert.equal(await launchCount(f.counter), 6, 'first durable trial was recovered, never relaunched; two unused trials ran');
   assert.equal((await readAuditRecord(f.store, ready.childId)).finalized, true);
@@ -991,7 +1012,7 @@ test('an uncapped native task remains cancellable through the runner signal', as
   const f = await fixture(t, { pauseOnTurnStartMarker: marker });
   const input = { ...f.spec, limits: { ...f.spec.limits, runMs: null, experimentMs: null }, setup: [], checks: [] };
   const controller = new AbortController();
-  const context = { baseDirectory: join(f.store.directory, 'audits'), signal: controller.signal,
+  const context = { resolveProfile: f.resolveProfile, baseDirectory: join(f.store.directory, 'audits'), signal: controller.signal,
     observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store }) };
   const running = runAuditExperiment(f.store, input, context);
   try {
@@ -1024,7 +1045,7 @@ test('SIGTERM during an audit resume cancels the active native task and leaves s
   t.after(() => rm(dirname(marker), { recursive: true, force: true }));
   const f = await fixture(t, { pauseOnTurnStartMarker: marker });
   const spec = { ...repeatedSpec(f), trials: { count: 2, order: 'balanced', budgetMs: 90000 } };
-  const context = { baseDirectory: join(f.store.directory, 'audits'),
+  const context = { resolveProfile: f.resolveProfile, baseDirectory: join(f.store.directory, 'audits'),
     observeAccess: (profile, options) => runObserveAccessFixture(profile, { ...options, store: f.store }),
     onTrialPrepared: async ({ slot }) => {
       if (slot.trialIndex === 0) throw Object.assign(new Error('fixture interruption before native work'), { code: 'fixture-stop-before-task' });
@@ -1038,7 +1059,7 @@ test('SIGTERM during an audit resume cancels the active native task and leaves s
 
   let stdout = '', stderr = '';
   const child = spawn(process.execPath, [cliPath, '--store', f.store.directory, '--json', 'audit', 'resume', created.id],
-    { stdio: ['ignore', 'pipe', 'pipe'] });
+    { env: { ...process.env, ...f.terminalEnvironment }, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
   child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
   t.after(async () => {

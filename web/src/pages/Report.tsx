@@ -56,6 +56,17 @@ export function Report() {
           {[data.a, data.b].map((side, index) => <section aria-label={`${side.profile} task outcome`} key={side.side} className="panel flex flex-col gap-2" style={{ borderTop: `3px solid var(--color-side-${side.side})` }}>
             <span className="meta">{index ? 'Right profile' : 'Left profile'}</span>
             <div><ProfileChip side={side.side} name={side.profile} meta={side.client} /></div>
+            {side.provenance ? <p className="meta">{[
+              side.provenance.basis, side.provenance.profileName, side.provenance.surface?.toUpperCase(),
+              side.provenance.rootMode === 'implicit' ? 'stock root' : side.provenance.rootMode === 'explicit' ? 'managed root' : 'root mode unknown',
+              side.provenance.executionLocation ?? 'location unknown',
+            ].filter(Boolean).join(' · ')}</p> : null}
+            {side.permissions ? <p className="meta">Permission mode · requested {side.permissions.requested ?? 'inherited'} · sent {side.permissions.sent ?? 'not recorded'} · confirmed {side.permissions.confirmed ?? 'not recorded'} · turn reported {side.permissions.observed ?? 'not recorded'}</p> : null}
+            {side.autoTurns ? <div>
+              <p className="text-ui font-medium">Copilot Auto · repeating this pair may route to different models.</p>
+              {side.autoTurns.length ? <ul className="list-disc pl-5 text-ui">{side.autoTurns.map((turn, index) =>
+                <li key={turn.turnId}>Turn {index + 1} · {turn.models.join(', ') || 'model not recorded'}</li>)}</ul> : <p className="hint">No turn model recorded.</p>}
+            </div> : null}
             {data.replay?.[side.side] ? <>
               <p className="meta">Root model (reported): {data.replayRootContext?.[side.side].model ?? 'Not recorded'}</p>
               <p className="meta">Root reasoning effort (reported): {data.replayRootContext?.[side.side].effort ?? 'Not recorded'}</p>
@@ -87,8 +98,8 @@ export function Report() {
         </section>
 
         {data.replay?.a || data.replay?.b ? <SessionReplayView ref={replayRef} sides={[
-          { side: 'a', profile: data.a.profile, replay: data.replay?.a ?? null },
-          { side: 'b', profile: data.b.profile, replay: data.replay?.b ?? null },
+          { side: 'a', profile: data.a.profile, client: data.a.client, replay: data.replay?.a ?? null },
+          { side: 'b', profile: data.b.profile, client: data.b.client, replay: data.replay?.b ?? null },
         ]} /> : null}
 
         <section className="flex flex-col gap-3" aria-labelledby="time">

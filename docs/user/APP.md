@@ -1,6 +1,8 @@
 # The Xenoflux app
 
-`xfx ui` opens a local web app for comparing Codex profiles and sessions. It runs
+Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
+
+`xfx ui` opens the local app for profiles, tasks and sessions. It runs
 on this Mac only: the server listens on `127.0.0.1`, opens your default browser,
 and requires its launch link to establish a browser session.
 
@@ -13,24 +15,68 @@ it. Running `xfx ui` again while it is running reopens the same app.
 
 ## What you can do
 
-- **Create a profile.** Open Profiles and choose **Create profile**. Choose
+- **Create a profile.** Open Profiles and choose **Create profile**. Select
+  Codex, Claude Code or GitHub Copilot CLI. Choose
   **Empty** to create a profile without copying another profile’s setup, or
   **Selected parts of another profile** to select supported settings/content
   and review the copy before creating it. Empty profiles still have the minimal
-  files Xenoflux needs to manage them. Creation does not open Codex or complete
+  files Xenoflux needs to manage them. Copying stays within the same client.
+  Creation does not open a native client or complete
   sign-in; follow the native setup guidance before running model tasks.
 - **Compare setups.** Choose two profiles to see how their settings, instructions,
   skills, MCP servers, plugins, hooks and memory settings differ today. Each item
   is labelled **Different**, **Same**, **Could not compare** (with the reason) or
   **Not applicable**. Comparing only reads files; it never copies, activates or
   signs in anything.
+- **Open native apps.** When installed signed Claude or GitHub Copilot apps are
+  available, Profiles offers separate **Open** buttons. These use each app's
+  existing account and submit no task. They do not create managed profiles,
+  select a Chat/Code/Cowork surface or automate model work. Copilot can also open
+  an existing app-local session ID. A successful link dispatch does not confirm
+  that the session exists; the native app reports missing sessions. This creates
+  no new task.
 - **Compare a task from existing sessions.** Tick two sessions you ran in Codex CLI
   or Desktop. The first one you tick is the left side of the report; **Swap sides**
-  changes that. Choosing sessions only reads their recorded history.
+  changes that. To select sessions across clients, choose **Choose recent sessions by profile**,
+  select a profile for each side and choose **List recent sessions**.
+  Listing and importing read stored history. A changed profile context requires
+  a fresh list and selection. List titles and folders stay local.
+  For managed Copilot profiles, listing and importing use the first bound
+  repository as the native working directory. Bind a repository in Profiles
+  before listing sessions.
+- **Import Claude Code conversations.** On **Open saved report**, select two
+  native UTF-8 UUID-named `.jsonl` transcripts, up to 8 MiB each, then choose
+  **Compare stored conversations**. This reads private snapshots through the official
+  stored-session reader without starting an agent. The partial report retains
+  public user/assistant text; tools, thinking and system content are omitted.
+  Account/profile, usage, original surface and execution location remain unknown.
+  Export the report to reopen it independently of the selected files. Raw
+  transcripts stay private; recorded text still needs inspection before sharing.
+- **Import Copilot conversations.** On **Open saved report**, enter two existing
+  local session UUIDs from Copilot CLI or the app, then choose **Compare Copilot
+  conversations**. Xenoflux uses the existing native Copilot CLI connection to
+  read stored history; `copilot` must be installed on PATH. It starts no new session
+  or model task. The current reader
+  supports the implicit native sign-in route and refuses token/custom-root overrides.
+  Only selected user/assistant text enters the partial report. Reasoning, tools and
+  system content are omitted; original account, surface/location, usage and task
+  completion stay unknown. Export to retain the conversation independently of native
+  history. Raw evidence remains private; inspect recorded text before sharing it.
 - **Run a new task.** Describe one task, choose a profile for each side and a
   repository, then review the pinned commit, limits and any commands you add.
-  Both sides can use the same profile. Each side can select its own model ID and
-  reasoning effort; blank fields inherit saved profile settings. Nothing starts
+  Choose Codex, Claude Code or GitHub Copilot CLI profiles on either side.
+  Each side can select an advertised model, reasoning effort and permission
+  mode for that job. Claude Code and Copilot CLI can inherit profile permissions.
+  Codex comparisons default to workspace-write with network access disabled and
+  also offer read-only. Ordinary reviews keep the selected profile's permissions.
+  Mixed-client pairs use each client's own permission rules. Copilot Auto can
+  route to different models each turn, so a repeat may use a different model.
+  The report lists models reported by each turn where available.
+  **Refresh models** initializes the native client without submitting a task or
+  changing model policy. It may use sign-in, write native state or run configured
+  startup hooks. Browsing uses cached metadata. Changing model clears explicit
+  effort; Start checks explicit choices again. Advertised models do not prove
+  account entitlement or settings observed in a turn. Nothing starts
   until **Start 2 model runs**. The sides run sequentially in
   separate copies of the committed source; uncommitted, untracked and ignored
   files are excluded. Setup and check commands are ordinary programs outside
@@ -91,6 +137,42 @@ it. Running `xfx ui` again while it is running reopens the same app.
 
 Reports with your same-task declaration have private links that work while the
 server is running. Export the report to keep the declaration after stopping it.
+
+## 4.0.0 scope and limits
+
+**4.0.0-beta.1 is an opt-in public beta candidate.** The supported journey is
+available for qualification, with the limits below still explicit. Passing
+checks does not establish that every native failure or end-user setup works.
+See [beta installation](INSTALLATION.md) and the
+[stable-promotion checklist](../developer/AUDIT-ACCEPTANCE.md#beta-exit-checklist).
+
+- Profiles follow the current selected CLI/Desktop installation and observed
+  capabilities. They are never pinned to a version/build matrix. Versions are
+  provenance; a changed executable or root between preview and launch requires
+  a fresh preview. SDK dependencies remain separately locked.
+- Claude Code has an observed per-root, same-account sign-in route. Copilot has
+  a qualified shared GitHub CLI (`gh-cli`) account route: separate setup roots
+  do not establish separate accounts. Distinct-account independence remains
+  unverified. Shared sign-out was not exercised as an isolation check.
+- Native credential refresh is **unverified and deferred to the next release**.
+  Sign-in, restart and successful tasks do not prove renewal. Native clients
+  own credentials and refresh; Xenoflux does not transfer credentials.
+- Copilot Auto may route each turn differently, limiting reproducibility.
+  Applied effort, turn/phase attribution, timing and usage stay unknown when
+  the native client does not report them. Partial capture stays partial.
+  Sampled process ancestry does not prove that escaped descendants terminated.
+- Restart interrupts owned work; there is no automatic reattach, resend or
+  resume. Reopening retains saved evidence and associated review responses.
+- Native qualification covers the adopted core paths and one mixed-client
+  pair. The remaining pair/mode cross-product, repeated overlap stress,
+  controller-kill native reviews and copied-setup native loading are deferred
+  to the next release; fixture coverage remains. Copy success does not prove
+  that the native client loaded the copied setup.
+- CLI setup inspection uses `--surface cli|desktop`; the former
+  `--client cli|desktop` flag is removed. See the [audit guide](AUDIT.md).
+- Desktop stale-callback recovery has synthetic native-fixture coverage;
+  recovery from that condition in real Codex remains unobserved. Those fixtures
+  do not establish real sign-in, Dock behavior or account isolation.
 
 ## What the app never does
 
@@ -198,7 +280,8 @@ Refreshing or closing the browser tab leaves an explicitly started task running.
 Reopen the app to see progress. **Cancel the run** stops only that experiment's
 owned work and retains a partial report; existing Codex and Terminal clients stay
 open. Stopping the local Xenoflux server interrupts its owned experiment and
-preserves the records. Reopening never restarts a model task automatically.
+preserves the records. Reopening never restarts a model task automatically or
+reattaches to live work.
 
 After an interruption, open the task under Recent. If recovery is needed, inspect
 the preview before choosing **Tidy up and keep the record**. Recovery only

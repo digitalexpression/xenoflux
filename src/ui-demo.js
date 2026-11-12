@@ -173,7 +173,7 @@ function report(ref, selection) {
     limits: [
       `Whether ${a} ran a check at the end — no result was recorded.`,
       'Which instructions each session actually loaded.',
-      'Environment and cache state — Codex doesn’t record them.',
+      'Environment and cache state — not recorded in this evidence.',
       ...partialKeys.map(side => `${side === 'a' ? a : b}’s history after turn 4, including file changes and whether checks ran. Findings use turns 1–4 only.`),
       '3 behaviors that the recorded actions can’t show.',
       'Whether these differences repeat — this is one pair, so consistency is unmeasured.',
@@ -500,7 +500,6 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       const advanced = request.advanced;
       const timeMinutes = advanced?.timeMinutes ?? 15;
       const outputMiB = advanced?.outputMiB ?? 8;
-      const sandbox = advanced?.sandbox ?? 'workspace-write';
       const setup = advanced?.setup ?? [];
       const previewToken = blocked ? null : randomUUID();
       const result = { ready: !blocked, blocked, previewToken, simulated: true,
@@ -512,7 +511,7 @@ export function createDemoProvider({ version = 'demo' } = {}) {
         where: [`Each profile gets its own copy of ${request.repository || '[repository]'} at ${request.commit || '[COMMIT]'}.`, 'Uncommitted edits and untracked or ignored files aren’t included. You have 3 uncommitted files.',
           'Preparing the copies leaves your folder and its Git index untouched.', 'That doesn’t limit what commands run during the task, or your checks, can affect outside the copy.'],
         checks: valid.map(check => `${check.name || 'Check'}: ${check.command}`),
-        limits: [`Each run stops after ${timeMinutes} minutes; the whole task after ${timeMinutes * 2 + 2}.`, `Codex access: ${sandbox}; output cap ${outputMiB} MiB per program.`, `Codex program: ${advanced?.program || 'profile default'}; reasoning effort: ${advanced?.reasoningEffort || 'profile default'}.`, 'A run that stops early is reported as stopped. Runs aren’t retried.', ...(setup.length ? [`Runs ${setup.length} setup command${setup.length === 1 ? '' : 's'} before the task.`] : [])],
+        limits: [`Each run stops after ${timeMinutes} minutes; the whole task after ${timeMinutes * 2 + 2}.`, `Left permissions: ${request.execution?.a?.permissionMode ?? 'workspace-write'}; right permissions: ${request.execution?.b?.permissionMode ?? 'workspace-write'}. Output cap ${outputMiB} MiB per program.`, `Codex program: ${advanced?.program || 'profile default'}; reasoning effort: ${advanced?.reasoningEffort || 'profile default'}.`, 'A run that stops early is reported as stopped. Runs aren’t retried.', ...(setup.length ? [`Runs ${setup.length} setup command${setup.length === 1 ? '' : 's'} before the task.`] : [])],
         willDo: ['Run 2 model tasks, one after the other, using each profile’s sign-in', ...(setup.length ? [`Run setup commands: ${setup.map(item => item.name || '(unnamed)').join(', ')}`] : []), 'Save the evidence and open the comparison report'],
         never: ['Changes, copies or activates profile settings', 'Signs in, or swaps in another profile if one fails', 'Closes your Codex windows'],
         cliCommand: 'xfx audit run --spec experiment.json' };

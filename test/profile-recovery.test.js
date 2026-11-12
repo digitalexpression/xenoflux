@@ -16,13 +16,13 @@ async function fixture(t) {
   const executable = join(root, 'codex');
   await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
   const made = await createHome({ store, name: 'Research', base, executable, version: '0.153.4' });
-  return { root, base, store, made, executable, lockPath: join(root, 'desktop-lock') };
+  return { root, base, store, made, executable, terminalEnvironment: { PATH: root + ':/usr/bin:/bin' }, lockPath: join(root, 'desktop-lock') };
 }
 const runtime = (idle = async () => {}) => ({ assertExternal: async () => {}, assertIdle: idle });
 const opts = (f, extra = {}) => ({ lockPath: f.lockPath, defaultUserHome: join(f.root, 'native-default'),
   runtime: runtime(), isAlive: () => false, ...extra });
 async function interruptedLogin(f) {
-  await assert.rejects(startHomeSignIn({ store: f.store, name: 'Research', base: f.base,
+  await assert.rejects(startHomeSignIn({ store: f.store, name: 'Research', base: f.base, terminalEnvironment: f.terminalEnvironment,
     probe: async () => '0.153.4', ramLogs: { prepareHome: async () => {} },
     run: async () => { const error = new Error('shutdown uncertain'); error.code = 'SHUTDOWN_FAILED'; throw error; } }),
   { code: 'SHUTDOWN_FAILED' });
@@ -40,7 +40,7 @@ test('recovers stale sign-in, then permits sign-in retry', async t => {
   assert.deepEqual([registryAfter.ino, registryAfter.mtimeMs], [registryBefore.ino, registryBefore.mtimeMs]);
   await assert.rejects(access(join(f.made.root, '.run-lock')), { code: 'ENOENT' });
   assert.equal(JSON.parse(await readFile(join(f.made.root, '.xfx-home-setup.json'), 'utf8')).phase, 'login-cancelled');
-  const retried = await startHomeSignIn({ store: f.store, name: 'Research', base: f.base,
+  const retried = await startHomeSignIn({ store: f.store, name: 'Research', base: f.base, terminalEnvironment: f.terminalEnvironment,
     probe: async () => '0.153.4', ramLogs: { prepareHome: async () => {} }, run: async () => ({ exitCode: 0 }) });
   assert.equal(retried.login.state, 'completed');
 });
@@ -112,14 +112,14 @@ test('profile operation reservation blocks stale run recovery without touching e
 test('recovers standalone CLI lock only with matching run report', async t => {
   const f = await fixture(t), lock = join(f.made.root, '.run-lock');
   const ramLogs = { prepareHome: async () => {} };
-  const interrupted = await launchHome(f.store, 'Research', { probe: async () => '0.153.4', ramLogs,
+  const interrupted = await launchHome(f.store, 'Research', { terminalEnvironment: f.terminalEnvironment, probe: async () => '0.153.4', ramLogs,
     run: async () => { const error = new Error('shutdown uncertain'); error.code = 'SHUTDOWN_FAILED'; throw error; } });
   assert.equal(interrupted.status, 'incomplete');
   const result = await recoverProfileRun(f.store, 'Research', opts(f, { apply: true }));
   assert.equal(result.kind, 'interactive-cli');
   await assert.rejects(access(lock), { code: 'ENOENT' });
   assert.equal(JSON.parse(await readFile(join(f.made.root, '.xfx-home-setup.json'), 'utf8')).phase, 'registered');
-  const retry = await launchHome(f.store, 'Research', { probe: async () => '0.153.4', ramLogs,
+  const retry = await launchHome(f.store, 'Research', { terminalEnvironment: f.terminalEnvironment, probe: async () => '0.153.4', ramLogs,
     run: async () => ({ exitCode: 0, signal: null }) });
   assert.equal(retry.status, 'exited');
 });

@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createDesktopInstanceRuntime, targetStartSeconds } from '../src/desktop-instance-runtime.js';
 import { DESKTOP_APP } from '../src/desktop-runtime.js';
 
@@ -29,7 +34,7 @@ test('request receipt selects the opened main while ignoring simultaneous unrela
   assert.deepEqual(result, { main: copiedMain, processes: [copiedMain, child] });
   assert.equal(call.file, helper);
   assert.deepEqual(call.args, ['--open-app', application.appPath, '--home', '/fixture/home', '--desktop-data', '/fixture/data', '--user-home', '/Users/test', '--temporary', '/fixture/tmp', '--target-executable', application.executable]);
-  assert.equal(call.options.timeout, 15000);
+  assert.equal(call.options.timeout, 17000);
   assert.equal(call.options.env.HOME, '/Users/test');
 });
 
@@ -380,7 +385,7 @@ test('idle resource inspection ignores sibling profile handles and rejects targe
   const holder = { pid: 90, ppid: 1, uid: 501, startedAt: 'Fri Oct  9 10:10:00 2026', executable: DESKTOP_APP.executable };
   const rt = createDesktopInstanceRuntime(opts({ processSnapshot: async () => [self, holder],
     lstat: async path => ({ isDirectory: () => path === home, isSymbolicLink: () => false }), realpath: async path => path,
-    execFile: async (file, args) => { assert.equal(file, '/usr/sbin/lsof'); assert.deepEqual(args.slice(0, 8), ['-nP', '-Fpcun', '-u', '501', '-a', '+D', home]); return { stdout: lsofOutput, stderr: '' }; },
+    execFile: async (file, args) => { assert.equal(file, '/usr/sbin/lsof'); assert.deepEqual(args, ['-nP', '-Fpcunt', '-u', '501']); return { stdout: lsofOutput, stderr: '' }; },
   }));
   assert.deepEqual(await rt.assertResourcesIdle([home]), { idle: true, processes: [] });
   lsofOutput = `p90\nf12\ncCodex\nu501\nn${home}/config.toml\n`;
@@ -405,6 +410,88 @@ test('resource inspection allows only the exact live review participant identity
   await assert.rejects(unrelated.assertResourcesIdle([home], { allowedProcesses: [holder] }), { code: 'RESOURCE_BUSY' });
 });
 
+test('passive plugin-cache references allow launch but every active database handle still blocks', async () => {
+  const home = '/fixture/home', data = '/fixture/desktop-data';
+  const cache = `${home}/plugins/cache/chrome/extension-host`;
+  const holder = { ...ownMain, executable: `${cache}/ChatGPT for Chrome` };
+  const header = `p${holder.pid}\ncChatGPT for Chrome\nu501\n`;
+  const passive = `f9\ntNPOLICY\nn\nfcwd\nn${cache}\nftxt\nn${holder.executable}\n`;
+  let extra = '', scanCalls = 0;
+  const aliases = new Map();
+  const rt = createDesktopInstanceRuntime(opts({
+    lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }),
+    realpath: async path => aliases.get(path) ?? path,
+    processSnapshot: async () => [self, holder],
+    execFile: async (_file, args) => {
+      scanCalls++;
+      assert.deepEqual(args, ['-nP', '-Fpcunt', '-u', '501']);
+      return { stdout: header + passive + extra, stderr: '' };
+    },
+  }));
+  const check = () => rt.assertResourcesIdle([home, data], { profileHome: home });
+  assert.deepEqual(await check(), { idle: true, processes: [] });
+  assert.equal(scanCalls, 1, 'one complete scan covers both resource trees');
+  for (const path of [`${home}/state_5.sqlite`, `${home}/state_5.sqlite-wal`, `${home}/state_5.sqlite-shm`,
+    `${home}/logs_1.sqlite`, `${home}/sessions/thread.jsonl`, `${data}/Local Storage/leveldb/LOCK`,
+    `${cache}/plugin.sqlite`, `${home}/plugins/cache-other/plugin.sqlite`]) {
+    for (const descriptor of ['12', 'txt']) {
+      extra = `f${descriptor}\nn${path}\n`;
+      await assert.rejects(check(), e => e.code === 'RESOURCE_BUSY' && e.remainingProcesses[0].pid === holder.pid,
+        `${descriptor} reference to ${path} must remain busy in the same Chrome process`);
+    }
+  }
+  extra = `f12\nn${holder.executable}\n`;
+  await assert.rejects(check(), { code: 'RESOURCE_BUSY' });
+  extra = '';
+  aliases.set(holder.executable, `${home}/state_5.sqlite`);
+  await assert.rejects(check(), { code: 'RESOURCE_BUSY' });
+  aliases.clear();
+  await assert.rejects(rt.assertResourcesIdle([home, data]), { code: 'RESOURCE_BUSY' });
+  await assert.rejects(rt.assertResourcesIdle([home], { profileHome: data }), { code: 'INVALID_RESOURCE_PATHS' });
+});
+
+test('directory scans never accept partial output, warnings, missing descriptors, timeouts or overflow as idle', async () => {
+  const home = '/fixture/home', executable = `${home}/plugins/cache/chrome/host`;
+  const stdout = `p30\ncChrome\nu501\nftxt\nn${executable}\n`;
+  const base = { lstat: async () => ({ isDirectory: () => true, isSymbolicLink: () => false }), realpath: async path => path,
+    processSnapshot: async () => [self, { ...ownMain, executable }] };
+  const failures = [
+    { code: 1, stdout, stderr: '' }, { code: 1, stdout: '', stderr: '' },
+    { code: 'ETIMEDOUT' }, { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', stdout, stderr: '' },
+  ];
+  for (const failure of failures) {
+    const rt = createDesktopInstanceRuntime(opts({ ...base, execFile: async () => { throw Object.assign(new Error(), failure); } }));
+    await assert.rejects(rt.assertResourcesIdle([home], { profileHome: home }), { code: 'RESOURCE_INSPECTION_FAILED' });
+  }
+  for (const output of [{ stdout, stderr: 'lsof: permission denied' },
+    { stdout: stdout + 'f12\n', stderr: '' }, { stdout: stdout.replace('ftxt\n', 'ftxt\nf12\n'), stderr: '' }]) {
+    const rt = createDesktopInstanceRuntime(opts({ ...base, execFile: async () => output }));
+    await assert.rejects(rt.assertResourcesIdle([home], { profileHome: home }), { code: 'RESOURCE_INSPECTION_FAILED' });
+  }
+});
+
+test('native cache working directory permits launch while real database and sidecar handles still block', { skip: process.platform !== 'darwin' }, async t => {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'xfx-cache-handles-')));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const cache = join(home, 'plugins', 'cache', 'fixture');
+  await mkdir(cache, { recursive: true });
+  const runtime = createDesktopInstanceRuntime();
+  for (const database of [null, 'state_5.sqlite', 'state_5.sqlite-wal', 'state_5.sqlite-shm']) {
+    const handle = database && await open(join(home, database), 'w');
+    let child;
+    try {
+      child = spawn('/bin/sleep', ['30'], { cwd: cache, stdio: ['ignore', 'ignore', 'ignore', ...(handle ? [handle.fd] : [])] });
+      await once(child, 'spawn');
+    } finally { if (handle) await handle.close(); }
+    const stopped = once(child, 'exit');
+    try {
+      if (database) await assert.rejects(runtime.assertResourcesIdle([home], { profileHome: home }),
+        e => e.code === 'RESOURCE_BUSY' && e.remainingProcesses.some(row => row.pid === child.pid));
+      else assert.deepEqual(await runtime.assertResourcesIdle([home], { profileHome: home }), { idle: true, processes: [] });
+    } finally { if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await stopped; } }
+  }
+});
+
 test('resource inspection treats absent paths as idle and incomplete lsof evidence as a refusal', async () => {
   const missing = createDesktopInstanceRuntime(opts({ lstat: async () => { throw Object.assign(new Error(), { code: 'ENOENT' }); } }));
   assert.deepEqual(await missing.assertResourcesIdle(['/fixture/missing']), { idle: true, processes: [] });
@@ -418,6 +505,33 @@ test('resource inspection treats absent paths as idle and incomplete lsof eviden
     processSnapshot: async () => [self] }));
   await assert.rejects(unobserved.assertResourcesIdle([home]), e => e.code === 'RESOURCE_INSPECTION_FAILED'
     && /process snapshot for \/fixture\/home: holder PID 999 was absent/.test(e.message));
+});
+
+test('exit-1 exact-file listings identify blockers without ever proving idle from partial rows', async () => {
+  const home = '/fixture/home';
+  const holder = { ...ownMain, executable: '/fixture/Code Helper (Plugin)' };
+  let stdout = `p${holder.pid}\ncCode Helper (Plugin)\nu501\nf12\nn${home}\n`, stderr = '';
+  const rt = createDesktopInstanceRuntime(opts({
+    lstat: async () => ({ isDirectory: () => false, isSymbolicLink: () => false }), realpath: async path => path,
+    processSnapshot: async () => [self, holder],
+    execFile: async () => { throw Object.assign(new Error(), { code: 1, stdout, stderr }); },
+  }));
+  await assert.rejects(rt.assertResourcesIdle([home]), e => {
+    assert.equal(e.code, 'RESOURCE_BUSY');
+    assert.match(e.message, /then retry/);
+    assert.ok(e.message.includes(`Code Helper (Plugin) (PID ${holder.pid})`));
+    assert.deepEqual(e.remainingProcesses, [holder]);
+    return true;
+  });
+  await assert.rejects(rt.assertResourcesIdle([home], { allowedProcesses: [holder] }), { code: 'RESOURCE_INSPECTION_FAILED' });
+  stdout = `p${holder.pid}\ncCode Helper (Plugin)\nu501\nf12\nn/fixture/sibling\n`;
+  await assert.rejects(rt.assertResourcesIdle([home]), { code: 'RESOURCE_INSPECTION_FAILED' });
+  stdout = 'p30x\ncCode\nu501\nn/fixture/home\n';
+  await assert.rejects(rt.assertResourcesIdle([home]), { code: 'RESOURCE_INSPECTION_FAILED' });
+  stdout = '';
+  assert.deepEqual(await rt.assertResourcesIdle([home]), { idle: true, processes: [] });
+  stderr = 'lsof: permission denied';
+  await assert.rejects(rt.assertResourcesIdle([home]), { code: 'RESOURCE_INSPECTION_FAILED' });
 });
 
 test('resource inspection diagnostics identify path validation and malformed lsof fields safely', async () => {

@@ -23,11 +23,13 @@ UTF-8 JSON example; replace repository/commit/profile values and use only truste
   "repository": "/path/to/repository",
   "revision": "0123456789abcdef0123456789abcdef01234567",
   "task": "Implement the requested change and summarize the result.",
-  "profiles": ["Research", "Careful"],
+  "profiles": [
+    {"name": "Research", "client": "codex", "sideId": "a", "execution": {"permissionMode": "workspace-write"}},
+    {"name": "Careful", "client": "codex", "sideId": "b", "execution": {"permissionMode": "read-only"}}
+  ],
   "setup": [],
   "checks": [{"name": "unit tests", "argv": ["npm", "test"], "timeoutMs": 300000}],
   "limits": {"runMs": 900000, "experimentMs": 1920000, "outputBytes": 8388608},
-  "sandbox": "workspace-write",
   "allowIncompleteCapture": false,
   "captureRequirements": {"usage": {"agents": "all", "fields": ["inputTokens", "outputTokens", "totalTokens"]}}
 }
@@ -37,12 +39,17 @@ UTF-8 JSON example; replace repository/commit/profile values and use only truste
 | --- | --- |
 | Repository/revision | Absolute normalized Git root; required revision resolves once to a commit. Record source HEAD/tree; do not execute configured worktree filters. |
 | Inputs | Committed files only: dirty/untracked/ignored contents, Git config/credentials excluded. Source worktree/index preserved. Reject submodules, LFS pointers, unsupported objects, more than 50,000 entries, 1 GiB total or 64 MiB/blob. Separate paths can affect trust/project configuration. New cleanliness is unknown; older recorded flags remain. |
-| Profiles | 2–8 sides; name string or object with `name`, optional `executable`, `version`, `sideId`, `execution`, `nativeConfig`, `skills`. Repeated homes need distinct `sideId` values. |
+| Profiles | 2–8 sides; name string or object with `name`, optional `client` (`codex`, `claude-code`, or `copilot`), `executable`, `version`, `sideId`, `execution`, `nativeConfig`, `skills`. Repeated homes need distinct `sideId` values. |
 | Resolution | Named profiles need the source repository bound and executable/version registered. `Default` needs existing native trust and an explicit executable. Executables must be trusted absolute paths; `version` records requested context, not a version gate. Series freeze observations for drift checks. No provider-version allowlist. |
-| `execution` | Optional per-side `model`/`reasoningEffort`; omitted inherits defaults. Process-local values need native confirmation before the turn; do not duplicate them in `nativeConfig`. |
+| `execution` | Per-side `model`, `reasoningEffort`, and `permissionMode`. Use only options supported by that client and profile. Copilot can use `model: "auto"` with an optional advertised `route`. Omitted fields use the client's defaults for the job. |
 | `nativeConfig` | Narrow `-c` overrides: `model`, `model_reasoning_effort`, `plan_mode_reasoning_effort`, `forced_login_method` (`chatgpt`/`api`), `agents.max_depth` (1–4), `features.multi_agent` (`false` only). Requested settings are separate from observed behavior; recipe fingerprints include them and resume rejects drift. Use the native executable, not a shell wrapper. |
 | `skills` | Distinct requested root-skill names, each uniquely resolved by native catalog. Selection is not proof of use. See [catalog/telemetry semantics](AUDIT-EVIDENCE.md#skill-catalogs-and-telemetry). |
 | `taskContract` | Optional explicit identity/edit boundary, e.g. `{"id":"booking-ledger","editableFiles":["src/booking-ledger.js"]}`; an evidence label, not enforced sandbox scope. |
+
+Claude Code supports `default`, `acceptEdits`, and `plan`. Copilot CLI
+supports `manual` and `assisted`. Leaving these choices unset inherits native
+permissions. CLI experiments have no interactive approval queue. Use the app
+to respond to individual native requests.
 
 If needed, `xfx profile bind NAME /path/to/repository` changes registry metadata only. Preparation never grants native project trust.
 
@@ -57,7 +64,7 @@ These commands run outside the Codex sandbox and can affect external files/servi
 | `runMs` | 15 minutes/side; maximum 24 hours. |
 | `experimentMs` | Derived from sides/run limit; maximum 24 hours. |
 | `outputBytes` | 8 MiB/process; 1 KiB–64 MiB. |
-| Sandbox | `workspace-write` (default) or `read-only`; native task networking disabled, writes limited accordingly. |
+| Codex permissions | `execution.permissionMode` accepts `workspace-write` or `read-only`. Native task networking is disabled. A version 1 recipe's top-level `sandbox` still supplies the Codex default if a side omits its mode. With neither set, the default is `workspace-write`. |
 
 For uncapped non-series work, both duration fields may be explicit `null`; omitted fields retain defaults. Cancellation/output/setup/check/startup/shutdown bounds still apply; series retain budgets. Filesystem/preflight/shutdown overhead can exceed the process deadline. No automatic retries.
 

@@ -18,15 +18,25 @@ const integer = (value, fallback, min, max, label) => {
 
 const NATIVE_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 
-export const selectionKey = selection => selection.sideId ?? selection.name.toLowerCase();
+export const selectionKey = selection => selection.sideId ?? (selection.client && selection.client !== 'codex' ? `${selection.client}:${selection.name.toLowerCase()}` : selection.name.toLowerCase());
+
+export function validateAuditApprovalsReviewer(value) {
+  if (value !== undefined && value !== 'user') throw new Error('Comparison approval reviewer must be user or inherited');
+  return value;
+}
+
+export const CODEX_PERMISSION_MODES = Object.freeze(['read-only', 'workspace-write']);
 
 export function validateExecution(value) {
   if (value === undefined) return undefined;
-  allowed(value, ['model', 'reasoningEffort'], 'execution settings');
-  if (value.model !== undefined && (typeof value.model !== 'string' || !/^[a-z0-9][a-z0-9._:/-]{0,99}$/i.test(value.model))) throw new Error('Model must be a plain model ID');
-  if (value.reasoningEffort !== undefined && !NATIVE_REASONING_EFFORTS.has(value.reasoningEffort))
-    throw new Error('Choose a supported reasoning effort');
-  return { ...(value.model !== undefined ? { model: value.model } : {}),
+  allowed(value, ['model', 'reasoningEffort', 'permissionMode', 'route'], 'execution settings');
+  if (value.model !== undefined && !plain(value.model, 1024)) throw new Error('Model must be a bounded native model ID');
+  if (value.reasoningEffort !== undefined && !plain(value.reasoningEffort, 1024))
+    throw new Error('Reasoning effort must be a bounded native option');
+  if (value.route !== undefined && (value.model !== 'auto' || !plain(value.route, 1024))) throw new Error('Select Copilot Auto with a bounded route ID');
+  if (value.permissionMode !== undefined && !['default', 'acceptEdits', 'plan', 'manual', 'assisted', 'read-only', 'workspace-write'].includes(value.permissionMode))
+    throw new Error('Permission mode is not a supported per-job override');
+  return { ...(value.route !== undefined ? { route: value.route } : {}), ...(value.permissionMode !== undefined ? { permissionMode: value.permissionMode } : {}), ...(value.model !== undefined ? { model: value.model } : {}),
     ...(value.reasoningEffort !== undefined ? { reasoningEffort: value.reasoningEffort } : {}) };
 }
 
@@ -87,7 +97,7 @@ function taskContract(value) {
 
 /** Freeze one task, committed baseline, selected setups and bounded execution recipe. */
 export function validateAuditSpec(value) {
-  allowed(value, ['schemaVersion', 'repository', 'revision', 'task', 'taskContract', 'profiles', 'limits', 'setup', 'checks', 'sandbox', 'allowIncompleteCapture', 'captureRequirements', 'quality', 'trials', 'variables'], 'experiment specification');
+  allowed(value, ['schemaVersion', 'repository', 'revision', 'task', 'taskContract', 'profiles', 'limits', 'setup', 'checks', 'sandbox', 'approvalsReviewer', 'allowIncompleteCapture', 'captureRequirements', 'quality', 'trials', 'variables'], 'experiment specification');
   if (value.schemaVersion !== 1 || !plain(value.repository) || !value.repository.startsWith('/')
     || resolve(value.repository) !== value.repository || !plain(value.revision, 200))
     throw new Error('Specify schemaVersion 1, an absolute repository and explicit Git revision');
@@ -99,14 +109,17 @@ export function validateAuditSpec(value) {
   const names = new Set();
   const profiles = value.profiles.map(selection => {
     const profile = typeof selection === 'string' ? { name: selection } : selection;
-    allowed(profile, ['name', 'executable', 'version', 'skills', 'nativeConfig', 'sideId', 'execution'], 'profile selection');
-    if (!plain(profile.name, 200) || (profile.sideId !== undefined && !/^[a-z][a-z0-9-]{0,39}$/.test(profile.sideId))
-      || (profile.sideId === undefined && names.has(profile.name.toLowerCase())))
+    allowed(profile, ['name', 'client', 'executable', 'version', 'skills', 'nativeConfig', 'sideId', 'execution'], 'profile selection');
+    if (profile.client !== undefined && !['codex', 'claude-code', 'copilot'].includes(profile.client))
+      throw new Error('Choose a supported native client');
+    const scopedName = plain(profile.name, 200) ? `${profile.client ?? 'codex'}:${profile.name.toLowerCase()}` : null;
+    if (!scopedName || (profile.sideId !== undefined && !/^[a-z][a-z0-9-]{0,39}$/.test(profile.sideId))
+      || (profile.sideId === undefined && names.has(scopedName)))
       throw new Error('Select distinct plain profile names or give each side a distinct side ID');
     const key = selectionKey(profile);
     if (keys.has(key)) throw new Error('Choose distinct side IDs');
     keys.add(key);
-    names.add(profile.name.toLowerCase());
+    names.add(scopedName);
     if ((profile.executable !== undefined && (!plain(profile.executable) || !profile.executable.startsWith('/')
         || resolve(profile.executable) !== profile.executable))
       || (profile.version !== undefined && !plain(profile.version, 100)))
@@ -118,7 +131,7 @@ export function validateAuditSpec(value) {
     const execution = validateExecution(profile.execution);
     if (execution && (nativeConfig?.model !== undefined || nativeConfig?.model_reasoning_effort !== undefined))
       throw new Error('Choose one way to specify the model and reasoning effort');
-    return { name: profile.name, ...(profile.sideId ? { sideId: profile.sideId } : {}),
+    return { name: profile.name, ...(profile.client ? { client: profile.client } : {}), ...(profile.sideId ? { sideId: profile.sideId } : {}),
       ...(execution !== undefined ? { execution } : {}), ...(profile.executable ? { executable: profile.executable } : {}),
       ...(profile.version !== undefined ? { version: profile.version } : {}), skills: [...skills],
       ...(nativeConfig !== undefined ? { nativeConfig } : {}) };
@@ -133,6 +146,7 @@ export function validateAuditSpec(value) {
     maxRuns: integer(value.limits?.maxRuns, profiles.length, profiles.length, 8, 'maxRuns') };
   const sandbox = value.sandbox ?? 'workspace-write';
   if (!['read-only', 'workspace-write'].includes(sandbox)) throw new Error('Audit sandbox must be read-only or workspace-write');
+  const approvalsReviewer = validateAuditApprovalsReviewer(value.approvalsReviewer);
   if (value.allowIncompleteCapture !== undefined && typeof value.allowIncompleteCapture !== 'boolean') throw new Error('allowIncompleteCapture must be a boolean');
   const setup = commands(value.setup, 'setup'), checks = commands(value.checks, 'check');
   const contract = taskContract(value.taskContract);
@@ -152,7 +166,7 @@ export function validateAuditSpec(value) {
     || value.variables.some(item => !plain(item, 160)) || new Set(value.variables).size !== value.variables.length))
     throw new Error('Intended setup variables require a trial schedule and distinct plain labels');
   return { schemaVersion: 1, repository: value.repository, revision: value.revision, task: value.task, profiles, limits,
-    setup, checks, sandbox, allowIncompleteCapture: value.allowIncompleteCapture ?? false,
+    setup, checks, sandbox, ...(approvalsReviewer ? { approvalsReviewer } : {}), allowIncompleteCapture: value.allowIncompleteCapture ?? false,
     ...(contract ? { taskContract: contract } : {}),
     ...(captureRequirements ? { captureRequirements } : {}),
     ...(quality ? { quality } : {}), ...(trials ? { trials, variables: value.variables ?? [] } : {}) };

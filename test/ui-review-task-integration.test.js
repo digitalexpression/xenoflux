@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fsPromises from 'node:fs/promises';
 import { chmod, rm, readFile, writeFile } from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
@@ -7,13 +8,22 @@ import { join } from 'node:path';
 import { createUiRunsFixture } from '../test-support/ui-runs-fixture.js';
 import { record } from '../src/metadata.js';
 
+const advertisedModels = ['gpt-6-luna', 'fixture-explicit-model', 'fixture-unavailable', 'fixture-model-a', 'fixture-model-b',
+  'c1-a', 'c1-b', 'c2-a', 'c2-b', 'r1', 'r2', 'conflict'].map((model, index) => ({ id: model, model, isDefault: index === 0,
+    supportedReasoningEfforts: ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort })) }));
+const catalogContext = { discover: async ({ profile, workspace }) => ({ status: 'ready', source: 'fixture-model/list',
+  models: advertisedModels, scope: { environmentBinding: profile.environmentBinding, workspace },
+  discoveredAt: new Date().toISOString(), process: { status: 'exited', shutdown: { groupTerminated: true } } }) };
+const refreshCatalog = (app, workspace) => app.provider.refreshCatalog({ requestId: randomUUID(), profile: 'baseline', workspace });
+
 const input = app => ({ task: 'Disposable paired review fixture', files: '', a: 'baseline', b: 'strict-review',
   repository: app.repository, commit: 'HEAD', checks: [] });
 const timeout = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(read, predicate, message) {
   const end = Date.now() + 15000;
-  while (Date.now() < end) { const value = await read(); if (predicate(value)) return value; await timeout(20); }
-  assert.fail(message);
+  let value;
+  while (Date.now() < end) { value = await read(); if (predicate(value)) return value; await timeout(20); }
+  assert.fail(typeof message === 'function' ? message(value) : message);
 }
 
 async function seedComparison(app) {
@@ -70,7 +80,7 @@ function reviewContext(mode = 'complete') {
   } } };
 }
 
-function fakeCodexServer(earlyApproval = false, uniqueSessions = false) {
+function fakeCodexServer(earlyApproval = false, uniqueSessions = false, removedModel = null) {
   return `#!/usr/bin/env node
 if (process.argv.includes('--version')) { process.stdout.write('codex 0.153.4\\n'); process.exit(0); }
 const fs = require('node:fs');
@@ -89,12 +99,16 @@ let cwd = null, prompt = null;
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 lines.on('line', line => {
   const message = JSON.parse(line), { id, method, params = {} } = message;
+  fs.appendFileSync(__filename + '.requests', method + '\\n');
   const result = value => send({ jsonrpc: '2.0', id, result: value });
   if (method === 'initialize') return result({ serverInfo: { name: 'fixture-codex', version: '0.153.4' } });
   if (method === 'initialized') return;
+  if (method === 'model/list') return result({ data: ${JSON.stringify(advertisedModels)}.filter(model => model.model !== ${JSON.stringify(removedModel)}), nextCursor: null });
   if (method === 'skills/list') return result({ data: [{ cwd: params.cwds[0], skills: [], errors: [] }] });
   if (method === 'thread/start') {
-    cwd = params.cwd;
+    if (Object.hasOwn(params, 'cwd')) return send({ jsonrpc: '2.0', id,
+      error: { code: -32602, message: 'Ordinary thread/start must inherit the process cwd' } });
+    cwd = process.cwd();
     result({ cwd, model: overrides.model === 'fixture-unavailable' ? 'fixture-fallback' : overrides.model ?? 'gpt-6-luna', reasoningEffort: overrides.model_reasoning_effort ?? 'medium', thread: { id: threadId, sessionId, cwd } });
     send({ jsonrpc: '2.0', method: 'thread/started', params: { thread: { id: threadId, sessionId, cwd } } });
     return;
@@ -258,7 +272,7 @@ test('review preview leaves no durable task or profile reservation', async t => 
 });
 
 test('ordinary review uses real capture against a disposable fake Codex executable', async t => {
-  const app = await createUiRunsFixture({ mode: {}, reviewContext: { accessOptions: {
+  const app = await createUiRunsFixture({ mode: {}, catalogContext, reviewContext: { accessOptions: {
     inspectResources: async () => ({ clients: [], pids: [], records: 0, partial: false }), processSnapshot: async () => [],
   } } });
   t.after(() => app.close());
@@ -267,6 +281,7 @@ test('ordinary review uses real capture against a disposable fake Codex executab
   const configPath = join(app.homes.baseline.home, 'config.toml');
   const configBefore = await readFile(configPath, 'utf8');
   const ref = await seedComparison(app);
+  await refreshCatalog(app, app.repository);
   const preview = await app.provider.previewReviewTask({ ref, profile: 'baseline', cwd: app.repository,
     execution: { model: 'fixture-explicit-model', reasoningEffort: 'high' } });
   const started = await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
@@ -300,7 +315,7 @@ test('ordinary review uses real capture against a disposable fake Codex executab
 
 test('two real app-server fixture processes retain early approvals and per-job settings on one home', async t => {
   const { mkdir } = await import('node:fs/promises');
-  const app = await createUiRunsFixture({ reviewContext: { accessOptions: {
+  const app = await createUiRunsFixture({ catalogContext, reviewContext: { accessOptions: {
     inspectResources: async () => ({ clients: [], pids: [], records: 0, partial: false }), processSnapshot: async () => [],
   } } });
   t.after(() => app.close());
@@ -308,6 +323,8 @@ test('two real app-server fixture processes retain early approvals and per-job s
   const ref = await seedComparison(app), secondWorkspace = join(app.root, 'separate-workspace');
   await mkdir(secondWorkspace, { mode: 0o700 });
   await app.provider.bindProfile({ name: 'baseline', repository: secondWorkspace });
+  await refreshCatalog(app, app.repository);
+  await refreshCatalog(app, secondWorkspace);
   const selections = [
     { model: 'fixture-model-a', reasoningEffort: 'low', cwd: app.repository },
     { model: 'fixture-model-b', reasoningEffort: 'high', cwd: secondWorkspace },
@@ -362,7 +379,7 @@ test('two comparisons and two reviews overlap on one profile with separate setti
   const { mkdir } = await import('node:fs/promises');
   const { readProfileOwners } = await import('../src/profile-reservations.js');
   const captures = new Map(), approvals = new Map();
-  const app = await createUiRunsFixture({
+  const app = await createUiRunsFixture({ catalogContext,
     beforeCapture: async options => {
       if (!options.execution?.model) return true;
       captures.set(options.execution.model, options);
@@ -394,6 +411,8 @@ test('two comparisons and two reviews overlap on one profile with separate setti
   const workspace = join(app.root, 'second-review-workspace');
   await mkdir(workspace, { mode: 0o700 });
   await app.provider.bindProfile({ name: 'baseline', repository: workspace });
+  await refreshCatalog(app, app.repository);
+  await refreshCatalog(app, workspace);
   const startComparison = async (name, effort) => {
     const preview = await app.provider.runPreview({ ...input(app), task: name, b: 'baseline',
       execution: { a: { model: `${name}-a`, reasoningEffort: effort }, b: { model: `${name}-b` } } });
@@ -405,15 +424,30 @@ test('two comparisons and two reviews overlap on one profile with separate setti
       execution: { model: name, reasoningEffort }, includeRecordedContent: name === 'r2', timeoutMs: 60000 });
     return (await app.provider.startReviewTask({ ref, previewToken })).id;
   };
-  const [c1, c2, r1, r2] = await Promise.all([
-    startComparison('c1', 'high'), startComparison('c2', 'low'),
-    startReview('r1', app.repository, 'medium'), startReview('r2', workspace, 'high'),
-  ]);
+  const readRun = id => app.provider.run({ id });
+  const readReview = id => app.provider.reviewTask({ id });
+  const describe = row => JSON.stringify({
+    status: row?.state ?? row?.status, phase: row?.phase, error: row?.error ?? row?.headline,
+    requests: row?.pendingRequests?.length, sides: row?.columns?.map(({ side, state, failure }) => ({ side, state, failure })),
+  });
+  async function atApproval(name, id, read) {
+    await until(() => read(id), row => {
+      assert.ok(['starting', 'prepared', 'running', 'waiting-for-user'].includes(row.state ?? row.status),
+        `${name} stopped before native approval: ${describe(row)}`);
+      assert.ok(row.pendingRequests.length <= 1, `${name} presented duplicate approvals: ${describe(row)}`);
+      return row.pendingRequests.length === 1;
+    }, row => `${name} did not reach native approval: ${describe(row)}`);
+    return id;
+  }
+  // Keep each job waiting while the next goes through real admission and reservation.
+  const c1 = await atApproval('c1', await startComparison('c1', 'high'), readRun);
+  const c2 = await atApproval('c2', await startComparison('c2', 'low'), readRun);
+  const r1 = await atApproval('r1', await startReview('r1', app.repository, 'medium'), readReview);
+  const r2 = await atApproval('r2', await startReview('r2', workspace, 'high'), readReview);
   const jobs = [c1, c2, r1, r2];
-  const [one, two, first, second] = await until(
-    () => Promise.all([app.provider.run({ id: c1 }), app.provider.run({ id: c2 }),
-      app.provider.reviewTask({ id: r1 }), app.provider.reviewTask({ id: r2 })]),
-    rows => rows.every(row => row.pendingRequests?.length === 1), 'four jobs did not reach native approval together');
+  const [one, two, first, second] = await Promise.all([readRun(c1), readRun(c2), readReview(r1), readReview(r2)]);
+  assert.deepEqual([one.state, two.state, first.status, second.status], ['running', 'running', 'waiting-for-user', 'waiting-for-user']);
+  assert.deepEqual([one, two, first, second].map(row => row.pendingRequests.length), [1, 1, 1, 1]);
   assert.deepEqual(new Set((await app.provider.info()).activeJobs.map(job => job.id)), new Set(jobs));
   assert.equal((await readProfileOwners(app.homes.baseline.root)).length, 6);
   assert.equal(new Set([one, two, first, second].map(row => row.pendingRequests[0].requestId)).size, 4);
@@ -489,4 +523,26 @@ test('shutdown waits for an ordinary review even when comparison receipt cleanup
   await assert.rejects(closing, /Owned comparisons stopped/);
   assert.equal((await app.provider.info()).activeJobs.length, 0);
   assert.equal((await app.provider.reviewTask(review)).status, 'cancelled');
+});
+
+test('an advertised choice removed from the initialized review connection fails before any native thread or turn', async t => {
+  const app = await createUiRunsFixture({ catalogContext, reviewContext: { accessOptions: {
+    inspectResources: async () => ({ clients: [], pids: [], records: 0, partial: false }), processSnapshot: async () => [],
+  } } });
+  t.after(() => app.close());
+  await writeFile(app.executable, fakeCodexServer(false, false, 'fixture-explicit-model'), { mode: 0o700 });
+  const ref = await seedComparison(app);
+  await refreshCatalog(app, app.repository);
+  const preview = await app.provider.previewReviewTask({ ref, profile: 'baseline', cwd: app.repository,
+    execution: { model: 'fixture-explicit-model', reasoningEffort: 'high' } });
+  assert.equal(preview.ready, true);
+  const started = await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
+  const task = await until(() => app.provider.reviewTask(started), value => value.status === 'failed', 'removed model did not fail');
+  assert.match(task.error, /selected model is no longer available/);
+  assert.equal(task.nativeSettings, null);
+  const methods = (await readFile(`${app.executable}.requests`, 'utf8')).trim().split('\n');
+  assert.ok(methods.includes('model/list'));
+  assert.equal(methods.includes('thread/start'), false);
+  assert.equal(methods.includes('turn/start'), false);
+  await assert.rejects(readFile(`${app.executable}.observed`), { code: 'ENOENT' });
 });

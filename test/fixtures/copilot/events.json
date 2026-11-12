@@ -1,0 +1,279 @@
+[
+  {
+    "id": "event-1",
+    "type": "assistant.turn_start",
+    "data": {
+      "turnId": "turn-1"
+    },
+    "timestamp": "2026-01-01T00:00:00.000Z"
+  },
+  {
+    "id": "event-2",
+    "type": "assistant.usage",
+    "data": {
+      "reasoningEffort": "medium",
+      "isAuto": true,
+      "inputTokens": 12637,
+      "outputTokens": 83,
+      "model": "fixture-routed-model",
+      "responseModel": "fixture-routed-model"
+    },
+    "timestamp": "2026-01-01T00:00:01.000Z"
+  },
+  {
+    "id": "event-3",
+    "type": "assistant.message",
+    "data": {
+      "turnId": "turn-1",
+      "content": "Synthetic interim answer.",
+      "toolRequests": [
+        {}
+      ],
+      "model": "fixture-routed-model"
+    },
+    "timestamp": "2026-01-01T00:00:02.000Z"
+  },
+  {
+    "id": "event-4",
+    "type": "tool.execution_start",
+    "data": {
+      "turnId": "turn-1",
+      "toolCallId": "call-2",
+      "toolName": "bash",
+      "arguments": {
+        "command": "/bin/sleep 1",
+        "mode": "sync",
+        "cwd": "@WORKSPACE@"
+      }
+    },
+    "timestamp": "2026-01-01T00:00:03.000Z"
+  },
+  {
+    "id": "event-5",
+    "type": "permission.requested",
+    "data": {
+      "ownerSessionId": "00000000-0000-4000-8000-000000000001",
+      "requestId": "request-3",
+      "permissionRequest": {
+        "kind": "shell",
+        "shellType": "bash",
+        "toolCallId": "call-2",
+        "fullCommandText": "/bin/sleep 1",
+        "hasParseErrors": false,
+        "hasWriteFileRedirection": false,
+        "possiblePaths": [
+          "/bin/sleep"
+        ],
+        "possibleUrls": [],
+        "commandSegments": [
+          {
+            "identifier": "/bin/sleep",
+            "fullCommandText": "/bin/sleep 1",
+            "hasUnboundExecutableContent": false,
+            "workingDirectory": "@WORKSPACE@",
+            "staticTokens": null
+          }
+        ]
+      },
+      "promptRequest": {
+        "kind": "path",
+        "toolCallId": "call-2",
+        "accessKind": "shell",
+        "paths": [
+          "/bin/sleep"
+        ]
+      }
+    },
+    "timestamp": "2026-01-01T00:00:04.000Z"
+  },
+  {
+    "id": "event-6",
+    "type": "permission.requested",
+    "data": {
+      "ownerSessionId": "00000000-0000-4000-8000-000000000001",
+      "requestId": "request-4",
+      "permissionRequest": {
+        "kind": "shell",
+        "shellType": "bash",
+        "toolCallId": "call-2",
+        "fullCommandText": "/bin/sleep 1",
+        "hasParseErrors": false,
+        "hasWriteFileRedirection": false,
+        "possiblePaths": [
+          "/bin/sleep"
+        ],
+        "possibleUrls": [],
+        "commandSegments": [
+          {
+            "identifier": "/bin/sleep",
+            "fullCommandText": "/bin/sleep 1",
+            "hasUnboundExecutableContent": false,
+            "workingDirectory": "@WORKSPACE@",
+            "staticTokens": null
+          }
+        ]
+      },
+      "promptRequest": {
+        "kind": "commands",
+        "toolCallId": "call-2",
+        "fullCommandText": "/bin/sleep 1",
+        "commandIdentifiers": [
+          "/bin/sleep"
+        ],
+        "canOfferSessionApproval": false
+      }
+    },
+    "timestamp": "2026-01-01T00:00:05.000Z"
+  },
+  {
+    "id": "event-7",
+    "type": "tool.execution_complete",
+    "data": {
+      "turnId": "turn-1",
+      "toolCallId": "call-2",
+      "success": true,
+      "result": {
+        "structuredContent": {
+          "shellId": "fixture-shell"
+        }
+      }
+    },
+    "timestamp": "2026-01-01T00:00:06.000Z"
+  },
+  {
+    "id": "event-8",
+    "type": "assistant.turn_end",
+    "data": {
+      "turnId": "turn-1"
+    },
+    "timestamp": "2026-01-01T00:00:07.000Z"
+  },
+  {
+    "id": "event-9",
+    "type": "assistant.turn_start",
+    "data": {
+      "turnId": "turn-5"
+    },
+    "timestamp": "2026-01-01T00:00:08.000Z"
+  },
+  {
+    "id": "event-10",
+    "type": "assistant.usage",
+    "data": {
+      "reasoningEffort": "medium",
+      "isAuto": true,
+      "inputTokens": 12797,
+      "outputTokens": 50,
+      "model": "fixture-routed-model",
+      "responseModel": "fixture-routed-model"
+    },
+    "timestamp": "2026-01-01T00:00:09.000Z"
+  },
+  {
+    "id": "event-11",
+    "type": "assistant.message",
+    "data": {
+      "turnId": "turn-5",
+      "content": "Synthetic interim answer.",
+      "toolRequests": [
+        {}
+      ],
+      "model": "fixture-routed-model"
+    },
+    "timestamp": "2026-01-01T00:00:10.000Z"
+  },
+  {
+    "id": "event-12",
+    "type": "tool.execution_start",
+    "data": {
+      "turnId": "turn-5",
+      "toolCallId": "call-6",
+      "toolName": "read_bash",
+      "arguments": {
+        "shellId": "fixture-shell",
+        "delay": 0
+      }
+    },
+    "timestamp": "2026-01-01T00:00:11.000Z"
+  },
+  {
+    "id": "event-13",
+    "type": "tool.execution_complete",
+    "data": {
+      "turnId": "turn-5",
+      "toolCallId": "call-6",
+      "success": true,
+      "result": {
+        "structuredContent": {
+          "shellId": "fixture-shell"
+        },
+        "contents": [
+          {
+            "type": "shell_exit",
+            "shellId": "fixture-shell",
+            "cwd": "@WORKSPACE@",
+            "exitCode": 0
+          }
+        ]
+      }
+    },
+    "timestamp": "2026-01-01T00:00:12.000Z"
+  },
+  {
+    "id": "event-14",
+    "type": "assistant.turn_end",
+    "data": {
+      "turnId": "turn-5"
+    },
+    "timestamp": "2026-01-01T00:00:13.000Z"
+  },
+  {
+    "id": "event-15",
+    "type": "assistant.turn_start",
+    "data": {
+      "turnId": "turn-7"
+    },
+    "timestamp": "2026-01-01T00:00:14.000Z"
+  },
+  {
+    "id": "event-16",
+    "type": "assistant.usage",
+    "data": {
+      "reasoningEffort": "medium",
+      "isAuto": true,
+      "inputTokens": 12873,
+      "outputTokens": 14,
+      "model": "fixture-routed-model",
+      "responseModel": "fixture-routed-model"
+    },
+    "timestamp": "2026-01-01T00:00:15.000Z"
+  },
+  {
+    "id": "event-17",
+    "type": "assistant.message",
+    "data": {
+      "turnId": "turn-7",
+      "content": "Synthetic final answer.",
+      "toolRequests": [],
+      "model": "fixture-routed-model",
+      "phase": "final_answer"
+    },
+    "timestamp": "2026-01-01T00:00:16.000Z"
+  },
+  {
+    "id": "event-18",
+    "type": "assistant.turn_end",
+    "data": {
+      "turnId": "turn-7"
+    },
+    "timestamp": "2026-01-01T00:00:17.000Z"
+  },
+  {
+    "id": "event-19",
+    "type": "session.idle",
+    "data": {
+      "mode": "interactive"
+    },
+    "timestamp": "2026-01-01T00:00:18.000Z"
+  }
+]

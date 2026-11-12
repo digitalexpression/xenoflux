@@ -4,7 +4,7 @@
 
 **Theme:** light + dark, following the system preference.
 
-**Status:** adopted design direction, 2026-10-27. This standalone guide covers Xenoflux's local web app. The [roadmap](docs/developer/ROADMAP.md#current-work-and-stop-condition) owns current implementation and built-app verification status; this design specification is not proof that its behavior has been verified.
+**Status:** adopted design direction. This standalone guide covers Xenoflux's local web app. The [roadmap](docs/developer/ROADMAP.md#current-work-and-stop-condition) owns release scope and direction; this design specification is not proof that its behavior has been verified.
 
 Xenoflux combines IBM Plex Sans, compact rounded controls and opaque layered surfaces. Cobalt identifies actions and links; Soft Mint supports the identity without implying success. Dark mode uses Obsidian `#0a0d16`, raised navy surfaces and lighter cobalt interaction cues. Content stays calm and readable, with technical character concentrated in typography and small header accents.
 
@@ -309,6 +309,7 @@ Use this navigation and report structure:
 
 - Confirmation screens such as the pre-start review lead with a ready summary (a success badge naming what was checked, the two profiles, the run size) plus the primary action and any consequential choice, such as no verification checks, as an informational notice. Details follow below.
 - Lead setup comparisons with a summary strip of Different / Same / Could not compare counts, with Different largest. The counts filter the list. Show the compared profiles as one compact line of side-colored chips with Swap and Change once both are chosen. Put any reading limit in an informational notice right below the summary.
+- Filtering setup items selects the first matching result. A summary status filter names its scope beside the result count and leaves both list presets unselected. When list and detail stack, offer **View details** at the selected row and **Back to selected item** in the detail; selecting a row keeps keyboard focus there until the user follows a link.
 - Give **Compare a task** and **Compare setups** equal prominence. Equal choices use equal visual weight; do not make one a filled primary action and the other a faint link.
 - Within task comparison, give **Use existing sessions** and **Run a new task** equal prominence. Once a path is chosen, emphasize its next meaningful action.
 - Task comparison leads with conditions/coverage, closing responses and checks, then side-by-side timeline and compact conversations using shadcn/ui AI Elements. Keep expandable session/turn lineage, independent order and a persistent nonmodal event inspector. Preserve delegation, supported timing and missing evidence; the shared goal owns the replay contract.
@@ -324,23 +325,21 @@ Use brief 120–200ms transitions to explain state changes, without moving contr
 
 ## Accessibility
 
-Use WCAG 2.2 AA as the web accessibility target. Check normal text contrast of at least 4.5:1, qualifying large text at least 3:1, and essential control/graphic contrast at least 3:1. Support keyboard operation, visible unobscured focus, accessible names, status announcements and errors that do not rely on color. Check 200% text resizing and reflow at 320 CSS pixels, with appropriate exceptions for genuinely two-dimensional content. AA pointer targets are at least 24×24 CSS pixels or meet a permitted exception; the 40px control height above provides a more comfortable default for pointer use on macOS. These are selected checks, not a complete conformance checklist. See the [W3C reference](https://www.w3.org/WAI/WCAG22/quickref/).
+Use WCAG 2.2 AA as the web accessibility target. Check normal text contrast of at least 4.5:1, qualifying large text at least 3:1, and essential control/graphic contrast at least 3:1. Support keyboard operation, visible unobscured focus, accessible names, status announcements and errors that do not rely on color. Check reflow at 320 CSS pixels, with appropriate exceptions for genuinely two-dimensional content. AA pointer targets are at least 24×24 CSS pixels or meet a permitted exception; the 40px control height above provides a more comfortable default for pointer use on macOS. These are selected checks, not a complete conformance checklist. Follow the [product goal's verification exclusions](docs/developer/AUDIT-GOAL.md#observable-acceptance); excluded checks are not outstanding work. See the [W3C reference](https://www.w3.org/WAI/WCAG22/quickref/).
 
 Use named header/navigation/breadcrumb/main landmarks and labelled supporting asides. Keep one `h1` per page, `h2` sections and `h3` cards; report heading order follows its reading order. Menus support arrows, Home/End and Escape; native controls or equivalent accessible components retain their keyboard semantics.
 
 Focus mounted page headings and export/opened-report summaries; in-page selection retains focus. Nonmodal inspectors receive focus only on explicit open and restore their trigger; delayed callbacks respect newer focus choices. Announce selection/filter/save/progress/apply/undo politely, not per event; alerts identify user-action errors.
 
-Static opaque-token checks (2026-10-27) met the selected text/status/action
-contrast thresholds and checked control/focus boundaries. They do not establish
-rendered accessibility, every state or image contrast. Full calculations remain
-in the private original.
+Static token checks do not establish rendered accessibility, every state or
+image contrast. Verify contrast in the rendered interface.
 
 Selected/hover fills (1.04:1 light) and canvas/surface (1.02:1 light) cannot carry
 meaning alone; retain text, icons, outlines and leading edges. Dark action fill
 is only 2.31:1 against its surface: its lighter boundary is required. Soft Mint
 is not a light-theme text link. Test actual composition, focus and disabled/busy
-states, including keyboard, long/empty/error/partial states, narrow reflow and
-200% zoom in both themes. Record results/limits in release summaries.
+states, including keyboard, long/empty/error/partial states and narrow reflow
+in both themes. Record results/limits in release summaries.
 
 ## Quick Start
 

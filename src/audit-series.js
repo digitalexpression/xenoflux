@@ -319,7 +319,11 @@ export async function runAuditSeries(store, input, context = {}) {
   const profiles = await freezeProfiles(store, pinned, context);
   pinned.profiles = pinned.profiles.map(selection => {
     const profile = profiles.find(item => (item.sideId ?? item.profileName.toLowerCase()) === selectionKey(selection));
-    return { ...selection, name: profile.profileName, executable: profile.executable, version: profile.version };
+    // Preserve inherited selection semantics; the frozen identity below already
+    // binds the resolved executable. An override would trigger a new version probe.
+    return { ...selection, name: profile.profileName,
+      ...(selection.executable === undefined ? {} : { executable: profile.executable }),
+      ...(profile.version == null ? {} : { version: profile.version }) };
   });
   const plan = trialPlan(pinned);
   const current = await createAuditSeries(store, { spec: pinned, baseline: preview.baseline,

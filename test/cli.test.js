@@ -81,10 +81,19 @@ test('profile register validates first, atomically creates its record, and leave
   await writeFile(join(native, 'codex-home', 'auth.json'), 'native credential sentinel', { mode: 0o600 });
   const profile = f.ok('profile', 'register', 'work', native, '--codex', binary, '--codex-version', '0.153.4');
   assert.ok(profile.native.environmentId);
+  const registry = await readFile(join(f.store, 'profiles.json'));
+  await rm(binary);
   const inspected = f.ok('profile', 'inspect', 'work');
   assert.equal(inspected.home, join(native, 'codex-home'));
+  assert.deepEqual(inspected.registration, { executable: binary, version: '0.153.4',
+    executableIdentity: profile.native.executableIdentity });
+  assert.equal(inspected.executable, undefined);
+  assert.equal(inspected.version, undefined);
+  assert.deepEqual(await readFile(join(f.store, 'profiles.json')), registry);
   assert.ok(inspected.logStorage);
   assert.equal(await readFile(join(native, 'codex-home', 'auth.json'), 'utf8'), 'native credential sentinel');
+  await writeFile(join(native, 'codex-home', 'config.toml'), 'cli_auth_credentials_store = "keyring"\n', { mode: 0o600 });
+  assert.equal(f.run('profile', 'inspect', 'work').status, 1, 'unsafe native binding remains rejected');
 });
 
 test('malformed stores and symbolic manifests fail closed', async t => {

@@ -104,8 +104,8 @@ export function ChooseSessions() {
   return (
     <Page current="compare" title="Choose two sessions">
       <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare a task' }, { label: 'Use existing sessions' }]} title="Choose two sessions"
-        subtitle="Pick work you did in Codex or ran here. Choosing a session only reads its recorded history." />
-      {info?.mode === 'demo' ? <SimulatedNote /> : null}
+        subtitle="Choose two recorded Codex sessions." />
+      {info?.mode === 'demo' ? <SimulatedNote /> : <div><Link className="btn" to="/compare/sessions/native">Choose recent sessions by profile</Link></div>}
       {view.data?.partial ? (
         <InfoNotice title="Partly listed">
           <p>{view.data.partial.text}</p>
@@ -125,7 +125,7 @@ export function ChooseSessions() {
           </select>
         </div>
         <div>
-          <span className="field-label" id="client-label">Client</span>
+          <span className="field-label" id="client-label">Codex surface</span>
           <SegmentedControl label="Client" value={client} onChange={setClient} options={[{ value: '', label: 'All' }, { value: 'cli', label: 'CLI' }, { value: 'desktop', label: 'Desktop' }]} />
         </div>
       </div>

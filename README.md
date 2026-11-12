@@ -1,18 +1,30 @@
 # Xenoflux
 
-A Codex profile manager for macOS.
+Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
+
+**4.0.0-beta.1 is a public beta candidate.** End-user qualification is still in
+progress; read the [scope and limits](docs/user/APP.md#400-scope-and-limits).
+The [beta-exit checklist](docs/developer/AUDIT-ACCEPTANCE.md#beta-exit-checklist)
+defines the review required before a stable 4.0.0 release.
 
 ## Install
 
-Run in an external terminal:
+4.0.0 targets Apple Silicon Macs with arm64 Node. See the
+[requirements](docs/user/INSTALLATION.md#requirements).
+
+After beta publication, opt in from an external terminal:
 
 ```sh
-npm install -g xenoflux
+npm install -g xenoflux@beta
 ```
+
+The `beta` npm channel is separate from stable `latest`; beta preparation does
+not change the stable release. To select this exact beta, use
+`xenoflux@4.0.0-beta.1` instead.
 
 ## Create a profile
 
-Replace `Research` with your profile name:
+For Codex CLI/Desktop, replace `Research` with your profile name:
 
 ```sh
 xfx profile create Research --apply --close-clients
@@ -24,7 +36,9 @@ does not. Repeated `desktop open` focuses the running profile. To preview setup 
 run `xfx profile create Research` without `--apply`.
 
 npm's global bin directory must already be on `PATH`. You need supported Node.js
-and a Codex CLI executable; desktop profiles also need Codex desktop. See
+and the selected native CLI installed separately; Codex desktop profiles also need
+Codex desktop. For Claude Code and GitHub Copilot CLI, choose the client in the
+app’s **Create profile** flow and follow its native sign-in guidance. See
 [Installation](docs/user/INSTALLATION.md) for requirements,
 managed/offline setup and updates, and [Profiles](docs/user/PROFILES.md) to continue an
 interrupted sign-in. Use `xfx --help` for all commands.
@@ -37,11 +51,13 @@ The local browser app supports:
 xfx ui
 ```
 
-Create empty or from-source profiles, run a task comparison and read its report
+Create empty or from-source profiles for any of the three CLI clients, run a
+same-client or mixed-client task comparison and read its report
 in a local browser app. It also supports setup/session comparisons
 and external review import. From a report, start an ordinary AI review with a
 selected profile and read its captured response. See
-[The Xenoflux app](docs/user/APP.md).
+[The Xenoflux app](docs/user/APP.md), including its
+[4.0.0 limits](docs/user/APP.md#400-scope-and-limits).
 
 For version and distribution identity, see the [package manifest](package.json),
 [GitHub releases](https://github.com/digitalexpression/xenoflux/releases) and
@@ -53,11 +69,10 @@ For version and distribution identity, see the [package manifest](package.json),
   [Copy settings](docs/user/ADVANCED-COPY.md), [Recovery](docs/user/PROFILE-RECOVERY.md)
   and [RAM logs](docs/user/RAM-LOGS.md).
 - **Developers:** [Development](docs/developer/README.md),
-  [Release process](docs/developer/LOCAL-RELEASE.md),
   [Desktop implementation](docs/developer/DESKTOP-IMPLEMENTATION.md)
   and [Copy policy](docs/developer/PROFILE-COPY-POLICY.md).
 
-The [documentation index](docs/README.md) includes the active roadmap and public release records.
+The [documentation index](docs/README.md) covers supported workflows and development contracts.
 
 ## License
 

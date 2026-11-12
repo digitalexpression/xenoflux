@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { probeVersion } from '../src/version-probe.js';
+import { probeNativeProfileVersion, probeVersion } from '../src/version-probe.js';
 
 async function executable(t, body) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-version-probe-')));
@@ -31,4 +31,13 @@ test('cancels a timed-out owned probe group', async t => {
   const pending = probeVersion(options(hanging, { signal: controller.signal }));
   controller.abort();
   await assert.rejects(pending, { code: 'CANCELLED' });
+});
+
+test('Copilot accepts the installed version banner with a trailing period', async t => {
+  const banner = await executable(t, `console.log("GitHub Copilot CLI 1.0.107.\\nRun 'copilot update' to check for updates.");`);
+  assert.equal(await probeNativeProfileVersion('copilot', options(banner)), '1.0.107');
+  const prerelease = await executable(t, "console.log('GitHub Copilot CLI 1.0.107-beta.1.');");
+  assert.equal(await probeNativeProfileVersion('copilot', options(prerelease)), '1.0.107-beta.1');
+  const invalid = await executable(t, "console.log('GitHub Copilot CLI 1.0.107.bad');");
+  await assert.rejects(probeNativeProfileVersion('copilot', options(invalid)), /Unrecognized native CLI version/);
 });

@@ -93,10 +93,15 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     var completed = false
     var launched: NSRunningApplication?
     var launchError: NSError?
+    let launchStarted = Date()
+    var callbackElapsed: TimeInterval?
     NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { application, error in
-        DispatchQueue.main.async { launched = application; launchError = error as NSError?; completed = true }
+        DispatchQueue.main.async {
+            callbackElapsed = Date().timeIntervalSince(launchStarted)
+            launched = application; launchError = error as NSError?; completed = true
+        }
     }
-    let deadline = Date(timeIntervalSinceNow: 15)
+    let deadline = launchStarted.addingTimeInterval(15)
     while !completed && Date() < deadline {
         _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     }
@@ -113,11 +118,21 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     // Verify the kernel executable, including for legacy bootstrap launches.
     let target = TargetIdentity(pid: application.processIdentifier, executable: expectedExecutable,
         startSeconds: startSeconds)
-    while validatedApplication(target) == nil && Date() < deadline && !application.isTerminated {
+    // The callback object's AppKit state may lag the live process. Let the
+    // run loop refresh registration until the same bounded identity check passes.
+    while validatedApplication(target) == nil && Date() < deadline {
         _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     }
     guard validatedApplication(target) != nil else {
-        fputs("Unable to verify the requested profile instance: PID \(target.pid), expected executable \(target.executable), observed \(executablePath(target.pid) ?? "stopped").\n", stderr); exit(EXIT_FAILURE)
+        let observedStart = processStartSeconds(target.pid).map(String.init) ?? "unavailable"
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        let observedUid = proc_pidinfo(target.pid, PROC_PIDTBSDINFO, 0, &info, size) == size ? String(info.pbi_uid) : "unavailable"
+        let registered = NSRunningApplication(processIdentifier: target.pid)
+        let terminated = registered.map { String($0.isTerminated) } ?? "unavailable"
+        let elapsed = String(format: "%.2f", Date().timeIntervalSince(launchStarted))
+        let callbackTime = callbackElapsed.map { String(format: "%.2f", $0) } ?? "unavailable"
+        fputs("Unable to verify the requested profile instance: PID \(target.pid), expected executable \(target.executable), observed \(executablePath(target.pid) ?? "stopped"); expected UID \(getuid()), observed UID \(observedUid); expected start \(target.startSeconds), observed start \(observedStart); macOS registration \(registered == nil ? "unavailable" : "available"), terminated \(terminated), callback terminated \(application.isTerminated), callback after \(callbackTime)s, elapsed \(elapsed)s.\n", stderr); exit(EXIT_FAILURE)
     }
     let result: [String: Any] = ["pid": target.pid, "executable": target.executable, "startSeconds": target.startSeconds]
     guard let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),

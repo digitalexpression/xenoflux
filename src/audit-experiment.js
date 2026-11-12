@@ -15,6 +15,7 @@ import { compareAuditRuns, auditExitCode } from './audit-report.js';
 import { readAuditSkillTelemetry } from './audit-telemetry.js';
 import { mergeAuditSkillTelemetry } from './audit-skill-usage.js';
 import { projectRetainedAuditRun } from './audit-replay.js';
+import { retainedNativeReference } from './capture-projection.js';
 
 export const isAuditRecordId = value => typeof value === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
 const profileSummary = profile => Object.fromEntries(['profileId', 'profileName', 'home', 'userHome', 'environmentId', 'executable', 'version']
@@ -84,7 +85,8 @@ async function recoverableProfile(store, current, context) {
   const resolveProfile = context.resolveProfile ?? resolveAuditProfile;
   const profile = await resolveProfile(store, saved.profileId ?? saved.profileName);
   const root = profile.nativeRoot ?? profile.home;
-  if (root !== reservation.root || profile.home !== owner.home || profile.profileId !== owner.profileId)
+  if (root !== reservation.root || profile.home !== owner.home || profile.profileId !== owner.profileId
+    || (profile.client ?? 'codex') !== (saved.client ?? 'codex'))
     throw new Error('The profile binding changed; preserve the saved reservation');
   const held = await inspectAuditReservation({ root, owner });
   if (held && JSON.stringify(held) !== JSON.stringify(owner)) throw new Error('A different operation owns the profile reservation');
@@ -119,11 +121,15 @@ export async function recoverAuditExperiment(store, id, { apply = false, ...cont
     let report = run.report;
     if (!report) {
       let evidence;
-      if (run.captureCheckpoint?.run && run.captureCheckpoint.threadId === run.captureCheckpoint.run.source?.threadId
-        && run.captureCheckpoint.profileHome === (run.record.profile?.home ?? run.record.profile?.userHome)) {
-        evidence = run.captureCheckpoint.run;
-      } else if (run.state.nativeSessionId && run.record.profile?.profileName) {
-        try { evidence = await (context.readNative ?? auditNativeSession)(store, run.record.profile.profileName, run.state.nativeSessionId); } catch {}
+      const checkpoint = run.captureCheckpoint, saved = run.record.profile;
+      const captured = checkpoint?.nativeReference && checkpoint?.run?.nativeReference === undefined
+        ? { ...checkpoint.run, nativeReference: checkpoint.nativeReference } : checkpoint?.run;
+      const reference = retainedNativeReference(captured, saved, run.id, checkpoint?.threadId ?? run.state.nativeSessionId);
+      if (checkpoint?.run && reference?.sessionId && checkpoint.threadId === reference.sessionId
+        && checkpoint.profileHome === (saved?.home ?? saved?.userHome)) {
+        evidence = captured;
+      } else if (reference?.client === 'codex' && reference.sessionId && saved?.profileName) {
+        try { evidence = await (context.readNative ?? auditNativeSession)(store, saved.profileName, reference.sessionId); } catch {}
       }
       report = { ...(evidence ?? pendingRun(run)), id: run.id, kind: 'audit-run', schemaVersion: 1,
         experimentId: run.record.experimentId, status: 'partial',

@@ -1,9 +1,10 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store, create } from '../src/profiles.js';
 import { registerHome } from '../src/homes.js';
+import { nativeClient } from '../src/profile-command.js';
 import { createEngineProvider } from '../src/ui-engine.js';
 import { startUiServer } from '../src/ui-server.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
@@ -94,6 +95,18 @@ export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 
     const defaultUserHome = join(root, 'default-user-home');
     await mkdir(join(defaultUserHome, '.codex'), { recursive: true, mode: 0o700 });
     await put(join(defaultUserHome, '.codex'), 'AGENTS.md', 'Default instructions.\n');
+    await put(join(defaultUserHome, '.claude'), 'CLAUDE.md', 'Claude fixture instructions.\n');
+    const claudeExecutable = join(root, 'claude');
+    await symlink(await realpath(process.execPath), join(root, 'node'));
+    const nativeProfileLog = join(root, 'claude-launches.log');
+    await writeFile(claudeExecutable, `#!/bin/sh
+printf '%s\\n' "$*" >> "${nativeProfileLog}"
+case "$*" in
+  --version) printf '2.1.319 (Claude Code)\\n' ;;
+  'auth status') printf '{"loggedIn":false,"authMethod":"none"}\\n'; exit 1 ;;
+  *) exit 99 ;;
+esac
+`, { mode: 0o700 });
     const rollouts = [];
     rollouts.push(await addSession(baseline.home, 1, 'Fix the date test', 'cli', 10));
     rollouts.push(await addSession(strict.home, 2, 'Fix the date test', 'vscode', 11));
@@ -102,7 +115,13 @@ export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 
     for (let i = 0; i < 101; i++) rollouts.push(await addSession(baseline.home, 100 + i, `Filler task ${i + 1}`, 'cli', 100 + i));
     const reportsRoot = join(root, 'reports');
     const serverLogs = [];
+    const terminalEnvironment = { PATH: root + ':/usr/bin:/bin', HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME };
     const provider = createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'),
+      resolveClient: signal => nativeClient(store, { '--codex': executable }, signal),
+      runContext: { terminalEnvironment },
+      reviewContext: { terminalEnvironment },
+      catalogContext: { terminalEnvironment },
+      accountContext: { terminalEnvironment },
       lockOptions: { lockPath: join(root, 'global.lock'), concurrentLockPath: join(root, 'desktop.lock') },
       // Isolate only OS process discovery to this fixture's empty process table.
       // Real DesktopRuntime idle guards still run; no client-control operation is called.
@@ -111,7 +130,7 @@ export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 
     });
     server = await startUiServer({ provider, staticRoot, log: message => serverLogs.push(message) });
     return { url: server.launchUrl, origin: server.origin, root, store,
-      homes: { baseline, strict }, defaultUserHome, reportsRoot, rollouts, instructions, skillLines, longSkillNames, privacyMarkers,
+      homes: { baseline, strict }, defaultUserHome, reportsRoot, rollouts, instructions, skillLines, longSkillNames, privacyMarkers, nativeProfileLog,
       serverLogs,
       close: async () => { await server.close(); await rm(root, { recursive: true, force: true }); } };
   } catch (error) {

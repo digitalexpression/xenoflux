@@ -177,6 +177,24 @@ test('copy links keep full skill identity when names share a long prefix', async
   assert.deepEqual(plan.items.filter(entry => entry.selected).map(entry => entry.name), [second]);
 });
 
+test('setup copy links require the item on the proposed source side', async t => {
+  const f = await fixture(t);
+  await put(f.a.home, 'skills/baseline-only/SKILL.md', '---\nname: baseline-only\ndescription: Baseline only.\n---\nCheck changes.\n');
+  for (const [a, b, absent, present] of [
+    ['baseline', 'strict-review', 'baseline-only', 'release-notes'],
+    ['strict-review', 'baseline', 'release-notes', 'baseline-only'],
+    ['Default', 'baseline', 'config.toml', 'AGENTS.md'],
+    ['baseline', 'Default', 'config.toml', 'AGENTS.md'],
+  ]) {
+    const view = await f.provider.setupComparison({ a, b });
+    const items = view.groups.flatMap(group => group.items);
+    const missing = items.find(item => item.name === absent && item.scope === 'Profile');
+    assert.ok(missing, `${a}/${b} exposes ${absent}`);
+    assert.equal(missing.actions.copy, undefined, `${a}/${b} cannot copy ${absent} from the missing source`);
+    assert.ok(items.find(item => item.name === present && item.scope === 'Profile')?.actions.copy, `${a}/${b} retains ${present} copy`);
+  }
+});
+
 test('setup copy preselection works when Default is the source on the left', async t => {
   const f = await fixture(t);
   const view = await f.provider.setupComparison({ a: 'Default', b: 'strict-review' });

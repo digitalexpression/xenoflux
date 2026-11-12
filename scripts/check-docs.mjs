@@ -33,7 +33,7 @@ export async function checkPackagedDocs(root, paths) {
     if (!contents.has(path)) contents.set(path, await readFile(join(root, path), 'utf8'));
     return contents.get(path);
   };
-  for (const source of paths.filter(path => path.endsWith('.md'))) {
+  for (const source of paths.filter(path => path.endsWith('.md') && !path.startsWith('node_modules/'))) {
     const text = withoutFences(await read(source));
     for (const match of text.matchAll(/\[[^\]\n]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+["'][^\n]*?["'])?\s*\)/g)) {
       const href = match[1] ?? match[2];
@@ -67,7 +67,7 @@ export async function main() {
     const paths = pack.files.map(file => file.path);
     const errors = await checkPackagedDocs(root, paths);
     if (errors.length) throw new Error(errors.join('\n'));
-    console.log(`Packaged documentation links passed (${paths.filter(path => path.endsWith('.md')).length} Markdown files).`);
+    console.log(`Packaged documentation links passed (${paths.filter(path => path.endsWith('.md') && !path.startsWith('node_modules/')).length} Markdown files).`);
   } finally {
     await rm(cache, { recursive: true, force: true });
   }

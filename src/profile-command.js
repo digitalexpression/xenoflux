@@ -30,12 +30,6 @@ async function question(prompt, { input, output, signal }) {
 export async function nativeClient(store, options, signal) {
   let executable = options['--codex'];
   if (!executable) {
-    for (const home of await listHomes(store)) {
-      if (home.state !== 'ready') continue;
-      executable = (await resolveHome(store, home.id)).native.executable; break;
-    }
-  }
-  if (!executable) {
     try { executable = (await discoverCodexExecutable()).executable; }
     catch { /* use the existing setup guidance below */ }
   }

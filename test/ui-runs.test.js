@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, access, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
@@ -8,6 +9,7 @@ import { createExperiment, createExperimentRun, readAuditRecord, writeAuditState
 import { validateAuditSpec } from '../src/audit-spec.js';
 import { createUiRuns } from '../src/ui-runs.js';
 import { inspectAuditRepository } from '../src/audit-workspace.js';
+import { resolveAuditExecutionProfile, snapshotAuditProfileSettings } from '../src/audit-profile.js';
 
 async function fixture(t, mode) {
   const app = await createUiRunsFixture({ mode });
@@ -15,6 +17,37 @@ async function fixture(t, mode) {
   return app;
 }
 const request = app => ({ task: 'PRIVATE U3 TASK TEXT', files: '', a: 'baseline', b: 'strict-review', repository: app.repository, commit: 'HEAD', checks: [] });
+
+test('a fake second client completes a comparison through the runtime registry and retained reports', async t => {
+  const app = await fixture(t);
+  const dispatched = [];
+  const capture = client => async input => {
+    dispatched.push(client);
+    assert.equal(input.profile.client, client);
+    return app.runContext.capture(input);
+  };
+  const service = createUiRuns({ store: app.store, defaultUserHome: join(app.root, 'default-user-home'),
+    context: { ...app.runContext, capture: capture('codex'),
+      clientRuntimes: { 'claude-code': { capture: capture('claude-code') } },
+      resolveProfile: async (...args) => {
+        const profile = await resolveAuditExecutionProfile(...args);
+        if (profile.profileName !== 'strict-review') return profile;
+        return { ...profile, client: 'claude-code', ...(profile.environmentBinding ? { environmentBinding: { ...profile.environmentBinding, client: 'claude-code' } } : {}) };
+      },
+    } });
+  t.after(() => service.close());
+  const preview = await service.runPreview(request(app));
+  assert.equal(preview.ready, true);
+  const started = await service.startRun({ previewToken: preview.previewToken });
+  const done = await waitFor(() => service.run(started), value => value.state !== 'running', 'Mixed fixture comparison did not finish');
+  const parent = await readAuditRecord(app.store, started.id);
+  assert.equal(done.state, 'finished', JSON.stringify(parent.report.failures));
+  assert.deepEqual(dispatched, ['codex', 'claude-code']);
+  const children = await Promise.all(parent.state.runs.map(({ id }) => readAuditRecord(app.store, id)));
+  assert.deepEqual(children.map(child => child.report.clientIdentity.client), ['codex', 'claude-code']);
+  assert.deepEqual(children.map(child => child.report.nativeReference.client), ['codex', 'claude-code']);
+  assert.ok(done.reportHref);
+});
 async function waitFor(read, predicate, message) {
   const end = Date.now() + 15000;
   while (Date.now() < end) {
@@ -28,8 +61,13 @@ async function waitFor(read, predicate, message) {
 test('run preview is read-only and binds exactly two profiles, commands and limits', async t => {
   const app = await fixture(t);
   const input = { ...request(app), files: 'README.md', checks: [{ name: 'smoke', command: 'true' }],
-    advanced: { timeMinutes: 2, outputMiB: 4, sandbox: 'read-only', program: '', reasoningEffort: 'high', setup: [{ name: 'prepare', command: 'true' }] } };
+    execution: { a: { reasoningEffort: 'max', permissionMode: 'read-only' }, b: { reasoningEffort: 'max' } },
+    advanced: { timeMinutes: 2, outputMiB: 4, program: '', setup: [{ name: 'prepare', command: 'true' }] } };
+  for (const profile of ['baseline', 'strict-review'])
+    await app.provider.refreshCatalog({ requestId: randomUUID(), profile, workspace: app.repository });
+  const discoveries = app.calls.catalogs.length;
   const preview = await app.provider.runPreview(input);
+  assert.equal(app.calls.catalogs.length, discoveries);
   assert.equal(preview.ready, true);
   assert.match(preview.previewToken, /^[0-9a-f-]{36}$/);
   assert.match(preview.where.join('\n'), /Pinned commit: [0-9a-f]{40}/);
@@ -40,13 +78,41 @@ test('run preview is read-only and binds exactly two profiles, commands and limi
   await assert.rejects(access(join(app.store.directory, 'audits')), { code: 'ENOENT' });
   await assert.rejects(access(join(app.store.directory, 'ui-runs')), { code: 'ENOENT' });
   const same = await app.provider.runPreview({ ...request(app), b: 'baseline',
-    execution: { a: { model: 'left-model' }, b: { model: 'right-model' } } });
+    execution: { a: { model: 'fixture-left' }, b: { model: 'fixture-right' } } });
   assert.equal(same.ready, true);
-  assert.match(same.runs[0].text, /left-model/);
-  assert.match(same.runs[1].text, /right-model/);
+  assert.match(same.runs[0].text, /fixture-left/);
+  assert.match(same.runs[1].text, /fixture-right/);
   for (const execution of [null, { a: null }, { a: { approvalPolicy: 'never' } }])
     await assert.rejects(app.provider.runPreview({ ...request(app), execution }), { code: 'invalid-run' });
   await assert.rejects(app.provider.startRun({ ...request(app) }), { code: 'invalid-run' });
+});
+
+test('preview never discovers models and explicit choices require separate refresh before preview and Start', async t => {
+  const app = await fixture(t);
+  assert.equal((await app.provider.runPreview(request(app))).ready, true);
+  const input = { ...request(app), execution: {
+    a: { model: 'fixture-left', reasoningEffort: 'max' },
+    b: { model: 'fixture-right', reasoningEffort: 'high' },
+  } };
+  await assert.rejects(app.provider.runPreview(input), { status: 422, code: 'catalog-unavailable' });
+  assert.deepEqual(app.calls.catalogs, []);
+  assert.deepEqual(app.calls.captures, []);
+  for (const profile of ['baseline', 'strict-review'])
+    await app.provider.refreshCatalog({ requestId: randomUUID(), profile, workspace: app.repository });
+  assert.equal(app.calls.catalogs.length, 2);
+  const preview = await app.provider.runPreview(input);
+  assert.equal(preview.ready, true);
+  await assert.rejects(app.provider.runPreview({ ...input, execution: { ...input.execution,
+    a: { model: 'removed-native-model', reasoningEffort: 'max' } } }), { status: 422, code: 'catalog-model-unavailable' });
+  await assert.rejects(app.provider.runPreview({ ...input, execution: { ...input.execution,
+    a: { model: 'fixture-left', reasoningEffort: 'high' } } }), { status: 422, code: 'catalog-effort-unavailable' });
+  assert.deepEqual(app.calls.captures, []);
+  const started = await app.provider.startRun({ previewToken: preview.previewToken });
+  const completed = await waitFor(() => app.provider.run(started), value => value.state !== 'running', 'Explicit run did not settle');
+  assert.equal(completed.state, 'finished');
+  assert.equal(app.calls.catalogs.length, 2, 'preview and Start do not launch another discovery probe');
+  const current = await readAuditRecord(app.store, started.id);
+  assert.deepEqual(current.record.spec.profiles.map(profile => profile.execution), [input.execution.a, input.execution.b]);
 });
 
 test('run history reports an unsafe receipt directory instead of presenting it as empty', async t => {
@@ -193,7 +259,13 @@ test('a setup change after preview prevents any experiment or model task from st
   const preview = await app.provider.runPreview(request(app));
   assert.equal(preview.ready, true);
   await writeFile(join(app.homes.baseline.home, 'AGENTS.md'), 'Changed after review.\n', { mode: 0o600 });
-  await assert.rejects(app.provider.startRun({ previewToken: preview.previewToken }), { code: 'preview-stale' });
+  await assert.rejects(app.provider.startRun({ previewToken: preview.previewToken }), error => {
+    assert.equal(error.code, 'preview-stale');
+    assert.deepEqual(error.details.changes, [{ reason: 'profile-settings-changed', side: 'a', profile: 'baseline',
+      changedPaths: ['$CODEX_HOME/AGENTS.md'] }]);
+    assert.equal(JSON.stringify(error.details).includes('Changed after review.'), false);
+    return true;
+  });
   assert.equal(app.calls.captures.length, 0);
   await assert.rejects(access(join(app.store.directory, 'audits')), { code: 'ENOENT' });
 });
@@ -349,4 +421,124 @@ test('a preflight refusal after Start keeps its reason through completion and re
   assert.equal((await app.provider.run(started)).headline, result.headline);
   assert.deepEqual(await app.provider.startRun({ previewToken: preview.previewToken }), started);
   assert.deepEqual(app.calls.captures, []);
+});
+
+
+test('stale baseline diagnostics name metadata fields without disclosing values or dispatching', async t => {
+  const app = await fixture(t, { staleCommit: true });
+  const preview = await app.provider.runPreview(request(app));
+  await assert.rejects(app.provider.startRun({ previewToken: preview.previewToken }), error => {
+    assert.equal(error.code, 'preview-stale');
+    assert.ok(error.details.changes.some(change => change.reason === 'baseline-changed' && change.fields.includes('commit')));
+    assert.equal(JSON.stringify(error.details).includes('f'.repeat(40)), false);
+    return true;
+  });
+  assert.equal(app.calls.captures.length, 0);
+  await assert.rejects(access(join(app.store.directory, 'audits')), { code: 'ENOENT' });
+});
+
+test('stale readiness and resolved profile diagnostics retain distinct source reasons before any dispatch', async t => {
+  const app = await fixture(t);
+  let changed = false;
+  const service = createUiRuns({ store: app.store, context: { ...app.runContext,
+    resolveProfile: async (...args) => {
+      const profile = await resolveAuditExecutionProfile(...args);
+      return changed ? { ...profile, environmentId: 'replacement-environment' } : profile;
+    },
+    observeAccess: async () => changed
+      ? { status: 'blocked', reason: 'fixture-resource-busy', clients: [], sourceReservation: null }
+      : { status: 'ready', clients: [], sourceReservation: null },
+  } });
+  t.after(() => service.close());
+  const preview = await service.runPreview(request(app));
+  assert.equal(preview.ready, true);
+  changed = true;
+  await assert.rejects(service.startRun({ previewToken: preview.previewToken }), error => {
+    assert.equal(error.code, 'preview-stale');
+    const changes = error.details.changes;
+    assert.deepEqual(changes.find(change => change.reason === 'readiness-changed').failures.map(failure => failure.code),
+      ['profile-access-blocked', 'profile-access-blocked']);
+    assert.ok(changes.find(change => change.reason === 'readiness-changed').profiles.every(profile =>
+      profile.checks.some(check => check.name === 'profile-access' && check.reason === 'fixture-resource-busy')));
+    assert.deepEqual(changes.filter(change => change.reason === 'profile-identity-changed').map(({ side, profile, fields }) => ({ side, profile, fields })), [
+      { side: 'a', profile: 'baseline', fields: ['environmentId'] },
+      { side: 'b', profile: 'strict-review', fields: ['environmentId'] },
+    ]);
+    assert.equal(JSON.stringify(error.details).includes('replacement-environment'), false);
+    return true;
+  });
+  assert.equal(app.calls.captures.length, 0);
+});
+
+test('unchanged previews remain valid while independent same-profile comparisons hold participants', async t => {
+  const app = await fixture(t, { capture: 'delayed' });
+  const input = { ...request(app), b: 'baseline' };
+  const first = await app.provider.runPreview(input), second = await app.provider.runPreview({ ...input, task: 'Independent second task' });
+  assert.equal(first.ready, true); assert.equal(second.ready, true);
+  const one = await app.provider.startRun({ previewToken: first.previewToken });
+  await waitFor(async () => app.calls.captures.length, count => count === 1, 'First comparison did not reach capture');
+  const two = await app.provider.startRun({ previewToken: second.previewToken });
+  await waitFor(async () => app.calls.captures.length, count => count === 2, 'Unchanged second comparison was refused while the first held participants');
+  assert.notEqual(one.id, two.id);
+  assert.deepEqual(await app.provider.startRun({ previewToken: first.previewToken }), one);
+  assert.equal(app.calls.captures.length, 2, 'Duplicate Start must not dispatch again');
+  await Promise.all([app.provider.cancelRun(one), app.provider.cancelRun(two)]);
+});
+
+test('same-profile review participants do not invalidate an unchanged comparison preview', async t => {
+  let reviewCaptures = 0;
+  const app = await createUiRunsFixture({ mode: { capture: 'delayed' }, reviewContext: { capture: async options => {
+    reviewCaptures++;
+    const threadId = `fixture-review-${reviewCaptures}`, turnId = `fixture-turn-${reviewCaptures}`;
+    await options.onSession({ source: { threadId }, events: [], turns: [] }, { status: 'partial' });
+    await options.onTurn({ threadId, turnId });
+    await new Promise(resolve => options.processOptions.signal.aborted ? resolve()
+      : options.processOptions.signal.addEventListener('abort', resolve, { once: true }));
+    return { process: { status: 'cancelled', exitCode: 0, shutdown: { groupTerminated: true } },
+      run: { source: { threadId }, turns: [] }, capture: { status: 'partial' } };
+  } } });
+  t.after(() => app.close());
+  const secondWorkspace = join(app.root, 'independent-review');
+  await mkdir(secondWorkspace, { mode: 0o700 });
+  await app.provider.bindProfile({ name: 'baseline', repository: secondWorkspace });
+  const source = { schemaVersion: 1, kind: 'audit-comparison', id: 'snapshot-stability', status: 'partial',
+    left: { id: 'left', source: { threadId: 'source-left' }, turns: [], checks: [] },
+    right: { id: 'right', source: { threadId: 'source-right' }, turns: [], checks: [] } };
+  const { ref } = await app.provider.openReport({ fileName: 'snapshot-stability.audit.json', text: JSON.stringify(source) });
+  const input = { ...request(app), b: 'baseline' };
+  const first = await app.provider.runPreview(input), second = await app.provider.runPreview({ ...input, task: 'Second stable comparison' });
+  const one = await app.provider.startRun({ previewToken: first.previewToken });
+  await waitFor(async () => app.calls.captures.length, count => count === 1, 'First comparison not capturing');
+  const reviews = [];
+  for (const cwd of [app.repository, secondWorkspace]) {
+    const preview = await app.provider.previewReviewTask({ ref, profile: 'baseline', cwd });
+    reviews.push(await app.provider.startReviewTask({ ref, previewToken: preview.previewToken }));
+  }
+  await waitFor(async () => reviewCaptures, count => count === 2, 'Review participants not active');
+  const two = await app.provider.startRun({ previewToken: second.previewToken });
+  await waitFor(async () => app.calls.captures.length, count => count === 2, 'Stable comparison preview was invalidated by review lifecycle');
+  await Promise.all([app.provider.cancelRun(one), app.provider.cancelRun(two), ...reviews.map(review => app.provider.cancelReviewTask(review))]);
+});
+
+
+test('an unavailable fresh settings snapshot is diagnosed without bypassing its stale guard', async t => {
+  const app = await fixture(t);
+  let unavailable = false;
+  const service = createUiRuns({ store: app.store, context: { ...app.runContext,
+    snapshotSettings: profile => unavailable && profile.profileName === 'baseline'
+      ? { status: 'unavailable', reason: 'fixture-source-unavailable' } : snapshotAuditProfileSettings(profile),
+  } });
+  t.after(() => service.close());
+  const preview = await service.runPreview(request(app));
+  assert.equal(preview.ready, true);
+  unavailable = true;
+  await assert.rejects(service.startRun({ previewToken: preview.previewToken }), error => {
+    assert.equal(error.code, 'preview-stale');
+    assert.ok(error.details.changes.some(change => change.reason === 'profile-settings-unavailable'
+      && change.side === 'a' && change.profile === 'baseline' && change.changedPaths.length === 0));
+    assert.ok(error.details.changes.some(change => change.reason === 'readiness-changed'
+      && change.failures.some(failure => failure.code === 'profile-settings-unavailable')));
+    return true;
+  });
+  assert.equal(app.calls.captures.length, 0);
 });

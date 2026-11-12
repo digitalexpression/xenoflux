@@ -53,7 +53,7 @@ test('substantive evaluation prepares twelve blocked slots and verifies starter/
     assert.equal(spec.quality.rubric.required, true);
     assert.deepEqual(spec.captureRequirements.context, [{ agents: 'root', origin: 'repository', path: 'AGENTS.md', phase: 'before-task' }]);
     const cli = spawnSync(process.execPath, [join(repo, 'bin/xfx.js'), '--store', manifest.store, '--json', 'audit', 'run', '--spec', task.specPath, '--dry-run'],
-      { cwd: repo, env: { PATH: process.env.PATH, HOME: join(output, 'preparation-home') }, encoding: 'utf8', timeout: 15000 });
+      { cwd: repo, env: { PATH: output + ':' + dirname(process.execPath) + ':/usr/bin:/bin', HOME: join(output, 'preparation-home') }, encoding: 'utf8', timeout: 15000 });
     assert.equal(cli.status, 0, cli.stderr);
     assert.equal(JSON.parse(cli.stdout).kind, 'audit-series-preview');
     assert.equal(JSON.parse(cli.stdout).plannedRuns, 4);

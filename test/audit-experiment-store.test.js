@@ -315,3 +315,132 @@ test('a non-private 0755 named-profile native root remains rejected', async t =>
   await assert.rejects(reserveAuditProfile({ root, owner }), /private directory/);
   await assert.rejects(inspectAuditReservation({ root, owner }), /private directory/);
 });
+
+test('capture checkpoint saves are fenced by exact owner generation, cancellation and finalization', async t => {
+  const f = await fixture(t), experiment = await createExperiment(f.store, { spec: {}, task: 'x', profiles: [] });
+  const record = await createExperimentRun(f.store, { experimentId: experiment.id, profile: { home: f.home } });
+  const owner = { runId: record.id, generation: 'first' }, replacement = { ...owner, generation: 'second' };
+  const run = { id: record.id, source: { threadId: uuid() }, profile: { home: f.home }, events: [] };
+  await writeAuditState(f.store, record.id, { status: 'running', reservation: { owner } });
+  await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {} }), /owner is stale/);
+  await writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {}, owner });
+  await writeAuditState(f.store, record.id, { reservation: { owner: replacement } });
+  await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {}, owner }), /owner is stale/);
+  await assert.rejects(writeAuditState(f.store, record.id, { phase: 'stale' }, { owner }), /owner is stale/);
+  await writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {}, owner: replacement });
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {}, owner: replacement, signal: controller.signal }), /stale or stopped/);
+  await writeAuditState(f.store, record.id, { status: 'cancelled' });
+  await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {}, owner: replacement }), /stale or stopped/);
+  await finalizeAuditRecord(f.store, record.id, { status: 'cancelled' });
+  await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {}, owner: replacement }), /unfinished/);
+  assert.equal((await readAuditRecord(f.store, record.id)).captureCheckpoint.owner.generation, 'second');
+});
+
+test('checkpoint publication serializes with owner replacement and finalization', async t => {
+  const f = await fixture(t), experiment = await createExperiment(f.store, { spec: {}, task: 'x', profiles: [] });
+  const record = await createExperimentRun(f.store, { experimentId: experiment.id, profile: { home: f.home } });
+  const owner = { runId: record.id, generation: 'first' };
+  await writeAuditState(f.store, record.id, { status: 'running', reservation: { owner } });
+  const originalRename = fsPromises.rename;
+  let resume, entered;
+  const paused = new Promise(resolve => { entered = resolve; });
+  const gate = new Promise(resolve => { resume = resolve; });
+  fsPromises.rename = async (from, to) => {
+    if (to === join(record.directory, 'capture-checkpoint.json')) { entered(); await gate; }
+    return originalRename(from, to);
+  };
+  syncBuiltinESMExports();
+  t.after(() => { resume(); fsPromises.rename = originalRename; syncBuiltinESMExports(); });
+  const saving = writeAuditCaptureCheckpoint(f.store, record.id, { owner,
+    run: { source: { threadId: uuid() }, profile: { home: f.home } }, capture: {} });
+  await paused;
+  let replaced = false;
+  const replacing = writeAuditState(f.store, record.id, { status: 'cancelled', reservation: { owner: { ...owner, generation: 'second' } } }).then(() => { replaced = true; });
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(replaced, false, 'Owner replacement must wait for the checkpoint mutation gate');
+  resume(); await saving; await replacing;
+  await finalizeAuditRecord(f.store, record.id, { status: 'cancelled' });
+  const current = await readAuditRecord(f.store, record.id);
+  assert.equal(current.state.reservation.owner.generation, 'second');
+  assert.equal(current.captureCheckpoint.owner.generation, 'first');
+  assert.equal(current.finalized, true);
+});
+
+test('opaque native session IDs stay qualified by local job and profile without collisions', async t => {
+  const f = await fixture(t), parent = await createExperiment(f.store, { spec: {}, task: 'x', profiles: [] });
+  const threadId = 'native/session:opaque-not-a-uuid';
+  const records = [];
+  for (const profileId of ['profile-a', 'profile-a']) {
+    const record = await createExperimentRun(f.store, { experimentId: parent.id, profile: { profileId, client: 'codex', home: f.home } });
+    const reference = { client: 'codex', jobId: record.id, profileId, sessionId: threadId, turnId: null, itemId: null, requestId: null };
+    await writeAuditCaptureCheckpoint(f.store, record.id, { run: { id: record.id, source: { threadId },
+      profile: { home: f.home }, clientIdentity: { client: 'codex' }, nativeReference: reference }, capture: {} });
+    records.push(await readAuditRecord(f.store, record.id));
+    assert.deepEqual(records.at(-1).captureCheckpoint.nativeReference, reference);
+    assert.equal(records.at(-1).captureCheckpoint.nativeReference.turnId, null);
+  }
+  assert.notEqual(records[0].id, records[1].id);
+  assert.equal(records[0].captureCheckpoint.threadId, records[1].captureCheckpoint.threadId);
+  assert.notEqual(records[0].captureCheckpoint.nativeReference.jobId, records[1].captureCheckpoint.nativeReference.jobId);
+  await assert.rejects(readAuditRecord(f.store, threadId), /UUID/);
+});
+
+test('checkpoint attribution rejects foreign client/job/profile/session and missing native sessions before publication', async t => {
+  const f = await fixture(t), parent = await createExperiment(f.store, { spec: {}, task: 'x', profiles: [] });
+  const record = await createExperimentRun(f.store, { experimentId: parent.id, profile: { profileId: 'profile-a', home: f.home } });
+  const threadId = 'native:session';
+  const nativeReference = { client: 'codex', jobId: record.id, profileId: 'profile-a', sessionId: threadId };
+  const run = { source: { threadId }, profile: { home: f.home }, nativeReference };
+  for (const changes of [{ client: 'copilot' }, { jobId: uuid() }, { profileId: 'other' }, { sessionId: 'other' }, { sessionId: null }]) {
+    await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run: { ...run,
+      nativeReference: { ...nativeReference, ...changes } }, capture: {} }), /does not match/);
+  }
+  await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run: { ...run,
+    clientIdentity: { client: 'copilot' } }, capture: {} }), /native identity/);
+  for (const value of [undefined, '', ' ', 'x'.repeat(1025), 'native\nthread', 'native\u200bthread'])
+    await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run: { ...run, source: { threadId: value } }, capture: {} }), /missing its native thread/);
+  await assert.rejects(readFile(join(record.directory, 'capture-checkpoint.json')), { code: 'ENOENT' });
+  await writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {} });
+  const before = await readFile(join(record.directory, 'capture-checkpoint.json'));
+  await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run: { ...run, nativeReference: undefined }, capture: {} }), /native reference is missing/);
+  assert.deepEqual(await readFile(join(record.directory, 'capture-checkpoint.json')), before);
+});
+
+test('checkpoint reader rejects mismatched qualified attribution without rewriting supported UUID receipts', async t => {
+  const f = await fixture(t), parent = await createExperiment(f.store, { spec: {}, task: 'x', profiles: [] });
+  const record = await createExperimentRun(f.store, { experimentId: parent.id, profile: { id: 'profile-a', home: f.home } });
+  const run = { source: { threadId: uuid() }, profile: { home: f.home } };
+  await writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {} });
+  const path = join(record.directory, 'capture-checkpoint.json'), original = await readFile(path);
+  const old = JSON.parse(original);
+  assert.equal(old.nativeReference, undefined);
+  await readAuditRecord(f.store, record.id);
+  assert.deepEqual(await readFile(path), original);
+  const reference = { client: 'codex', jobId: record.id, profileId: 'profile-a', sessionId: uuid() };
+  for (const changes of [{ client: 'copilot' }, { jobId: uuid() }, { profileId: 'other' }, { sessionId: null }]) {
+    await writeFile(path, JSON.stringify({ ...old, nativeReference: { ...reference, ...changes } }), { mode: 0o600 });
+    await assert.rejects(readAuditRecord(f.store, record.id), /does not match/);
+  }
+  await writeFile(path, JSON.stringify({ ...old, run: { ...run, clientIdentity: { client: 'copilot' } } }), { mode: 0o600 });
+  await assert.rejects(readAuditRecord(f.store, record.id), /native identity/);
+  await writeFile(path, original, { mode: 0o600 });
+  assert.equal((await readAuditRecord(f.store, record.id)).captureCheckpoint.threadId, uuid());
+});
+
+
+test('native turn checkpoints permit null to known once and validate available scope on older profile manifests', async t => {
+  const f = await fixture(t), parent = await createExperiment(f.store, { spec: {}, task: 'x', profiles: [] });
+  const record = await createExperimentRun(f.store, { experimentId: parent.id, profile: { home: f.home } });
+  const nativeReference = { client: 'codex', jobId: record.id, profileId: 'observed-profile', sessionId: 'native:session' };
+  const run = { source: { threadId: 'native:session' }, profile: { home: f.home }, nativeReference };
+  await writeAuditCaptureCheckpoint(f.store, record.id, { run, capture: {} });
+  const known = { ...run, nativeReference: { ...nativeReference, turnId: 'native:turn' } };
+  await writeAuditCaptureCheckpoint(f.store, record.id, { run: known, capture: {} });
+  assert.equal((await readAuditRecord(f.store, record.id)).captureCheckpoint.nativeReference.turnId, 'native:turn');
+  await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run: { ...known,
+    nativeReference: { ...known.nativeReference, profileId: 'different-profile' } }, capture: {} }), /native identity changed/);
+  for (const turnId of [null, 'different:turn'])
+    await assert.rejects(writeAuditCaptureCheckpoint(f.store, record.id, { run: { ...known,
+      nativeReference: { ...known.nativeReference, turnId } }, capture: {} }), /root turn changed/);
+});

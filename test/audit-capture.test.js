@@ -908,6 +908,7 @@ ${f.script.replace("if (method==='thread/start') {", `if (method==='thread/start
   assert.equal(processResult.status, 'exited');
   assert.equal(run.status, 'partial');
   assert.equal(capture.observer.savedSettingsChanged, false);
+  assert.ok(run.source, JSON.stringify({ reason: run.reason, errors: capture.errors, stderr: await readFile(f.options.processOptions.stderrPath, 'utf8'), exitCode: processResult.exitCode }, null, 2));
   assert.equal(run.source.persistence, 'native-owned-session');
   assert.equal(capture.observer.nativeSessionStorage, 'profile-owned-new-rollouts');
   assert.ok(capture.observer.effects.includes('native-owned session files in profile-owned new rollouts'));

@@ -3,14 +3,19 @@
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
-import { selectionKey, validateAuditSpec } from './audit-spec.js';
+import { randomUUID } from 'node:crypto';
+import { CODEX_PERMISSION_MODES, selectionKey, validateAuditSpec } from './audit-spec.js';
 import { inspectAuditRepository, authorizeAuditWorkspaceParent, createAuditWorkspace,
   snapshotAuditWorkspace, setAuditWorkspaceActive } from './audit-workspace.js';
 import { createExperiment, createExperimentRun, writeAuditState, finalizeAuditRecord,
   reserveAuditProfile, releaseAuditProfileReservation, writeAuditCaptureCheckpoint } from './audit-experiment-store.js';
+import { COPILOT_PERMISSION_MODES } from './copilot-catalog.js';
+import { normalizeSessionReplay } from './audit-session-replay.js';
 import { resolveAuditExecutionProfile, observeAuditProfileAccess, snapshotAuditProfileSettings,
-  compareAuditProfileSettings, inspectAuditExecutable } from './audit-profile.js';
-import { runAuditCapture } from './audit-capture.js';
+  compareAuditProfileSettings, inspectAuditExecutable, auditSettingsIdentity } from './audit-profile.js';
+import { createClientRuntime } from './client-runtime.js';
+import { createEnvironmentBinding } from './client-contracts.js';
+import { retainedNativeReference } from './capture-projection.js';
 import { runAuditProcess, getAuditProcessIdentity } from './audit-process.js';
 import { compareAuditRuns, auditExitCode } from './audit-report.js';
 import { probeAuditVersion } from './audit-native-version.js';
@@ -26,6 +31,8 @@ const safeProfile = profile => ({
   ...(profile.sideId ? { sideId: profile.sideId } : {}),
   ...(profile.execution ? { execution: profile.execution } : {}), id: profile.profileId, name: profile.profileName,
   profileId: profile.profileId, profileName: profile.profileName, home: profile.home,
+  client: profile.client ?? 'codex', surface: profile.surface ?? 'cli',
+  executionLocation: profile.executionLocation ?? 'local', rootMode: profile.rootMode ?? 'explicit',
   userHome: profile.userHome, executable: profile.executable, executableIdentity: profile.executableIdentity,
   nativeRoot: profile.nativeRoot ?? null, environmentId: profile.environmentId ?? null,
   executableSource: profile.executableSource, version: profile.version, versionSource: profile.versionSource,
@@ -34,12 +41,15 @@ const safeProfile = profile => ({
   ...(profile.nativeConfig !== undefined ? { nativeConfig: { ...profile.nativeConfig } } : {}) });
 const SAFE_ERROR_TEXT = {
   'repository-limit': 'The source repository exceeds the supported Git tree or capture bounds.',
+  'copilot-account-unverified': 'This Copilot profile needs a verified native account scope before it can start.',
   'profile-repository-unbound': 'The selected repository is not already bound to this profile; no binding was changed.',
   'profile-access-blocked': 'A selected profile has an untrusted or mutating reservation.',
   'profile-access-unavailable': 'Safe access to a selected profile could not be verified.',
   'profile-clients-changed': 'An existing profile client or native reservation changed; remaining runs stopped.',
   'native-request-failed': 'The native approval or input request could not be handled. The comparison leg stopped.',
   'requested-execution-unconfirmed': 'Codex did not confirm the requested model or reasoning effort. The model turn did not start.',
+  'requested-approval-reviewer-unconfirmed': 'Codex did not confirm user approval routing. The model turn did not start.',
+  'requested-approval-reviewer-unsupported': 'User approval routing is available only for Codex comparisons.',
   'profile-reservation-failed': 'A selected profile could not be reserved.',
   'profile-settings-changed': 'Profile settings changed or became unverifiable.',
   'profile-settings-unavailable': 'Profile settings could not be safely fingerprinted.',
@@ -50,7 +60,9 @@ const SAFE_ERROR_TEXT = {
   cancelled: 'The experiment was cancelled.',
   'capture-incomplete': 'Required capture evidence is incomplete.',
   'required-context-unavailable': 'Required loaded context was not verified in the audit workspace.',
-  'task-failed': 'The Codex task process did not complete successfully.',
+  'task-failed': 'The task process did not complete successfully.',
+  'claude-native-rate-limit': 'Claude Code reached its native usage limit. The task did not complete.',
+  'copilot-task-failed': 'The Copilot task did not record a completed response.',
   'setup-failed': 'A setup command failed.',
   'process-shutdown-failed': 'A process group could not be confirmed stopped.',
 };
@@ -90,8 +102,9 @@ function dependencies(context) {
     snapshotSettings: context.snapshotSettings ?? snapshotAuditProfileSettings,
     compareSettings: context.compareSettings ?? compareAuditProfileSettings,
     probeVersion: context.probeVersion ?? probeAuditVersion,
-    capture: context.capture ?? runAuditCapture,
+    capture: createClientRuntime({ capture: context.capture, runtimes: context.clientRuntimes }).capture,
     readReplay: context.readReplay ?? ((_store, profile, id, options) => auditRetainedNativeSession(profile, id, options)),
+    clientRuntimes: context.clientRuntimes,
     process: context.process ?? runAuditProcess,
     createExperiment: context.createExperiment ?? createExperiment,
     createExperimentRun: context.createExperimentRun ?? createExperimentRun,
@@ -111,8 +124,23 @@ function dependencies(context) {
 
 /** Freeze a bounded native replay beside the finalized run report. */
 export async function captureFrozenSessionReplay(deps, store, profile, capturedRun, runDirectory, capturedAt = now()) {
-  const id = capturedRun?.source?.threadId;
-  const validId = typeof id === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id);
+  if (profile.client === 'claude-code' && capturedRun?.sessionReplay && capturedRun?.source?.fingerprint)
+    return { sessionReplay: capturedRun.sessionReplay,
+      replayCapture: { status: 'partial', capturedAt, sourceFingerprint: capturedRun.source.fingerprint,
+        boundary: 'owned-native-sdk-stream' }, coverage: capturedRun.coverage, childDiscovery: undefined };
+  const { client, sessionId: id, nativeReference: reference } = retainedNativeReference(capturedRun, profile,
+    capturedRun?.id, capturedRun?.source?.threadId) ?? {};
+  const validId = typeof id === 'string' && (client === 'codex'
+    ? /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)
+    : id.trim().length > 0 && id.length <= 1024 && !/[\p{Cc}\p{Cf}]/u.test(id));
+  if (validId && client === 'copilot' && capturedRun.replayCapture?.boundary === 'owned-copilot-live-message-projection') {
+    const sessionReplay = normalizeSessionReplay(capturedRun.sessionReplay);
+    const [root] = sessionReplay.sessions;
+    if (sessionReplay.sessions.length === 1 && root.id === id && root.parentId === null
+      && root.source.fingerprint === capturedRun.replayCapture.sourceFingerprint)
+      return { sessionReplay, replayCapture: capturedRun.replayCapture };
+  }
+  const readReplay = client === 'codex' ? deps.readReplay : deps.clientRuntimes?.[client]?.readReplay;
   const unavailable = reason => ({ sessionReplay: { schemaVersion: 1, kind: 'session-replay', sessions: [{
     id, parentId: null, depth: 0, status: 'unavailable', reason, source: { fingerprint: null }, events: [],
     limits: [{ kind: 'capture-boundary', message: `Replay capture attempted at ${capturedAt}; unavailable evidence is frozen for this run.` },
@@ -123,12 +151,14 @@ export async function captureFrozenSessionReplay(deps, store, profile, capturedR
   if (!validId) return { replayCapture: { status: 'unavailable', capturedAt, sourceFingerprint: null,
     boundary: 'finalized-native-history-snapshot', reason: 'The completed run has no verifiable native session ID.' },
   coverage: { ...(capturedRun.coverage ?? {}), agents: 'partial' }, childDiscovery: undefined };
+  if (typeof readReplay !== 'function') return unavailable('This client has no retained native history reader.');
   try {
-    const native = await deps.readReplay(store, profile, id, { includeReplay: true,
-      actionRepoRoot: capturedRun.source.workspace ?? undefined,
+    const native = await readReplay(store, profile, id, { includeReplay: true,
+      actionRepoRoot: capturedRun.source?.workspace ?? undefined,
+      ...(reference ? { nativeReference: reference } : {}),
       ...(Array.isArray(capturedRun.agents) ? { recordedAgents: capturedRun.agents } : {}),
       ...(capturedRun.childDiscovery ? { recordedDiscovery: capturedRun.childDiscovery } : {}),
-      ...(typeof runDirectory === 'string' ? { childIndexHome: join(runDirectory, 'runtime', 'sqlite') } : {}) });
+      ...(client === 'codex' && typeof runDirectory === 'string' ? { childIndexHome: join(runDirectory, 'runtime', 'sqlite') } : {}) });
     const fingerprint = native?.source?.fingerprint;
     const rootReplay = native?.sessionReplay?.sessions?.find(session => session.id === id && session.parentId === null);
     if (native?.source?.nativeSessionId !== id
@@ -218,8 +248,18 @@ export async function previewAuditExperiment(store, input, context = {}) {
     try {
       const resolvedProfile = await deps.resolveProfile(store, selection, { repository: repository?.repository ?? spec.repository });
       const profile = { ...resolvedProfile, sideId: selection.sideId, execution: selection.execution, ...(selection.version !== undefined ? { requestedVersion: selection.version } : {}) };
-      const requested = selection;
+      const requested = selection, codex = (profile.client ?? 'codex') === 'codex';
+      if (requested.execution?.permissionMode && !(profile.client === 'claude-code'
+        ? ['default', 'acceptEdits', 'plan'].includes(requested.execution.permissionMode)
+        : profile.client === 'copilot' ? COPILOT_PERMISSION_MODES.includes(requested.execution.permissionMode)
+          : codex && CODEX_PERMISSION_MODES.includes(requested.execution.permissionMode))
+        || requested.execution?.route && profile.client !== 'copilot')
+        throw new Error('The selected client does not support this execution override');
+      if (!codex && spec.captureRequirements?.context)
+        throw new Error('The selected client does not support Codex context verification');
       const checks = [];
+      if (spec.approvalsReviewer && (profile.client ?? 'codex') !== 'codex')
+        throw Object.assign(new Error(SAFE_ERROR_TEXT['requested-approval-reviewer-unsupported']), { code: 'requested-approval-reviewer-unsupported' });
       if (!profile.profileId || !profile.home || !profile.reservationRoot || !profile.executable)
         throw new Error('Profile executable or home is unavailable');
       if (requested.executable && profile.executable !== requested.executable)
@@ -234,7 +274,7 @@ export async function previewAuditExperiment(store, input, context = {}) {
       if (access?.status !== 'ready') failures.push({ scope: 'profile', profile: profile.profileName,
         code: access?.status === 'blocked' ? 'profile-access-blocked' : 'profile-access-unavailable',
         message: 'Safe coexistence with this profile could not be established.' });
-      else {
+      else if (codex) {
         let observedVersion = null;
         try { observedVersion = await deps.probeVersion({ executable: profile.executable, cwd: repository?.repository ?? spec.repository,
           env: profile.env, timeoutMs: 2000 }) ?? null; }
@@ -246,21 +286,21 @@ export async function previewAuditExperiment(store, input, context = {}) {
           observed: observedVersion, registered: profile.version ?? null,
           ...(requested.version !== undefined ? { requested: requested.version } : {}) });
       }
-      checks.push({ name: 'capture-protocol', status: 'pending', reason: 'Confirmed by app-server initialize and skills/list during the run.' });
+      checks.push({ name: 'capture-protocol', status: 'pending', reason: codex ? 'Confirmed by app-server initialize and skills/list during the run.' : 'Checked on the selected native connection during the run.' });
       let settings;
       try { settings = await deps.snapshotSettings(profile); }
       catch { settings = { status: 'unavailable' }; }
       checks.push({ name: 'settings-snapshot', status: settings?.status === 'ready' ? 'ready' : 'unknown' });
       if (settings?.status !== 'ready') failures.push({ scope: 'profile', profile: profile.profileName,
         code: 'profile-settings-unavailable', message: 'Profile settings cannot be safely fingerprinted; execution is blocked.' });
-      profiles.push({ sideId: selection.sideId, profileId: profile.profileId, profileName: profile.profileName, home: profile.home,
-        executable: profile.executable, version: profile.version ?? null, versionSource: profile.versionSource ?? 'unavailable',
+      profiles.push({ sideId: selection.sideId, profileId: profile.profileId, profileName: profile.profileName, home: profile.home, client: profile.client ?? 'codex',
+        rootMode: profile.rootMode, surface: profile.surface, executionLocation: profile.executionLocation, executable: profile.executable, version: profile.version ?? null, versionSource: profile.versionSource ?? 'unavailable',
         ...(profile.requestedVersion !== undefined ? { requestedVersion: profile.requestedVersion } : {}),
         status: failures.some(f => f.profile === profile.profileName) ? 'blocked' : 'ready',
         busy: (access?.clients?.length ?? 0) > 0, reason: null, checks });
     } catch (error) {
       failures.push({ scope: 'profile', profile: selection.name, code: errorCode(error), message: errorText(error) });
-      profiles.push({ profileName: selection.name, profileId: null, home: null, executable: null,
+      profiles.push({ profileName: selection.name, client: selection.client ?? 'codex', profileId: null, home: null, executable: null,
         version: null, status: 'unavailable', busy: false, reason: errorText(error), checks: [] });
     }
   }
@@ -277,7 +317,7 @@ export async function previewAuditExperiment(store, input, context = {}) {
     repository: repository ? { path: repository.repository, commit: repository.commit, tree: repository.tree,
       files: repository.files, bytes: repository.bytes, clean: repository.clean } : null,
     profiles, taskCount: spec.profiles.length, executionOrder: spec.profiles.map(p => p.sideId ?? p.name),
-    limits: { ...spec.limits, sandbox: spec.sandbox }, failures, warnings,
+    limits: { ...spec.limits, sandbox: spec.sandbox, ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}) }, failures, warnings,
     ...(spec.captureRequirements ? { captureRequirements: spec.captureRequirements } : {}),
     capture: { status: 'partial', capabilities: { appServerV2: 'pending', skillsList: 'pending', skillUseObservability: 'native-otel-best-effort' },
       errors: [{ code: 'exhaustive-skill-use-unverified' }] },
@@ -304,8 +344,9 @@ function compareProfileAccess(before, after, experimentId) {
 }
 
 function reservationOwner(experimentId, runId, profile, store) {
-  return { kind: 'audit-experiment', membershipVersion: 1, host: hostname(), pid: process.pid, runId, experimentId,
-    storePath: store.directory, profileId: profile.profileId, home: profile.home };
+  return { kind: 'audit-experiment', membershipVersion: 1, generation: randomUUID(), host: hostname(), pid: process.pid, runId, experimentId,
+    storePath: store.directory, profileId: profile.profileId, home: profile.home,
+    ...(profile.client === 'copilot' || profile.client === 'claude-code' ? { binding: profile.environmentBinding } : {}) };
 }
 
 async function ensureDirs(directory) {
@@ -325,7 +366,7 @@ async function runCommand(store, runId, deps, command, { profile, workspace, dir
     env, timeoutMs, outputLimitBytes: outputBytes, stdoutPath, stderrPath, signal,
     onSpawn: async info => { await deps.writeState(store, runId, { status: 'running', phase,
       coordinator: await coordinatorIdentity(), reservation: { root: profile.reservationRoot, owner, status: 'held' },
-      process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname() } }); } });
+      process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname(), ...(info.nativeAncestry ? { nativeAncestry: info.nativeAncestry } : {}) } }); } });
   if (result.shutdown?.groupTerminated === false || result.status === 'shutdown-failed')
     return { name: command.name, status: 'recovery-required', exitCode: result.exitCode, elapsedMs: result.elapsedMs,
       process: result.processIdentity ?? null, pid: result.pid ?? null, shutdown: result.shutdown ?? null };
@@ -343,7 +384,10 @@ function captureComplete(captured) {
 
 /** Execute the validated paired experiment sequentially and persist recovery state. */
 export async function runAuditExperiment(store, input, context = {}) {
-  const spec = validateAuditSpec(input), deps = dependencies(context), preview = await previewAuditExperiment(store, spec, context);
+  const spec = validateAuditSpec(input);
+  if (spec.approvalsReviewer && typeof context.onNativeRequest !== 'function')
+    throw new TypeError('User approval routing requires an interactive comparison request handler');
+  const deps = dependencies(context), preview = await previewAuditExperiment(store, spec, context);
   if (preview.status !== 'ready') return { ...preview, exitCode: auditExitCode(preview) };
   const verifiedRepository = await deps.inspectRepository(spec.repository, preview.baseline.commit);
   if (verifiedRepository.commit !== preview.baseline.commit || verifiedRepository.tree !== preview.baseline.tree)
@@ -356,7 +400,7 @@ export async function runAuditExperiment(store, input, context = {}) {
   const experiment = await deps.createExperiment(store, { ...(context.experimentId ? { id: context.experimentId } : {}),
     ...(context.series ? { series: context.series } : {}), spec: { ...spec, task: undefined }, task: spec.task,
     profiles: preview.profiles.map(item => safeProfile({ profileId: item.profileId, profileName: item.profileName,
-      home: item.home, sideId: item.sideId, version: item.version })), baseline: { repository: preview.baseline, source: 'committed-snapshot' } });
+      home: item.home, sideId: item.sideId, version: item.version, client: item.client, rootMode: item.rootMode, surface: item.surface, executionLocation: item.executionLocation })), baseline: { repository: preview.baseline, source: 'committed-snapshot' } });
   const runs = [], reservations = [], failures = [], warnings = [], runReferences = [], finalizedRuns = new Set(), releasedRunIds = new Set(), pendingFinalReports = new Map();
   let recoveryRequired = false;
   const startedAt = Date.now(), experimentDeadline = spec.limits.experimentMs === null ? null : startedAt + spec.limits.experimentMs;
@@ -402,8 +446,8 @@ export async function runAuditExperiment(store, input, context = {}) {
     for (const selection of spec.profiles) {
       const prepared = bySelection.get(selectionKey(selection)), { profile } = prepared;
       const fresh = await deps.resolveProfile(store, selection, { repository: repository.repository });
-      const keys = ['profileId', 'profileName', 'home', 'nativeRoot', 'reservationRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository'];
-      if (keys.some(key => fresh[key] !== profile[key]))
+      const keys = ['profileId', 'profileName', 'home', 'nativeRoot', 'reservationRoot', 'environmentId', 'executable', 'executableIdentity', 'bindingRepository', 'client', 'rootMode', 'surface'];
+      if (keys.some(key => fresh[key] !== profile[key]) || JSON.stringify(fresh.accountQualification) !== JSON.stringify(profile.accountQualification))
         throw Object.assign(new Error('The selected profile binding changed before its reservation was held.'), { code: 'profile-binding-changed' });
       const executable = await deps.inspectExecutable(profile.executable);
       if (executable.executableIdentity !== profile.executableIdentity)
@@ -414,6 +458,7 @@ export async function runAuditExperiment(store, input, context = {}) {
         throw Object.assign(new Error(SAFE_ERROR_TEXT['profile-clients-changed']), { code: 'profile-clients-changed' });
       if (deps.compareSettings(prepared.beforeSettings, await deps.snapshotSettings(profile)).status !== 'unchanged')
         throw Object.assign(new Error(SAFE_ERROR_TEXT['profile-settings-changed']), { code: 'profile-settings-changed' });
+      if ((profile.client ?? 'codex') !== 'codex') continue;
       let observedVersion = null;
       try { observedVersion = await deps.probeVersion({ executable: profile.executable, cwd: repository.repository,
         env: profile.env, timeoutMs: 2000, signal: controller.signal }) ?? null; }
@@ -504,31 +549,49 @@ export async function runAuditExperiment(store, input, context = {}) {
         const taskTimeout = remainingLimits.length ? Math.max(1, Math.min(...remainingLimits)) : null;
         const selectedSkills = selection.skills ?? [];
         let capturing = true;
-        const captured = await deps.capture({ executionMode: 'audit', profile, execution: selection.execution, workspace: workspace.directory, task: spec.task, selectedSkills,
+        const captureState = async patch => {
+          if (!capturing || controller.signal.aborted) return;
+          return deps.writeState(store, runRecord.id, patch, { owner, signal: controller.signal });
+        };
+        let executionProfile = profile;
+        if (profile.client && profile.client !== 'codex' && profile.environmentBinding) {
+          executionProfile = { ...profile, cwd: workspace.directory };
+          executionProfile.settingsSnapshot = await deps.snapshotSettings(executionProfile);
+          executionProfile.settingsIdentity = auditSettingsIdentity(executionProfile.settingsSnapshot);
+          if (!executionProfile.settingsIdentity) throw new Error('The prepared workspace settings could not be verified');
+          executionProfile.environmentBinding = createEnvironmentBinding({ ...profile.environmentBinding,
+            workspace: workspace.directory, settingsIdentity: executionProfile.settingsIdentity });
+        }
+        if (profile.client === 'copilot')
+          await deps.writeState(store, runRecord.id, { nativeShutdownPending: true }, { owner, signal: controller.signal });
+        const captured = await deps.capture({ executionMode: 'audit', profile: executionProfile, execution: selection.execution, workspace: workspace.directory, task: spec.task, selectedSkills,
           requiredContext: spec.captureRequirements?.context,
-          onProcessReady: async info => deps.writeState(store, runRecord.id, {
-            process: { pid: info.pid, processIdentity: info.processIdentity, host: hostname() } }),
+          onProcessReady: async info => captureState({
+            process: { pid: info.pid, processIdentity: info.processIdentity, host: hostname(), ...(info.nativeAncestry ? { nativeAncestry: info.nativeAncestry } : {}) } }),
           ...(context.onNativeRequest ? { onNativeRequest: (request, details) => {
             if (!capturing || controller.signal.aborted) throw new Error('Comparison leg stopped');
             return context.onNativeRequest(runRecord.id, selection.sideId, request, details);
           } } : {}),
           processOptions: { env: profile.env, timeoutMs: taskTimeout, outputLimitBytes: spec.limits.outputBytes,
-            stdoutPath: join(runRecord.directory, 'codex.stdout'), stderrPath: join(runRecord.directory, 'codex.stderr'),
+            stdoutPath: join(runRecord.directory, `${profile.client ?? 'codex'}.stdout`), stderrPath: join(runRecord.directory, `${profile.client ?? 'codex'}.stderr`),
             signal: controller.signal,
-          onSpawn: async info => deps.writeState(store, runRecord.id, { status: 'running', phase: 'task',
+          onSpawn: async info => captureState({ status: 'running', phase: 'task',
             coordinator: await coordinatorIdentity(), reservation: { root: profile.reservationRoot, owner, status: 'held' },
-            process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname() },
+            process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname(), ...(info.nativeAncestry ? { nativeAncestry: info.nativeAncestry } : {}) },
             workspace: { ...workspaceIntent, active: true } }) },
           limits: { id: runRecord.id },
-          sandbox: spec.sandbox,
-          onPhase: async phase => deps.writeState(store, runRecord.id, { phase }),
+          sandbox: (profile.client ?? 'codex') === 'codex' ? selection.execution?.permissionMode ?? spec.sandbox : spec.sandbox,
+          ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
+          onPhase: async phase => captureState({ phase }),
           onTaskEnd: async evidence => {
+            if (!capturing) return;
             // Capture calls this only after owned process-group shutdown, before
             // checks. Missing native child evidence still makes the boundary partial.
             const snapshot = await deps.snapshotWorkspace({ directory: workspace.directory, owner: workspaceOwner,
               outputDirectory: dirs.artifacts, label: 'task-end', retainPatchContent: true,
               sourceBaselineCommit: workspace.sourceCommit, sourceBaselineTree: workspace.sourceTree,
               baselineFingerprint: initialSnapshot?.fingerprint });
+            if (!capturing) return;
             taskEndSnapshot = snapshot;
             const changeCount = compareAuditWorkspaceDelta(initialSnapshot, snapshot);
             const changeInventory = compareAuditWorkspaceInventory(initialSnapshot, snapshot);
@@ -547,11 +610,12 @@ export async function runAuditExperiment(store, input, context = {}) {
             runResult.artifacts.push({ kind: 'workspace-snapshot', label: snapshot.label, fingerprint: snapshot.fingerprint,
               status: snapshot.status, files: snapshot.files.length, patchPath: snapshot.patchPath, metadataPath: snapshot.metadataPath,
               captureComplete: taskEndCaptureComplete, timing: runResult.taskEnd.timing });
-            await deps.writeState(store, runRecord.id, { phase: 'checks', taskEnd: runResult.taskEnd,
+            await captureState({ phase: 'checks', taskEnd: runResult.taskEnd,
               workspace: { ...workspaceIntent, active: true, finalFingerprint: snapshot.fingerprint } });
           },
           onSession: async (session, captureRecord) => {
-            await deps.writeCaptureCheckpoint(store, runRecord.id, { run: session, capture: captureRecord });
+            if (!capturing || controller.signal.aborted) return;
+            await deps.writeCaptureCheckpoint(store, runRecord.id, { run: session, capture: captureRecord, owner, signal: controller.signal });
             await deps.writeState(store, runRecord.id, { phase: 'capture',
             nativeSessionId: session?.source?.threadId ?? null,
             captureCheckpoint: { capturedAt: now(), status: session?.status ?? 'unknown',
@@ -560,10 +624,19 @@ export async function runAuditExperiment(store, input, context = {}) {
               skillCount: Array.isArray(session?.skills) ? session.skills.length : null,
               skillInvocationCount: Array.isArray(session?.skillInvocations) ? session.skillInvocations.length : null,
               toolInvocationCount: Array.isArray(session?.toolInvocations) ? session.toolInvocations.length : null,
-              coverage: session?.coverage ?? null, captureStatus: captureRecord?.status ?? 'unknown' } });
-          } }).finally(() => { capturing = false; });
-        const taskProcessUnsafe = captured?.process?.shutdown?.groupTerminated === false || captured?.process?.status === 'shutdown-failed';
-        if (!taskProcessUnsafe) await deps.writeState(store, runRecord.id, { phase: 'capture', process: null });
+              coverage: session?.coverage ?? null, captureStatus: captureRecord?.status ?? 'unknown' } }, { owner, signal: controller.signal });
+          } }).catch(async error => {
+            if (profile.client === 'copilot') {
+              if (error.process?.shutdown?.groupTerminated === true)
+                await deps.writeState(store, runRecord.id, { process: null, nativeShutdownPending: false });
+              else recoveryRequired = true;
+            }
+            throw error;
+          }).finally(() => { capturing = false; });
+        const taskProcessUnsafe = profile.client === 'copilot' && captured?.process?.shutdown?.groupTerminated !== true
+          || captured?.process?.shutdown?.groupTerminated === false || captured?.process?.status === 'shutdown-failed';
+        if (!taskProcessUnsafe) await deps.writeState(store, runRecord.id, { phase: 'capture', process: null,
+          ...(profile.client === 'copilot' ? { nativeShutdownPending: false } : {}) });
         const taskElapsedMs = duration(taskStart);
         runResult.metrics = { ...(captured?.run?.metrics ?? {}), ...runResult.metrics,
           taskMs: taskElapsedMs, captureMs: captured?.run?.metrics?.wallMs ?? taskElapsedMs };
@@ -575,7 +648,7 @@ export async function runAuditExperiment(store, input, context = {}) {
         runResult.warnings.push(...(Array.isArray(runResult.normalized.warnings) ? runResult.normalized.warnings : []));
         runResult.normalized.metrics = { ...(runResult.normalized.metrics ?? {}), ...runResult.metrics };
         runResult.coverage = { ...(runResult.normalized.coverage ?? {}), ...runResult.coverage };
-        if (!taskEndSnapshot) {
+        if (!taskEndSnapshot && !taskProcessUnsafe) {
           const snapshot = await deps.snapshotWorkspace({ directory: workspace.directory, owner: workspaceOwner,
             outputDirectory: dirs.artifacts, label: 'task-end-fallback', retainPatchContent: true,
             sourceBaselineCommit: workspace.sourceCommit, sourceBaselineTree: workspace.sourceTree,
@@ -629,10 +702,12 @@ export async function runAuditExperiment(store, input, context = {}) {
         }
         if (captured?.capture?.errors?.some(error => error.code === 'requested-execution-unconfirmed'))
           throw Object.assign(new Error(SAFE_ERROR_TEXT['requested-execution-unconfirmed']), { code: 'requested-execution-unconfirmed' });
+        if (captured?.capture?.errors?.some(error => error.code === 'requested-approval-reviewer-unconfirmed'))
+          throw Object.assign(new Error(SAFE_ERROR_TEXT['requested-approval-reviewer-unconfirmed']), { code: 'requested-approval-reviewer-unconfirmed' });
         if (captured?.capture?.errors?.some(error => error?.code === 'native-request-failed'))
           throw Object.assign(new Error(SAFE_ERROR_TEXT['native-request-failed']), { code: 'native-request-failed' });
         const nativeCompleted = runResult.normalized.outcome?.nativeTurnStatus === 'completed';
-        const taskStatus = captured?.process?.status === 'exited' && captured?.process?.exitCode === 0 && nativeCompleted
+        const taskStatus = nativeCompleted && (profile.client === 'claude-code' || captured?.process?.status === 'exited' && captured?.process?.exitCode === 0)
           ? 'passed' : 'failed';
         runResult.task = { status: taskStatus, processStatus: captured?.process?.status ?? 'unknown',
           exitCode: captured?.process?.exitCode ?? null, nativeTurnStatus: runResult.normalized.outcome?.nativeTurnStatus ?? null, nativeThreadId: runResult.normalized.source?.threadId ?? null };
@@ -643,8 +718,12 @@ export async function runAuditExperiment(store, input, context = {}) {
           throw Object.assign(new Error(SAFE_ERROR_TEXT.timeout), { code: 'timeout' });
         if (processStatus === 'cancelled' || controller.signal.aborted)
           throw Object.assign(new Error(SAFE_ERROR_TEXT.cancelled), { code: 'cancelled' });
-        if (taskStatus === 'failed') throw Object.assign(new Error('Codex task process did not complete successfully.'), {
-          code: captured?.process?.status === 'timeout' ? 'timeout' : captured?.process?.status === 'cancelled' ? 'cancelled' : 'task-failed' });
+        if (taskStatus === 'failed') {
+          const rateLimited = profile.client === 'claude-code'
+            && captured?.capture?.errors?.some(error => error?.code === 'claude-native-rate-limit');
+          const code = rateLimited ? 'claude-native-rate-limit' : profile.client === 'copilot' ? 'copilot-task-failed' : 'task-failed';
+          throw Object.assign(new Error(SAFE_ERROR_TEXT[code]), { code });
+        }
         const checkStart = Date.now();
         for (let cmd = 0; cmd < spec.checks.length; cmd++) {
           if (controller.signal.aborted || (runDeadline !== null && Date.now() >= runDeadline)) { runResult.checks.push({ name: spec.checks[cmd].name, status: controller.signal.aborted ? 'cancelled' : 'timeout', exitCode: null }); break; }
@@ -770,7 +849,7 @@ export async function runAuditExperiment(store, input, context = {}) {
           const processState = (await import('./audit-experiment-store.js')).readAuditRecord;
           const persisted = await processState(store, runRecord.id).catch(() => null);
           const processInfo = persisted?.state?.process;
-          if (processInfo?.pid) { recoveryRequired = true; runResult.status = 'recovery-required'; }
+          if ((profile.client === 'copilot' && recoveryRequired) || processInfo?.pid) { recoveryRequired = true; runResult.status = 'recovery-required'; }
           else {
             // Preserve a final state for cleanup even when setup failed before
             // the task-end checkpoint. This is explicitly not task-end evidence.
@@ -857,7 +936,7 @@ export async function runAuditExperiment(store, input, context = {}) {
           checkEvidence: runResult.checkEvidence });
         runs.push(runResult);
       }
-      if (recoveryRequired || failures.some(f => ['profile-settings-changed', 'profile-clients-changed'].includes(f.code)) || controller.signal.aborted) break;
+      if (recoveryRequired || failures.some(f => ['profile-settings-changed', 'profile-clients-changed', 'requested-approval-reviewer-unconfirmed'].includes(f.code)) || controller.signal.aborted) break;
     }
   } catch (error) {
     failures.push({ code: error.code ?? errorCode(error), message: errorText(error) });
@@ -971,7 +1050,7 @@ export async function runAuditExperiment(store, input, context = {}) {
     : complete ? 'complete' : reservationBlocked ? 'blocked' : strictFailure ? 'failed' : partial || runs.length ? 'partial' : 'failed';
   const report = { schemaVersion: 1, kind: 'audit-experiment-report', id: experiment.id,
     status: reportStatus,
-    limits: { ...spec.limits, sandbox: spec.sandbox },
+    limits: { ...spec.limits, sandbox: spec.sandbox, ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}) },
     baseline: { repository: preview.baseline?.repository ?? null, commit: preview.baseline?.commit ?? null,
       tree: preview.baseline?.tree ?? null, selectedRevision: preview.baseline?.selectedRevision ?? null,
       sourceHead: preview.baseline?.sourceHead ?? null, sourceDirty: preview.baseline?.sourceDirty ?? null,

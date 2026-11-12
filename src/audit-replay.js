@@ -7,6 +7,7 @@ import { readAuditRecord } from './audit-experiment-store.js';
 import { auditRetainedNativeSession } from './audit-session.js';
 import { buildAuditComparisonConditions } from './audit-conditions.js';
 import { evaluateAuditQuality } from './audit-quality.js';
+import { retainedNativeReference } from './capture-projection.js';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
@@ -54,7 +55,8 @@ async function retainedContext(store, current, read) {
     environment = series.state.trials?.find(row => row.experimentId === parent.id)?.environment;
   }
   const selection = spec.profiles.find(row => saved.sideId ? row.sideId === saved.sideId : row.name === saved.profileName);
-  if (!selection || selection.executable !== saved.executable
+  if (!selection || (selection.executable !== undefined && selection.executable !== saved.executable)
+    || (selection.executable === undefined && (!saved.executable || current.report.profile?.executable !== saved.executable))
     || !isDeepStrictEqual(selection.execution, saved.execution)
     || !isDeepStrictEqual(selection.nativeConfig, saved.nativeConfig)) throw Error('profile-binding');
   const joined = buildAuditComparisonConditions({ spec: { ...spec, task: parent.record.task }, recipe,
@@ -80,19 +82,23 @@ async function retainedContext(store, current, read) {
 export async function projectRetainedAuditRun(store, current, { read = readAuditRecord,
   readNative = auditRetainedNativeSession, includeReplay = false } = {}) {
   const original = current.report;
+  const reference = retainedNativeReference(original, current.record.profile, current.id ?? original?.id, original?.source?.threadId);
   if (current.record.kind !== 'audit-experiment-run' || !original
-    || original.source?.kind !== 'native-app-server-v2' || !UUID.test(original.source.threadId ?? '')) return original;
+    || reference?.client !== 'codex' || !UUID.test(reference.sessionId ?? '')
+    || original.source?.kind !== 'native-app-server-v2') return original;
   const projection = { schemaVersion: 1, mode: 'retained-evidence-read-only',
     originalReportFingerprint: digest(original), native: 'unavailable', context: 'unavailable',
     sourceAttestation: 'read-time-retained-snapshot' };
+  const withoutRead = context => ({ ...original, reportProjection: { ...projection, context,
+    sourceAttestation: original.reportProjection?.sourceAttestation ?? 'unknown' } });
   let context;
   try { context = await retainedContext(store, current, read); projection.context = 'verified'; }
-  catch { return { ...original, reportProjection: projection }; }
-  const saved = current.record.profile, rootId = original.source.threadId;
+  catch { return withoutRead('unavailable'); }
+  const saved = current.record.profile, rootId = reference.sessionId;
   if (saved.profileId !== original.profile?.profileId || saved.profileName !== original.profile?.profileName
     || saved.home !== original.profile?.home
     || !original.agents?.some(row => row.id === rootId && row.parentId == null))
-    return { ...original, reportProjection: { ...projection, context: 'binding-mismatch' } };
+    return withoutRead('binding-mismatch');
   // Finalized captures define one immutable evidence boundary. Once recipe and
   // profile bindings are verified, reopening must not refresh any part of that
   // report from a native source that may have grown, changed, or disappeared.

@@ -8,6 +8,9 @@ import { isDeepStrictEqual, promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parse } from 'smol-toml';
+import { find } from './profiles.js';
+import { copilotSettingMetadata, qualifiedCopilotRoute, resolveCopilotProfile } from './copilot-profile.js';
+import { CLAUDE_CLIENT, resolveClaudeProfile } from './claude-profile.js';
 import { launchPlan, discoverCodexExecutable } from './launcher.js';
 import { resolveHome } from './homes.js';
 import { nativePath } from './node-runtime.js';
@@ -18,6 +21,7 @@ import { observeAuditProcess } from './audit-process.js';
 import { profileOwners } from './profile-reservations.js';
 import { probeAuditVersion } from './audit-native-version.js';
 import { validateAuditNativeConfig } from './audit-spec.js';
+import { createEnvironmentBinding, assertEnvironmentBinding } from './client-contracts.js';
 
 const execFile = promisify(nodeExecFile);
 const VERSION = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 100
@@ -102,15 +106,53 @@ async function defaultProfile(name, { repository, defaultUserHome }) {
     reservationRoot: home, environmentId: null, bindingRepository };
 }
 
+async function selectedClient(store, selection) {
+  const selected = selection.name.trim().toLowerCase() === 'default' ? null : find(await store.read(), selection.name);
+  const client = selected ? selected.client ?? 'codex' : selection.client ?? 'codex';
+  if (!['codex', 'claude-code', 'copilot'].includes(client)) throw new Error('Unknown native profile client');
+  if (selection.client !== undefined && selection.client !== client)
+    throw new Error('Selected client does not match the persisted profile');
+  return { client, selected };
+}
+
+async function resolveNonCodexProfile(selection, { client, selected }, options) {
+  if (['executable', 'version', 'nativeConfig'].some(key => selection[key] !== undefined) || selection.skills?.length)
+    throw new Error('Use the bound native executable and settings for this client');
+  const resolveClient = { [CLAUDE_CLIENT]: resolveClaudeProfile, copilot: resolveCopilotProfile, ...options.profileResolvers }[client];
+  if (typeof resolveClient !== 'function') throw new Error(`No CLI profile resolver is available for ${client}`);
+  const profile = { ...await resolveClient({ selected, ...options }), executionMode: 'profile' };
+  if (profile.client !== client || profile.profileId !== (selected?.id ?? `default-${client}`))
+    throw new Error('Native profile resolution changed its selected identity');
+  if (client === 'copilot' && profile.rootMode === 'explicit'
+    && !qualifiedCopilotRoute(profile.environmentBinding, profile.accountQualification))
+    throw Object.assign(new Error('The selected Copilot root has no verified account scope.'), { code: 'copilot-account-unverified' });
+  profile.settingsSnapshot = await snapshotAuditProfileSettings(profile);
+  profile.settingsIdentity = auditSettingsIdentity(profile.settingsSnapshot);
+  if (!profile.settingsIdentity)
+    throw Object.assign(new Error('Selected profile settings could not be safely inspected'), { code: 'profile-settings-unavailable' });
+  profile.environmentBinding = createEnvironmentBinding({
+    client, surface: profile.surface, executionLocation: profile.executionLocation, profileId: profile.profileId, rootMode: profile.rootMode,
+    roots: { config: profile.home, runtime: profile.nativeRoot ? profile.home : null,
+      user: profile.userHome, reservation: profile.reservationRoot },
+    workspace: profile.cwd, executable: { path: profile.executable, identity: profile.executableIdentity,
+      version: profile.version }, settingsIdentity: profile.settingsIdentity,
+  });
+  return profile;
+}
+
 /** Resolve one explicit profile to a launch-ready, credential-minimal environment. */
-export async function resolveAuditExecutionProfile(store, input, { repository, defaultUserHome = homedir(), probe = probeAuditVersion } = {}) {
+export async function resolveAuditExecutionProfile(store, input, { repository, defaultUserHome = homedir(), probe = probeAuditVersion,
+  terminalEnvironment = process.env, profileResolvers } = {}) {
   const selection = selectionOf(input);
+  const route = await selectedClient(store, selection);
+  if (route.client !== 'codex') return resolveNonCodexProfile(selection, route,
+    { repository, defaultUserHome, terminalEnvironment, profileResolvers, sessionOnly: false });
   const isDefault = selection.name.trim().toLowerCase() === 'default';
   let profile;
   if (isDefault) profile = await defaultProfile(selection.name, { repository, defaultUserHome });
   else {
     let plan;
-    try { plan = await launchPlan(store, selection.name, process.env, { repository }); }
+    try { plan = await launchPlan(store, selection.name, terminalEnvironment, { repository }); }
     catch (error) {
       if (error.message === 'Bind this repository to the profile before launching it')
         throw Object.assign(new Error('The selected repository is not already bound to this profile'), { code: 'profile-repository-unbound' });
@@ -121,7 +163,7 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
       userHome: resolved.environment.launch.env.HOME, nativeRoot: plan.nativeRoot,
       reservationRoot: plan.nativeRoot, environmentId: plan.environmentId,
       bindingRepository: repository === undefined ? null : plan.cwd,
-      _nativeExecutable: plan.executable, _nativeVersion: plan.version,
+      _nativeExecutable: plan.executable,
       _nativeIdentity: plan.executableIdentity, _nativeEnv: plan.env };
   }
 
@@ -129,10 +171,10 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
   if (selection.executable !== undefined) binary = await executableInfo(selection.executable);
   else if (profile._nativeExecutable) binary = { executable: profile._nativeExecutable,
     executableIdentity: profile._nativeIdentity };
-  else throw new Error('Default profile audit requires an explicit Codex executable');
+  else binary = await discoverCodexExecutable(terminalEnvironment);
 
   const env = profile._nativeEnv ? { ...profile._nativeEnv } : {
-    PATH: nativePath(process.env), HOME: profile.userHome, CODEX_HOME: profile.home,
+    PATH: nativePath(terminalEnvironment), HOME: profile.userHome, CODEX_HOME: profile.home,
     CODEX_SQLITE_HOME: profile.home, TMPDIR: profile.home, TMP: profile.home, TEMP: profile.home,
   };
   // Do not carry arbitrary variables from the invoking process into Codex.
@@ -140,8 +182,8 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
   for (const key of Object.keys(env)) if (!allowed.has(key)) delete env[key];
   env.PATH = nativePath({ PATH: env.PATH });
   env.HOME = profile.userHome; env.CODEX_HOME = profile.home; env.CODEX_SQLITE_HOME = profile.home;
-  let version = profile._nativeVersion ?? null;
-  let versionSource = version ? 'registered' : 'unavailable';
+  let version = null;
+  let versionSource = 'unavailable';
   if (selection.executable !== undefined) {
     version = null;
     versionSource = 'unavailable';
@@ -156,10 +198,11 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
     }
   }
   const result = { profileId: profile.profileId, profileName: profile.profileName,
+    client: 'codex', surface: 'cli', executionLocation: 'local', rootMode: 'explicit',
     home: profile.home, userHome: profile.userHome, nativeRoot: profile.nativeRoot,
     reservationRoot: profile.reservationRoot, environmentId: profile.environmentId,
     executable: binary.executable, executableIdentity: binary.executableIdentity, version,
-    executableSource: selection.executable === undefined ? 'registered' : 'explicit-per-trial',
+    executableSource: selection.executable === undefined ? 'path' : 'explicit-per-trial',
     versionSource, ...(selection.version !== undefined ? { requestedVersion: selection.version } : {}),
     env, bindingRepository: profile.bindingRepository,
     ...(selection.nativeConfig !== undefined ? { nativeConfig: { ...selection.nativeConfig } } : {}),
@@ -169,13 +212,16 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
 
 /** Resolve ordinary native execution without probing the executable or changing profile settings. */
 export async function resolveProfileExecutionProfile(store, input, {
-  repository, defaultUserHome = homedir(), terminalEnvironment = process.env,
+  repository, defaultUserHome = homedir(), terminalEnvironment = process.env, profileResolvers, sessionOnly = false,
 } = {}) {
   const selection = typeof input === 'string' ? { name: input } : input;
   if (!selection || typeof selection !== 'object' || Array.isArray(selection)
     || typeof selection.name !== 'string' || !selection.name.trim()
-    || Object.keys(selection).some(key => key !== 'name'))
+    || Object.keys(selection).some(key => !['name', 'client'].includes(key)))
     throw new Error('Select a profile without execution overrides');
+  const route = await selectedClient(store, selection);
+  if (route.client !== 'codex') return resolveNonCodexProfile(selection, route,
+    { repository, defaultUserHome, terminalEnvironment, profileResolvers, sessionOnly });
   const isDefault = selection.name.trim().toLowerCase() === 'default';
   let profile;
   if (isDefault) {
@@ -200,7 +246,7 @@ export async function resolveProfileExecutionProfile(store, input, {
       userHome: plan.env.HOME, nativeRoot: plan.nativeRoot, reservationRoot: plan.nativeRoot,
       environmentId: plan.environmentId, executable: plan.executable,
       executableIdentity: plan.executableIdentity, version: plan.version,
-      executableSource: 'registered', versionSource: 'registered',
+      executableSource: 'path', versionSource: 'unavailable',
       env: plan.env, cwd: plan.cwd, bindingRepository: repository === undefined ? null : plan.cwd };
   }
   profile.executionMode = 'profile';
@@ -213,15 +259,29 @@ export async function resolveProfileExecutionProfile(store, input, {
     { code: workspaceUnavailable ? 'profile-workspace-unavailable' : 'profile-settings-unavailable' });
   }
   profile.settingsIdentity = auditSettingsIdentity(profile.settingsSnapshot);
+  profile.client = 'codex';
+  profile.surface = 'cli';
+  profile.executionLocation = 'local';
+  // Default also sends CODEX_HOME explicitly; identical paths do not imply implicit routing.
+  profile.rootMode = 'explicit';
+  profile.environmentBinding = createEnvironmentBinding({
+    client: profile.client, surface: profile.surface, executionLocation: profile.executionLocation,
+    profileId: profile.profileId, rootMode: profile.rootMode,
+    roots: { config: profile.home, runtime: isDefault ? null : profile.home,
+      user: profile.userHome, reservation: profile.reservationRoot },
+    workspace: profile.cwd, executable: { path: profile.executable,
+      identity: profile.executableIdentity, version: profile.version }, settingsIdentity: profile.settingsIdentity,
+  });
   return profile;
 }
 
 /** Recheck the preview immediately before Start; no task or version probe is run. */
 export async function recheckProfileExecutionProfile(store, preview, options = {}) {
-  const fresh = await resolveProfileExecutionProfile(store, preview?.profileName, options);
+  const fresh = await resolveProfileExecutionProfile(store, { name: preview?.profileName, ...(preview?.client ? { client: preview.client } : {}) }, options);
   const fields = ['profileId', 'home', 'userHome', 'nativeRoot', 'reservationRoot', 'environmentId',
-    'executable', 'executableIdentity', 'cwd', 'bindingRepository'];
+    'executable', 'executableIdentity', 'cwd', 'bindingRepository', 'client', 'surface', 'executionLocation', 'rootMode'];
   if (!preview || fields.some(key => preview[key] !== fresh[key])
+    || !isDeepStrictEqual(preview.accountQualification, fresh.accountQualification)
     || !isDeepStrictEqual(preview.env, fresh.env) || !isDeepStrictEqual(preview.launchArgs, fresh.launchArgs))
     throw Object.assign(new Error('Selected profile or launch environment changed after preview'), { code: 'profile-preview-changed' });
   let settings = compareAuditProfileSettings(preview.settingsSnapshot, fresh.settingsSnapshot);
@@ -232,6 +292,11 @@ export async function recheckProfileExecutionProfile(store, preview, options = {
     throw Object.assign(new Error(settings.status === 'changed'
       ? 'Selected profile settings changed after preview' : 'Selected profile settings could not be rechecked'),
     { code: settings.status === 'changed' ? 'profile-settings-changed' : 'profile-settings-unavailable' });
+  try { assertEnvironmentBinding(preview.environmentBinding, fresh.environmentBinding); }
+  catch (cause) {
+    throw Object.assign(new Error('Selected environment binding changed after preview', { cause }),
+      { code: 'profile-preview-changed' });
+  }
   const access = await observeAuditProfileAccess(fresh, { store, ...(options.accessOptions ?? {}) });
   if (access.status !== 'ready') {
     const unavailable = access.status === 'unavailable';
@@ -421,10 +486,12 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
     // The built-in ~/.codex directory is commonly mode 0755; the existing
     // safety contract only forbids group/world write access there. Named
     // profile native roots and homes remain strictly private.
-    const homeInfo = await canonicalDirectory(profile.home, 'Selected Codex home', { privateOnly: Boolean(profile.nativeRoot) });
+    const codex = !profile.client || profile.client === 'codex';
+    const homeInfo = await canonicalDirectory(profile.home, 'Selected configuration root', { privateOnly: Boolean(profile.nativeRoot) });
     if (profile.nativeRoot) {
       await canonicalDirectory(profile.nativeRoot, 'Selected native root', { privateOnly: true });
-      if (profile.home !== join(profile.nativeRoot, 'codex-home') || profile.reservationRoot !== profile.nativeRoot)
+      if ((codex ? profile.home !== join(profile.nativeRoot, 'codex-home') : !insideRoot(profile.home, profile.nativeRoot))
+        || profile.reservationRoot !== profile.nativeRoot)
         throw new Error('Selected native home identity is inconsistent');
     } else if (profile.reservationRoot !== profile.home) throw new Error('Selected default home identity is inconsistent');
     void homeInfo;
@@ -450,7 +517,7 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
         return { status: 'blocked', reason: 'profile-reservation-untrusted', clients: [], sourceReservation: { status: 'untrusted' } };
       }
       if (owner) {
-        const journal = await readDesktopJournal(profile, owner);
+        const journal = codex && await readDesktopJournal(profile, owner);
         if (!journal) return { status: 'blocked', reason: 'profile-reservation-foreign', clients: [], sourceReservation: { status: 'foreign' } };
         trustedOwner = owner;
         sourceReservation = { kind: 'desktop-instance', runId: owner.runId, profileId: owner.profileId,
@@ -460,8 +527,10 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
       if (error.code !== 'ENOENT') throw error;
     }
 
-    const targets = ['config.toml', 'auth.json', 'state_5.sqlite', 'state_5.sqlite-wal', 'state_5.sqlite-shm']
-      .map(name => join(profile.home, name));
+    const targets = codex ? ['config.toml', 'auth.json', 'state_5.sqlite', 'state_5.sqlite-wal', 'state_5.sqlite-shm']
+      .map(name => join(profile.home, name))
+      : profile.client === 'copilot' ? ['config.json', 'settings.json', 'mcp-config.json'].map(name => join(profile.home, name))
+        : [join(profile.home, 'settings.json'), join(profile.rootMode === 'implicit' ? profile.userHome : profile.home, '.claude.json')];
     const present = [];
     for (const path of targets) {
       let info;
@@ -563,8 +632,9 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
 }
 
 async function selectedSettingRoots(profile) {
+  const claude = profile.client === CLAUDE_CLIENT;
   const roots = [
-    { root: profile.home, label: '$CODEX_HOME', ...(profile.executionMode === 'profile' ? { identity: true } : {}) },
+    { root: profile.home, label: claude ? '$CLAUDE_CONFIG' : '$CODEX_HOME', ...(profile.executionMode === 'profile' ? { identity: true } : {}) },
     ...(profile.userHome !== profile.home ? [{ root: profile.userHome, label: '$HOME',
       ...(profile.executionMode === 'profile' ? { identity: true } : {}) }] : []),
   ];
@@ -602,6 +672,63 @@ function insideRoot(path, root) {
 
 function withinOrEqual(path, root) { return path === root || insideRoot(path, root); }
 
+const NATIVE_SYNC_BUCKET = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}_(?:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|unbound)$/i;
+const SYNC_MANIFEST_RECORD = 'native-sync-manifest-content-v1';
+const syncStatIdentity = info => JSON.stringify([info.dev, info.ino, info.uid, info.nlink,
+  info.mode, info.size, info.mtimeMs, info.ctimeMs]);
+async function safeSyncFile(path, maxBytes) {
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid() || info.nlink !== 1
+    || info.mode & 0o022 || info.size > maxBytes || await realpath(path) !== path)
+    throw new Error('Native sync metadata is unsafe');
+  return info;
+}
+
+async function nativeSyncContainer(profile, absolute, info) {
+  if (profile.client !== CLAUDE_CLIENT) return false;
+  const parts = relative(profile.home, absolute).split(sep);
+  if (parts.length !== 3 || parts[0] !== 'skills' || parts[1] !== 'synced' || !NATIVE_SYNC_BUCKET.test(parts[2]))
+    return false;
+  if (!info.isDirectory() || await realpath(absolute) !== absolute)
+    throw new Error('Native sync container is unsafe');
+  const marker = join(resolve(absolute, '..'), `.bucket-${parts[2]}`);
+  try { await safeSyncFile(marker, 0); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  try {
+    await lstat(join(absolute, 'SKILL.md'));
+    throw new Error('Native sync container is also a skill package');
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  return true;
+}
+
+async function syncManifestFingerprint(path) {
+  const before = await safeSyncFile(path, MAX_CONFIG_BYTES);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    if (syncStatIdentity(await handle.stat()) !== syncStatIdentity(before))
+      throw new Error('Native sync manifest changed while reading');
+    const bytes = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!bytesRead) throw new Error('Native sync manifest changed while reading');
+      offset += bytesRead;
+    }
+    if (syncStatIdentity(await handle.stat()) !== syncStatIdentity(before)
+      || syncStatIdentity(await safeSyncFile(path, MAX_CONFIG_BYTES)) !== syncStatIdentity(before))
+      throw new Error('Native sync manifest changed while reading');
+    const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)
+      || manifest.skills !== undefined && !Array.isArray(manifest.skills)
+      || manifest.lastUpdated !== undefined && !Number.isFinite(manifest.lastUpdated)
+      || ['staleDirs', 'pendingClaims'].some(key => manifest[key] !== undefined
+        && (!Array.isArray(manifest[key]) || manifest[key].some(value => typeof value !== 'string'))))
+      throw new Error('Native sync manifest is malformed');
+    // Preserve every byte, including unknown activation/attribution fields.
+    return JSON.stringify([SYNC_MANIFEST_RECORD, before.mode & 0o777, createHash('sha256').update(bytes).digest('hex')]);
+  } finally { await handle.close(); }
+}
+
 async function collectSettingMetadata(roots, profile) {
   const records = new Map();
   let files = 0;
@@ -614,6 +741,7 @@ async function collectSettingMetadata(roots, profile) {
     let info;
     try { info = await lstat(absolute); }
     catch (error) { if (error.code === 'ENOENT') { records.set(logical, 'missing'); return; } throw error; }
+    const syncContainer = await nativeSyncContainer(profile, absolute, info);
     if (info.isSymbolicLink()) {
       const linkTarget = await readlink(absolute), target = await realpath(absolute);
       const targetInfo = await lstat(target);
@@ -650,6 +778,8 @@ async function collectSettingMetadata(roots, profile) {
       return;
     }
     if (info.isFile()) {
+      if (profile.client === CLAUDE_CLIENT && !observational && await realpath(absolute) !== absolute)
+        fail('Claude settings source is not canonical');
       if ((!observational && (info.nlink !== 1 || info.uid !== process.getuid())) || (info.mode & 0o022))
         throw new Error('Settings source file is unsafe');
       files += 1;
@@ -668,14 +798,39 @@ async function collectSettingMetadata(roots, profile) {
     for await (const entry of dir) entries.push(entry.name);
     entries.sort();
     if (entries.length > MAX_SETTINGS_FILES) throw new Error('Settings source exceeds the directory limit');
-    for (const name of entries) await walk(root, join(absolute, name), `${logical}/${name}`, depth + 1, nextAncestors,
-      { observational, skillSource, packageBoundary });
+    for (const name of entries) {
+      if (syncContainer && name === '.last-complete-round') {
+        await safeSyncFile(join(absolute, name), 1024);
+        continue; // Native sync reuse stamp, not a selected skill input.
+      }
+      if (syncContainer && name === 'manifest.json') {
+        if (++files > MAX_SETTINGS_FILES) throw new Error('Settings source exceeds the file limit');
+        records.set(`${logical}/${name}`, await syncManifestFingerprint(join(absolute, name)));
+        continue;
+      }
+      await walk(root, join(absolute, name), `${logical}/${name}`, depth + 1, nextAncestors,
+        { observational, skillSource, packageBoundary });
+    }
   };
   for (const descriptor of roots) {
     const { root, label } = descriptor;
     const rootInfo = await canonicalDirectory(root, 'Settings root');
     if (descriptor.identity)
       records.set(`${label}/@directory`, JSON.stringify([rootInfo.dev, rootInfo.ino, rootInfo.mode & 0o777]));
+    if (profile.client === CLAUDE_CLIENT) {
+      if (descriptor.workspace || descriptor.workspaceAncestor) {
+        for (const name of ['CLAUDE.md', 'CLAUDE.local.md', '.mcp.json']) await walk(root, join(root, name), `${label}/${name}`);
+        for (const name of ['settings.json', 'settings.local.json', 'CLAUDE.md', 'rules', 'agents', 'skills', 'commands'])
+          await walk(root, join(root, '.claude', name), `${label}/.claude/${name}`, 0, new Set(), { skillSource: name === 'skills' });
+      } else if (label === '$CLAUDE_CONFIG') {
+        for (const name of ['settings.json', 'CLAUDE.md', 'rules', 'agents', 'skills', 'commands', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json'])
+          await walk(root, join(root, name), `${label}/${name}`, 0, new Set(), { skillSource: name === 'skills' });
+      }
+      // `.claude.json` is native state rewritten on every start, so it is not a
+      // settings source here. User-scope MCP entries inside it are outside this
+      // identity; the runtime checks its workspace trust flag separately.
+      continue;
+    }
     if (descriptor?.workspace || descriptor?.workspaceAncestor) {
       for (const name of ['AGENTS.md', 'AGENTS.override.md']) await walk(root, join(root, name), `${label}/${name}`);
       const codex = join(root, '.codex');
@@ -693,12 +848,16 @@ async function collectSettingMetadata(roots, profile) {
   return records;
 }
 
-/** Capture private file-stat fingerprints only; no configuration or instruction bodies are read. */
+/** Capture private settings identities; only validated native sync manifests use content hashes.
+ * Credential/account stores and ordinary configuration/instruction bodies are never opened here.
+ */
 export async function snapshotAuditProfileSettings(profile) {
   // Detailed records remain process-local. A series may persist the explicit
-  // metadata-only continuity token below; ordinary run recovery has no such token.
+  // settings continuity token below; ordinary run recovery has no such token.
   const snapshot = { status: 'ready', persistence: 'process-local', capturedAt: new Date().toISOString() };
-  try { settingsBySnapshot.set(snapshot, { status: 'ready', records: await collectSettingMetadata(await selectedSettingRoots(profile), profile) }); }
+  try { settingsBySnapshot.set(snapshot, { status: 'ready', records: profile.client === 'copilot'
+    ? await copilotSettingMetadata({ ...profile.environmentBinding, workspace: profile.cwd })
+    : await collectSettingMetadata(await selectedSettingRoots(profile), profile) }); }
   catch (error) {
     snapshot.status = 'unavailable';
     snapshot.reason = error.auditReason ?? 'settings-source-unavailable';
@@ -718,10 +877,12 @@ export function compareAuditProfileSettings(before, after) {
   return { status: changedPaths.length ? 'changed' : 'unchanged', changedPaths };
 }
 
-/** Private continuity token over file-stat metadata only; never reads or hashes credential bodies. */
+/** Private continuity token; v2 adds complete native sync-manifest content protection, never credentials. */
 export function auditSettingsIdentity(snapshot) {
   const saved = snapshot && settingsBySnapshot.get(snapshot);
   if (saved?.status !== 'ready') return null;
   const entries = [...saved.records].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
-  return { algorithm: 'sha256-file-stat-metadata-v1', digest: createHash('sha256').update(JSON.stringify(entries)).digest('hex') };
+  const hasContent = entries.some(([, value]) => value.startsWith(`["${SYNC_MANIFEST_RECORD}",`));
+  return { algorithm: hasContent ? 'sha256-settings-metadata-v2' : 'sha256-file-stat-metadata-v1',
+    digest: createHash('sha256').update(JSON.stringify(entries)).digest('hex') };
 }

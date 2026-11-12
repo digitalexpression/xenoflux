@@ -1,8 +1,8 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { ArrowLeftRight } from 'lucide-react';
 import { apiGet } from '@/api/client';
-import type { ProfilesView, SetupComparison as View, SetupGroup, SetupItem } from '@/api/types';
+import type { NativeClientId, ProfilesView, SetupComparison as View, SetupGroup, SetupItem } from '@/api/types';
 import { ComparisonBadge } from '@/components/badges';
 import { Disclosure, SegmentedControl, SummaryTiles, type TileKey } from '@/components/controls';
 import { DiffBlock } from '@/components/diff';
@@ -15,18 +15,42 @@ import { useResource } from '@/lib/useResource';
 import { cn } from '@/lib/cn';
 
 const TILE_LABEL: Record<TileKey, SetupItem['label']> = { different: 'different', same: 'same', cannotCompare: 'cannot-compare' };
+const FILTER_LABEL: Record<TileKey, string> = { different: 'Different only', same: 'Same only', cannotCompare: 'Could not compare only' };
+
+function setupOptions(view: ProfilesView | null) {
+  const stockLabels = { 'claude-code': 'Claude Code', copilot: 'Copilot CLI' } as const;
+  const options = view?.profiles.map(profile => ({
+    value: profile.client && profile.client !== 'codex' ? `${profile.client}:${profile.name}` : profile.name,
+    label: profile.client && profile.client !== 'codex' ? `${profile.name} · ${stockLabels[profile.client]}` : profile.name,
+  })) ?? [];
+  for (const client of ['claude-code', 'copilot'] as const)
+    if (view?.copySources?.[client]?.includes('Default')) options.push({ value: `${client}:Default`, label: `${stockLabels[client]} Default` });
+  return options;
+}
+
+function setupSelection(value: string): [name: string, client: NativeClientId] {
+  const separator = value.indexOf(':');
+  return separator === -1 ? [value, 'codex'] : [value.slice(separator + 1), value.slice(0, separator) as NativeClientId];
+}
+
+function setupParams(first: string, second: string) {
+  const [a, aClient] = setupSelection(first), [b, bClient] = setupSelection(second);
+  return { a, b, ...(aClient === 'codex' ? {} : { aClient }), ...(bClient === 'codex' ? {} : { bClient }) };
+}
 
 export function SetupComparison() {
   const [params, setParams] = useSearchParams();
   const a = params.get('a') ?? '', b = params.get('b') ?? '';
+  const aClient = params.get('aClient'), bClient = params.get('bClient');
   if (!a || !b) return <ChooseProfiles />;
-  return <ComparisonView key={JSON.stringify([a, b])} a={a} b={b} onChange={(x, y) => setParams({ a: x, b: y })} />;
+  const first = aClient ? `${aClient}:${a}` : a, second = bClient ? `${bClient}:${b}` : b;
+  return <ComparisonView key={JSON.stringify([first, second])} first={first} second={second} onChange={(x, y) => setParams(setupParams(x, y))} />;
 }
 
 function ChooseProfiles() {
   const navigate = useNavigate();
   const profiles = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles');
-  const names = profiles.data?.profiles.map(p => p.name) ?? [];
+  const names = setupOptions(profiles.data);
   return (
     <Page current="compare" title="Compare setups">
       <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare setups' }]} title="Compare setups"
@@ -35,17 +59,17 @@ function ChooseProfiles() {
       {profiles.loading && !profiles.data ? <Loading label="Reading profiles…" rows={1} /> : null}
       {profiles.data ? (
         names.length < 2 ? (
-          <WarningAlert title="You need a second profile">Only {names[0] ?? 'Default'} exists. Create one, empty or from parts of it, then change it in Codex as usual. <Link to="/profiles?create=1">Create profile…</Link></WarningAlert>
-        ) : <ProfilePairForm names={names} initial={[names[1] ?? names[0] ?? '', names[2] ?? names[0] ?? '']} onSubmit={(x, y) => navigate(`/compare/setups?a=${encodeURIComponent(x)}&b=${encodeURIComponent(y)}`)} submitLabel="Compare setups" />
+          <WarningAlert title="You need a second profile">Only {names[0]?.label ?? 'Default'} exists. Create one, empty or from parts of it, then change it in Codex as usual. <Link to="/profiles?create=1">Create profile…</Link></WarningAlert>
+        ) : <ProfilePairForm names={names} initial={[names[1]?.value ?? names[0]?.value ?? '', names[2]?.value ?? names[0]?.value ?? '']} onSubmit={(x, y) => navigate(`/compare/setups?${new URLSearchParams(setupParams(x, y))}`)} submitLabel="Compare setups" />
       ) : null}
     </Page>
   );
 }
 
 function ProfilePairForm({ names, initial, onSubmit, submitLabel, onCancel }:
-  { names: string[]; initial: [string, string]; onSubmit: (a: string, b: string) => void; submitLabel: string; onCancel?: () => void }) {
+  { names: ReturnType<typeof setupOptions>; initial: [string, string]; onSubmit: (a: string, b: string) => void; submitLabel: string; onCancel?: () => void }) {
   const [a, setA] = useState(initial[0]);
-  const [b, setB] = useState(initial[1] !== initial[0] ? initial[1] : names.find(n => n !== initial[0]) ?? '');
+  const [b, setB] = useState(initial[1] !== initial[0] ? initial[1] : names.find(n => n.value !== initial[0])?.value ?? '');
   const [error, setError] = useState(false);
   const idA = useId(), idB = useId(), errorId = useId();
   return (
@@ -53,13 +77,13 @@ function ProfilePairForm({ names, initial, onSubmit, submitLabel, onCancel }:
       <div className="flex flex-wrap gap-4 items-end">
         <div className="flex-1 min-w-[200px]">
           <label htmlFor={idA} className="field-label"><SideText side="a">First</SideText> · left side</label>
-          <select id={idA} className="input font-mono" value={a} onChange={event => { setA(event.target.value); setError(false); }}>{names.map(n => <option key={n}>{n}</option>)}</select>
+          <select id={idA} className="input font-mono" value={a} onChange={event => { setA(event.target.value); setError(false); }}>{names.map(n => <option key={n.value} value={n.value}>{n.label}</option>)}</select>
         </div>
         <Button size="icon" aria-label="Swap the two profiles" onClick={() => { setA(b); setB(a); }}><ArrowLeftRight size={18} aria-hidden="true" /></Button>
         <div className="flex-1 min-w-[200px]">
           <label htmlFor={idB} className="field-label"><SideText side="b">Second</SideText> · right side</label>
           <select id={idB} className="input font-mono" value={b} onChange={event => { setB(event.target.value); setError(false); }}
-            aria-invalid={error || undefined} aria-describedby={error ? errorId : undefined}>{names.map(n => <option key={n}>{n}</option>)}</select>
+            aria-invalid={error || undefined} aria-describedby={error ? errorId : undefined}>{names.map(n => <option key={n.value} value={n.value}>{n.label}</option>)}</select>
         </div>
       </div>
       {error ? <p id={errorId} role="alert" className="text-ui" style={{ color: 'var(--color-error)' }}>Choose two different profiles.</p> : null}
@@ -71,9 +95,10 @@ function ProfilePairForm({ names, initial, onSubmit, submitLabel, onCancel }:
   );
 }
 
-function ComparisonView({ a, b, onChange }: { a: string; b: string; onChange: (a: string, b: string) => void }) {
+function ComparisonView({ first, second, onChange }: { first: string; second: string; onChange: (a: string, b: string) => void }) {
+  const { a, b } = setupParams(first, second);
   const info = useInfo();
-  const view = useResource(() => apiGet<View>('/api/compare/setups', { a, b }), JSON.stringify([a, b]));
+  const view = useResource(() => apiGet<View>('/api/compare/setups', setupParams(first, second)), JSON.stringify([first, second]));
   const profiles = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles');
   const [preset, setPreset] = useState<'attention' | 'all'>('attention');
   const [only, setOnly] = useState<TileKey | null>(null);
@@ -93,8 +118,8 @@ function ComparisonView({ a, b, onChange }: { a: string; b: string; onChange: (a
       (only ? item.label === TILE_LABEL[only] : effectivePreset === 'all' || item.label !== 'same' || showSame[group.id])
       && (!q || `${item.name} ${item.scope} ${item.category}`.toLowerCase().includes(q))) }));
   }, [data, only, effectivePreset, query, showSame]);
-  const all = data?.groups.flatMap(g => g.items) ?? [];
-  const current = all.find(item => item.id === selected) ?? visible.flatMap(g => g.items)[0] ?? null;
+  const items = visible.flatMap(g => g.items);
+  const current = items.find(item => item.id === selected) ?? items[0] ?? null;
   const total = visible.reduce((n, g) => n + g.items.length, 0);
 
   return (
@@ -105,16 +130,29 @@ function ComparisonView({ a, b, onChange }: { a: string; b: string; onChange: (a
       {data?.blocked ? <WarningAlert title={data.blocked} live /> : null}
       <div className="flex flex-wrap items-center gap-3">
         <ProfileChip side="a" name={a} meta={data?.a.meta} />
-        <Button size="icon" aria-label="Swap the two profiles" onClick={() => onChange(b, a)}><ArrowLeftRight size={18} aria-hidden="true" /></Button>
+        <Button size="icon" aria-label="Swap the two profiles" onClick={() => onChange(second, first)}><ArrowLeftRight size={18} aria-hidden="true" /></Button>
         <ProfileChip side="b" name={b} meta={data?.b.meta} />
         {data?.project ? <span className="text-ui">in <span className="font-mono">{data.project}</span></span> : null}
         <Button className="ml-auto" onClick={() => setChanging(true)}>Change profiles…</Button>
       </div>
       {view.error ? <LoadError error={view.error} onRetry={view.reload} /> : null}
-      <SummaryTiles counts={data?.counts ?? null} loading={view.loading && !data} active={only}
+      {data?.copyHref ? <div><Link className="btn" to={data.copyHref}>Preview copying selected settings</Link></div> : null}
+      {data?.separate ? <>
+        <InfoNotice title="Separate setup inventories"><p>{data.separate.reason}</p></InfoNotice>
+        <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))' }}>
+          {(['a', 'b'] as const).map(side => <section className="panel min-w-0 wrap-anywhere" key={side}>
+            <h2 className="text-heading">{data[side].name} · {data[side].meta}</h2>
+            <p className="hint">Discovery {data.separate?.[side].status}</p>
+            {data.separate?.[side].warnings.map(warning => <p key={warning} className="text-ui">{warning}</p>)}
+            <ul className="list-none p-0">{data.separate?.[side].resources.map((item, index) => <li key={index} className="py-2">
+              <p className="text-ui font-medium">{item.name}</p><p className="hint">{[item.category, item.scope, item.origin, item.status].filter(Boolean).join(' · ')}</p>
+            </li>)}</ul>
+          </section>)}
+        </div>
+      </> : <SummaryTiles counts={data?.counts ?? null} loading={view.loading && !data} active={only}
         onFilter={key => { setOnly(key); setSelected(null); }}
-        captions={{ different: 'Where the two setups differ. Start here.' }} />
-      {data?.limits ? (
+        captions={{ different: 'Where the two setups differ. Start here.' }} />}
+      {data?.limits && !data.separate ? (
         <InfoNotice title="Reading limits">
           <p>{data.limits.text}</p>
           <Disclosure label="Show sources" expandedLabel="Hide sources">
@@ -128,30 +166,30 @@ function ComparisonView({ a, b, onChange }: { a: string; b: string; onChange: (a
         </InfoNotice>
       ) : null}
       {view.loading && !data ? <Loading label="Reading both setups… Results appear as each part finishes. No client is opened." /> : null}
-      {data && !data.blocked ? (
+      {data && !data.blocked && !data.separate ? (
         <>
           <div className="flex flex-wrap items-end gap-4">
             <div className="flex-1 min-w-[220px] max-w-[420px]">
               <label htmlFor={searchId} className="field-label">Find an item</label>
-              <input id={searchId} type="search" className="input" value={query} onChange={event => setQuery(event.target.value)} />
+              <input id={searchId} type="search" className="input" value={query} onChange={event => { setQuery(event.target.value); setSelected(null); }} />
             </div>
-            {!noDifferences ? <SegmentedControl label="Which items to list" value={only ? 'all' : preset} onChange={value => { setPreset(value); setOnly(null); }}
+            {!noDifferences ? <SegmentedControl label="Which items to list" value={only ? null : effectivePreset} onChange={value => { setPreset(value); setOnly(null); setSelected(null); }}
               options={[{ value: 'attention', label: 'Needs attention' }, { value: 'all', label: 'Everything' }]} /> : null}
-            <p className="hint" role="status">{total} {total === 1 ? 'item' : 'items'} in this view</p>
+            <p className="hint" role="status">{total} {total === 1 ? 'item' : 'items'} in this view{only ? ` · ${FILTER_LABEL[only]}` : ''}</p>
           </div>
           {noDifferences ? <p className="text-body font-medium">No differences within what was read. {data.counts.cannotCompare ? `${data.counts.cannotCompare} couldn’t be compared, so these setups aren’t confirmed identical.` : ''}</p> : null}
           {total === 0 ? (
             <div className="panel flex flex-col gap-2 items-start">
               <p>Nothing matches this view.</p>
-              <Button onClick={() => { setQuery(''); setOnly(null); setPreset('all'); }}>Clear filters</Button>
+              <Button onClick={() => { setQuery(''); setOnly(null); setPreset('all'); setSelected(null); }}>Clear filters</Button>
             </div>
           ) : (
-            <div className="flex flex-wrap gap-6 items-start">
+            <div className="@container flex flex-wrap gap-6 items-start">
               <div className="flex flex-col gap-4" style={{ flex: '999 1 540px', minWidth: 0 }}>
-                {visible.filter(group => group.items.length || (effectivePreset === 'attention' && !only && group.counts.same)).map(group => (
+                {visible.filter(group => group.items.length || (!query.trim() && effectivePreset === 'attention' && !only && group.counts.same)).map(group => (
                   <GroupPanel key={group.id} group={group} full={data.groups.find(g => g.id === group.id)!} selectedId={current?.id ?? null}
                     onSelect={setSelected} showingSame={Boolean(showSame[group.id]) || effectivePreset === 'all'} canShowSame={!only && effectivePreset === 'attention'}
-                    onShowSame={() => setShowSame(value => ({ ...value, [group.id]: !value[group.id] }))} />
+                    onShowSame={() => { setShowSame(value => ({ ...value, [group.id]: !value[group.id] })); setSelected(null); }} />
                 ))}
               </div>
               {current ? <DetailPanel item={current} a={a} b={b} /> : null}
@@ -162,7 +200,7 @@ function ComparisonView({ a, b, onChange }: { a: string; b: string; onChange: (a
       <Dialog open={changing} onOpenChange={setChanging}>
         {changing ? (
           <DialogContent title="Change profiles">
-            <ProfilePairForm names={profiles.data?.profiles.map(p => p.name) ?? [a, b]} initial={[a, b]} submitLabel="Compare these"
+            <ProfilePairForm names={profiles.data ? setupOptions(profiles.data) : [{ value: first, label: a }, { value: second, label: b }]} initial={[first, second]} submitLabel="Compare these"
               onSubmit={(x, y) => { setChanging(false); onChange(x, y); }} />
             <DialogClose asChild><Button>Cancel</Button></DialogClose>
           </DialogContent>
@@ -208,7 +246,7 @@ function ItemRow({ item, selected, onSelect }: { item: SetupItem; selected: bool
   const different = item.label === 'different';
   return (
     <li className="border-b last:border-b-0" style={{ borderColor: 'var(--color-divider)' }}>
-      <button type="button" onClick={onSelect} aria-current={selected ? 'true' : undefined}
+      <button id={selected ? 'selected-setup-item' : undefined} type="button" onClick={onSelect} aria-current={selected ? 'true' : undefined}
         className={cn('row-select w-full text-left border-0 flex-wrap items-center')} data-selected={selected}
         style={{ background: selected ? undefined : 'transparent', minHeight: 52 }}>
         <span className="w-[160px] flex-none"><ComparisonBadge label={item.label} exactState={item.exactState} /></span>
@@ -218,21 +256,23 @@ function ItemRow({ item, selected, onSelect }: { item: SetupItem; selected: bool
           {item.reason && !different ? item.reason : <SummaryText parts={item.summary} colored={different} />}
         </span>
       </button>
+      {selected ? <div className="px-4 pb-3 @min-[944px]:hidden">
+        <a className="btn" href="#detail-title" aria-label={`View details for ${item.name}`}>View details</a>
+      </div> : null}
     </li>
   );
 }
 
 function DetailPanel({ item, a, b }: { item: SetupItem; a: string; b: string }) {
-  const heading = useRef<HTMLHeadingElement>(null);
-  useEffect(() => { /* Selecting a row doesn't move focus (handoff §9). */ }, [item.id]);
   return (
     <aside aria-labelledby="detail-title" className="panel flex flex-col gap-4" style={{ flex: '1 1 380px', borderTop: '3px solid var(--color-link-focus)', minWidth: 0 }}>
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap gap-2 items-center"><ComparisonBadge label={item.label} exactState={item.exactState} /><span className="text-ui font-medium">{item.exactText}</span></div>
-        <h2 id="detail-title" ref={heading} tabIndex={-1} className="font-mono text-body font-semibold wrap-anywhere">{item.name}</h2>
+        <h2 id="detail-title" tabIndex={-1} className="font-mono text-body font-semibold wrap-anywhere scroll-mt-4">{item.name}</h2>
         <p className="meta">{item.category} · {item.scope}</p>
         {item.reason ? <p className="text-ui">{item.reason}</p> : null}
       </div>
+      <a className="btn self-start @min-[944px]:hidden" href="#selected-setup-item">Back to selected item</a>
       {item.detail.values ? (
         <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(160px, 100%), 1fr))' }}>
           {item.detail.values.map(box => (

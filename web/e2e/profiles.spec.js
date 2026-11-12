@@ -259,3 +259,40 @@ test('compare two setups and inspect all lines of a skill package', async ({ app
   await page.getByRole('button', { name: 'Show fewer lines' }).click();
   await expect(packageFile).not.toContainText(app.skillLines[14]);
 });
+
+test('Claude creation previews and cancels without launching; selected copy and Undo preserve the profile', async ({ app, page }) => {
+  await page.setViewportSize({ width: 390, height: 850 });
+  await openProfiles(page);
+  await createDialog(page, 'claude-cancelled');
+  await page.getByLabel('Client', { exact: true }).selectOption('claude-code');
+  await page.getByRole('button', { name: 'Review profile' }).click();
+  await expect(page.getByText('Claude Code executable:', { exact: false })).toBeVisible();
+  await expect(access(app.nativeProfileLog)).rejects.toMatchObject({ code: 'ENOENT' });
+  await page.getByRole('link', { name: 'Cancel', exact: true }).click();
+  expect((await app.store.read()).profiles.some(p => p.name === 'claude-cancelled')).toBe(false);
+
+  await createDialog(page, 'claude-parts');
+  await page.getByLabel('Client', { exact: true }).selectOption('claude-code');
+  await page.getByRole('radio', { name: /Selected parts of another profile/ }).check();
+  await expect(page.getByLabel('Copy parts from').locator('option')).toHaveText(['Default']);
+  await page.getByRole('button', { name: 'Choose parts and preview' }).click();
+  const instructions = page.locator('label.row-select').filter({ hasText: 'CLAUDE.md' });
+  await instructions.getByRole('checkbox').check();
+  await page.getByRole('button', { name: 'Create claude-parts with 1 item' }).click();
+  await expect(page.getByRole('heading', { name: '✓ claude-parts created' })).toBeVisible();
+  const profile = (await app.store.read()).profiles.find(p => p.name === 'claude-parts');
+  expect(profile.client).toBe('claude-code');
+  expect(await readFile(join(profile.native.configRoot, 'CLAUDE.md'), 'utf8')).toBe('Claude fixture instructions.\n');
+  await page.getByRole('button', { name: 'Undo this copy' }).click();
+  await expect(page.getByRole('heading', { name: 'Undone', exact: true })).toBeVisible();
+  await expect(access(join(profile.native.configRoot, 'CLAUDE.md'))).rejects.toMatchObject({ code: 'ENOENT' });
+  await page.getByRole('link', { name: 'Back to Profiles' }).click();
+  const card = page.getByRole('article', { name: 'claude-parts' });
+  await expect(card.getByText('Account independence: not verified.')).toBeVisible();
+  await card.getByRole('button', { name: 'Native setup and sign-in' }).click();
+  await expect(card.getByText(/CLAUDE_CONFIG_DIR=.*auth login/)).toBeVisible();
+  await expect(card.getByText('This command uses the currently installed Claude Code.', { exact: false })).toBeVisible();
+  await card.getByRole('button', { name: 'Check sign-in for claude-parts' }).click();
+  await expect(card.getByText(/Claude Code · Signed out/)).toBeVisible();
+  expect(await readFile(app.nativeProfileLog, 'utf8')).toBe('--version\nauth status\n');
+});

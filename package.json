@@ -1,7 +1,7 @@
 {
   "name": "xenoflux",
-  "version": "3.1.1",
-  "description": "Codex profile manager for macOS",
+  "version": "4.0.0-beta.1",
+  "description": "Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.",
   "type": "module",
   "bin": {
     "xfx": "bin/xfx.js"
@@ -27,27 +27,12 @@
     "docs/examples/audit-quality-trials.json",
     "docs/examples/audit-booking-ledger-comparison.md",
     "docs/developer/README.md",
-    "docs/developer/LOCAL-RELEASE.md",
     "docs/developer/AUDIT-GOAL.md",
     "docs/developer/ROADMAP.md",
     "docs/developer/REVIEW-TASK-IMPLEMENTATION.md",
-    "docs/developer/history/NATIVE-VALIDATION-3.1.0.md",
-    "docs/developer/history/PROFILE-UI-ASSESSMENT.md",
     "docs/developer/PROFILE-COPY-POLICY.md",
     "docs/developer/DESKTOP-IMPLEMENTATION.md",
-    "docs/developer/AUDIT-ACCEPTANCE.md",
-    "docs/developer/history/README.md",
-    "docs/developer/history/DESKTOP-HISTORY.md",
-    "docs/developer/history/RELEASE-3.0.1.md",
-    "docs/developer/history/RELEASE-3.1.1.md",
-    "docs/developer/history/RELEASE-3.1.0.md",
-    "docs/developer/history/RELEASE-3.0.0.md",
-    "docs/developer/history/RELEASE-2.1.0.md",
-    "docs/developer/history/RELEASE-2.0.0.md",
-    "docs/developer/history/ROADMAP-2.1.0.md",
-    "docs/developer/history/PROFILE-ASSESSMENT-2.1.0.md",
-    "docs/developer/history/evidence/profile-comparison-2026-10-14-summary.json",
-    "docs/developer/history/evidence/audit-2.0.0-summary.json"
+    "docs/developer/AUDIT-ACCEPTANCE.md"
   ],
   "engines": {
     "node": ">=22.15.0 <23 || >=23.8.0"
@@ -61,9 +46,12 @@
     "local-release": "node scripts/local-release.mjs",
     "build:ui": "vite build --config web/vite.config.ts",
     "check:ui": "node scripts/check-design-tokens.mjs && tsc -p web --noEmit && node scripts/check-ui-build.mjs && playwright test",
-    "test:ui": "npm run build:ui && playwright test"
+    "test:ui": "npm run build:ui && playwright test",
+    "prepack": "node scripts/local-release.mjs --pack-guard"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.322",
+    "@github/copilot-sdk": "1.0.29",
     "smol-toml": "1.9.0"
   },
   "author": "Digital Expression",
@@ -81,7 +69,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "latest",
+    "tag": "beta",
     "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {
@@ -105,5 +93,9 @@
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.3.5"
-  }
+  },
+  "private": true,
+  "cpu": [
+    "arm64"
+  ]
 }

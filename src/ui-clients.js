@@ -4,7 +4,7 @@
 import { lstat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { inspectNativeResources } from './audit-profile.js';
-import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
+import { createCodexDesktopSurface } from './desktop-surface.js';
 
 const TARGETS = ['config.toml', 'auth.json', 'state_5.sqlite', 'state_5.sqlite-wal', 'state_5.sqlite-shm'];
 
@@ -25,7 +25,7 @@ const insideApp = executable => /\.app\/Contents\//.test(executable ?? '');
  * instance journal's observation when there is one. Unknown is never idle.
  */
 export async function observeProfileClients(home, { desktopRunning = null, inspect = inspectNativeResources,
-  snapshot = () => createDesktopInstanceRuntime().snapshot() } = {}) {
+  desktopSurface = createCodexDesktopSurface(), snapshot = () => desktopSurface.snapshot() } = {}) {
   let holders, rows;
   try {
     holders = (await inspect(await presentTargets(home))).clients;

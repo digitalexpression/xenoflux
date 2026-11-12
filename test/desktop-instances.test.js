@@ -13,6 +13,8 @@ import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { launchHome } from '../src/launcher.js';
 import { removeProfile, unbindNativeHome } from '../src/profile-removal.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
+import { createDesktopInstanceRuntime } from '../src/desktop-instance-runtime.js';
+import { createCodexDesktopSurface } from '../src/desktop-surface.js';
 import { assertNoConcurrentDesktops } from '../src/desktop-instance-guard.js';
 import { acquireProfileParticipant, releaseProfileParticipant } from '../src/profile-reservations.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
@@ -108,17 +110,38 @@ async function fixture(t) {
     const plan = await desktopInstancePlan(store, name, { runtime });
     await prepareLauncher(store, plan);
   }
-  return { root, store, homes, original, rows, calls, runtime, options, aliases, ramLogs };
+  return { root, store, homes, original, rows, calls, runtime, options, aliases, ramLogs, surface: createCodexDesktopSurface(store, options) };
 }
 const statePath = (f, id) => join(f.store.directory, 'desktop-instances', `${id}.json`);
 const lockPath = (f, name) => join(f.homes[name].root, '.run-lock');
 
+test('prepare and reopen allow a passive browser host but preserve the reservation for its database handle', async t => {
+  const f = await fixture(t), home = f.homes.A.home;
+  const cache = join(home, 'plugins', 'cache', 'chrome'), executable = join(cache, 'host');
+  await mkdir(cache, { recursive: true }); await writeFile(executable, 'fixture');
+  const browser = row(900, executable); let databaseOpen = false;
+  const guard = createDesktopInstanceRuntime({ processSnapshot: async () => [browser],
+    execFile: async (_file, args) => ({ stdout: args.includes('--') ? '' :
+      `p900\ncChrome\nu${process.getuid()}\nfcwd\nn${cache}\nftxt\nn${executable}\n`
+      + (databaseOpen ? `f12\nn${join(home, 'state_5.sqlite')}\n` : ''), stderr: '' }) });
+  f.runtime.assertResourcesIdle = guard.assertResourcesIdle;
+  await prepareDesktopInstance(f.store, 'A', f.options);
+  assert.equal((await f.surface.open('A')).status, 'opened');
+  f.rows.splice(1); databaseOpen = true;
+  const opens = f.calls.filter(call => call.operation === 'open').length;
+  await assert.rejects(f.surface.open('A'), { code: 'RESOURCE_BUSY' });
+  await access(lockPath(f, 'A'));
+  assert.equal(f.calls.filter(call => call.operation === 'open').length, opens);
+  databaseOpen = false;
+  assert.equal((await f.surface.open('A')).status, 'opened');
+});
+
 test('two fixed-home desktops coexist with the original and two simultaneously running CLI profiles', async t => {
   const f = await fixture(t), originalStore = await readFile(f.store.file);
-  const a = await openDesktopInstance(f.store, 'A', f.options), b = await openDesktopInstance(f.store, 'B', f.options);
+  const a = await f.surface.open('A'), b = await f.surface.open('B');
   let releaseCli; const hold = new Promise(resolve => { releaseCli = resolve; });
   let bothStarted; const ready = new Promise(resolve => { bothStarted = resolve; }); let count = 0;
-  const launches = ['C', 'D'].map(name => launchHome(f.store, name, { ramLogs: f.ramLogs, probe: async () => '0.153.4', run: async args => {
+  const launches = ['C', 'D'].map(name => launchHome(f.store, name, { terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' }, ramLogs: f.ramLogs, probe: async () => '0.153.4', run: async args => {
     assert.equal(args.env.CODEX_HOME, f.homes[name].home);
     assert.equal(args.env.CODEX_SQLITE_HOME, f.homes[name].home);
     await args.onSpawn(name === 'C' ? 100 : 101);
@@ -130,7 +153,7 @@ test('two fixed-home desktops coexist with the original and two simultaneously r
     await ready;
     for (const name of ['A', 'B', 'C', 'D']) await access(lockPath(f, name));
     assert.deepEqual(f.rows.find(row => row.pid === f.original.pid), f.original);
-    const listed = await listDesktopInstances(f.store, { runtime: f.runtime, observe: true });
+    const listed = await f.surface.list({ observe: true });
     assert.deepEqual(listed.instances.map(instance => instance.observed.status), ['running', 'running']);
     assert.notEqual(a.home, b.home); assert.notEqual(a.desktopData, b.desktopData);
     for (const path of f.aliases) assert.equal(await readFile(join(path, 'preserved.txt'), 'utf8'), 'existing-session');
@@ -140,12 +163,12 @@ test('two fixed-home desktops coexist with the original and two simultaneously r
 });
 
 test('reopening focuses one owned instance; same-profile CLI and registry removal remain locked', async t => {
-  const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options);
-  const again = await openDesktopInstance(f.store, 'A', f.options);
+  const f = await fixture(t), a = await f.surface.open('A');
+  const again = await f.surface.open('A');
   assert.equal(again.status, 'focused'); assert.equal(again.main.pid, a.main.pid);
   assert.equal(f.calls.filter(call => call.operation === 'open').length, 1);
-  await focusDesktopInstance(f.store, 'A', f.options);
-  await assert.rejects(launchHome(f.store, 'A', { ramLogs: f.ramLogs, run: async () => { throw new Error('must not launch'); } }), /in use/);
+  await f.surface.focus('A');
+  await assert.rejects(launchHome(f.store, 'A', { terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' }, ramLogs: f.ramLogs, run: async () => { throw new Error('must not launch'); } }), /in use/);
   await assert.rejects(removeProfile(f.store, 'A', f.options), /unfinished desktop instance/);
   await assert.rejects(unbindNativeHome(f.store, 'A', f.options), /unfinished desktop instance/);
 });
@@ -182,13 +205,13 @@ test(`desktop open handles ${code} once, then reuses and focuses the running app
     if (stale) { stale = false; throw Object.assign(new Error(code), { code }); }
     return load(...args);
   };
-  const first = await openDesktopInstance(f.store, 'A', f.options);
+  const first = await f.surface.open('A', f.options);
   assert.equal(first.status, 'opened');
   assert.equal(f.calls.filter(call => call.operation === 'prepare').length, 1);
   // A vendor update while this profile is live must not replace its bundle.
   f.options.loadLauncher = async () => { throw new Error('running open must not load or refresh the cache'); };
   f.options.prepareLauncher = async () => { throw new Error('running open must not prepare'); };
-  const again = await openDesktopInstance(f.store, 'A', f.options);
+  const again = await f.surface.open('A', f.options);
   assert.equal(again.status, 'focused');
   assert.deepEqual(again.main, first.main);
   assert.equal(f.calls.filter(call => call.operation === 'open').length, 1);
@@ -218,7 +241,7 @@ test('automatic preparation preserves invalid caches and executing raw apps or F
 test('open reconciles stopped opening and running journals without manual recovery', async t => {
   const f = await fixture(t);
   for (const phase of ['opening', 'running']) {
-    const first = await openDesktopInstance(f.store, 'A', f.options);
+    const first = await f.surface.open('A', f.options);
     f.rows.splice(1);
     const path = statePath(f, first.profileId), state = JSON.parse(await readFile(path));
     state.phase = phase;
@@ -226,7 +249,7 @@ test('open reconciles stopped opening and running journals without manual recove
     await writeFile(path, JSON.stringify(state), { mode: 0o600 });
     // A stopped, validated journal may also survive a crash after lock release.
     await rm(lockPath(f, 'A'), { recursive: true });
-    const again = await openDesktopInstance(f.store, 'A', f.options);
+    const again = await f.surface.open('A', f.options);
     assert.equal(again.status, 'opened');
     assert.notEqual(again.main.pid, first.main.pid);
   }
@@ -589,7 +612,7 @@ test('recovery refuses orphaned recorded helpers and corrupted helper bindings w
 });
 
 test('changed journal identity or routing cannot authorize control of another desktop', async t => {
-  const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options);
+  const f = await fixture(t), a = await f.surface.open('A');
   const path = statePath(f, a.profileId), saved = JSON.parse(await readFile(path));
   const saveChanged = async change => {
     const state = structuredClone(saved); change(state);
@@ -600,9 +623,9 @@ test('changed journal identity or routing cannot authorize control of another de
   const unrelated = row(500); f.rows.push(unrelated);
   await saveChanged(state => { state.main = unrelated; state.processes = [unrelated]; });
   await assert.rejects(closeDesktopInstance(f.store, 'A', f.options), /Invalid desktop instance record|receipt is missing or changed/);
-  await assert.rejects(focusDesktopInstance(f.store, 'A', f.options), /Invalid desktop instance record|receipt is missing or changed/);
+  await assert.rejects(f.surface.focus('A'), /Invalid desktop instance record|receipt is missing or changed/);
   await saveChanged(state => { state.plan.userHome = f.options.defaultUserHome; });
-  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /Invalid desktop instance record/);
+  await assert.rejects(f.surface.open('A'), /Invalid desktop instance record/);
   await saveChanged(state => { state.plan.app.bundleId = 'unrelated.app'; });
   await assert.rejects(closeDesktopInstance(f.store, 'A', f.options), /Invalid desktop instance record/);
   assert.equal(f.calls.filter(call => ['close', 'focus'].includes(call.operation)).length, 0);
