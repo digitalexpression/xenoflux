@@ -13,6 +13,7 @@ import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { launchHome } from '../src/launcher.js';
 import { removeProfile, unbindNativeHome } from '../src/profile-removal.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
+import { createDesktopInstanceRuntime } from '../src/desktop-instance-runtime.js';
 import { createCodexDesktopSurface } from '../src/desktop-surface.js';
 import { assertNoConcurrentDesktops } from '../src/desktop-instance-guard.js';
 import { acquireProfileParticipant, releaseProfileParticipant } from '../src/profile-reservations.js';
@@ -113,6 +114,27 @@ async function fixture(t) {
 }
 const statePath = (f, id) => join(f.store.directory, 'desktop-instances', `${id}.json`);
 const lockPath = (f, name) => join(f.homes[name].root, '.run-lock');
+
+test('prepare and reopen allow a passive browser host but preserve the reservation for its database handle', async t => {
+  const f = await fixture(t), home = f.homes.A.home;
+  const cache = join(home, 'plugins', 'cache', 'chrome'), executable = join(cache, 'host');
+  await mkdir(cache, { recursive: true }); await writeFile(executable, 'fixture');
+  const browser = row(900, executable); let databaseOpen = false;
+  const guard = createDesktopInstanceRuntime({ processSnapshot: async () => [browser],
+    execFile: async (_file, args) => ({ stdout: args.includes('--') ? '' :
+      `p900\ncChrome\nu${process.getuid()}\nfcwd\nn${cache}\nftxt\nn${executable}\n`
+      + (databaseOpen ? `f12\nn${join(home, 'state_5.sqlite')}\n` : ''), stderr: '' }) });
+  f.runtime.assertResourcesIdle = guard.assertResourcesIdle;
+  await prepareDesktopInstance(f.store, 'A', f.options);
+  assert.equal((await f.surface.open('A')).status, 'opened');
+  f.rows.splice(1); databaseOpen = true;
+  const opens = f.calls.filter(call => call.operation === 'open').length;
+  await assert.rejects(f.surface.open('A'), { code: 'RESOURCE_BUSY' });
+  await access(lockPath(f, 'A'));
+  assert.equal(f.calls.filter(call => call.operation === 'open').length, opens);
+  databaseOpen = false;
+  assert.equal((await f.surface.open('A')).status, 'opened');
+});
 
 test('two fixed-home desktops coexist with the original and two simultaneously running CLI profiles', async t => {
   const f = await fixture(t), originalStore = await readFile(f.store.file);

@@ -171,7 +171,7 @@ async function finishStopped(store, state, runtime, options) {
       allowedProcesses.push(...observedReview.processes);
     } else if (task.captureIntent) throw new Error('Review process identity is unavailable; preserving reservation');
   }
-  await runtime.assertResourcesIdle(resources(state.plan), { allowedProcesses });
+  await runtime.assertResourcesIdle(resources(state.plan), { allowedProcesses, profileHome: state.plan.home });
   if (reserved) await releaseProfileParticipant(state.plan.nativeRoot, state.owner);
   await save(store, state, 'closed');
   await releaseInstanceControl(state.owner, options);
@@ -274,7 +274,7 @@ export async function prepareDesktopInstance(store, name, {
     const appDirectory = join(paths(store, id).root, 'apps', id);
     if ((await runtime.snapshot()).some(row => row.executable.startsWith(`${appDirectory}/`)))
       throw new Error('Profile app processes are still running; prepare or refresh only after they stop');
-    await runtime.assertResourcesIdle(resources(plan));
+    await runtime.assertResourcesIdle(resources(plan), { profileHome: plan.home });
     await privateDirectory(store.directory); await privateDirectory(paths(store, id).root, true);
     if (previous) await releaseInstanceControl(previous.owner, options);
     const runId = randomUUID();
@@ -288,7 +288,7 @@ export async function prepareDesktopInstance(store, name, {
       await acquire(reservation, owner, true); reserved = true;
       await reserveInstanceControl(owner, options);
       await assertBinding(store, state);
-      await runtime.assertResourcesIdle(resources(plan));
+      await runtime.assertResourcesIdle(resources(plan), { profileHome: plan.home });
       if ((await runtime.snapshot()).some(row => row.executable.startsWith(`${appDirectory}/`)))
         throw new Error('Profile app processes are still running; preserving the prepared app');
       state.launcherPaths = await prepareLauncher(store, plan);
@@ -354,7 +354,7 @@ export async function openDesktopInstance(store, name, {
       await acquire(join(plan.nativeRoot, '.run-lock'), owner, true); reserved = true;
       await reserveInstanceControl(owner, options);
       await assertBinding(store, state);
-      await runtime.assertResourcesIdle(resources(plan));
+      await runtime.assertResourcesIdle(resources(plan), { profileHome: plan.home });
       await privateDirectory(plan.desktopData, true);
       try { state.launcherPaths = await loadLauncher(store, plan); }
       catch (error) {
@@ -367,7 +367,7 @@ export async function openDesktopInstance(store, name, {
         const appRoot = `${join(paths(store, id).root, 'apps', id)}/`;
         if ((await runtime.snapshot()).some(row => row.executable.startsWith(appRoot)))
           throw new Error('Profile app is still executing; preserving its cached app and reservation');
-        await runtime.assertResourcesIdle(resources(plan));
+        await runtime.assertResourcesIdle(resources(plan), { profileHome: plan.home });
         state.launcherPaths = await prepareLauncher(store, plan);
       }
       validateLauncherPaths(state.launcherPaths, store, id);

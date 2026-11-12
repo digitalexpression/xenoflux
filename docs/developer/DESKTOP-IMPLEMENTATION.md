@@ -47,6 +47,11 @@ cloud-cancellation operation. Finding an installed app establishes no account is
   block cleanup. The [review contract](REVIEW-TASK-IMPLEMENTATION.md#execution-with-the-selected-profiles-settings)
   owns shared participation. Recovery validates binding, journal, owner, stopped
   processes and handles, releasing only its own reservation without launching/quitting apps.
+- Resource checks use a bounded, complete same-user handle scan for directories.
+  A working directory inside the selected home's `plugins/cache`, or a mapping of
+  that process's verified executable there, does not keep the profile busy.
+  Open file descriptors and other mappings still block, including database/WAL/SHM
+  handles held by that same process. Incomplete scans and warnings remain refusals.
 
 ## Verification and native acceptance
 

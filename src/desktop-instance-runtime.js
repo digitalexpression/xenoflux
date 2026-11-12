@@ -260,7 +260,9 @@ export function createDesktopInstanceRuntime({
     let receipt, result;
     try {
       result = await execFile(helperExecutable, args, {
-        cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: userHome }, encoding: 'utf8', maxBuffer: 65536, timeout: openTimeoutMs,
+        // Leave time for the native helper's bounded verification failure to
+        // reach stderr instead of racing the controller's process timer.
+        cwd: '/', env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: userHome }, encoding: 'utf8', maxBuffer: 65536, timeout: openTimeoutMs + 2000,
       });
     } catch (cause) {
       const error = fail('DESKTOP_OPEN_FAILED');
@@ -333,9 +335,11 @@ export function createDesktopInstanceRuntime({
     for (const row of tree) if (absoluteCanonical(row.executable)) owned.set(row.pid, row);
     return { status: 'running', ...(escaped.length ? { orphaned: true } : {}), processes };
   }
-  async function assertResourcesIdle(paths, { allowedProcesses = [] } = {}) {
+  async function assertResourcesIdle(paths, { allowedProcesses = [], profileHome } = {}) {
     validateRows(allowedProcesses);
     if (!Array.isArray(paths) || paths.some(path => typeof path !== 'string' || !path.startsWith('/') || /[\x00-\x1f\x7f]/.test(path) || resolve(path) !== path))
+      throw fail('INVALID_RESOURCE_PATHS');
+    if (profileHome !== undefined && (!absoluteCanonical(profileHome) || !paths.includes(profileHome)))
       throw fail('INVALID_RESOURCE_PATHS');
     const present = [];
     for (const path of new Set(paths)) {
@@ -348,17 +352,22 @@ export function createDesktopInstanceRuntime({
       if (stat.isSymbolicLink?.()) throw resourceInspectionFailure('lstat', path, 'path is a symbolic link');
       present.push({ path, directory: stat.isDirectory?.() === true });
     }
-    const holders = new Set(), partialPaths = [];
+    const holders = new Set(), partialPaths = [], cacheExecutables = [];
+    let directoryResult;
     for (const item of present) {
       let result;
-      const args = ['-nP', '-Fpcun', '-u', String(uid), '-a', ...(item.directory ? ['+D', item.path] : ['--', item.path])];
+      // +D can exit 1 for unused expanded paths. A complete same-user scan
+      // lets us distinguish passive cache references without accepting partial evidence.
+      const args = ['-nP', '-Fpcunt', '-u', String(uid), ...(item.directory ? [] : ['-a', '--', item.path])];
       try {
-        result = await execFile('/usr/sbin/lsof', args, { cwd: '/', encoding: 'utf8', timeout: systemTimeoutMs,
-          maxBuffer: 4 * 1024 * 1024, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' } });
+        result = item.directory && directoryResult ? directoryResult : await execFile('/usr/sbin/lsof', args, {
+          cwd: '/', encoding: 'utf8', timeout: systemTimeoutMs, maxBuffer: 4 * 1024 * 1024,
+          env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', LC_ALL: 'C' } });
+        if (item.directory) directoryResult = result;
       } catch (e) {
+        if (item.directory) throw resourceInspectionFailure('lsof', item.path, safeResourceErrorReason(e));
         if (e.code === 1 && e.stdout === '' && e.stderr === '') continue;
-        // macOS +D can return 1 with real holders. These prove activity,
-        // but cannot prove the absence of additional holders.
+        // Exact-path exit-1 rows prove activity, never completeness.
         if (e.code !== 1 || typeof e.stdout !== 'string' || !e.stdout || e.stderr !== '')
           throw resourceInspectionFailure('lsof', item.path, safeResourceErrorReason(e));
         result = { stdout: e.stdout, stderr: '' };
@@ -369,8 +378,9 @@ export function createDesktopInstanceRuntime({
         const reason = /permission denied|operation not permitted/i.test(result.stderr) ? 'reported permission denied' : 'reported warnings';
         throw resourceInspectionFailure('lsof output', item.path, reason);
       }
-      let currentPidSeen, sawCommand = false, sawUid = false, sawName = false;
+      let currentPidSeen, descriptor, fileType, sawCommand = false, sawUid = false, sawName = false;
       const finishProcess = () => {
+        if (descriptor !== undefined) throw resourceInspectionFailure('lsof fields', item.path, 'file descriptor missing name');
         if (currentPidSeen !== undefined && (!sawCommand || !sawUid || !sawName)) {
           const missing = [['command', sawCommand], ['uid', sawUid], ['name', sawName]].filter(([, seen]) => !seen).map(([name]) => name);
           throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} missing ${missing.join(', ')}`);
@@ -384,6 +394,8 @@ export function createDesktopInstanceRuntime({
           if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1)
             throw resourceInspectionFailure('lsof fields', item.path, 'invalid PID field');
           currentPidSeen = Number(value);
+          descriptor = undefined;
+          fileType = undefined;
           sawCommand = sawUid = sawName = false;
         } else if (field === 'c' && currentPidSeen !== undefined) {
           if (!value) throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} has an empty command field`);
@@ -391,13 +403,31 @@ export function createDesktopInstanceRuntime({
         } else if (field === 'u' && currentPidSeen !== undefined) {
           if (value !== String(uid)) throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} has an unexpected UID field`);
           sawUid = true;
+        } else if (field === 'f' && currentPidSeen !== undefined) {
+          if (descriptor !== undefined) throw resourceInspectionFailure('lsof fields', item.path, 'file descriptor missing name');
+          if (!value || /[\x00-\x1f\x7f]/.test(value)) throw resourceInspectionFailure('lsof fields', item.path, 'invalid file descriptor');
+          descriptor = value;
+          fileType = undefined;
+        } else if (field === 't' && currentPidSeen !== undefined) {
+          fileType = value;
         } else if (field === 'n' && currentPidSeen !== undefined) {
-          if (!value) throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} has an empty name field`);
+          // These kernel/network objects have no filesystem path on macOS.
+          const namelessObject = item.directory && ['NPOLICY', 'NEXUS', 'PIPE'].includes(fileType);
+          if (!value && !namelessObject) throw resourceInspectionFailure('lsof fields', item.path, `PID ${currentPidSeen} has an empty name field`);
           sawName = true;
+          const fileDescriptor = descriptor;
+          descriptor = undefined;
           let observed = value;
-          try { observed = await realpath(value); } catch { /* compare the reported absolute path below */ }
+          if (value.startsWith('/')) {
+            try { observed = await realpath(value); } catch { /* compare the reported absolute path below */ }
+          }
           const within = item.directory ? observed === item.path || observed.startsWith(`${item.path}/`) : observed === item.path;
-          if (within) holders.add(currentPidSeen);
+          if (!within) continue;
+          const cache = profileHome && item.path === profileHome ? `${profileHome}/plugins/cache/` : undefined;
+          const inCache = cache && value.startsWith(cache) && observed.startsWith(cache);
+          if (inCache && fileDescriptor === 'cwd') continue;
+          if (inCache && fileDescriptor === 'txt') cacheExecutables.push({ pid: currentPidSeen, path: observed });
+          else holders.add(currentPidSeen);
         }
       }
       finishProcess();
@@ -405,9 +435,17 @@ export function createDesktopInstanceRuntime({
     const assertComplete = () => {
       if (partialPaths.length) throw resourceInspectionFailure('lsof', partialPaths.join(', '), 'exit status 1 with incomplete resource evidence');
     };
-    if (!holders.size) { assertComplete(); return { idle: true, processes: [] }; }
+    if (!holders.size && !cacheExecutables.length) { assertComplete(); return { idle: true, processes: [] }; }
     const rows = await snapshot();
     const byPid = new Map(rows.map(row => [row.pid, row]));
+    for (const reference of cacheExecutables) {
+      const row = byPid.get(reference.pid);
+      let executable;
+      try { if (row) executable = await realpath(row.executable); } catch { /* unknown mappings remain busy */ }
+      // Exempt only the running image, never other mappings or open files
+      // belonging to the same process (including SQLite/WAL/SHM files).
+      if (executable !== reference.path) holders.add(reference.pid);
+    }
     const processes = [...holders].map(pid => byPid.get(pid));
     const missingPid = [...holders].find(pid => !byPid.has(pid));
     if (missingPid !== undefined) throw resourceInspectionFailure('process snapshot', present.map(item => item.path).join(', '), `holder PID ${missingPid} was absent`);
