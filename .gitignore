@@ -9,10 +9,15 @@ node_modules
 /output/u3-hardening-2026-10-28/
 .DS_Store
 
+# Machine-specific Claude launch configuration.
+/.claude/launch.json
+
 # Internal audit records retain private paths, prompts and runtime identities.
 /docs/developer/HANDOVER-macos-audit-*.md
 /docs/developer/evidence/audit-*.json
 
+/private/
+# Legacy private paths stay ignored to prevent accidental reintroduction.
 /local/
 /test-results/
 /playwright-report/

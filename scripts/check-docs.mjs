@@ -1,12 +1,30 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
+const userDocs = ['README.md', 'docs/INSTALLATION.md', 'docs/GUIDE.md', 'docs/CLI.md'];
+const sourceDocs = [...userDocs, 'CONTRIBUTING.md', 'docs/CONTRACTS.md'];
+
+export async function checkDocumentationPolicy(root, sourcePaths, packagePaths) {
+  const errors = [];
+  const core = sourcePaths.filter(path => path.endsWith('.md') && (path.startsWith('docs/')
+    || (!path.includes('/') && !['AGENTS.md', 'DESIGN.md'].includes(path))));
+  for (const path of sourceDocs) if (!core.includes(path)) errors.push(`Missing document owner: ${path}`);
+  for (const path of core) if (!sourceDocs.includes(path)) errors.push(`Consolidate ${path} into an existing document owner`);
+  const packaged = packagePaths.filter(path => path.endsWith('.md') && !path.startsWith('node_modules/'));
+  for (const path of userDocs) if (!packaged.includes(path)) errors.push(`User document is not packaged: ${path}`);
+  for (const path of packaged) if (!userDocs.includes(path)) errors.push(`Keep contributor/internal document out of npm: ${path}`);
+  for (const path of core.filter(path => !['README.md', 'docs/INSTALLATION.md'].includes(path))) {
+    if (/\bbeta\b/i.test(await readFile(join(root, path), 'utf8')))
+      errors.push(`${path}: channel wording belongs in README.md or docs/INSTALLATION.md`);
+  }
+  return errors;
+}
 
 function withoutFences(markdown) {
   return markdown.replace(/^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, '');
@@ -65,9 +83,15 @@ export async function main() {
       { cwd: root, maxBuffer: 4 * 1024 * 1024 });
     const [pack] = JSON.parse(stdout);
     const paths = pack.files.map(file => file.path);
-    const errors = await checkPackagedDocs(root, paths);
+    const { stdout: sourceListing } = await exec('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: root });
+    const sourcePaths = (await Promise.all([...new Set(sourceListing.split('\0').filter(Boolean))].map(async path => {
+      try { await access(join(root, path)); return path; }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    }))).filter(Boolean);
+    const errors = [...await checkPackagedDocs(root, paths), ...await checkPackagedDocs(root, sourcePaths),
+      ...await checkDocumentationPolicy(root, sourcePaths, paths)];
     if (errors.length) throw new Error(errors.join('\n'));
-    console.log(`Packaged documentation links passed (${paths.filter(path => path.endsWith('.md') && !path.startsWith('node_modules/')).length} Markdown files).`);
+    console.log('Documentation passed: six document owners, four packaged user documents, source/package links and channel wording.');
   } finally {
     await rm(cache, { recursive: true, force: true });
   }

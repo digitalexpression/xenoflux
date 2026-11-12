@@ -1,14 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { prepareEvaluation } from '../test-support/substantive-evaluation/prepare.mjs';
 import { prepareExecutionEnvelope, validateExecutionEnvelope } from '../test-support/evaluation-isolation/prepare-envelope.mjs';
 import { auditQualityFingerprint } from '../src/audit-quality.js';
+
+test('execution envelope permits ignored in-checkout work under private/work', async t => {
+  const work = resolve('private/work');
+  await mkdir(work, { recursive: true });
+  const root = await realpath(await mkdtemp(join(work, 'envelope-path-test-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const campaignDir = join(root, 'campaign');
+  await prepareEvaluation(campaignDir);
+  const envelope = await prepareExecutionEnvelope(join(campaignDir, 'campaign.json'), join(root, 'envelope'));
+  assert.equal(envelope.executionAuthorized, false);
+  assert.equal((await validateExecutionEnvelope(join(root, 'envelope/envelope.json'))).executionAuthorized, false);
+});
 
 test('execution envelope binds frozen inputs and remains pending without touching campaign', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-envelope-test-')));

@@ -100,7 +100,7 @@ export async function prepareExecutionEnvelope(campaignPath, output, { nativeBin
     || campaign.tasks?.length !== 3) throw new Error('envelope-campaign-not-frozen-offline-fixture');
   if (await realpath(dirname(output)) !== dirname(output)) throw new Error('envelope-output-parent-not-canonical');
   const insideSource = !relative(source, output).startsWith('../');
-  if (insideSource && (!output.startsWith(`${source}/release-artifacts/`) || !ignoredOutput(output)))
+  if (insideSource && (!output.startsWith(`${source}/private/work/`) || !ignoredOutput(output)))
     throw new Error('envelope-output-must-be-outside-source-or-git-ignored');
   if (resolve(campaignPath) === output || campaignPath.startsWith(`${output}/`)) throw new Error('envelope-output-overlaps-campaign');
   if (typeof campaign.checker?.path !== 'string') throw new Error('envelope-checker-missing');

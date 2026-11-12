@@ -3,9 +3,12 @@ import { readdir, lstat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkMaintainerStorage } from './check-maintainer-storage.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const roots = ['bin', 'src', 'scripts', 'test-support'];
+const storageErrors = await checkMaintainerStorage(root);
+if (storageErrors.length) throw new Error(storageErrors.join('\n'));
 
 async function javascriptFiles(directory) {
   const files = [];

@@ -1,40 +1,33 @@
 # Xenoflux development
 
-## Start with the active work
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for source ownership/checks and the relevant
+[contracts](docs/CONTRACTS.md) before changing behavior. The [guide](docs/GUIDE.md)
+owns the user journey and supported limits; [DESIGN.md](DESIGN.md) owns UI rules.
+Read only task-relevant sections, then begin authorized work. Reopen settled
+choices only for conflicting evidence or a scope change.
 
-Read the [roadmap](docs/developer/ROADMAP.md#current-work-and-stop-condition)
-for product direction, the [goal](docs/developer/AUDIT-GOAL.md#current-release-boundary)
-for supported behavior, and [acceptance](docs/developer/AUDIT-ACCEPTANCE.md) for
-verification criteria. Read relevant sections rather than every linked document.
-Once the outcome, affected code and verification are clear, begin authorized
-implementation. Reopen decisions only for conflicting evidence or a scope change.
-Documentation grants no operational authorization.
+For maintainer work, read `private/maintainer/instructions.md` if present. It routes
+current assignments and release workflows. Public development/checks must work
+without private context. Documentation and historical grants authorize no operation.
 
-## References by task
-
-| Work | Read when relevant |
+| Task | Read |
 | --- | --- |
-| Client runtime, ordinary review, persistence or recovery | [Implementation contract](docs/developer/REVIEW-TASK-IMPLEMENTATION.md). |
-| UI composition | [App guide](docs/user/APP.md), [DESIGN.md](DESIGN.md), and the globally installed shadcn skill. |
-| Profile creation, copying or setup comparison | [Profile copy policy](docs/developer/PROFILE-COPY-POLICY.md). Implementation gaps are not exceptions to preserve. |
-| Checks and browser verification | [Developer guide](docs/developer/README.md#checkout-and-checks). |
+| Client execution, API, persistence or recovery | [Execution](docs/CONTRACTS.md#execution-approvals-and-ownership) and [recovery](docs/CONTRACTS.md#persistence-cancellation-and-recovery) contracts; relevant production code/tests |
+| Profiles and selected copying | [Copy contract](docs/CONTRACTS.md#profile-creation-copying-and-undo) |
+| UI composition | [Guide](docs/GUIDE.md), [DESIGN.md](DESIGN.md), globally installed shadcn skill |
+| Checks and packaging | [Contributing](CONTRIBUTING.md#checkout-and-checks) and [release building](CONTRIBUTING.md#build-a-release-candidate) |
 
-## Preserve boundaries
+Profiles follow the current selected installation/capabilities, never a pinned
+CLI/Desktop version. Preserve unrelated edits, user data and original evidence.
+Native client/model operations, publication and installed updates need current
+user instructions covering their effects; do not re-request existing grants.
 
-Profiles must not be pinned to CLI or Desktop versions. Resolve the current
-selected installation and observed capabilities; retain versions as provenance
-and validate executable/root identity for each prepared operation. Follow the
-[provider version policy](docs/developer/AUDIT-GOAL.md#evolution-and-provider-version-policy).
+Keep six public documents: README, installation, guide, CLI, contributing and
+contracts. AGENTS and DESIGN are project instructions. Product context belongs in
+the guide/contracts; do not recreate parallel PRODUCT, goal, roadmap or feature
+spec documents. Use code/tests for schema fields and private current-work for
+assignments. Preserve compressed originals before removing documentation.
 
-Preserve original data and others' edits. Live profile/client operations, model
-runs, publication and installed updates need current authorization covering their
-effects. Do not re-request steps already covered by an explicit grant.
-
-## Keep documentation useful
-
-The goal owns behavior, the roadmap owns direction, and feature contracts own
-implementation rules. Keep one owner per fact and link to it. Prefer concise
-rules and supported limitations over duplicated narratives. Keep private paths,
-identifiers, operational grants and execution records outside public source.
-Preserve full originals privately before shortening or removing them; do not
-alter raw evidence, published tags or artifacts.
+Update the owning fact and link to it. Keep private paths, operational receipts,
+chat IDs and execution plans out of public source. Inspect outgoing history and
+run [public history checks](CONTRIBUTING.md#prepare-public-commits) before pushing.
