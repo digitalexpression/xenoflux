@@ -191,6 +191,7 @@ async function installDetached(packed, tarball, temporary) {
 }
 
 export async function packageInventory(directory, { npmBinsFor = [] } = {}) {
+  directory = await realpath(directory);
   const files = [];
   const targets = new Set(npmBinsFor.map(file => file.path));
   const aliases = new Map();

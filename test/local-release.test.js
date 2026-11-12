@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -336,23 +336,32 @@ test('default install smoke accepts only the reviewed dependency install hook', 
 });
 
 
-test('installed inventory accepts only npm aliases declared by unchanged bundled manifests', async t => {
-  const root = await mkdtemp(join(tmpdir(), 'xfx-generated-bin-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const dependency = join(root, 'node_modules', 'fixture');
-  const aliases = join(root, 'node_modules', '.bin');
-  await mkdir(dependency, { recursive: true });
-  await writeFile(join(dependency, 'package.json'), JSON.stringify({ name: 'fixture', bin: { fixture: 'bin.js' } }));
-  await writeFile(join(dependency, 'bin.js'), '#!/usr/bin/env node\n', { mode: 0o755 });
-  const expected = await packageInventory(root);
-  await mkdir(aliases);
-  await symlink('../fixture/bin.js', join(aliases, 'fixture'));
-  assert.deepEqual(await packageInventory(root, { npmBinsFor: expected }), expected);
-  await assert.rejects(packageInventory(root), /Unexpected npm binary link/);
-  await symlink('../fixture/bin.js', join(aliases, 'undeclared'));
-  await assert.rejects(packageInventory(root, { npmBinsFor: expected }), /Unexpected npm binary link/);
-  await rm(join(aliases, 'undeclared'));
-  await rm(join(aliases, 'fixture'));
-  await symlink('/outside', join(aliases, 'fixture'));
-  await assert.rejects(packageInventory(root, { npmBinsFor: expected }));
+test('installed inventory accepts declared npm aliases through canonical and symlink-parent roots', async t => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'xfx-generated-bin-')));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const physical = join(directory, 'physical');
+  const linked = join(directory, 'linked');
+  await mkdir(physical);
+  await symlink(physical, linked);
+  for (const [name, parent] of [['canonical', physical], ['symlink-parent', linked]]) {
+    await t.test(name, async () => {
+      const root = join(parent, name);
+      const dependency = join(root, 'node_modules', 'fixture');
+      const aliases = join(root, 'node_modules', '.bin');
+      await mkdir(dependency, { recursive: true });
+      await writeFile(join(dependency, 'package.json'), JSON.stringify({ name: 'fixture', bin: { fixture: 'bin.js' } }));
+      await writeFile(join(dependency, 'bin.js'), '#!/usr/bin/env node\n', { mode: 0o755 });
+      const expected = await packageInventory(root);
+      await mkdir(aliases);
+      await symlink('../fixture/bin.js', join(aliases, 'fixture'));
+      assert.deepEqual(await packageInventory(root, { npmBinsFor: expected }), expected);
+      await assert.rejects(packageInventory(root), /Unexpected npm binary link/);
+      await symlink('../fixture/bin.js', join(aliases, 'undeclared'));
+      await assert.rejects(packageInventory(root, { npmBinsFor: expected }), /Unexpected npm binary link/);
+      await rm(join(aliases, 'undeclared'));
+      await rm(join(aliases, 'fixture'));
+      await symlink('/outside', join(aliases, 'fixture'));
+      await assert.rejects(packageInventory(root, { npmBinsFor: expected }));
+    });
+  }
 });
