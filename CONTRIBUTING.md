@@ -20,7 +20,10 @@ npx playwright install chromium
 npm run check:ui
 ```
 
-`check` validates JavaScript syntax. `check:native` checks the universal launcher's
+`check` validates JavaScript syntax and, when private context exists, the maintainer
+storage boundary. Run `npm run check:storage` for that check alone; task scripts/logs/
+receipts belong in `private/work/` and completed records in `private/archive/`.
+`check:native` checks the universal launcher's
 source/binary identities, architectures, signature and entitlements. `check:docs`
 checks source and packaged links, documentation ownership and package membership.
 `check:ui` checks types, design tokens, bundled-build parity and Chromium journeys.

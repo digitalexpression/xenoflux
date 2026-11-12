@@ -22,6 +22,7 @@
   "scripts": {
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "check": "node scripts/check.mjs",
+    "check:storage": "node scripts/check-maintainer-storage.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "check:public": "node scripts/check-public-history.mjs",
     "build:native": "node scripts/build-profile-launcher.mjs",
