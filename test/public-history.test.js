@@ -19,13 +19,13 @@ function fixture(t) {
   git('init', '-b', 'main');
   git('config', 'user.name', 'Fixture');
   git('config', 'user.email', 'fixture@example.invalid');
-  writeFileSync(join(cwd, '.gitignore'), '/local/\n');
+  writeFileSync(join(cwd, '.gitignore'), '/private/\n');
   git('add', '.gitignore'); git('commit', '-m', 'Public baseline');
   git('update-ref', 'refs/remotes/origin/main', 'HEAD');
   return {
     cwd, env, git,
     check: (args = [], input) => spawnSync(process.execPath, [script, ...args], { cwd, env, input, encoding: 'utf8' }),
-    privateFile: () => { mkdirSync(join(cwd, 'local'), { recursive: true }); writeFileSync(join(cwd, 'local/notes.md'), 'Private fixture'); },
+    privateFile: () => { mkdirSync(join(cwd, 'private'), { recursive: true }); writeFileSync(join(cwd, 'private/notes.md'), 'Private fixture'); },
   };
 }
 
@@ -37,16 +37,16 @@ test('public history check permits clean work and ignored untracked context', t 
 });
 
 test('public history check rejects a force-staged private file', t => {
-  const f = fixture(t); f.privateFile(); f.git('add', '-f', 'local/notes.md');
+  const f = fixture(t); f.privateFile(); f.git('add', '-f', 'private/notes.md');
   const result = f.check();
-  assert.equal(result.status, 1); assert.match(result.stderr, /local\/notes\.md/);
+  assert.equal(result.status, 1); assert.match(result.stderr, /private\/notes\.md/);
 });
 
 test('pre-push rejects private files committed then deleted on a new branch', t => {
-  const f = fixture(t); f.privateFile(); f.git('add', '-f', 'local/notes.md'); f.git('commit', '-m', 'Private checkpoint');
-  f.git('rm', 'local/notes.md'); f.git('commit', '-m', 'Remove notes');
+  const f = fixture(t); f.privateFile(); f.git('add', '-f', 'private/notes.md'); f.git('commit', '-m', 'Private checkpoint');
+  f.git('rm', 'private/notes.md'); f.git('commit', '-m', 'Remove notes');
   const result = f.check(['--pre-push', 'origin'], `refs/heads/topic ${f.git('rev-parse', 'HEAD')} refs/heads/topic ${'0'.repeat(40)}\n`);
-  assert.equal(result.status, 1); assert.match(result.stderr, /local\/notes\.md/);
+  assert.equal(result.status, 1); assert.match(result.stderr, /private\/notes\.md/);
 });
 
 test('pre-push allows ref deletion without a baseline', t => {
@@ -56,10 +56,10 @@ test('pre-push allows ref deletion without a baseline', t => {
 
 test('pre-push checks existing ref updates and fails closed for unavailable remote tips', t => {
   const f = fixture(t); const base = f.git('rev-parse', 'HEAD');
-  f.privateFile(); f.git('add', '-f', 'local/notes.md'); f.git('commit', '-m', 'Private checkpoint');
+  f.privateFile(); f.git('add', '-f', 'private/notes.md'); f.git('commit', '-m', 'Private checkpoint');
   const tip = f.git('rev-parse', 'HEAD');
   const result = f.check(['--pre-push', 'origin'], `refs/heads/topic ${tip} refs/heads/topic ${base}\n`);
-  assert.equal(result.status, 1); assert.match(result.stderr, /local\/notes\.md/);
+  assert.equal(result.status, 1); assert.match(result.stderr, /private\/notes\.md/);
   const missing = f.check(['--pre-push', 'origin'], `refs/heads/topic ${tip} refs/heads/topic ${'a'.repeat(40)}\n`);
   assert.equal(missing.status, 1); assert.match(missing.stderr, /Fetch the remote/);
 });
@@ -76,9 +76,9 @@ test('installed hook blocks an actual local push before private history reaches 
   const clean = push('HEAD:refs/heads/main');
   assert.equal(clean.status, 0, clean.stderr);
   f.git('switch', '-c', 'topic');
-  f.privateFile(); f.git('add', '-f', 'local/notes.md'); f.git('commit', '-m', 'Private checkpoint');
-  f.git('rm', 'local/notes.md'); f.git('commit', '-m', 'Remove notes');
+  f.privateFile(); f.git('add', '-f', 'private/notes.md'); f.git('commit', '-m', 'Private checkpoint');
+  f.git('rm', 'private/notes.md'); f.git('commit', '-m', 'Remove notes');
   const blocked = push('HEAD:refs/heads/topic');
-  assert.notEqual(blocked.status, 0); assert.match(blocked.stderr, /local\/notes\.md/);
+  assert.notEqual(blocked.status, 0); assert.match(blocked.stderr, /private\/notes\.md/);
   assert.equal(f.git('ls-remote', '--heads', 'origin', 'refs/heads/topic'), '');
 });

@@ -10,7 +10,7 @@ Once the outcome, affected code and verification are clear, begin authorized
 implementation. Reopen decisions only for conflicting evidence or a scope change.
 Documentation grants no operational authorization.
 
-For maintainer work, read `local/maintainer/instructions.md` if present.
+For maintainer work, read `private/maintainer/instructions.md` if present.
 Public development and checks must work without that ignored file. It provides
 private context and workflow pointers, not operational authorization.
 

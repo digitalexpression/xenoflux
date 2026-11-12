@@ -63,7 +63,7 @@ authorization covering their effects and must preserve unrelated clients/data.
 ## Prepare public commits
 
 Start short-lived `codex/<task>` branches from current public `main`. Keep private
-maintainer instructions, coordination and notes under ignored `local/maintainer/`.
+maintainer instructions, coordination and notes under ignored `private/maintainer/`.
 Each worktree needs its own local context if its task requires it. Public checks
 must work without that context. Shared project rules belong in `AGENTS.md`.
 

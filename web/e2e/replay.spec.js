@@ -302,7 +302,7 @@ test('replay keeps both sides readable at narrow widths and enlarged text in lig
   const provider = createDemoProvider();
   const server = await startUiServer({ provider, staticRoot: resolve('dist/ui') });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-  const receiptDir = resolve('local/candidate-2026-11-01/browser');
+  const receiptDir = resolve('test-results/ui-e2e/replay-layout');
   await mkdir(receiptDir, { recursive: true });
   try {
     await page.route('**/api/reports/demo-run', async route => {

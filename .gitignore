@@ -16,6 +16,8 @@ node_modules
 /docs/developer/HANDOVER-macos-audit-*.md
 /docs/developer/evidence/audit-*.json
 
+/private/
+# Legacy private paths stay ignored to prevent accidental reintroduction.
 /local/
 /test-results/
 /playwright-report/
