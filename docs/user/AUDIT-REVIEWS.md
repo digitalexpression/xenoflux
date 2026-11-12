@@ -4,11 +4,37 @@ Advanced CLI workflows. Start with [experiments](AUDIT-EXPERIMENTS.md) or [sessi
 
 ## Repeated trials and explicit quality criteria
 
-Use a versioned `quality` definition with the [complete series example](../examples/audit-quality-trials.json). Replace its repository and registered profile names before use:
+Save this as `series.json`, replacing the repository, task and registered profile
+names. It repeats each profile three times and checks the recorded test result
+and changed-file count:
+
+```json
+{
+  "schemaVersion": 1,
+  "repository": "/absolute/path/to/repository",
+  "revision": "HEAD",
+  "task": "Improve the setup documentation and summarize the change.",
+  "profiles": ["Research", "Careful"],
+  "trials": {"count": 3, "order": "balanced", "budgetMs": 2160000},
+  "checks": [{"name": "unit tests", "argv": ["npm", "test"], "timeoutMs": 300000}],
+  "quality": {
+    "schemaVersion": 1, "id": "tests-and-scope", "version": "1",
+    "checks": [{"name": "unit tests", "required": true}],
+    "workspace": {"maxChangedFiles": 20}
+  },
+  "limits": {"runMs": 900000, "experimentMs": 1920000, "outputBytes": 8388608},
+  "allowIncompleteCapture": true
+}
+```
+
+The profile names above select Codex profiles. Use explicit client selections as
+shown in [experiment specifications](AUDIT-EXPERIMENTS.md#experiment-specification)
+for other clients. Checks run outside the model sandbox; choose trusted commands.
+`allowIncompleteCapture` permits a partial report, not a claim of complete evidence.
 
 ```sh
-xfx audit run --spec audit-quality-trials.json --dry-run
-xfx audit run --spec audit-quality-trials.json
+xfx audit run --spec series.json --dry-run
+xfx audit run --spec series.json
 xfx audit show SERIES_UUID
 xfx audit resume SERIES_UUID
 ```

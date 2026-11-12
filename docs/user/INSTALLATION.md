@@ -5,10 +5,8 @@ Contributor checks are in the [developer guide](../developer/README.md).
 
 Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
 
-This guide describes **4.0.0-beta.1**, an opt-in public beta candidate. Publication
-is separate from preparation. Once published, select `xenoflux@beta` for the beta
-channel or `xenoflux@4.0.0-beta.1` for this exact version. Plain `xenoflux` and
-`xenoflux@latest` select the stable channel; preparing beta does not update it.
+Select `xenoflux@beta` for the opt-in beta channel or `xenoflux@4.0.0-beta.1`
+for this exact release. Plain `xenoflux` and `xenoflux@latest` select stable.
 Review the [beta scope and limits](APP.md#400-scope-and-limits) before opting in.
 
 ## Requirements
@@ -94,12 +92,12 @@ reports RAM logs disabled; see [RAM logs](RAM-LOGS.md).
 
 ## Install an offline release bundle
 
-After publication, download all three files from the same beta
+Download all three files from the same beta
 [GitHub prerelease](https://github.com/digitalexpression/xenoflux/releases):
 `xenoflux-VERSION.tgz`, `manifest.json`, and `install.mjs`. The same npm tarball
 contains the SDK runtime and arm64 native library; no separate runtime archive
 is required. Your selected native CLIs must be installed separately.
-For this candidate, `VERSION` is `4.0.0-beta.1`; keep the prerelease suffix in
+For this release, `VERSION` is `4.0.0-beta.1`; keep the prerelease suffix in
 the tarball name. Use its matching manifest and installer.
 Place them together in one directory and keep the tarballs compressed. From an
 external terminal in that directory:

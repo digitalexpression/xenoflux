@@ -51,7 +51,17 @@ For recorded-control checks, add `--expect-model MODEL --expect-effort EFFORT` t
 
 Inspect recorded conditions, responses/actions, checks, changes and scoped time/tokens. Completion, verification, capture coverage and reviewer judgment are separate. Compatible named checks require matching recipes; code deltas need a common baseline; scores need matching rubrics. A setup difference does not erase unrelated supported observations. One pair proves neither consistency, causality nor a universal winner.
 
-File-scope/read-before-edit findings describe only attributed actions and frozen `taskContract` boundaries, not all edits or understanding. Missing action/actor/source coverage keeps absence unknown. See the [synthetic comparison](../examples/audit-booking-ledger-comparison.md) for illustrative wording, not measured results.
+File-scope/read-before-edit findings describe attributed actions and frozen
+`taskContract` boundaries. They do not establish all edits or understanding.
+For example, these synthetic observations support different, limited conclusions:
+
+| Recorded evidence | Supported conclusion |
+| --- | --- |
+| Left edits a declared file; right edits outside the declared boundary | The observed editing scopes differ. Other edits may be missing. |
+| Matching check recipe passes on the left and fails on the right | The recorded check results differ. Completion claims remain separate. |
+| Only one pair, with incomplete usage and action capture | Consistency, total cost and general profile superiority remain unknown. |
+
+These are illustrative readings, not measured profile results.
 
 ### Reopen a saved audit run
 

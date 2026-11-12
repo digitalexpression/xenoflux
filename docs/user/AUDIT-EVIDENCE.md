@@ -1,6 +1,6 @@
 # Audit evidence and capture reference
 
-Commands: [audit guide](AUDIT.md). Execution/recovery: [experiments](AUDIT-EXPERIMENTS.md). Dated native outcomes: [release evidence](../developer/AUDIT-ACCEPTANCE.md).
+Commands: [audit guide](AUDIT.md). Execution/recovery: [experiments](AUDIT-EXPERIMENTS.md). Verification requirements: [acceptance criteria](../developer/AUDIT-ACCEPTANCE.md).
 
 ## Session replay
 
@@ -15,6 +15,28 @@ New xfx runs freeze replay at completion, including capture-unavailable states. 
 | Child discovery | 100 children, depth 4, 250,000 index rows or 2.5 seconds |
 
 After temporary-index removal, retained actor observations identify candidates, but same-home headers/owned turns must corroborate them; discovery remains partial. Bodies never captured stay unavailable. Private internal reasoning is excluded. Content opt-in, redaction and fingerprint-binding rules are in [export](AUDIT.md#export-a-frozen-report).
+
+## History turn metadata
+
+`history --profile NAME --id TASK_ID --turns` reads native `turn_context`
+observations from that profile's selected rollout: turn ID, timestamp, cwd,
+workspace roots, model and effort, with source file/line. Without a context,
+start-only turns have unknown fields. Conflicting observations remain visible;
+settings, latest index values and session defaults never fill missing history.
+
+The bounded snapshot permits 32 MiB total, 1 MiB per line and 10,000 metadata
+records. Malformed/oversized lines, unterminated records, concurrent changes and
+limits make capture incomplete. Unsafe paths and mismatched session IDs are
+refused. Recorded context does not prove backend routing or every tool's cwd.
+
+For a selected child, same-profile index/rollout ownership must verify its parent.
+Only positively attributed child turns are included; inherited/unattributed turns
+remain excluded. `parentTaskId` and `unattributedTurnCount` expose that limit;
+the latter counts distinct turn IDs in this bounded snapshot, not all history.
+Shared root IDs, timestamps, models and inherited ordinals do not prove ownership.
+Missing attribution is partial; no safe attribution or conflicting identities is
+unavailable. Parent rollouts are not scanned and children are not auto-discovered.
+This metadata includes no token amounts. See [history commands](PROFILES.md#open-the-desktop-or-cli).
 
 ## Per-run resource provenance
 

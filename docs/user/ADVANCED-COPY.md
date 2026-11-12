@@ -1,88 +1,71 @@
 # Inspect and selectively copy profile contents
 
-Audience: users. This guide covers inspection, selective copying and undo. For profile setup, see [Profiles](PROFILES.md).
+Use [Profiles](PROFILES.md) to create a profile. The app supports same-client
+copying for Codex, Claude Code and GitHub Copilot CLI; the commands below show
+Codex. Cross-client copying is unsupported, and copied-setup native loading
+remains unverified in the current beta scope.
 
-Use `xfx profile inspect Default` or `xfx profile inspect Research --json` to inspect a profile. The inventory reports discovered contents and their origin. It does not prove that the selected native client loaded every item into a task.
-Use the app for same-client Codex, Claude Code or GitHub Copilot CLI copy flows.
-Cross-client copying is unsupported; copied-setup native loading remains
-unverified for the deferred 4.0.0 qualification. The commands below show Codex examples.
-
-Full profile inspection considers known project locations automatically. Copy selection reads supported settings and standalone resources without scanning project folders, conversation history, memories or plugin caches. Project-local resources remain associated with their projects: inspecting them does not copy repositories, grant trust, or change project files. Filesystem metadata entries `.DS_Store`, `.git`, and `.tmp` are omitted from inventory and counts without changing files on disk. Legitimate hidden resources such as `.system` remain discoverable. Missing paths, unsupported formats and scan limits are reported rather than treated as empty inventories.
+`xfx profile inspect NAME` shows discovered contents and origin. Missing paths,
+unsupported formats and scan limits remain explicit. Inspection can discover
+project/plugin/system resources that are not eligible for copying; it does not
+prove that the native client loaded an item. Project discovery neither copies
+repositories nor grants project trust. Filesystem metadata such as `.DS_Store`,
+`.git` and `.tmp` is omitted; legitimate hidden resources remain discoverable.
 
 ## Select individual items
 
-Run these commands in an external interactive terminal:
+Run from an external interactive terminal:
 
 ```sh
-# Select and preview without applying changes.
 xfx copy Default Research --advanced
-
-# Review, then apply selected changes.
 xfx copy Default Research --advanced --apply --close-clients
-
-# Prepare a new profile with selected contents.
 xfx profile create Research --from Default --advanced --apply --close-clients
 ```
 
-Creation is the primary workflow: start fresh or seed a new profile with selected
-contents. Profiles then evolve independently. Later copies show current differences;
-they do not synchronize profiles or infer deletions from missing source items.
+The first command previews without applying. Advanced selection starts empty:
+arrow keys navigate, left/right collapse or expand, Space selects, `/` searches,
+`d` opens details and Enter reviews. Cancellation applies nothing; an empty copy
+selection can still include optional manual setup guidance. Application requires
+explicit confirmation. For a selected conflict, type `replace` or skip the item.
 
-Advanced mode starts with nothing selected. Use arrow keys to navigate, left/right to collapse or expand categories, Space to select, `/` to search, and `d` to inspect details. Enter reviews the selection; cancellation leaves copying unapplied. An empty selection means no copied items and is distinct from cancellation. Optional manual setup guidance does not copy integration state. Final application still needs an explicit confirmation.
+Supported selections are configuration keys, global instructions, supported agent
+definitions, standalone skill packages and rules. Skills include resources and
+scripts. Unsafe/unsupported packages are refused rather than partially copied.
+Review origin, scope and source path when names coincide.
 
-Supported selections are individual configuration keys, global instruction files, supported agent definitions, standalone skill packages, and rule files. Skills include their resources and scripts, not just their `SKILL.md`. Project, plugin and system resources retain their origin and are not silently promoted into profile-owned copies. A package with unsupported or unsafe contents is refused rather than partially copied.
-
-For a selected destination conflict, type `replace` to replace that item or enter another response to skip it. Review each item's origin, scope and source path, especially when names coincide. Unselected items and configuration keys are preserved.
-
-Replacing a selected skill is exact: the preview includes obsolete files and
-directories that will be removed inside that package. Other skill packages remain
-untouched. Undo restores the package's prior files and supported directory shape
-and modes. Unsafe contents and unsupported file/directory transitions are refused
-before mutation. Xenoflux never falls back to a partial package overlay.
+Unselected/destination-only content is preserved. Missing source items do not
+imply deletion. Replacing a selected skill is exact: the preview lists obsolete
+files/directories removed inside that package. Other packages stay untouched;
+Undo restores prior files and supported directory shape/modes. Unsafe transitions
+are refused before mutation. Identical selections return unchanged without client
+preparation or a copy journal.
 
 `--include config,instructions,agents` selects supported source items under the
-same preservation policy. It preserves destination-only keys, instructions and agents when the source
-lacks them. Use `--advanced` for individual
-selection and optional setup guidance. These options cannot be combined.
-
-Identical selections return unchanged without preparing clients or creating a copy
-journal. Diff output distinguishes changes from items kept at the destination;
-native instruction precedence is not inferred from the selected file alone.
+same preservation policy. Use `--advanced` for individual selections and optional
+setup guidance; these options cannot be combined. Created profiles subsequently
+evolve independently; later copies are reviewed changes, not synchronization.
 
 ## Limits and dependencies
 
-Plugins, hooks and MCP connections are native/manual setup only. Select wanted
-guidance separately from copied files. Steps identify known source/marketplace
-identity, definition differences and verification needs; when installation or
-availability cannot be established, check the destination first. Cache contents do
-not establish installation. A plugin's known components stay with the parent plugin.
-Xenoflux does not install, enable, connect, trust or configure these integrations.
-Manual setup is outside copy undo and does not create a persistent checklist.
+| Content | Treatment |
+| --- | --- |
+| Plugins, hooks and MCP connections | Optional native/manual setup guidance only. No installation, enablement, connection, trust or authentication changes. Known plugin components stay with their parent plugin. |
+| Credentials, sign-in, permissions and trust | Never copied. Selected configuration values are checked for credentials; unrelated private integrations do not block safe keys. Native storage/authentication routing is preserved. |
+| Conversations, generated memory, project references, caches, databases and RAM-log links | Not copy selections. Resume history in its owning profile or start a fresh task with a reviewed handover. |
+| External requirements referenced by instructions/scripts | Not installed or rewritten. Check required commands, files and integrations yourself. |
 
-For example, selecting guidance for `formatter@personal` and MCP entry `docs`
-may report that the plugin is configured in the source but its installed version
-is unknown, while the destination already has the same MCP definition. The necessary
-actions are to check the exact plugin and marketplace in the destination, install
-only if absent, then review enablement and any sign-in/trust requirements. For `docs`,
-verify its connection in Codex settings; do not add a duplicate definition. A version
-read from a local plugin source describes that source, not the installed package.
+Manual guidance is regenerated from current bounded metadata and has no saved
+completion state. Matching definitions avoid redundant changes; unknown installed
+versions/connections require checking the destination. Source/cache contents do
+not prove installation. For a plugin, verify its exact marketplace identity before
+installing anything; for MCP, check the native connection rather than adding a
+duplicate definition. Manual setup is outside Undo.
 
-The guide is regenerated from bounded current metadata whenever selected. It has no
-saved completion state. Matching definitions suppress redundant definition changes;
-unknown installation or connection state remains an explicit check. The existing
-`compare` command retains its core settings scope; use the selected-copy preview for
-package changes and the optional guide for integration setup differences.
-
-Conversations, generated memory, project references and runtime artifacts are not
-copy selections. Full diagnostic inspection retains its broader read-only scope.
-Resume tasks in their owning profile, or use a fresh destination task with a reviewed
-handover; copied or resumed history cannot promise a clean destination instruction
-context. Credentials, sign-in, granted permissions, project/hook trust, caches,
-databases and RAM-log links are not copied.
-
-Instructions and skill scripts may reference external commands, files or integrations. Copying the selected files does not install those dependencies or rewrite arbitrary references. Review their requirements before using the destination. For config-key copying, credential checks apply to the selected values, so unrelated private integrations in the source configuration do not block copying safe keys. Unknown configuration is visible but not freely copyable; destination storage and authentication routing are preserved.
-
-CLI and desktop discovery can differ because their user environments differ. Machine-level resources shown as shared or desktop-dependent may not be available to an isolated named CLI profile. Test the destination through the interface you intend to use.
+The `compare` command retains its core settings scope. Use copy preview for
+package changes and the optional guide for integration differences. Unknown
+configuration may be visible without being copyable. CLI/Desktop environments can
+expose different shared or machine resources. Test copied setup in a fresh task
+through the intended interface; discovery does not establish use or adherence.
 
 ## Undo and interrupted setup
 
@@ -93,21 +76,17 @@ xfx copy undo COPY_ID
 xfx copy undo COPY_ID --apply --close-clients
 ```
 
-Undo refuses to overwrite intervening edits. Interrupted copies report a recovery action; follow that action before beginning another copy.
+Undo refuses intervening edits. Preserve the current v3 journal and payload while
+Undo is needed. Follow a reported recovery action before starting another copy.
 
-The current v3 journal records selected files, package deletions, and directory
-state needed for safe undo. Preserve its record and payload until the operation is
-no longer needed.
+Profile preparation, copy, sign-in and desktop integration are separate steps.
+Cancelling after preparation leaves the profile prepared. Continue with
+`xfx copy SOURCE TARGET --advanced --apply` or `xfx profile signin NAME --apply`.
+Failed/cancelled sign-in does not erase a successful copy.
 
-New-profile setup consists of separate preparation, copy, sign-in and desktop integration steps. Cancelling after preparation leaves the profile prepared. Continue copying with `xfx copy SOURCE TARGET --advanced --apply` or sign in using `xfx profile signin NAME --apply`. Cancelling or failing sign-in does not erase a successful settings copy.
-
-Before applying or undoing, ensure Codex clients that can access the affected homes are quiescent. The `--close-clients` option permits the existing graceful shutdown workflow; standalone terminal sessions must be closed manually when requested. Inspection and preview never close applications.
-
-Current limitation: Desktop home ownership is not always observable. A running
-Desktop can therefore block copying between otherwise idle profiles. Xenoflux
-keeps that case blocked and refuses to close an app that hosts its own invocation.
-The refusal can occur without evidence that the selected target is busy; positive
-copy/undo acceptance requires client conditions the guard can verify.
-
-After copying, check the skill or rule in a fresh Codex task through the interface
-you intend to use. Discovery alone does not establish that it executes or applies.
+Before applying or undoing, affected native homes must be idle. `--close-clients`
+allows graceful shutdown; close standalone terminal sessions manually when asked.
+Inspection and preview never close applications. Desktop ownership may be
+unobservable even when the selected target seems idle; that case stays blocked.
+Xenoflux refuses to close an app hosting its own invocation. See the
+[copy policy](../developer/PROFILE-COPY-POLICY.md) for the implementation contract.

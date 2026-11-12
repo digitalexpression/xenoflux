@@ -53,6 +53,7 @@ test('npm package includes reviewed docs and excludes private receipts and unrev
     'docs/developer/history/evidence/private-canary.json',
     'docs/knowledge/private-canary.md', 'docs/knowledge/private-sources.json',
     'private/maintainer/private-canary.json', 'private/archive/private-canary.json',
+    'docs/examples/audit-quality-trials.json', 'docs/examples/audit-booking-ledger-comparison.md',
     'docs/examples/private-canary.json', 'release-artifacts/private-canary.json', 'output/design/private-canary.md'];
   for (const path of [...publicPaths, ...privatePaths]) {
     await mkdir(dirname(join(directory, path)), { recursive: true });

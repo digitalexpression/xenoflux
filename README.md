@@ -2,7 +2,7 @@
 
 Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
 
-**4.0.0-beta.1 is a public beta candidate.** End-user qualification is still in
+**4.0.0-beta.1 is an opt-in public beta.** End-user qualification is still in
 progress; read the [scope and limits](docs/user/APP.md#400-scope-and-limits).
 The [beta-exit checklist](docs/developer/AUDIT-ACCEPTANCE.md#beta-exit-checklist)
 defines the review required before a stable 4.0.0 release.
@@ -12,14 +12,13 @@ defines the review required before a stable 4.0.0 release.
 4.0.0 targets Apple Silicon Macs with arm64 Node. See the
 [requirements](docs/user/INSTALLATION.md#requirements).
 
-After beta publication, opt in from an external terminal:
+Opt in from an external terminal:
 
 ```sh
 npm install -g xenoflux@beta
 ```
 
-The `beta` npm channel is separate from stable `latest`; beta preparation does
-not change the stable release. To select this exact beta, use
+The `beta` npm channel is separate from stable `latest`. To select this exact beta, use
 `xenoflux@4.0.0-beta.1` instead.
 
 ## Create a profile

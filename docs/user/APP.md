@@ -1,292 +1,228 @@
 # The Xenoflux app
 
-Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
-
-`xfx ui` opens the local app for profiles, tasks and sessions. It runs
-on this Mac only: the server listens on `127.0.0.1`, opens your default browser,
-and requires its launch link to establish a browser session.
+Use the local browser app to create profiles, compare tasks, inspect saved sessions
+and request AI reviews with Codex, Claude Code or GitHub Copilot CLI on macOS.
 
 ```sh
 xfx ui
 ```
 
-Keep the terminal window open while you use the app. Press Ctrl+C there to stop
-it. Running `xfx ui` again while it is running reopens the same app.
+The server listens on `127.0.0.1`. Open its launch link to establish a browser
+session and keep the terminal open while using the app. Running `xfx ui` again
+reopens the same app; Ctrl+C stops the server.
 
 ## What you can do
 
-- **Create a profile.** Open Profiles and choose **Create profile**. Select
-  Codex, Claude Code or GitHub Copilot CLI. Choose
-  **Empty** to create a profile without copying another profile’s setup, or
-  **Selected parts of another profile** to select supported settings/content
-  and review the copy before creating it. Empty profiles still have the minimal
-  files Xenoflux needs to manage them. Copying stays within the same client.
-  Creation does not open a native client or complete
-  sign-in; follow the native setup guidance before running model tasks.
-- **Compare setups.** Choose two profiles to see how their settings, instructions,
-  skills, MCP servers, plugins, hooks and memory settings differ today. Each item
-  is labelled **Different**, **Same**, **Could not compare** (with the reason) or
-  **Not applicable**. Comparing only reads files; it never copies, activates or
-  signs in anything.
-- **Open native apps.** When installed signed Claude or GitHub Copilot apps are
-  available, Profiles offers separate **Open** buttons. These use each app's
-  existing account and submit no task. They do not create managed profiles,
-  select a Chat/Code/Cowork surface or automate model work. Copilot can also open
-  an existing app-local session ID. A successful link dispatch does not confirm
-  that the session exists; the native app reports missing sessions. This creates
-  no new task.
-- **Compare a task from existing sessions.** Tick two sessions you ran in Codex CLI
-  or Desktop. The first one you tick is the left side of the report; **Swap sides**
-  changes that. To select sessions across clients, choose **Choose recent sessions by profile**,
-  select a profile for each side and choose **List recent sessions**.
-  Listing and importing read stored history. A changed profile context requires
-  a fresh list and selection. List titles and folders stay local.
-  For managed Copilot profiles, listing and importing use the first bound
-  repository as the native working directory. Bind a repository in Profiles
-  before listing sessions.
-- **Import Claude Code conversations.** On **Open saved report**, select two
-  native UTF-8 UUID-named `.jsonl` transcripts, up to 8 MiB each, then choose
-  **Compare stored conversations**. This reads private snapshots through the official
-  stored-session reader without starting an agent. The partial report retains
-  public user/assistant text; tools, thinking and system content are omitted.
-  Account/profile, usage, original surface and execution location remain unknown.
-  Export the report to reopen it independently of the selected files. Raw
-  transcripts stay private; recorded text still needs inspection before sharing.
-- **Import Copilot conversations.** On **Open saved report**, enter two existing
-  local session UUIDs from Copilot CLI or the app, then choose **Compare Copilot
-  conversations**. Xenoflux uses the existing native Copilot CLI connection to
-  read stored history; `copilot` must be installed on PATH. It starts no new session
-  or model task. The current reader
-  supports the implicit native sign-in route and refuses token/custom-root overrides.
-  Only selected user/assistant text enters the partial report. Reasoning, tools and
-  system content are omitted; original account, surface/location, usage and task
-  completion stay unknown. Export to retain the conversation independently of native
-  history. Raw evidence remains private; inspect recorded text before sharing it.
-- **Run a new task.** Describe one task, choose a profile for each side and a
-  repository, then review the pinned commit, limits and any commands you add.
-  Choose Codex, Claude Code or GitHub Copilot CLI profiles on either side.
-  Each side can select an advertised model, reasoning effort and permission
-  mode for that job. Claude Code and Copilot CLI can inherit profile permissions.
-  Codex comparisons default to workspace-write with network access disabled and
-  also offer read-only. Ordinary reviews keep the selected profile's permissions.
-  Mixed-client pairs use each client's own permission rules. Copilot Auto can
-  route to different models each turn, so a repeat may use a different model.
-  The report lists models reported by each turn where available.
-  **Refresh models** initializes the native client without submitting a task or
-  changing model policy. It may use sign-in, write native state or run configured
-  startup hooks. Browsing uses cached metadata. Changing model clears explicit
-  effort; Start checks explicit choices again. Advertised models do not prove
-  account entitlement or settings observed in a turn. Nothing starts
-  until **Start 2 model runs**. The sides run sequentially in
-  separate copies of the committed source; uncommitted, untracked and ignored
-  files are excluded. Setup and check commands are ordinary programs outside
-  the Codex sandbox and may affect files beyond those copies. No check command
-  is selected automatically, and finishing is not verification.
-- **Read the report.** Inspect each recorded session in the replay timeline,
-  browse the two independently scrolling conversations, and expand turns or
-  delegated sessions. Select a message or activity to read it in the side inspector;
-  the inspector stays open as you select other events. **Open delegated session** follows the
-  selected delegation; **Return to calling event** restores that side's originating event,
-  search and scroll position, including nested visits. **Source and event details**
-  shows its recorded references. **F6** switches focus between the conversation
-  and inspector; **Escape** closes the inspector and returns to the selected event.
-  Each side uses
-  its own root session's elapsed-time origin. Missing histories, timestamps and
-  omitted content remain explicit. New xfx runs keep the replay captured at
-  completion; reopening does not add later session activity. Replay content that
-  was never saved cannot be recovered from a saved report. The last recorded
-  responses appear side by side above replay, with full text and source-event
-  links. **Assessment** shows selected checks in one compact comparison table,
-  separately from completion and reviews. **Inspect** opens a persistent side
-  panel: switch profiles or checks, inspect the recorded command, timeout, exit
-  code and timing, and search retained output. Different or unknown check
-  definitions remain explicit; matching names alone do not establish equivalence.
-  Viewing a check never reruns it. Older reports may retain only results, with
-  command text and output marked unavailable; content that was never saved cannot
-  be recovered when opening the report. Exports include check commands and output
-  only when recorded-content inclusion is selected, subject to redaction and size
-  limits; omitted and unavailable content remains identified as such.
-  **Time and tokens** compares Workflow, Main session and delegated agents in two
-  compact columns. All bars share one scale and legend: uncached input, cached
-  input, other output and reasoning. Expand a row for exact counters and scope.
-  Cached input is already part of input; reasoning is already part of output.
-  Workflow time spans the earliest to latest retained event; overlapping agent
-  durations are not added. Runner task time is shown separately in workflow details.
-  A validated captured-session token sum can be shown while **Whole workflow not
-  validated** remains visible: verified accounting does not prove every native
-  session was captured. Missing usage stays unknown. File counts and rows share one retained snapshot
-  inventory, separating tracked changes from ignored artifacts. Reports without
-  that inventory show observed edit paths with an explicit coverage limit.
-- **Export and reopen.** Export saves a Markdown report and its `.md.audit.json`
-  companion together in a new folder under `~/Xenoflux reports/`. Keep the two
-  files together. **Open saved report** reopens the JSON file exactly as saved,
-  even after the original sessions are gone.
-  Event bodies, check commands and check output are excluded unless you select
-  **Include recorded messages and tool content**. New runner captures retain up
-  to 64 KiB per check output stream, with truncation stated explicitly. The
-  task-end workspace reference is a baseline; earlier checks may change files.
-  Known secret patterns are redacted, but private prose and code
-  can remain; inspect both files before sharing.
-  If an attached review is bound to recorded content, export cannot silently
-  remove that evidence and keep the same review. Preserve the reviewed content,
-  or obtain a review of the sanitized export instead.
-- **Manage profiles.** See each profile's client state, open Codex CLI in Terminal
-  or Codex Desktop, create a profile (empty or from selected parts of another),
-  copy selected settings with a preview and undo, rename, change the project
-  binding, or remove a profile from Xenoflux (its files stay on disk).
+### Create and manage profiles
 
-Reports with your same-task declaration have private links that work while the
-server is running. Export the report to keep the declaration after stopping it.
+In Profiles, choose **Create profile**, select the client, then choose **Empty**
+or **Selected parts of another profile**. Empty profiles contain the minimal
+management files. Selected-parts creation previews supported same-client copies;
+cross-client copying is unsupported. Follow the native sign-in guidance before
+starting model work. Creation itself does not open a native client or sign in.
+
+Profiles can be renamed, bound to a project, inspected or removed from Xenoflux.
+Removal leaves their files on disk. Copying settings requires a preview and
+supports Undo; affected clients must be idle. See [profiles](PROFILES.md) and
+[selective copying](ADVANCED-COPY.md) for commands and recovery.
+
+Choose two profiles to compare current settings, instructions, skills, MCP servers,
+plugins, hooks and memory settings. Items show **Different**, **Same**,
+**Could not compare** with a reason, or **Not applicable**. Inspection reads files;
+it neither copies them nor proves the native client loaded them.
+
+When signed Claude or GitHub Copilot apps are installed, separate **Open** buttons
+use their existing accounts without submitting a task or creating managed desktop
+profiles. A Copilot session link dispatch does not prove that the session exists;
+the native app reports missing sessions.
+
+### Compare existing sessions
+
+Tick two sessions; the first selected is the left side. **Swap sides** reverses
+them. For different profiles or clients, choose **Choose recent sessions by
+profile**, select each profile and choose **List recent sessions**. Changing the
+profile context requires a fresh list and selection. Managed Copilot profiles use
+their first bound repository as the native working directory; bind one in Profiles
+before listing. Listing and importing read history without starting model tasks.
+
+On **Open saved report**, you can also:
+
+- Select two native UTF-8 UUID-named Claude Code `.jsonl` files, up to 8 MiB each,
+  and choose **Compare stored conversations**.
+- Enter two existing Copilot CLI/app session UUIDs and choose **Compare Copilot
+  conversations**. The native `copilot` CLI must be on PATH; this reader uses
+  implicit sign-in and refuses token/custom-root overrides.
+
+These imports retain selected user/assistant text as partial evidence. Tools,
+reasoning and system content are omitted; original account, execution surface,
+location, usage and completion remain unknown. Raw transcripts stay private.
+Export to reopen the report independently of native history. See the
+[import contracts](AUDIT-EVIDENCE.md#read-only-client-conversation-imports).
+
+### Run a new task
+
+Describe the task, choose a profile for each side and select the repository.
+Review the pinned commit, limits, model, effort, permissions and any setup/check
+commands. Same-client and mixed-client pairs use each client's permission rules.
+Codex comparisons default to workspace-write with networking disabled and also
+offer read-only. Claude Code and Copilot CLI can inherit profile permissions.
+Copilot Auto may route each turn differently.
+
+**Refresh models** initializes the native client without submitting a task. It may
+use sign-in, write native state or run configured startup hooks. Browsing uses
+cached metadata. Changing the model clears explicit effort; Start rechecks explicit
+choices. An advertised model does not prove account entitlement or applied settings.
+
+Choose **Start 2 model runs** to begin. Sides run sequentially in separate copies
+of the committed source; dirty, untracked and ignored files are excluded. Setup
+and check commands run outside the Codex sandbox and may affect external files
+or services. Choose trusted commands. No check is selected automatically, and
+completion alone is not verification. CLI specifications and process limits are
+in [controlled experiments](AUDIT-EXPERIMENTS.md).
+
+### Read the report
+
+Read the last recorded responses side by side, then inspect these views:
+
+| View | Use it to |
+| --- | --- |
+| Replay | Browse independently scrolling conversations, expand turns/delegated sessions and select events for the side inspector. **Open delegated session** follows a delegation; **Return to calling event** restores that side's event, search and scroll. |
+| Assessment | Compare recorded checks. **Inspect** opens a panel with the recipe, timeout, exit status, timing and retained output. Matching names alone do not prove matching checks; viewing never reruns one. |
+| Time and tokens | Expand Workflow, Main session or delegated-agent rows for exact counters and scope. Cached input is part of input; reasoning is part of output. Overlapping spans are not added. Missing usage stays unknown. |
+| Outcome and code | Inspect captured changes and the snapshot's distinction between tracked changes and ignored artifacts. Older reports may expose only observed edit paths with a coverage limit. |
+
+**F6** switches focus between conversation and inspector. **Escape** closes the
+inspector and returns to the selected event. **Source and event details** shows
+recorded references. Each side uses its own root session's elapsed-time origin.
+
+Saved replay does not acquire later activity. Missing histories, content and check
+output cannot be reconstructed on reopen. A validated captured-session token sum
+can coexist with **Whole workflow not validated**: accounting does not prove every
+native session was captured. See [evidence and capture](AUDIT-EVIDENCE.md) for
+bounds, attribution and accounting rules.
+
+### Export and reopen
+
+Export creates a Markdown report and its `.md.audit.json` companion in a new folder
+under `~/Xenoflux reports/`. Keep both files together. **Open saved report** reads
+the JSON as saved, even after original sessions disappear. Same-task declaration
+links work while the server runs; export preserves the declaration afterwards.
+
+Event bodies, check commands/output and patch text are omitted unless you select
+**Include recorded messages and tool content**. Known-secret redaction does not
+remove all private prose or code; inspect both files before sharing. An attached
+review cannot retain its evidence binding while that evidence is silently removed.
+Preserve the reviewed content or request a review of a separate sanitized export.
 
 ## 4.0.0 scope and limits
 
-**4.0.0-beta.1 is an opt-in public beta candidate.** The supported journey is
-available for qualification, with the limits below still explicit. Passing
-checks does not establish that every native failure or end-user setup works.
-See [beta installation](INSTALLATION.md) and the
-[stable-promotion checklist](../developer/AUDIT-ACCEPTANCE.md#beta-exit-checklist).
+**4.0.0-beta.1 is an opt-in public beta.** Use the
+[installation guide](INSTALLATION.md) to opt in. The
+[beta-exit checklist](../developer/AUDIT-ACCEPTANCE.md#beta-exit-checklist) governs
+stable promotion; passing fixtures does not prove every native journey.
 
-- Profiles follow the current selected CLI/Desktop installation and observed
-  capabilities. They are never pinned to a version/build matrix. Versions are
-  provenance; a changed executable or root between preview and launch requires
-  a fresh preview. SDK dependencies remain separately locked.
-- Claude Code has an observed per-root, same-account sign-in route. Copilot has
-  a qualified shared GitHub CLI (`gh-cli`) account route: separate setup roots
-  do not establish separate accounts. Distinct-account independence remains
-  unverified. Shared sign-out was not exercised as an isolation check.
-- Native credential refresh is **unverified and deferred to the next release**.
-  Sign-in, restart and successful tasks do not prove renewal. Native clients
-  own credentials and refresh; Xenoflux does not transfer credentials.
-- Copilot Auto may route each turn differently, limiting reproducibility.
-  Applied effort, turn/phase attribution, timing and usage stay unknown when
-  the native client does not report them. Partial capture stays partial.
-  Sampled process ancestry does not prove that escaped descendants terminated.
-- Restart interrupts owned work; there is no automatic reattach, resend or
-  resume. Reopening retains saved evidence and associated review responses.
-- Native qualification covers the adopted core paths and one mixed-client
-  pair. The remaining pair/mode cross-product, repeated overlap stress,
-  controller-kill native reviews and copied-setup native loading are deferred
-  to the next release; fixture coverage remains. Copy success does not prove
-  that the native client loaded the copied setup.
-- CLI setup inspection uses `--surface cli|desktop`; the former
-  `--client cli|desktop` flag is removed. See the [audit guide](AUDIT.md).
-- Desktop stale-callback recovery has synthetic native-fixture coverage;
-  recovery from that condition in real Codex remains unobserved. Those fixtures
-  do not establish real sign-in, Dock behavior or account isolation.
+- Profiles follow the current selected installation and observed capabilities,
+  never a fixed CLI/Desktop version. A changed executable or root after preview
+  requires a fresh preview. SDK dependencies are separately locked.
+- Claude Code has an observed per-root, same-account route. Copilot's qualified
+  `gh-cli` route is shared. Separate setup roots do not prove independent accounts;
+  distinct-account independence and shared sign-out isolation remain unverified.
+- Native credential refresh is unverified. Clients own sign-in and renewal;
+  Xenoflux does not transfer credentials. Successful tasks do not prove refresh.
+- Native qualification covers adopted core paths and one mixed-client pair.
+  Remaining pair/mode combinations, repeated overlap stress, controller-kill native
+  reviews and copied-setup native loading are deferred. Copy success does not
+  establish that the client loaded the setup.
+- Unreported effort, turn attribution, timing and usage stay unknown. Sampled
+  ancestry does not prove escaped descendants stopped. Real Codex stale-callback
+  recovery remains unobserved; synthetic Desktop fixtures prove neither sign-in,
+  Dock behavior nor account isolation.
+- CLI setup inspection uses `--surface cli|desktop`; the old `--client cli|desktop`
+  option is removed. See the [audit guide](AUDIT.md).
 
 ## What the app never does
 
-- Close Codex or Terminal sessions. Copying and undoing require idle affected
-  clients; the app reports blockers for you to close manually.
-- Sign in for you, transfer credentials, conversation history or memory between profiles, or install,
+- Close Codex or Terminal sessions to make copying possible; it reports blockers
+  for you to close manually.
+- Sign in for you, transfer credentials/history/memory between profiles, or install,
   enable or connect plugins and MCP servers.
-- Start or resume a session when you only browse or compare.
-- Send report browsing or setup comparisons to an external service. An explicitly
-  started model task uses the selected profile's provider connection and sign-in.
+- Start or resume a model task merely because you browse or compare evidence.
+- Send browsing/setup comparisons to an external service. Explicit model tasks
+  use the selected profile's provider connection and sign-in.
 
 ## Review a comparison
 
-From a comparison report, choose **Review**. Select a profile and its normal
-workspace, edit the review prompt and choose whether to include recorded report
-content. **Preview review** shows the exact frozen inputs and prompt, workspace,
-executable and limits; it starts no native session. Editing the form invalidates
-that preview. Choose **Start review** to start one ordinary model task.
+Choose **Review**, select a profile and its normal workspace, edit the prompt and
+choose whether to include recorded content. **Preview review** shows the frozen
+inputs, prompt, executable, workspace and limits without starting a session.
+Editing the form invalidates that preview. Choose **Start review** to submit once.
 
-You can select a model ID and reasoning effort for each review. Blank fields
-inherit the profile settings; overrides apply only to that task. The native
-session must confirm explicit selections before a model turn starts.
+Blank model/effort fields inherit profile settings; overrides apply only to this
+task. Start rechecks explicit choices. Applied settings and session IDs appear only
+when reported by the native session. The selected client's CLI supplies its normal
+instructions, integrations, permissions and provider connection. Xenoflux does not
+change sign-in, trust or configuration. Reasoning from the report is a prompt
+instruction, not enforced isolation; normal native history/runtime effects apply.
+Duration is uncapped by default with an optional time cap, no token/dollar cap,
+and an 8 MiB native process-output bound.
 
-The selected profile supplies its normal provider connection, default model settings,
-instructions, integrations and permissions. Xenoflux does not change sign-in,
-trust or configuration to prepare a review. The task has the profile's normal
-native history and runtime effects; the request to reason from the report is a
-prompt instruction, not enforced isolation. Effective settings and session IDs
-are shown only when reported by the native session. Model duration is uncapped
-by default; you can choose a time cap. There is no token or dollar cap, and native
-process output is bounded to 8 MiB.
+An already-running Xfx-managed Codex Desktop instance can stay open during review;
+cancelling the review leaves it running. A confirmed-stopped instance is reconciled
+by observed profile listing or the next review Start. Uncertain helpers/file holders
+still block conflicting work. New Desktop launch while a comparison/review owns
+the profile remains blocked.
 
-Reviews run through the profile's Codex CLI, independently of Desktop. An
-already-running Xfx-managed Desktop instance can remain open on that profile;
-other Desktop profiles are unaffected. Cancelling the review leaves Desktop
-running. You can quit Desktop normally: observed profile listing or the next
-review Start reconciles its stopped reservation automatically. Remaining helpers
-or uncertain file holders still block cleanup.
+Comparisons and reviews can overlap on one profile, up to eight active jobs per
+controller by default. The header links to each job, with independent approvals,
+progress, cancellation and results. Simultaneous reviews need non-overlapping
+workspaces. Profile mutation is blocked by execution reservations, and overlapping
+work shares machine/profile conditions.
 
-Independent comparisons and reviews can overlap on the same profile, up to eight
-active jobs per controller by default. The header links to each active job. Each
-keeps its own approvals, progress, cancellation and results. Choose a separate
-workspace for each simultaneous review; overlapping directories are refused.
-Profile changes are blocked while its execution reservations remain. Timings
-during overlapping work reflect shared machine and profile conditions.
+Native approval/input requests appear on the review page; nothing is answered
+automatically. **Cancel review** stops owned work and retains partial output.
+Refreshing follows the same task; closing the tab leaves it running. Restart never
+resubmits or resumes it. Unknown ownership remains visible and blocks conflicts.
 
-When Codex needs approval or input, the review page shows its requested action
-and choices. Nothing is answered automatically. **Cancel review** stops owned
-work and retains partial output. Refreshing follows the same task; closing the
-tab leaves it running. A server restart never resumes or retries it. Live or
-unknown process ownership stays uncertain and blocks conflicting work.
+Read the captured response and use **Open its comparison and evidence** to return
+to the frozen report. Inputs/responses remain after source-session loss. A partial
+response is not a completed review. Ordinary responses are attributed text, separate
+from structured ratings, and are not included in report exports.
 
-Read the captured response on the review page and use **Open its comparison and
-evidence** to return to the frozen report. The task retains its inputs and
-response even if original sessions disappear. A partial or missing response is
-not a completed review. Ordinary responses are attributed text, separate from
-structured review ratings; one pair does not prove general superiority or
-consistency. Report exports do not include the separate ordinary task response.
-
-External review preparation and import remain optional:
-
-On an engine-backed two-session comparison, open **Reviews** and choose
-**Prepare packet for external review** to save a frozen Markdown/JSON review
-packet. Choose whether recorded message and tool content should be included;
-review references and evidence metadata remain in the packet either way. Read
-the files before sharing, since included content can contain private information.
-After an external reviewer prepares a submission for that exact packet, return
-to its Reviews page and choose the review submission JSON file. Xenoflux validates
-it against the report's frozen evidence, shows who wrote it, what it concludes and which
-evidence it cites, then saves it as a new evaluation. This import does not call
-an AI service. To revise a review, open the saved evaluation and import a new
-submission that supersedes the earlier review. Export the report after saving
-to retain and share the evaluation; inspect recorded content before sharing.
-Xenoflux still does not automatically judge a result.
+For optional external review, open **Reviews** on an engine-backed comparison and
+choose **Prepare packet for external review**. Review the frozen Markdown/JSON files
+before sharing. Import a submission for that exact packet to validate its references
+and save a new evaluation without calling an AI service. Revisions supersede prior
+entries without deleting history. Export the evaluation to retain it. Submission
+formats and evidence rules are in [external reviews](AUDIT-REVIEWS.md#review-either-audit-entry-path).
 
 ## Inspect captured code changes
 
-In **Outcome and code**, each side shows whether task-end patch text was retained.
-Choose **Inspect [profile] patch** to read it. A patch compares the captured
-workspace against its original source baseline, so it may include setup changes.
-It is not necessarily a task-only delta and does not include unchanged source or
-ignored-file contents. After-process fallback captures are labelled separately.
-Reports enriched from verified retained snapshot artifacts identify that origin.
+In **Outcome and code**, choose **Inspect [profile] patch**. Patches compare the
+captured workspace to its source baseline and may include setup changes. They do
+not include unchanged source or ignored-file contents. Fallback timing, verified
+snapshot enrichment and absent/binary/oversized content are labelled explicitly.
+Historical reports are never filled from today's workspace.
 
-New xfx captures retain a complete redacted text patch up to 256 KiB per side.
-Binary, oversized, unreadable or absent content stays explicit; no truncated patch
-is represented as complete. Historical reports are not modified or populated from
-today's workspace. Known-secret redaction is not a guarantee that every private
-value is removed; inspect the packet before sharing it.
-
-Patch text is excluded from ordinary exports. Select **Include recorded messages
-and tool content** to include available patch text together with the selected
-replay/check content. The Markdown and JSON use the same choice. Changing this
-choice cannot silently strip evidence from an existing review: prepare a separate
-packet from the original unreviewed comparison when a different disclosure is
-needed.
+Patch text uses the same **Include recorded messages and tool content** export
+choice as replay/check bodies. Limits and completeness rules are in
+[captured task-end patches](AUDIT-EVIDENCE.md#captured-task-end-patch-content).
 
 ## CLI workflows
 
-Construct repeated comparisons with the [series/cohort commands](AUDIT-REVIEWS.md).
+Use [series/cohort commands](AUDIT-REVIEWS.md) for repeated comparisons.
 
 ## Progress, cancellation and interruption
 
-Refreshing or closing the browser tab leaves an explicitly started task running.
-Reopen the app to see progress. **Cancel the run** stops only that experiment's
-owned work and retains a partial report; existing Codex and Terminal clients stay
-open. Stopping the local Xenoflux server interrupts its owned experiment and
-preserves the records. Reopening never restarts a model task automatically or
-reattaches to live work.
+Refreshing or closing the browser tab leaves started work running. Reopen the app
+to follow it. **Cancel the run** stops only the experiment's owned work and retains
+a partial report; existing Codex/Terminal clients stay open. Stopping the server
+interrupts its work and preserves records. Reopening never reattaches, resumes or
+starts a model task automatically.
 
-After an interruption, open the task under Recent. If recovery is needed, inspect
-the preview before choosing **Tidy up and keep the record**. Recovery only
-reconciles stopped resources owned by that experiment; live or uncertain resources
-stay untouched. The report and its exports keep failures and unavailable evidence.
+After interruption, open the task under Recent. Preview recovery before choosing
+**Tidy up and keep the record**. Only confirmed-stopped owned resources are
+reconciled; live or uncertain resources stay untouched. Failures and unavailable
+evidence remain in the report and exports.
 
 ## Try it with example data
 
@@ -294,16 +230,15 @@ stay untouched. The report and its exports keep failures and unavailable evidenc
 xfx ui --demo
 ```
 
-Demo mode uses synthetic examples and marks simulated actions; external review
-import is not simulated. It never reads or changes your profiles, sessions or clients.
+Demo mode marks synthetic examples and simulated actions. External review import
+is not simulated. It never reads or changes your profiles, sessions or clients.
 
 ## If something goes wrong
 
-- **"Open Xenoflux from its launch link"**: the page was opened without the link
-  `xfx ui` prints. Run `xfx ui` again.
-- **"Xenoflux isn't running"**: the page cannot reach the server. Run `xfx ui`
-  again and inspect the last recorded run state; no task restarts automatically.
-- **A profile's history couldn't be read**: macOS may need permission for the
-  terminal that runs `xfx ui` to read folders in Documents, Desktop or Downloads.
-  Allow it in System Settings › Privacy & Security › Files and Folders.
-- **Port in use** with `--port`: run `xfx ui` without `--port` to pick a free one.
+- **"Open Xenoflux from its launch link"**: run `xfx ui` again and use its link.
+- **"Xenoflux isn't running"**: restart the server and inspect the recorded state;
+  no task restarts automatically.
+- **A profile's history couldn't be read**: allow the terminal to access the relevant
+  Documents/Desktop/Downloads folder in System Settings > Privacy & Security >
+  Files and Folders.
+- **Port in use** with `--port`: omit `--port` to select a free one.
