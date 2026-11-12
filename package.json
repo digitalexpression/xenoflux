@@ -41,6 +41,7 @@
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "check": "node scripts/check.mjs",
     "check:docs": "node scripts/check-docs.mjs",
+    "check:public": "node scripts/check-public-history.mjs",
     "build:native": "node scripts/build-profile-launcher.mjs",
     "check:native": "node scripts/build-profile-launcher.mjs --check",
     "local-release": "node scripts/local-release.mjs",

@@ -10,6 +10,10 @@ Once the outcome, affected code and verification are clear, begin authorized
 implementation. Reopen decisions only for conflicting evidence or a scope change.
 Documentation grants no operational authorization.
 
+For maintainer work, read `local/maintainer/instructions.md` if present.
+Public development and checks must work without that ignored file. It provides
+private context and workflow pointers, not operational authorization.
+
 ## References by task
 
 | Work | Read when relevant |
@@ -38,3 +42,6 @@ rules and supported limitations over duplicated narratives. Keep private paths,
 identifiers, operational grants and execution records outside public source.
 Preserve full originals privately before shortening or removing them; do not
 alter raw evidence, published tags or artifacts.
+
+Before the first public push, review every outgoing commit and run the
+[public history check](docs/developer/README.md#prepare-public-commits).

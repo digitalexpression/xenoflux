@@ -60,6 +60,46 @@ See [Desktop verification](DESKTOP-IMPLEMENTATION.md#verification-and-native-acc
 for the limits of this fixture. Real profile/client operations need current
 authorization covering their effects and must preserve unrelated clients/data.
 
+## Prepare public commits
+
+Start short-lived `codex/<task>` branches from current public `main`. Keep private
+maintainer instructions, coordination and notes under ignored `local/maintainer/`.
+Each worktree needs its own local context if its task requires it. Public checks
+must work without that context. Shared project rules belong in `AGENTS.md`.
+
+Keep checkpoint commits local. Before the branch's first public push, squash or
+reorganize them into focused commits explaining the resulting behavior and checks.
+Review the entire outgoing history, including commit messages and file contents.
+Deleting a private file in a later commit does not remove its earlier contents.
+
+Run the local history check after fetching public `main`:
+
+```sh
+git fetch origin
+npm run check:public
+```
+
+The check rejects tracked or outgoing paths ignored by the current checkout,
+including files committed and subsequently deleted. It checks the index, selected
+commit trees and outgoing history. It does not inspect prose or detect secrets
+inside allowed paths. Review changes to ignore rules as part of the content review.
+Use `npm run check:public -- --base <revision>` to select another reviewed base.
+
+Maintainers can install a local pre-push hook that invokes a reviewed copy of
+`scripts/check-public-history.mjs` from the common Git hooks directory, passing
+`--pre-push "$1"`. Keeping that copy outside the working tree allows checks on
+branches that do not yet contain the helper. Refresh it when the helper changes.
+It reads Git's ref updates
+from standard input and checks each outgoing range. For a new ref, it uses that
+remote's fetched `main`; for an existing ref, it requires the remote tip locally.
+Fetch before retrying a missing-base error. The hook is local configuration and
+needs installation in each independent clone; linked worktrees share it.
+
+Push explicit named branches or release tags. Keep private checkpoint ancestry
+out of public branches and review actual package contents separately. Git ignore
+rules do not control npm's package allowlist. Existing public history requires a
+separate assessment; this procedure does not rewrite it.
+
 ## Build a release candidate
 
 The 4.0.0 beta line uses version `4.0.0-beta.1` and npm channel `beta`.
@@ -87,7 +127,9 @@ source identity and refuses tracked changes or untracked package inputs.
 Review its generated `package.json`: the prerelease version and
 `publishConfig.tag: "beta"` must agree with the manifest and artifact filename.
 For any later approved publication, use that exact tarball with npm `--tag beta`
-and a GitHub prerelease. Leave stable `latest` unchanged; a GitHub prerelease
+and a GitHub prerelease. Run publication from a clean checkout whose `HEAD` equals
+the manifest's `sourceRevision`, and verify registry `gitHead` when present.
+Leave stable `latest` unchanged; a GitHub prerelease
 label alone does not select npm's distribution channel.
 `--smoke` checks disposable installation and lifecycle fixtures; it does not
 qualify real native accounts, tasks or credential refresh. Building or passing
