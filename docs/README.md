@@ -5,6 +5,10 @@ Version identity is recorded in the [package manifest](../package.json),
 [GitHub releases](https://github.com/digitalexpression/xenoflux/releases) and
 [npm package](https://www.npmjs.com/package/xenoflux).
 
+For this beta line, follow the explicit channel instructions in
+[Installation](user/INSTALLATION.md). Stable promotion uses the
+[beta-exit checklist](developer/AUDIT-ACCEPTANCE.md#beta-exit-checklist).
+
 ## User guides
 
 | Guide | Use it to |

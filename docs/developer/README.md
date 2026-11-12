@@ -62,6 +62,10 @@ authorization covering their effects and must preserve unrelated clients/data.
 
 ## Build a release candidate
 
+The 4.0.0 beta line uses version `4.0.0-beta.1` and npm channel `beta`.
+The [beta-exit checklist](AUDIT-ACCEPTANCE.md#beta-exit-checklist) owns the stable
+promotion criteria; beta preparation does not complete that future review.
+
 After the required checks, commit all package inputs and build from a clean
 tracked checkout:
 
@@ -80,6 +84,11 @@ The development manifest is private and ordinary checkout `npm pack` is refused.
 Use the generated tarball for any separately authorized publication; publishing
 the checkout would bypass the verified bundle. The builder records the committed
 source identity and refuses tracked changes or untracked package inputs.
+Review its generated `package.json`: the prerelease version and
+`publishConfig.tag: "beta"` must agree with the manifest and artifact filename.
+For any later approved publication, use that exact tarball with npm `--tag beta`
+and a GitHub prerelease. Leave stable `latest` unchanged; a GitHub prerelease
+label alone does not select npm's distribution channel.
 `--smoke` checks disposable installation and lifecycle fixtures; it does not
 qualify real native accounts, tasks or credential refresh. Building or passing
 checks does not authorize publication, merging or installed updates.

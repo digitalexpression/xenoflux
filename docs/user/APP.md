@@ -140,6 +140,12 @@ server is running. Export the report to keep the declaration after stopping it.
 
 ## 4.0.0 scope and limits
 
+**4.0.0-beta.1 is an opt-in public beta candidate.** The supported journey is
+available for qualification, with the limits below still explicit. Passing
+checks does not establish that every native failure or end-user setup works.
+See [beta installation](INSTALLATION.md) and the
+[stable-promotion checklist](../developer/AUDIT-ACCEPTANCE.md#beta-exit-checklist).
+
 - Profiles follow the current selected CLI/Desktop installation and observed
   capabilities. They are never pinned to a version/build matrix. Versions are
   provenance; a changed executable or root between preview and launch requires
@@ -164,6 +170,9 @@ server is running. Export the report to keep the declaration after stopping it.
   that the native client loaded the copied setup.
 - CLI setup inspection uses `--surface cli|desktop`; the former
   `--client cli|desktop` flag is removed. See the [audit guide](AUDIT.md).
+- Desktop stale-callback recovery has synthetic native-fixture coverage;
+  recovery from that condition in real Codex remains unobserved. Those fixtures
+  do not establish real sign-in, Dock behavior or account isolation.
 
 ## What the app never does
 

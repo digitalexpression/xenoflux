@@ -2,6 +2,9 @@
 
 ## Current work and stop condition
 
+The 4.0.0 line is an opt-in public beta. Complete the
+[beta-exit review](AUDIT-ACCEPTANCE.md#beta-exit-checklist) before stable promotion.
+
 Xenoflux supports local Apple Silicon macOS profile management and task comparison for Codex,
 Claude Code and GitHub Copilot CLI. The core journey is create a profile, compare
 a task, inspect its report and optionally request an ordinary AI review.

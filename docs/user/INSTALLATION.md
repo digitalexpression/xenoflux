@@ -5,6 +5,12 @@ Contributor checks are in the [developer guide](../developer/README.md).
 
 Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.
 
+This guide describes **4.0.0-beta.1**, an opt-in public beta candidate. Publication
+is separate from preparation. Once published, select `xenoflux@beta` for the beta
+channel or `xenoflux@4.0.0-beta.1` for this exact version. Plain `xenoflux` and
+`xenoflux@latest` select the stable channel; preparing beta does not update it.
+Review the [beta scope and limits](APP.md#400-scope-and-limits) before opting in.
+
 ## Requirements
 
 - Apple Silicon Mac with macOS 13 or later; run an arm64 Node installation.
@@ -30,7 +36,7 @@ formats may be unsupported; preserve originals and check the release notes.
 ## Install globally with npm
 
 ```sh
-npm install -g xenoflux
+npm install -g xenoflux@beta
 xfx --help
 ```
 
@@ -38,7 +44,7 @@ npm installs the package and links `xfx` into its global executable directory:
 `$(npm prefix -g)/bin` on macOS. When that directory is already on `PATH`, `xfx`
 is immediately available; no `~/.local/bin` export or `xfx install` step is needed.
 If `xfx` is not found, check `npm prefix -g` and your Node installation's global
-bin setup. Plain `npm install xenoflux` installs locally; use `npm exec -- xfx`
+bin setup. `npm install xenoflux@beta` installs the beta locally; use `npm exec -- xfx`
 for that project-local installation.
 
 Global npm installation does not close Codex clients, prepare a profile, enable
@@ -72,7 +78,7 @@ xfx install --close-clients
 You can also obtain that installer without a global npm installation:
 
 ```sh
-npm exec --yes --package=xenoflux@latest -- xfx install --close-clients
+npm exec --yes --package=xenoflux@beta -- xfx install --close-clients
 ```
 
 Run managed installation from an external terminal. It may request graceful
@@ -88,10 +94,13 @@ reports RAM logs disabled; see [RAM logs](RAM-LOGS.md).
 
 ## Install an offline release bundle
 
-Download all three files from the same [GitHub release](https://github.com/digitalexpression/xenoflux/releases):
+After publication, download all three files from the same beta
+[GitHub prerelease](https://github.com/digitalexpression/xenoflux/releases):
 `xenoflux-VERSION.tgz`, `manifest.json`, and `install.mjs`. The same npm tarball
 contains the SDK runtime and arm64 native library; no separate runtime archive
 is required. Your selected native CLIs must be installed separately.
+For this candidate, `VERSION` is `4.0.0-beta.1`; keep the prerelease suffix in
+the tarball name. Use its matching manifest and installer.
 Place them together in one directory and keep the tarballs compressed. From an
 external terminal in that directory:
 
@@ -120,7 +129,7 @@ leaves `xfx` unavailable, rerun this installer from the same directory.
 For the npm global installation:
 
 ```sh
-npm install -g xenoflux@latest
+npm install -g xenoflux@beta
 npm uninstall -g xenoflux
 ```
 
@@ -128,6 +137,9 @@ npm updates or removes its package and CLI link. Profiles and controller data
 under `~/.xfx` remain untouched. If a separate managed copy also exists, npm does
 not update or remove it. Use `command -v xfx` to see which installation your shell
 resolves.
+
+The update command above stays on the beta channel. It does not move npm's
+stable `latest` tag or publish anything.
 
 For a managed installation, run its installer from a newer package or offline
 bundle to update it. `xfx install --close-clients` reinstalls the version you invoke.

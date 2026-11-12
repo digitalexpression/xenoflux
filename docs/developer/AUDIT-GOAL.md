@@ -6,6 +6,10 @@ Current user instructions determine authorization; documentation grants none.
 
 ## Current release boundary
 
+The 4.0.0 line is being prepared as **4.0.0-beta.1**, an opt-in public beta.
+Stable promotion follows the [beta-exit checklist](AUDIT-ACCEPTANCE.md#beta-exit-checklist).
+Beta status preserves the same safety, privacy and explicit-approval requirements.
+
 The locally bundled browser UI supports **Codex, Claude Code and GitHub Copilot
 CLI on Apple Silicon macOS**, launched with `xfx ui`. Users can:
 

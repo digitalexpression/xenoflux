@@ -1,6 +1,6 @@
 {
   "name": "xenoflux",
-  "version": "4.0.0",
+  "version": "4.0.0-beta.1",
   "description": "Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CLI on macOS.",
   "type": "module",
   "bin": {
@@ -69,7 +69,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "latest",
+    "tag": "beta",
     "registry": "https://registry.npmjs.org/"
   },
   "devDependencies": {

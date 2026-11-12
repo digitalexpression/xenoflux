@@ -151,6 +151,10 @@ assert.equal(RuntimeConnection.forStdio({ path: external }).path, external);
   assert.doesNotMatch(contents.stdout, /node_modules\/(?:@anthropic-ai\/claude-agent-sdk-|@github\/copilot-sdk-|@koromix\/koffi-darwin-x64|vite\/)/);
   assert.doesNotMatch(contents.stdout, /(?:^|\/)\._/m);
   const published = JSON.parse(await readFile(join(application, 'package.json'), 'utf8'));
+  assert.match(published.version, /^4\.0\.0-beta\.\d+$/);
+  assert.equal(published.version, project.version);
+  assert.equal(published.publishConfig.tag, 'beta');
+  assert.equal(project.filename, `xenoflux-${published.version}.tgz`);
   assert.equal(published.private, undefined);
   assert.equal(published.scripts.prepack, undefined);
   assert.deepEqual(published.cpu, ['arm64']);
@@ -163,12 +167,17 @@ assert.equal(RuntimeConnection.forStdio({ path: external }).path, external);
       '--no-audit', '--no-fund', '--cache', join(root, mode, 'empty-cache'), ...(mode === 'omit-optional' ? ['--omit=optional'] : [])]);
     assert.equal(installed.code, 0, installed.stderr);
     const globalApp = join(prefix, 'lib', 'node_modules', 'xenoflux');
+    const installedManifest = JSON.parse(await readFile(join(globalApp, 'package.json'), 'utf8'));
+    assert.equal(installedManifest.version, published.version);
+    assert.equal(installedManifest.publishConfig.tag, 'beta');
     assert.deepEqual(await packageInventory(globalApp, { npmBinsFor: inventory }), inventory);
     const probe = await run(process.execPath, [join(globalApp, 'bin', 'xfx.js'), external], { cwd: root, env: { ...process.env, NODE_PATH: '' } });
     assert.equal(probe.code, 0, probe.stderr);
   }
   const manifest = manifestFor({ packageName: project.name, version: project.version, tarball: project.filename,
     sha256: await digest(bundle) });
+  assert.equal(manifest.version, published.version);
+  assert.equal(manifest.tarball, `xenoflux-${published.version}.tgz`);
   const installer = join(release, 'install.mjs');
   await writeFile(join(release, 'manifest.json'), JSON.stringify(manifest));
   await writeFile(installer, await readFile(join(process.cwd(), 'scripts', 'install-template.mjs')));
