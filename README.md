@@ -4,6 +4,9 @@ Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CL
 
 ## Install
 
+4.0.0 targets Apple Silicon Macs with arm64 Node. See the
+[requirements](docs/user/INSTALLATION.md#requirements).
+
 Run in an external terminal:
 
 ```sh

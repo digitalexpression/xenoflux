@@ -2,7 +2,7 @@
 
 ## Current work and stop condition
 
-Xenoflux supports local macOS profile management and task comparison for Codex,
+Xenoflux supports local Apple Silicon macOS profile management and task comparison for Codex,
 Claude Code and GitHub Copilot CLI. The core journey is create a profile, compare
 a task, inspect its report and optionally request an ordinary AI review.
 

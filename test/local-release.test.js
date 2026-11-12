@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { archiveRuntimeDependency, buildOfflineRuntime, hasReadCorroboration, manifestFor, parseArguments, preservesFrozenAuditFields } from '../scripts/local-release.mjs';
+import { archiveRuntimeDependency, assertInstallHooks, buildBundledPackage, bundledManifest, hasReadCorroboration, manifestFor, packageInventory, parseArguments, preservesFrozenAuditFields } from '../scripts/local-release.mjs';
 
 test('local release arguments and manifests retain only reviewable artifact facts', () => {
   assert.deepEqual(parseArguments(['--output', '/tmp/release', '--smoke']), {
@@ -15,12 +15,9 @@ test('local release arguments and manifests retain only reviewable artifact fact
   assert.throws(() => parseArguments(['--output']), /Missing value/);
   assert.throws(() => parseArguments(['--helpers', '/tmp/helpers']), /Unknown option/);
   assert.deepEqual(manifestFor({ packageName: 'xenoflux', version: '0.1.1-rc.1', tarball: 'xenoflux.tgz',
-    sha256: 'abc', dependencies: [{ name: 'xenoflux-runtime', version: '0.1.1-rc.1', tarball: 'runtime.tgz',
-      platform: 'darwin', arch: 'arm64', sha256: 'def' }],
-    sourceRevision: '5ab3e9f', smoke: { status: 'passed' } }), {
-    schemaVersion: 2, package: 'xenoflux', version: '0.1.1-rc.1', tarball: 'xenoflux.tgz',
-    sha256: 'abc', dependencies: [{ name: 'xenoflux-runtime', version: '0.1.1-rc.1', tarball: 'runtime.tgz',
-      platform: 'darwin', arch: 'arm64', sha256: 'def' }],
+    sha256: 'abc', sourceRevision: '5ab3e9f', smoke: { status: 'passed' } }), {
+    schemaVersion: 3, package: 'xenoflux', version: '0.1.1-rc.1', tarball: 'xenoflux.tgz',
+    sha256: 'abc', runtime: { bundled: true, platform: 'darwin', arch: 'arm64' },
     sourceRevision: '5ab3e9f', smoke: { status: 'passed' },
   });
 });
@@ -115,7 +112,7 @@ test('runtime dependency archives preserve package files without running lifecyc
     await assert.rejects(access(join(location, 'lifecycle-ran')), { code: 'ENOENT' });
 });
 
-test('offline npm installs the locked SDKs and builds a runtime archive without SDK CLIs', { skip: process.platform !== 'darwin' }, async t => {
+test('self-contained npm bundle preserves locked SDK files, peers and Koffi without SDK CLIs', { skip: process.platform !== 'darwin' }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'xfx offline runtime '));
   t.after(() => rm(root, { force: true, recursive: true }));
   const fixture = join(root, 'project');
@@ -139,25 +136,39 @@ assert.equal(RuntimeConnection.forStdio({ path: external }).path, external);
     '--pack-destination', release, '--cache', join(root, 'fixture-pack-cache')], { cwd: fixture });
   assert.equal(packed.code, 0, packed.stderr);
   const [project] = JSON.parse(packed.stdout);
-  const { install, dependency } = await buildOfflineRuntime(project, join(release, project.filename), root, release);
-  const binary = join(install, 'node_modules', 'xenoflux', 'bin', 'xfx.js');
+  const { install, archive: bundle, inventory } = await buildBundledPackage(project, join(release, project.filename), root, release);
+  const application = join(install, 'node_modules', 'xenoflux');
+  const binary = join(application, 'bin', 'xfx.js');
   const external = join(root, 'external', 'copilot');
-  const result = await run(process.execPath, [binary, external], {
-    cwd: install, env: { ...process.env, NODE_PATH: '' },
-  });
+  const result = await run(process.execPath, [binary, external], { cwd: install, env: { ...process.env, NODE_PATH: '' } });
   assert.equal(result.code, 0, result.stderr);
-  assert.equal(dependency.arch, process.arch);
-  const bundle = join(release, dependency.tarball);
-  assert.equal(dependency.sha256, await digest(bundle));
   const contents = await run('/usr/bin/tar', ['-tzf', bundle]);
   assert.equal(contents.code, 0, contents.stderr);
   assert.match(contents.stdout, /node_modules\/@anthropic-ai\/claude-agent-sdk\/package\.json/);
   assert.match(contents.stdout, /node_modules\/@github\/copilot-sdk\/package\.json/);
-  assert.ok(contents.stdout.includes(`node_modules/@koromix/koffi-darwin-${process.arch}/package.json`));
-  assert.doesNotMatch(contents.stdout, /node_modules\/(?:@anthropic-ai\/claude-agent-sdk-|@github\/copilot-sdk-|vite\/)/);
+  assert.ok(contents.stdout.includes('node_modules/@koromix/koffi-darwin-arm64/package.json'));
+  assert.ok(contents.stdout.includes('node_modules/which/CHANGELOG.md'));
+  assert.doesNotMatch(contents.stdout, /node_modules\/(?:@anthropic-ai\/claude-agent-sdk-|@github\/copilot-sdk-|@koromix\/koffi-darwin-x64|vite\/)/);
   assert.doesNotMatch(contents.stdout, /(?:^|\/)\._/m);
+  const published = JSON.parse(await readFile(join(application, 'package.json'), 'utf8'));
+  assert.equal(published.private, undefined);
+  assert.equal(published.scripts.prepack, undefined);
+  assert.deepEqual(published.cpu, ['arm64']);
+  assert.deepEqual(published.os, ['darwin']);
+  assert.deepEqual(Object.keys(published.dependencies).sort(), published.bundleDependencies.toSorted());
+  for (const name of ['@anthropic-ai/sdk', '@modelcontextprotocol/sdk', 'zod']) assert.ok(published.dependencies[name]);
+  for (const mode of ['normal', 'omit-optional']) {
+    const prefix = join(root, mode, 'prefix');
+    const installed = await run('npm', ['install', '--global', bundle, '--prefix', prefix, '--offline', '--foreground-scripts',
+      '--no-audit', '--no-fund', '--cache', join(root, mode, 'empty-cache'), ...(mode === 'omit-optional' ? ['--omit=optional'] : [])]);
+    assert.equal(installed.code, 0, installed.stderr);
+    const globalApp = join(prefix, 'lib', 'node_modules', 'xenoflux');
+    assert.deepEqual(await packageInventory(globalApp, { npmBinsFor: inventory }), inventory);
+    const probe = await run(process.execPath, [join(globalApp, 'bin', 'xfx.js'), external], { cwd: root, env: { ...process.env, NODE_PATH: '' } });
+    assert.equal(probe.code, 0, probe.stderr);
+  }
   const manifest = manifestFor({ packageName: project.name, version: project.version, tarball: project.filename,
-    sha256: await digest(join(release, project.filename)), dependencies: [dependency] });
+    sha256: await digest(bundle) });
   const installer = join(release, 'install.mjs');
   await writeFile(join(release, 'manifest.json'), JSON.stringify(manifest));
   await writeFile(installer, await readFile(join(process.cwd(), 'scripts', 'install-template.mjs')));
@@ -174,10 +185,10 @@ async function installerFixture(t, { projectDirectory = 'package' } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'xfx-install-template-'));
   t.after(() => rm(root, { force: true, recursive: true }));
   const projectSource = join(root, 'project-source', projectDirectory);
-  const dependencySource = join(root, 'dependency-source', 'package');
+  const dependencySource = projectSource;
   await mkdir(join(projectSource, 'bin'), { recursive: true, mode: 0o700 });
-  await mkdir(dependencySource, { recursive: true, mode: 0o700 });
-  await writeFile(join(projectSource, 'package.json'), '{"name":"xenoflux"}\n');
+  await writeFile(join(projectSource, 'package.json'), JSON.stringify({ name: 'xenoflux', version: '0.2.0', type: 'module',
+    os: ['darwin'], cpu: ['arm64'], bundleDependencies: ['@fixture/sdk'] }) + '\n');
   await writeFile(join(projectSource, 'bin', 'xfx.js'), `import { writeFile } from 'node:fs/promises';
 import { marker } from '@fixture/sdk';
 if (marker !== 'nested-runtime') throw new Error('Wrong SDK dependency was resolved');
@@ -192,18 +203,13 @@ await writeFile(process.env.XFX_INSTALL_ARGUMENTS, JSON.stringify(process.argv.s
   await writeFile(join(nested, 'index.js'), "export const marker = 'nested-runtime';\n");
   const release = join(root, 'release');
   await mkdir(release, { mode: 0o700 });
-  const project = join(release, 'xenoflux.tgz'), dependency = join(release, 'runtime.tgz');
+  const project = join(release, 'xenoflux.tgz');
   await archive(dirname(projectSource), project, projectDirectory);
-  await archive(dirname(dependencySource), dependency, 'package');
   const template = join(process.cwd(), 'scripts', 'install-template.mjs');
   await writeFile(join(release, 'install.mjs'), await readFile(template), { mode: 0o700 });
-  const manifest = {
-    schemaVersion: 2, package: 'xenoflux', version: '0.2.0', tarball: 'xenoflux.tgz', sha256: await digest(project),
-    dependencies: [{ name: 'xenoflux-runtime', version: '0.2.0', tarball: 'runtime.tgz',
-      platform: process.platform, arch: process.arch, sha256: await digest(dependency) }],
-  };
+  const manifest = manifestFor({ packageName: 'xenoflux', version: '0.2.0', tarball: 'xenoflux.tgz', sha256: await digest(project) });
   await writeFile(join(release, 'manifest.json'), JSON.stringify(manifest));
-  return { root, release, dependency, manifest };
+  return { root, release, project, manifest, projectSource };
 }
 
 test('standalone installer verifies tarballs, stages package paths, and preserves quoted arguments', async t => {
@@ -217,9 +223,9 @@ test('standalone installer verifies tarballs, stages package paths, and preserve
   assert.deepEqual(JSON.parse(await readFile(result, 'utf8')), ['install', '--background-path', quoted]);
 });
 
-test('standalone installer rejects a changed runtime archive before staging', async t => {
+test('standalone installer rejects a changed bundled archive before staging', async t => {
   const f = await installerFixture(t);
-  await writeFile(f.dependency, 'changed');
+  await writeFile(f.project, 'changed');
   const output = join(f.root, 'arguments.json');
   const result = await run(process.execPath, [join(f.release, 'install.mjs')], { env: { ...process.env, XFX_INSTALL_ARGUMENTS: output } });
   assert.equal(result.code, 1);
@@ -229,10 +235,11 @@ test('standalone installer rejects a changed runtime archive before staging', as
 
 test('standalone installer refuses a bundle for a different architecture', async t => {
   const f = await installerFixture(t);
-  f.manifest.dependencies[0].arch = process.arch === 'arm64' ? 'x64' : 'arm64';
+  // A valid Apple Silicon manifest must refuse an Intel host before staging.
+  const template = pathToFileURL(join(f.release, 'install.mjs')).href;
   await writeFile(join(f.release, 'manifest.json'), JSON.stringify(f.manifest));
   const output = join(f.root, 'arguments.json');
-  const result = await run(process.execPath, [join(f.release, 'install.mjs')], { env: { ...process.env, XFX_INSTALL_ARGUMENTS: output } });
+  const result = await run(process.execPath, ['--input-type=module', '--eval', `Object.defineProperty(process, 'arch', { value: 'x64' }); await import(${JSON.stringify(template)});`], { env: { ...process.env, XFX_INSTALL_ARGUMENTS: output } });
   assert.equal(result.code, 1);
   assert.match(result.stderr, /Release runtime requires/);
   await assert.rejects(readFile(output));
@@ -252,4 +259,100 @@ test('standalone installer rejects an unsupported Node before loading the releas
     assert.equal(result.code, 1);
     assert.ok(result.stderr.includes(`Node 22.15.0+ (22.x) or 23.8.0+ is required; found v${version}`));
   }
+});
+
+
+test('checkout is private and ordinary npm pack refuses the unbundled development tree', async () => {
+  const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8'));
+  const lock = JSON.parse(await readFile(join(process.cwd(), 'package-lock.json'), 'utf8'));
+  assert.equal(manifest.private, true);
+  assert.deepEqual(manifest.cpu, ['arm64']);
+  assert.deepEqual(lock.packages[''].cpu, ['arm64']);
+  const result = await run('npm', ['pack', '--dry-run', '--offline', '--json']);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /Direct checkout packing is disabled/);
+});
+
+test('complete package archive conserves upstream changelogs and rejects unsafe members', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-complete-archive-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, 'source');
+  const dependency = join(source, 'node_modules', 'fixture');
+  await mkdir(dependency, { recursive: true });
+  await writeFile(join(dependency, 'CHANGELOG.md'), 'Must survive npm packlist filtering.\n');
+  await writeFile(join(dependency, 'LICENSE'), 'License must remain byte-identical.\n');
+  const expected = await packageInventory(source);
+  const archive = join(root, 'complete.tgz');
+  await archiveRuntimeDependency(source, archive, { includeNodeModules: true });
+  const extracted = join(root, 'extracted');
+  await mkdir(extracted);
+  const result = await run('/usr/bin/tar', ['-xzf', archive, '-C', extracted]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(await packageInventory(join(extracted, 'package')), expected);
+  await symlink('/outside', join(dependency, 'unsafe-link'));
+  await assert.rejects(packageInventory(source), /Unsafe package member/);
+  await assert.rejects(archiveRuntimeDependency(source, join(root, 'unsafe.tgz'), { includeNodeModules: true }), /Unsafe installed runtime dependency member/);
+});
+
+test('standalone installer refuses unsafe artifact names, digests and incompatible format before effects', async t => {
+  for (const change of [
+    { tarball: '../outside.tgz' }, { sha256: 'not-a-digest' }, { schemaVersion: 2 },
+    { runtime: { bundled: false, platform: 'darwin', arch: 'arm64' } },
+  ]) {
+    const f = await installerFixture(t);
+    await writeFile(join(f.release, 'manifest.json'), JSON.stringify({ ...f.manifest, ...change }));
+    const marker = join(f.root, 'arguments.json');
+    const result = await run(process.execPath, [join(f.release, 'install.mjs')], { env: { ...process.env, XFX_INSTALL_ARGUMENTS: marker } });
+    assert.equal(result.code, 1, result.stderr);
+    await assert.rejects(access(marker), { code: 'ENOENT' });
+  }
+});
+
+test('standalone installer rejects links in a correctly hashed archive before extracting', async t => {
+  const f = await installerFixture(t);
+  await symlink('/outside', join(f.projectSource, 'unsafe-link'));
+  await archive(dirname(f.projectSource), f.project, 'package');
+  f.manifest.sha256 = await digest(f.project);
+  await writeFile(join(f.release, 'manifest.json'), JSON.stringify(f.manifest));
+  const marker = join(f.root, 'arguments.json');
+  const result = await run(process.execPath, [join(f.release, 'install.mjs')], { env: { ...process.env, XFX_INSTALL_ARGUMENTS: marker } });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Unsafe archive member type/);
+  await assert.rejects(access(marker), { code: 'ENOENT' });
+});
+
+
+test('default install smoke accepts only the reviewed dependency install hook', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-install-hook-review-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dependency = join(root, 'node_modules', 'koffi');
+  await mkdir(dependency, { recursive: true });
+  const file = join(dependency, 'package.json');
+  const reviewed = { name: 'koffi', version: '3.3.4', scripts: { install: 'node ./cnoke.cjs -P . -D src/koffi --prebuild --release' } };
+  await writeFile(file, JSON.stringify(reviewed));
+  assert.deepEqual(await assertInstallHooks(root, await packageInventory(root)), ['koffi@3.3.4:install']);
+  await writeFile(file, JSON.stringify({ ...reviewed, scripts: { install: 'unreviewed-native-command' } }));
+  await assert.rejects(assertInstallHooks(root, await packageInventory(root)), /Unreviewed bundled install hook/);
+});
+
+
+test('installed inventory accepts only npm aliases declared by unchanged bundled manifests', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-generated-bin-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dependency = join(root, 'node_modules', 'fixture');
+  const aliases = join(root, 'node_modules', '.bin');
+  await mkdir(dependency, { recursive: true });
+  await writeFile(join(dependency, 'package.json'), JSON.stringify({ name: 'fixture', bin: { fixture: 'bin.js' } }));
+  await writeFile(join(dependency, 'bin.js'), '#!/usr/bin/env node\n', { mode: 0o755 });
+  const expected = await packageInventory(root);
+  await mkdir(aliases);
+  await symlink('../fixture/bin.js', join(aliases, 'fixture'));
+  assert.deepEqual(await packageInventory(root, { npmBinsFor: expected }), expected);
+  await assert.rejects(packageInventory(root), /Unexpected npm binary link/);
+  await symlink('../fixture/bin.js', join(aliases, 'undeclared'));
+  await assert.rejects(packageInventory(root, { npmBinsFor: expected }), /Unexpected npm binary link/);
+  await rm(join(aliases, 'undeclared'));
+  await rm(join(aliases, 'fixture'));
+  await symlink('/outside', join(aliases, 'fixture'));
+  await assert.rejects(packageInventory(root, { npmBinsFor: expected }));
 });

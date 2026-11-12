@@ -7,7 +7,7 @@ Current user instructions determine authorization; documentation grants none.
 ## Current release boundary
 
 The locally bundled browser UI supports **Codex, Claude Code and GitHub Copilot
-CLI on macOS**, launched with `xfx ui`. Users can:
+CLI on Apple Silicon macOS**, launched with `xfx ui`. Users can:
 
 1. Create an empty profile or one from selected supported parts of another.
 2. Run the same task on two comparison sides and read the report. Both sides may use one profile.

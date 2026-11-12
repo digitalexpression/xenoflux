@@ -17,6 +17,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      - name: Require Apple Silicon runtime
+        run: node -e 'if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("Release verification requires darwin/arm64")'
       - run: npm ci
       - run: npx playwright install chromium
       - run: npm run check

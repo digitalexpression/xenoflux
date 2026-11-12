@@ -7,7 +7,8 @@ Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CL
 
 ## Requirements
 
-- macOS 13 or later for the packaged launcher; the installed Codex app's own
+- Apple Silicon Mac with macOS 13 or later; run an arm64 Node installation.
+  Intel Macs and Node running under Rosetta are unsupported in 4.0.0. The installed Codex app's own
   requirements also apply.
 - Node.js 22.15.0 or later in the 22.x line, or Node.js 23.8.0 or later,
   available on `PATH`. Node.js 23.0–23.7 is unsupported.
@@ -19,8 +20,9 @@ Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CL
 - An external interactive terminal for commands that apply native profile or
   managed-installation changes.
 
-Xenoflux does not bundle Node.js. Its prebuilt launcher supports Apple Silicon and
-Intel Macs; users do not need a Swift compiler or Xcode Command Line Tools.
+Xenoflux does not bundle Node.js. Users do not need a Swift compiler or Xcode
+Command Line Tools. The package includes its locked SDK runtime and arm64 native
+library; selected client CLIs remain separate installations.
 The Node minimum includes the Zstandard decoder needed for compressed Desktop
 history. Check `node --version` and update Node separately if needed. Older saved
 formats may be unsupported; preserve originals and check the release notes.
@@ -41,6 +43,8 @@ for that project-local installation.
 
 Global npm installation does not close Codex clients, prepare a profile, enable
 RAM logs or create the standalone managed app. Profile setup is a separate step.
+The npm tarball includes the locked SDK dependencies and required peers. Optional
+SDK CLI binaries are excluded; Xenoflux uses your separately installed native CLIs.
 For Codex CLI/Desktop:
 
 ```sh
@@ -84,12 +88,10 @@ reports RAM logs disabled; see [RAM logs](RAM-LOGS.md).
 
 ## Install an offline release bundle
 
-Download all four files from the same [GitHub release](https://github.com/digitalexpression/xenoflux/releases):
-`xenoflux-VERSION.tgz`, `xenoflux-runtime-VERSION-darwin-ARCH.tgz`,
-`manifest.json`, and `install.mjs`. Select the runtime for your Node architecture
-(`arm64` or `x64`). The bundle includes locked SDK dependencies, required peers
-and the matching Koffi native library; optional SDK CLI binaries are excluded.
-Your selected native CLIs must be installed separately.
+Download all three files from the same [GitHub release](https://github.com/digitalexpression/xenoflux/releases):
+`xenoflux-VERSION.tgz`, `manifest.json`, and `install.mjs`. The same npm tarball
+contains the SDK runtime and arm64 native library; no separate runtime archive
+is required. Your selected native CLIs must be installed separately.
 Place them together in one directory and keep the tarballs compressed. From an
 external terminal in that directory:
 
@@ -97,8 +99,8 @@ external terminal in that directory:
 node install.mjs --close-clients
 ```
 
-The installer verifies and extracts the tarballs. There is no outer archive to
-unpack. Keep the four files until installation has been checked. If interruption
+The installer checks the Apple Silicon target and SHA-256 digest before extracting
+the tarball. There is no outer archive to unpack. Keep the three files until installation has been checked. If interruption
 leaves `xfx` unavailable, rerun this installer from the same directory.
 
 ## Installation locations

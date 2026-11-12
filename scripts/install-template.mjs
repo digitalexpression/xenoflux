@@ -12,7 +12,7 @@ if (!Number.isInteger(version[0]) || !Number.isInteger(version[1])
     import('node:crypto'), import('node:fs/promises'), import('node:child_process'), import('node:path'),
     import('node:os'), import('node:url'),
   ]);
-  const { access, lstat, mkdir, mkdtemp, readFile, rename, rm } = fs;
+  const { access, lstat, mkdir, mkdtemp, readFile, rm } = fs;
   const { spawn } = childProcess;
   const { basename, dirname, isAbsolute, join, relative, resolve, sep } = path;
   const { tmpdir } = os;
@@ -21,7 +21,7 @@ if (!Number.isInteger(version[0]) || !Number.isInteger(version[1])
 
   function fail(message) { throw new Error(message); }
   function validArtifact(name) {
-    if (typeof name !== 'string' || !name || basename(name) !== name || name.includes('\\') || !name.endsWith('.tgz'))
+    if (typeof name !== 'string' || !name || basename(name) !== name || name.includes('\\') || /[\0\r\n]/.test(name) || !name.endsWith('.tgz'))
       fail('Release manifest contains an unsafe artifact name');
     return name;
   }
@@ -54,6 +54,15 @@ if (!Number.isInteger(version[0]) || !Number.isInteger(version[1])
       || entry.split('/').some(segment => segment === '..' || segment === '.'))
       || entries.some(entry => entry !== 'package' && !entry.startsWith('package/')))
       fail(`Unsafe archive paths in ${basename(archive)}`);
+    const types = [];
+    await new Promise((resolveRun, reject) => {
+      const child = spawn('/usr/bin/tar', ['-tvzf', archive], { stdio: ['ignore', 'pipe', 'inherit'] });
+      child.stdout.setEncoding('utf8'); child.stdout.on('data', chunk => types.push(chunk));
+      child.once('error', reject);
+      child.once('close', code => code === 0 ? resolveRun() : reject(new Error(`Unable to inspect ${basename(archive)}`)));
+    });
+    if (types.join('').split('\n').filter(Boolean).some(entry => !/^[d-]/.test(entry)))
+      fail(`Unsafe archive member type in ${basename(archive)}`);
   }
   async function extract(archive, destination) {
     await tarEntries(archive);
@@ -68,35 +77,29 @@ if (!Number.isInteger(version[0]) || !Number.isInteger(version[1])
     let manifest;
     try { manifest = JSON.parse(await readFile(manifestPath, 'utf8')); }
     catch { fail('Unable to read release manifest'); }
-    if (manifest?.schemaVersion !== 2 || typeof manifest.package !== 'string' || typeof manifest.version !== 'string'
-      || !Array.isArray(manifest.dependencies) || manifest.dependencies.length !== 1) fail('Unsupported release manifest');
+    if (manifest?.schemaVersion !== 3 || manifest.package !== 'xenoflux' || typeof manifest.version !== 'string'
+      || manifest.runtime?.bundled !== true || manifest.runtime.platform !== 'darwin' || manifest.runtime.arch !== 'arm64'
+      || manifest.dependencies !== undefined) fail('Unsupported release manifest');
+    if (manifest.runtime.platform !== process.platform || manifest.runtime.arch !== process.arch)
+      fail(`Release runtime requires ${manifest.runtime.platform}/${manifest.runtime.arch}; found ${process.platform}/${process.arch}`);
     const project = { name: validArtifact(manifest.tarball), digest: validDigest(manifest.sha256) };
-    const dependency = manifest.dependencies[0];
-    if (dependency?.name !== 'xenoflux-runtime' || dependency.version !== manifest.version)
-      fail('Release manifest must include the matching Xenoflux runtime archive');
-    if (dependency.platform !== process.platform || dependency.arch !== process.arch)
-      fail(`Release runtime requires ${dependency.platform}/${dependency.arch}; found ${process.platform}/${process.arch}`);
-    const dependencyArtifact = { name: validArtifact(dependency.tarball), digest: validDigest(dependency.sha256) };
-    if (project.name === dependencyArtifact.name) fail('Release artifacts must be distinct');
-    for (const artifact of [project, dependencyArtifact]) {
-      const file = resolve(bundle, artifact.name);
-      if (!inside(bundle, file)) fail('Release manifest resolves outside its bundle');
-      await access(file).catch(() => fail(`Release artifact is missing: ${artifact.name}`));
-      if (await digest(file) !== artifact.digest) fail(`SHA-256 mismatch for ${artifact.name}`);
-      artifact.file = file;
-    }
+    const file = resolve(bundle, project.name);
+    if (!inside(bundle, file)) fail('Release manifest resolves outside its bundle');
+    await access(file).catch(() => fail(`Release artifact is missing: ${project.name}`));
+    if (await digest(file) !== project.digest) fail(`SHA-256 mismatch for ${project.name}`);
+    project.file = file;
     const temporary = await mkdtemp(join(tmpdir(), 'xfx-install-'));
     try {
-      const projectExtract = join(temporary, 'project-extract');
-      const dependencyExtract = join(temporary, 'dependency-extract');
-      await Promise.all([mkdir(projectExtract, { mode: 0o700 }), mkdir(dependencyExtract, { mode: 0o700 })]);
-      const projectRoot = await extract(project.file, projectExtract);
-      const dependencyRoot = await extract(dependencyArtifact.file, dependencyExtract);
-      const stage = join(temporary, 'xenoflux');
-      await rename(projectRoot, stage);
-      const modules = join(dependencyRoot, 'node_modules');
-      if (!(await lstat(modules).catch(() => null))?.isDirectory()) fail('Runtime archive has no safe node_modules directory');
-      await rename(modules, join(stage, 'node_modules'));
+      const extraction = join(temporary, 'project-extract');
+      await mkdir(extraction, { mode: 0o700 });
+      const stage = await extract(project.file, extraction);
+      const projectManifest = JSON.parse(await readFile(join(stage, 'package.json'), 'utf8'));
+      if (projectManifest.name !== manifest.package || projectManifest.version !== manifest.version
+        || JSON.stringify(projectManifest.os) !== '["darwin"]' || JSON.stringify(projectManifest.cpu) !== '["arm64"]'
+        || projectManifest.private || !Array.isArray(projectManifest.bundleDependencies))
+        fail('Release package does not match its bundled manifest');
+      const modules = await lstat(join(stage, 'node_modules')).catch(() => null);
+      if (!modules?.isDirectory() || modules.isSymbolicLink()) fail('Release package has no safe bundled node_modules directory');
       const command = join(stage, 'bin', 'xfx.js');
       const commandInfo = await lstat(command).catch(() => null);
       if (!commandInfo?.isFile() || commandInfo.isSymbolicLink()) fail('Release package has no safe xfx command');

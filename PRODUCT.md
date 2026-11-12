@@ -8,7 +8,7 @@ Profile manager and task comparison for Codex, Claude Code and GitHub Copilot CL
 
 web
 
-The product interface is a locally bundled browser app on macOS,
+The product interface is a locally bundled browser app on Apple Silicon macOS,
 launched with `xfx ui`. Codex, Claude Code and GitHub Copilot CLI provide task
 execution; native desktop apps are part of its operating context.
 

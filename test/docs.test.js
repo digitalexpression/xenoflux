@@ -20,3 +20,13 @@ test('packaged docs reject omitted local targets and broken headings, ignoring e
   assert.match(errors[0], /missing heading/);
   assert.match(errors[1], /target is not packaged/);
 });
+
+
+test('bundled upstream documentation is outside application link validation', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-bundled-docs-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'node_modules', 'fixture'), { recursive: true });
+  await writeFile(join(root, 'README.md'), '# Application\n');
+  await writeFile(join(root, 'node_modules', 'fixture', 'README.md'), '[Upstream development link](not-shipped.md)\n');
+  assert.deepEqual(await checkPackagedDocs(root, ['README.md', 'node_modules/fixture/README.md']), []);
+});

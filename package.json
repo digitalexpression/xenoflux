@@ -46,7 +46,8 @@
     "local-release": "node scripts/local-release.mjs",
     "build:ui": "vite build --config web/vite.config.ts",
     "check:ui": "node scripts/check-design-tokens.mjs && tsc -p web --noEmit && node scripts/check-ui-build.mjs && playwright test",
-    "test:ui": "npm run build:ui && playwright test"
+    "test:ui": "npm run build:ui && playwright test",
+    "prepack": "node scripts/local-release.mjs --pack-guard"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.322",
@@ -92,5 +93,9 @@
     "tailwindcss": "4.3.3",
     "typescript": "7.0.2",
     "vite": "8.3.5"
-  }
+  },
+  "private": true,
+  "cpu": [
+    "arm64"
+  ]
 }

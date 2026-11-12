@@ -10,7 +10,10 @@ text. Use the app guide for workflows and DESIGN.md for interaction rules.
 
 ## Checkout and checks
 
-Use a supported Node.js version on macOS. From the repository root:
+Use a supported Node.js version on macOS. Release packaging targets Apple Silicon
+with arm64 Node; see the
+[installation requirements](../user/INSTALLATION.md#requirements).
+From the repository root:
 
 ```sh
 npm ci
@@ -56,6 +59,30 @@ TZ=UTC XFX_NATIVE_PROFILE_OPEN=1 node --test test/native-profile-open.test.js
 See [Desktop verification](DESKTOP-IMPLEMENTATION.md#verification-and-native-acceptance)
 for the limits of this fixture. Real profile/client operations need current
 authorization covering their effects and must preserve unrelated clients/data.
+
+## Build a release candidate
+
+After the required checks, commit all package inputs and build from a clean
+tracked checkout:
+
+```sh
+npm run local-release -- --output /absolute/new/release-directory --smoke
+```
+
+The output is one self-contained npm tarball, a schema-3 SHA-256 manifest and
+`install.mjs`. Both npm and the standalone installer use the same tarball.
+Node.js and the selected native CLIs remain external requirements. The builder
+stages the locked SDK dependency graph, including required peers and the arm64
+Koffi library, without optional SDK CLI packages or development dependencies.
+It preserves dependency files and licenses; source/type/map pruning is deferred.
+
+The development manifest is private and ordinary checkout `npm pack` is refused.
+Use the generated tarball for any separately authorized publication; publishing
+the checkout would bypass the verified bundle. The builder records the committed
+source identity and refuses tracked changes or untracked package inputs.
+`--smoke` checks disposable installation and lifecycle fixtures; it does not
+qualify real native accounts, tasks or credential refresh. Building or passing
+checks does not authorize publication, merging or installed updates.
 
 ## Change the native launcher
 
