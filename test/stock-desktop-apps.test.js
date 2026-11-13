@@ -48,8 +48,8 @@ test('open rechecks the exact app and passes only its absolute path to native op
   f.calls.length = 0;
   const result = await f.service.open({ client: 'claude', appKey: app.appKey });
   assert.equal(result.status, 'opened');
-  assert.match(result.message, /existing native account/);
-  assert.match(result.message, /Managed profiles and automated tasks remain unqualified/);
+  assert.match(result.message, /existing setup/);
+  assert.match(result.message, /No managed profile was selected/);
   assert.deepEqual(f.calls.filter(call => call.command === '/usr/bin/open'), [{ command: '/usr/bin/open', args: ['-a', f.path] }]);
   assert.ok(f.calls.findIndex(call => call.command === '/usr/bin/codesign') < f.calls.findIndex(call => call.command === '/usr/bin/open'));
 });
@@ -149,4 +149,16 @@ test('changed scheme registration, app build or signature invalidates navigation
     await assert.rejects(f.service.open({ client: 'copilot', appKey: app.appKey, sessionId: 'native-id' }), /changed or is unavailable/);
     assert.equal(f.calls.some(call => call.command === '/usr/bin/open'), false);
   });
+});
+
+test('managed binding freshly verifies executable while stock listing retains its public shape', async t => {
+  const f = await fixture(t, 'copilot'), app = (await f.service.list())[1];
+  assert.equal(Object.hasOwn(app, 'executable'), false);
+  const binding = await f.service.binding({ client: 'copilot', appKey: app.appKey });
+  assert.equal(binding.executable, f.executable);
+  assert.match(binding.executableIdentity.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(binding.appKey, app.appKey);
+  await writeFile(f.executable, 'changed signed fixture');
+  await assert.rejects(f.service.binding({ client: 'copilot', appKey: app.appKey }), /changed or is unavailable/);
+  assert.equal(f.calls.some(call => call.command === '/usr/bin/open'), false);
 });

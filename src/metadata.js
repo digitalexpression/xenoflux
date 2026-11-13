@@ -49,7 +49,12 @@ export async function acquire(path, owner, atomic = false) {
   try {
     await mkdir(target, { mode: 0o700 });
     await writeFile(join(target, 'owner.json'), JSON.stringify(owner), { flag: 'wx', mode: 0o600 });
-    if (atomic) await rename(target, path);
+    if (atomic) {
+      // Directory rename may replace a competing launcher's empty mkdir-first lock.
+      await mkdir(path, { mode: 0o700 });
+      await rename(join(target, 'owner.json'), join(path, 'owner.json'));
+      await rmdir(target);
+    }
   } catch (e) {
     if (atomic) {
       await unlink(join(target, 'owner.json')).catch(() => {});

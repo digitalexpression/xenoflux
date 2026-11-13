@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -68,7 +69,7 @@ function recordedActions(turnNumber, source) {
 }
 
 /** Build a disposable, real-engine app fixture. No Codex client is launched. */
-export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 'dist', 'ui') } = {}) {
+export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 'dist', 'ui'), setupInspection = false } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-browser-')));
   let server;
   try {
@@ -107,6 +108,37 @@ case "$*" in
   *) exit 99 ;;
 esac
 `, { mode: 0o700 });
+    let setupSources = null;
+    if (setupInspection) {
+      const repository = await realpath(await mkdir(join(root, 'inspection-project'), { recursive: true }).then(() => join(root, 'inspection-project')));
+      await put(repository, 'AGENTS.md', 'Project Codex inspection instruction.\n');
+      await put(repository, 'CLAUDE.md', 'Project Claude inspection instruction.\n');
+      await put(repository, '.github/copilot-instructions.md', 'Project Copilot inspection instruction.\n');
+      const nativeRoots = {};
+      const identity = (await store.read()).profiles.find(profile => profile.name === 'baseline').native.executableIdentity;
+      for (const [client, name] of [['claude-code', 'Claude source'], ['copilot', 'Copilot source']]) {
+        const nativeRoot = join(root, `${client}-source`), configRoot = join(nativeRoot, 'config');
+        await mkdir(configRoot, { recursive: true, mode: 0o700 });
+        await store.update(data => {
+          const profile = create(data, name, '', client);
+          profile.native = { environmentId: randomUUID(), root: nativeRoot, configRoot, rootMode: 'explicit',
+            executable: join(root, `${client}-missing-cli`), executableIdentity: identity, version: '1.0.0' };
+        });
+        await put(configRoot, 'settings.json', JSON.stringify({ model: `${client}-fixture`, theme: 'dark',
+          mcpServers: { 'source-tools': { command: '/fixture/source-server', args: ['--local'], enabled: false } },
+          hooks: { SessionStart: [{ command: '/fixture/source-hook' }] }, enabledPlugins: { 'source-plugin@fixture': false } }) + '\n');
+        await put(configRoot, client === 'claude-code' ? 'CLAUDE.md' : 'copilot-instructions.md', `${client} profile inspection instruction.\n`);
+        await put(configRoot, 'skills/source-helper/SKILL.md', '---\nname: source-helper\ndescription: Inspect source evidence.\n---\nKeep the inspection source text visible.\n');
+        await put(configRoot, 'skills/source-helper/scripts/check.sh', 'echo source-inspection-fixture\n');
+        nativeRoots[client] = configRoot;
+      }
+      await put(join(defaultUserHome, '.copilot'), 'copilot-instructions.md', 'Default Copilot fixture instruction.\n');
+      const colon = await prepareNativeHome({ directory: join(root, 'native-colon'), executable, codexVersion: '0.153.4' });
+      await store.update(data => { create(data, 'codex:with:colon'); });
+      await registerHome(store, 'codex:with:colon', colon.root, { executable, version: '0.153.4' });
+      await put(colon.home, 'AGENTS.md', 'Colon profile inspection instruction.\n');
+      setupSources = { repository, nativeRoots, colon };
+    }
     const rollouts = [];
     rollouts.push(await addSession(baseline.home, 1, 'Fix the date test', 'cli', 10));
     rollouts.push(await addSession(strict.home, 2, 'Fix the date test', 'vscode', 11));
@@ -118,6 +150,8 @@ esac
     const terminalEnvironment = { PATH: root + ':/usr/bin:/bin', HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME };
     const provider = createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'),
       resolveClient: signal => nativeClient(store, { '--codex': executable }, signal),
+      stockApps: { list: async () => [], open: async () => { throw new Error('No fixture stock app is installed'); } },
+      discoveryContext: { inspectDesktop: async () => { throw new Error('No fixture desktop app is installed'); } },
       runContext: { terminalEnvironment },
       reviewContext: { terminalEnvironment },
       catalogContext: { terminalEnvironment },
@@ -131,7 +165,7 @@ esac
     server = await startUiServer({ provider, staticRoot, log: message => serverLogs.push(message) });
     return { url: server.launchUrl, origin: server.origin, root, store,
       homes: { baseline, strict }, defaultUserHome, reportsRoot, rollouts, instructions, skillLines, longSkillNames, privacyMarkers, nativeProfileLog,
-      serverLogs,
+      serverLogs, setupSources,
       close: async () => { await server.close(); await rm(root, { recursive: true, force: true }); } };
   } catch (error) {
     if (server) await server.close().catch(() => {});

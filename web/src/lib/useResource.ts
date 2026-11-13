@@ -7,27 +7,58 @@ export interface Resource<T> {
   reload: () => void;
   setData: (value: T) => void;
 }
+interface ResourceRead { background: boolean }
+interface ResourcePolicy { live?: boolean; paused?: boolean }
 
-/** Load once per key; keeps the last data visible while reloading. */
-export function useResource<T>(load: () => Promise<T>, key: string): Resource<T> {
+/** Load once per key, with optional quiet checks while the page is visible. */
+export function useResource<T>(load: (read: ResourceRead) => Promise<T>, key: string, policy: ResourcePolicy = {}): Resource<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(true);
-  const [generation, setGeneration] = useState(0);
   const latest = useRef(load);
+  const paused = useRef(policy.paused);
+  const request = useRef<() => void>(() => {});
   latest.current = load;
+  paused.current = policy.paused;
 
   useEffect(() => {
     let current = true;
-    setLoading(true);
-    setError(null);
-    latest.current().then(
-      value => { if (current) { setData(value); setLoading(false); } },
-      (reason: unknown) => { if (current) { setError(reason instanceof Error ? reason : new Error(String(reason))); setLoading(false); } },
-    );
-    return () => { current = false; };
-  }, [key, generation]);
+    let inFlight = false;
+    let queued = false;
+    let revision = 0;
+    function read(background: boolean) {
+      if (!current || (background && (paused.current || document.visibilityState === 'hidden' || inFlight))) return;
+      const version = ++revision;
+      if (!background) { setLoading(true); setError(null); }
+      if (inFlight) { queued = true; return; }
+      inFlight = true;
+      const loader = latest.current;
+      void Promise.resolve().then(() => loader({ background })).then(
+        value => { if (current && version === revision) { setData(value); setError(null); } },
+        (reason: unknown) => { if (current && version === revision) setError(reason instanceof Error ? reason : new Error(String(reason))); },
+      ).finally(() => {
+        inFlight = false;
+        if (!current) return;
+        if (queued) { queued = false; read(false); }
+        else setLoading(false);
+      });
+    }
+    request.current = () => read(false);
+    read(false);
+    const check = () => read(true);
+    const timer = policy.live ? window.setInterval(check, 5_000) : undefined;
+    if (policy.live) {
+      window.addEventListener('focus', check);
+      document.addEventListener('visibilitychange', check);
+    }
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', check);
+      document.removeEventListener('visibilitychange', check);
+    };
+  }, [key, policy.live]);
 
-  const reload = useCallback(() => setGeneration(value => value + 1), []);
+  const reload = useCallback(() => request.current(), []);
   return { data, error, loading, reload, setData };
 }

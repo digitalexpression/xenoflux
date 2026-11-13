@@ -1,6 +1,7 @@
-import { mkdir, readFile, writeFile, rename, unlink, rmdir, lstat, realpath, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, writeFile, rename, unlink, rmdir, lstat, realpath, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 function nonempty(value, label) {
   if (typeof value !== 'string' || !value.trim() || value.length > 4096) throw new Error(`${label} must be a nonempty string of at most 4096 characters`);
@@ -80,6 +81,56 @@ export class Store {
     await rejectLink(this.directory); await rejectLink(this.file);
     try { return validate(JSON.parse(await readFile(this.file, 'utf8'))); }
     catch (error) { if (error.code === 'ENOENT') return { schemaVersion: 1, profiles: [] }; throw error; }
+  }
+  async inspect() {
+    const blocked = reason => ({ kind: 'blocked', reason, rows: [], limits: [] });
+    let handle;
+    try {
+      await rejectLink(this.directory); await rejectLink(this.file);
+      handle = await open(this.file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      const before = await handle.stat();
+      if (!before.isFile() || before.size > 1024 * 1024) return blocked('Registry inspection requires a regular file of at most 1 MiB.');
+      const buffer = Buffer.alloc(before.size + 1);
+      let length = 0;
+      while (length < buffer.length) {
+        const { bytesRead } = await handle.read(buffer, length, buffer.length - length, null);
+        if (!bytesRead) break;
+        length += bytesRead;
+      }
+      const after = await handle.stat();
+      if (length !== before.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs)
+        return blocked('Registry changed during inspection. Check again.');
+      let data;
+      try { data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, length))); }
+      catch { return blocked('Registry is not valid UTF-8 JSON. Automatic migration is not available.'); }
+      const known = data?.schemaVersion === 1 && Array.isArray(data.profiles);
+      const records = Array.isArray(data?.profiles) ? data.profiles : [];
+      const limits = records.length > 200 ? ['Only the first 200 registry records were inspected.'] : [];
+      let reason = null;
+      if (!known) reason = 'Unsupported registry format. Automatic migration is not available.';
+      else if (records.length > 200) reason = 'Registry exceeds the inspection limit of 200 records.';
+      else { try { validate(data); } catch (error) { reason = error.message; } }
+      const label = (value, fallback) => typeof value === 'string' && value.trim()
+        ? value.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '').slice(0, 200) || fallback : fallback;
+      const occurrences = new Map();
+      const rows = records.slice(0, 200).map((record, index) => {
+        const base = { key: `registry-unsupported-${index}`, name: label(record?.name, `Record ${index + 1}`),
+          client: known && PROFILE_CLIENTS.includes(record?.client ?? 'codex') ? record?.client ?? 'codex' : null };
+        if (!known) return { ...base, kind: 'unsupported', reason: 'Inspection only. The registry format is unsupported.' };
+        try { validateProfile(record); }
+        catch (error) { return { ...base, kind: 'unsupported', reason: error.message }; }
+        const identity = JSON.stringify([base.client, record.id]);
+        const occurrence = (occurrences.get(identity) ?? 0) + 1;
+        occurrences.set(identity, occurrence);
+        const key = `registry-profile-${createHash('sha256').update(identity).digest('hex')}-${occurrence}`;
+        return { ...base, key, kind: 'supported', olderEncoding: record.client === undefined,
+          native: record.native ? { ...record.native } : null };
+      });
+      return { kind: reason ? 'blocked' : 'readable', reason, rows, limits };
+    } catch (error) {
+      if (error.code === 'ENOENT') return { kind: 'readable', reason: null, rows: [], limits: [] };
+      return blocked(`Could not inspect registry: ${error.message}`);
+    } finally { await handle?.close(); }
   }
   async withLock(action) {
     await rejectLink(this.directory);

@@ -37,6 +37,7 @@ async function setup(t, { wrongCwd = false, escapedDescendant = false, defaultRu
   for (const label of ['Copilot A', 'Copilot B']) {
     const rootPath = join(root, label), configRoot = join(rootPath, 'config'), reviewPath = join(root, label + ' review');
     await mkdir(configRoot, { recursive: true, mode: 0o700 });
+    await mkdir(join(rootPath, 'workspace'), { mode: 0o700 });
     await mkdir(reviewPath, { mode: 0o700 });
     await writeFile(join(configRoot, 'fixture.json'), JSON.stringify({ label, wrongCwd, escapedDescendant, ...(productRouting && { noTools: true, invocationLog }) }), { mode: 0o600 });
     managed.push({ id: randomUUID(), name: label, description: '', revision: 1, client: 'copilot', repositories: [{ path: repository }, { path: reviewPath }],

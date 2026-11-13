@@ -2,9 +2,12 @@ import { mkdir, lstat, realpath, writeFile, rename, unlink, rmdir, stat, access 
 import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
+import { find } from './profiles.js';
+import { resolveClaudeProfile } from './claude-profile.js';
+import { resolveCopilotProfile } from './copilot-profile.js';
 import { loadHomeBinding, resolveHome } from './homes.js';
-import { probeVersion } from './version-probe.js';
+import { probeVersion, probeNativeProfileVersion } from './version-probe.js';
 import { runInteractive } from './interactive-process.js';
 import { createLogStorage } from './log-storage.js';
 import { nativePath } from './node-runtime.js';
@@ -21,7 +24,42 @@ async function record(path, value) {
   await rename(temp, path);
 }
 
-export async function launchPlan(store, name, terminalEnvironment = process.env, { repository, resumeId } = {}) {
+async function nativeRootIdentity(root, home) {
+  return Promise.all([root, home].map(async path => {
+    await privateDirectory(path);
+    const info = await lstat(path);
+    return [info.dev, info.ino];
+  }));
+}
+
+async function nativeLaunchPlan(selected, terminalEnvironment, { repository, resumeId, defaultUserHome }) {
+  if (resumeId !== undefined) throw new Error('Standalone resume is only supported for Codex profiles.');
+  if (!selected.native) throw new Error('This profile has no native binding.');
+  let cwd = selected.repositories[0]?.path ?? join(selected.native.root, 'workspace');
+  if (repository !== undefined) {
+    if (typeof repository !== 'string' || !repository.trim() || /[\x00-\x1f\x7f]/.test(repository)) throw new Error('Invalid repository path');
+    cwd = await realpath(repository);
+    if (!selected.repositories.some(row => row.path === cwd)) throw new Error('Bind this repository to the profile before launching it');
+  }
+  if (await realpath(cwd) !== cwd || !(await stat(cwd)).isDirectory()) throw new Error('The saved workspace is no longer available at its canonical path');
+  const resolver = selected.client === 'claude-code' ? resolveClaudeProfile : resolveCopilotProfile;
+  const profile = await resolver({ selected, defaultUserHome, terminalEnvironment, sessionOnly: true, workspace: cwd });
+  const env = { ...profile.env, TERM: 'xterm-256color', ...(selected.client === 'copilot' ? { COPILOT_HOME: profile.home } : {}) };
+  for (const key of ['TERM', 'COLORTERM']) {
+    const value = terminalEnvironment[key];
+    if (typeof value === 'string' && value.length <= 128 && /^[A-Za-z0-9_.@:+-]+$/.test(value)) env[key] = value;
+  }
+  return { client: selected.client, profileId: selected.id, name: selected.name, nativeRoot: profile.reservationRoot,
+    environmentId: profile.environmentId, home: profile.home, executable: profile.executable,
+    executableIdentity: profile.executableIdentity, version: null, cwd, native: structuredClone(selected.native),
+    rootIdentity: await nativeRootIdentity(profile.reservationRoot, profile.home),
+    args: selected.client === 'copilot' ? ['--no-auto-update'] : [], env, operation: 'launch',
+    configurationChangedSinceRegistration: false, configurationSource: join(profile.home, 'settings.json'), desktopChanged: false };
+}
+
+export async function launchPlan(store, name, terminalEnvironment = process.env, { repository, resumeId, defaultUserHome = homedir() } = {}) {
+  const selected = /^default$/i.test(name) ? null : find(await store.read(), name);
+  if (selected?.client && selected.client !== 'codex') return nativeLaunchPlan(selected, terminalEnvironment, { repository, resumeId, defaultUserHome });
   const { profile, native, environment } = await resolveHome(store, name);
   const binary = await discoverCodexExecutable(terminalEnvironment);
   let cwd = environment.cwd;
@@ -52,7 +90,7 @@ export async function launchPlan(store, name, terminalEnvironment = process.env,
     const value = terminalEnvironment[key];
     if (typeof value === 'string' && value.length <= 128 && /^[A-Za-z0-9_.@:+-]+$/.test(value)) env[key] = value;
   }
-  return { profileId: profile.id, name: profile.name, nativeRoot: native.root,
+  return { client: 'codex', profileId: profile.id, name: profile.name, nativeRoot: native.root,
     environmentId: environment.id, home: environment.home, executable: binary.executable,
     executableIdentity: binary.executableIdentity, version: null, cwd,
     native: structuredClone(profile.native),
@@ -80,16 +118,17 @@ export async function discoverCodexExecutable(environment = process.env) {
 
 /** Launch only the explicitly bound native home. No profile materialization. */
 export async function launchHome(store, name, { signal, terminalEnvironment, onStart = () => {},
-  repository, resumeId, run = runInteractive, probe = probeVersion, ramLogs = createLogStorage() } = {}) {
-  let plan = await launchPlan(store, name, terminalEnvironment, { repository, resumeId });
+  repository, resumeId, defaultUserHome, run = runInteractive, probe, ramLogs = createLogStorage() } = {}) {
+  let plan = await launchPlan(store, name, terminalEnvironment, { repository, resumeId, defaultUserHome });
   const lock = join(plan.nativeRoot, '.run-lock'), runId = randomUUID();
   try { await mkdir(lock, { mode: 0o700 }); }
   catch { throw new Error('This native home is in use or an earlier run needs recovery'); }
   let reportPath, preserveLock = false;
-  const report = { schemaVersion: 1, kind: 'interactive-cli', runId, profileId: plan.profileId,
+  const report = { schemaVersion: 1, kind: 'interactive-cli', client: plan.client, runId, profileId: plan.profileId,
     environmentId: plan.environmentId, home: plan.home, cwd: plan.cwd, operation: plan.operation,
     ...(resumeId ? { resumeId } : {}), status: 'starting',
     startedAt: new Date().toISOString(), terminalOutputRetained: false };
+  if (plan.client !== 'codex') Object.assign(report, { rootIdentity: plan.rootIdentity, executable: plan.executable });
   try {
     await writeFile(join(lock, 'owner.json'), JSON.stringify({ pid: process.pid, host: hostname(), runId, kind: report.kind }), { flag: 'wx', mode: 0o600 });
     const launches = join(plan.nativeRoot, 'launches');
@@ -97,15 +136,17 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     await privateDirectory(launches);
     const runRoot = join(launches, runId); await mkdir(runRoot, { mode: 0o700 });
     reportPath = join(runRoot, 'report.json'); await record(reportPath, report);
-    const version = await probe({ executable: plan.executable, cwd: plan.cwd, env: plan.env, signal });
-    const fresh = await launchPlan(store, plan.profileId, terminalEnvironment, { repository, resumeId });
-    if (fresh.nativeRoot !== plan.nativeRoot || fresh.environmentId !== plan.environmentId || fresh.home !== plan.home || fresh.cwd !== plan.cwd)
+    const options = { executable: plan.executable, cwd: plan.cwd, env: plan.env, signal };
+    const version = await (probe ? probe(options) : plan.client === 'codex' ? probeVersion(options) : probeNativeProfileVersion(plan.client, options));
+    const fresh = await launchPlan(store, plan.profileId, terminalEnvironment, { repository, resumeId, defaultUserHome });
+    if (fresh.client !== plan.client || fresh.nativeRoot !== plan.nativeRoot || fresh.environmentId !== plan.environmentId || fresh.home !== plan.home || fresh.cwd !== plan.cwd
+      || JSON.stringify(fresh.rootIdentity) !== JSON.stringify(plan.rootIdentity))
       throw Object.assign(new Error('Home binding changed'), { code: 'HOME_CHANGED' });
     if (fresh.executable !== plan.executable || fresh.executableIdentity !== plan.executableIdentity)
       throw Object.assign(new Error('Executable changed'), { code: 'EXECUTABLE_CHANGED' });
     plan = fresh;
     report.version = version; report.configurationChangedSinceRegistration = plan.configurationChangedSinceRegistration;
-    await ramLogs.prepareHome({ home: plan.home, key: plan.environmentId, signal });
+    if (plan.client === 'codex') await ramLogs.prepareHome({ home: plan.home, key: plan.environmentId, signal });
     await onStart(plan);
     if (signal?.aborted) throw Object.assign(new Error('Launch cancelled'), { code: 'CANCELLED' });
     const result = await run({ executable: plan.executable, args: plan.args, cwd: plan.cwd, env: plan.env, signal,
@@ -118,17 +159,31 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
   } finally {
     if (!preserveLock) {
       try {
-        const after = await loadHomeBinding(plan.native);
-        if (after.native.environmentId !== plan.environmentId || after.environment.home !== plan.home)
-          throw new Error('Home changed during launch');
-        report.postflight = 'paths-and-auth-metadata-checked';
+        if (plan.client === 'codex') {
+          const after = await loadHomeBinding(plan.native);
+          if (after.native.environmentId !== plan.environmentId || after.environment.home !== plan.home) throw new Error('Home changed during launch');
+          report.postflight = 'paths-and-auth-metadata-checked';
+        } else {
+          const after = find(await store.read(), plan.profileId);
+          if (after.client !== plan.client || JSON.stringify(after.native) !== JSON.stringify(plan.native)
+            || JSON.stringify(await nativeRootIdentity(plan.nativeRoot, plan.home)) !== JSON.stringify(plan.rootIdentity)) throw new Error('Home changed during launch');
+          report.postflight = 'profile-paths-checked';
+        }
       } catch {
         report.postflight = 'failed';
         report.status = 'incomplete';
         report.error ??= 'HOME_CHANGED';
+        if (plan.client !== 'codex') preserveLock = true;
       }
     }
     report.finishedAt = new Date().toISOString();
+    if (plan.client !== 'codex') {
+      try {
+        await privateDirectory(plan.nativeRoot);
+        const current = await lstat(plan.nativeRoot);
+        if (JSON.stringify([current.dev, current.ino]) !== JSON.stringify(plan.rootIdentity[0])) throw new Error('Root changed');
+      } catch { reportPath = null; preserveLock = true; }
+    }
     if (reportPath) await record(reportPath, report);
     if (!preserveLock) {
       await unlink(join(lock, 'owner.json')).catch(e => { if (e.code !== 'ENOENT') throw e; });

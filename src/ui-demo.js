@@ -3,9 +3,26 @@
 // simulated in memory and every view says so.
 import { randomUUID } from 'node:crypto';
 import { UiError } from './ui-server.js';
-import { ASSOCIATION, comparisonLabel, countLabels, exactStateText, groupMeta } from './audit-presentation.js';
+import { ASSOCIATION, comparisonLabel, countLabels, exactStateText, groupMeta, presentSetupInventory } from './audit-presentation.js';
 
 const A = 'baseline', B = 'strict-review';
+const SETUP_CLIENTS = { codex: 'Codex', 'claude-code': 'Claude Code', copilot: 'GitHub Copilot' };
+function demoSetup(name, client, repo) {
+  return presentSetupInventory({ status: 'partial', warnings: ['Synthetic setup evidence. No real files or clients are read.'],
+    coverage: { config: 'complete', instructions: 'complete', agents: 'complete', rules: 'complete', skills: 'complete',
+      plugins: 'partial', mcp: 'partial', hooks: 'complete', tools: 'unavailable', memorySettings: 'partial', sourceValues: 'complete' },
+    resources: [
+      { id: `${client}-${name}-model`, name: 'model', category: 'config', scope: 'profile', origin: 'Synthetic profile settings',
+        status: 'present', path: `[DEMO]/${client}/${name}/settings`, value: client === 'codex' ? 'gpt-6' : 'native-default', valueStatus: 'present', sourceRole: 'profile' },
+      { id: `${client}-${name}-instructions`, name: client === 'claude-code' ? 'CLAUDE.md' : 'AGENTS.md', category: 'instruction',
+        scope: repo ? 'project' : 'profile', origin: 'Synthetic instructions', status: 'present', sourceRole: repo ? 'project' : 'profile',
+        path: `${repo || `[DEMO]/${client}/${name}`}/instructions.md`, detail: { status: 'available', text: 'Review the changes and run the relevant checks.' } },
+      { id: `${client}-${name}-plugin`, name: 'review-helper', category: 'plugin', scope: 'plugin', origin: 'Synthetic plugin cache',
+        path: `[DEMO]/${client}/plugins/review-helper/plugin.json`, status: 'present', sourceRole: 'plugin-cache',
+        value: { name: 'review-helper', version: '1.0.0' }, valueStatus: 'present',
+        state: { configured: 'unknown', cached: 'present', installed: 'unknown', enabled: 'unknown', available: 'unknown', loaded: 'unknown', used: 'unknown' } },
+    ] });
+}
 const PRECEDENCE = 'A project setting or launch option can override the profile value, so the value a session actually used isn’t known from setup alone.';
 
 function setupItems(a, b) {
@@ -307,6 +324,17 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       return { mode: 'demo', version, features: { runs: true, copy: true, create: true, clientControls: true, profileEdits: true },
         activeRun: active ? { id: active.id, task: active.task, profiles: [active.a, active.b], href: `/runs/${active.id}` } : null };
     },
+    async discovery() {
+      return { checkedAt: new Date().toISOString(), scope: ['Synthetic demo locations only'],
+        registry: { kind: 'readable', reason: null }, attention: [], limits: [], simulated: true,
+        clients: [['codex', 'Codex'], ['claude-code', 'Claude Code'], ['copilot', 'GitHub Copilot']].map(([client, name]) => ({
+          client, name, cli: { kind: 'found', label: 'Found (simulated)', location: `[DEMO]/bin/${client}`, version: null, identity: `demo-${client}` },
+          desktop: { kind: 'unavailable', label: 'Could not confirm (simulated)', reason: 'No real app is inspected in demo mode.' },
+          desktopNote: 'Open a managed profile from Profiles. Desktop startup and profile storage are supported; sign-in and task execution remain unverified.',
+          setups: [{ key: `demo-${client}`, name: 'Default', origin: 'Synthetic standard folder', kind: 'found', label: 'Folder found (simulated)',
+            location: `[DEMO]/${client}`, reason: 'Simulated folder presence. Sign-in and eligibility are not checked.', inspectHref: `/profiles/Default/setup?client=${client}` }],
+        })) };
+    },
     async overview() {
       return { profileCount: 4, readyToRun: 3,
         sessions: { status: 'partial', text: '6 sessions in 3 profiles · 1 profile couldn’t be read' },
@@ -330,7 +358,24 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       if (action === 'open-terminal') state.cli = 'running';
       return { status: 'success', message: `Simulated: ${action.replace('-', ' ')} for ${name}. Nothing was opened.`, profile: profileCard(name) };
     },
-    async setupComparison({ a = A, b = B }) {
+    async setupChoices() {
+      return { choices: [...PROFILE_NAMES.map(name => ({ name, client: 'codex' })),
+        ...['claude-code', 'copilot'].map(client => ({ name: 'Default', client }))].map(({ name, client }) => ({
+        key: JSON.stringify([client, name]), name, client, label: `${name} · ${SETUP_CLIENTS[client]}`, available: true, reason: null,
+      })), warnings: ['Synthetic demo setups.'] };
+    },
+    async profileSetup({ name, client = 'codex', repo }) {
+      if (!SETUP_CLIENTS[client] || (client === 'codex' ? !PROFILE_NAMES.includes(name) : name !== 'Default')) throw new UiError(404, 'Synthetic setup not found.', 'not-found');
+      return { profile: { name, client, meta: SETUP_CLIENTS[client] }, project: repo ?? null,
+        readAt: 'Simulated current setup', inventory: demoSetup(name, client, repo) };
+    },
+    async setupComparison({ a = A, b = B, aClient = 'codex', bClient = 'codex', repo }) {
+      if (aClient !== bClient) {
+        const sides = await Promise.all([this.profileSetup({ name: a, client: aClient, repo }), this.profileSetup({ name: b, client: bClient, repo })]);
+        return { a: sides[0].profile, b: sides[1].profile, project: repo ?? null, readAt: 'Simulated current setup',
+          counts: { different: 0, same: 0, cannotCompare: 0 }, limits: null, groups: [],
+          separate: { reason: 'Mixed-client setups are shown separately; categories and settings are not equivalent.', a: sides[0].inventory, b: sides[1].inventory } };
+      }
       if (a === b) return { a: { name: a }, b: { name: b }, project: null, readAt: '', counts: { different: 0, same: 0, cannotCompare: 0 }, limits: null, groups: [], blocked: 'Choose two different profiles.' };
       for (const name of [a, b]) if (!PROFILE_NAMES.includes(name)) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
       const groups = setupItems(a, b).map(group => {

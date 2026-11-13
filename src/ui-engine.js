@@ -1,23 +1,25 @@
 // The engine-backed provider for the local app. Each method reuses existing
 // discovery, history, comparison, export and copy code and returns the view
 // models in web/src/api/types.ts. Task execution requires a reviewed run token.
+import { createProfileDiscovery } from './profile-discovery.js';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareAuditProfiles, compareAuditSessions } from './audit.js';
+import { discoverAuditProfile, resolveAuditProfile } from './audit-discovery.js';
 import { auditSelectionOptions } from './audit-selection.js';
 import { canonicalAuditChecks } from './audit-explanation.js';
 import { exportAuditReport, readAuditReport } from './audit-store.js';
 import { buildAuditReviewPacket, projectAuditReviewState } from './audit-review.js';
 import { evaluateAuditEvidence, previewAuditEvidence } from './audit-review-command.js';
-import { ASSOCIATION, presentComparison, presentEvidence, presentReviews, presentRunExecution, presentSetupComparison, presentSkillPackage } from './audit-presentation.js';
+import { ASSOCIATION, presentComparison, presentEvidence, presentReviews, presentRunExecution, presentSetupComparison, presentSetupInventory, presentSkillPackage } from './audit-presentation.js';
 import { inspectCopyProfile } from './copy-client.js';
 import { managedNativeProfiles, PROFILE_CLIENT_NAMES } from './managed-native-profile.js';
 import { inspectSetupGuidance } from './setup-guidance.js';
-import { createDesktopRuntime, DESKTOP_APP } from './desktop-runtime.js';
+import { DESKTOP_APP } from './desktop-runtime.js';
 import { createHome, planHomeCreation } from './home-create.js';
 import { nativeClient } from './profile-command.js';
 import { bind, find, PROFILE_CLIENTS, renameProfile as renameInData } from './profiles.js';
@@ -33,6 +35,8 @@ import { createUiRuns } from './ui-runs.js';
 import { createUiReviewTasks } from './ui-review-tasks.js';
 import { createUiCatalog } from './ui-catalog.js';
 import { createStockDesktopApps } from './stock-desktop-apps.js';
+import { createManagedDesktop } from './managed-desktop.js';
+import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { assertEnvironmentBinding, createEnvironmentBinding } from './client-contracts.js';
 import { createCopilotRuntime } from './copilot-runtime.js';
@@ -112,9 +116,16 @@ function copyError(error) {
 
 const MAX_SAVED = 20;
 
+function profileCopyRuntime() {
+  const runtime = createDesktopInstanceRuntime();
+  // UI copying observes its endpoints without controlling unrelated clients.
+  return { assertIdle: ({ resourcePaths }) => runtime.assertResourcesIdle(resourcePaths) };
+}
+
 export function createEngineProvider({ store, version = 'unknown', reportsRoot = join(homedir(), 'Xenoflux reports'), defaultUserHome = homedir(),
-  observeClients = observeProfileClients, desktopSurface = createCodexDesktopSurface(store), stockApps = createStockDesktopApps(), clientOps = defaultClientOps(store, desktopSurface), copyRuntime = () => createDesktopRuntime({ closeClients: false }),
-  resolveClient = signal => nativeClient(store, {}, signal), profilesBase = join(dirname(store.directory), 'profiles'), lockOptions = {}, runContext = {}, reviewContext = {}, catalogContext = {}, copilotImportContext = {}, accountContext = {}, maxActiveJobs = 8 }) {
+  observeClients = observeProfileClients, desktopSurface = createCodexDesktopSurface(store), stockApps = createStockDesktopApps(), clientOps = defaultClientOps(store, desktopSurface), copyRuntime = profileCopyRuntime,
+  resolveClient = signal => nativeClient(store, {}, signal), profilesBase = join(dirname(store.directory), 'profiles'), lockOptions = {}, runContext = {}, reviewContext = {}, catalogContext = {}, copilotImportContext = {}, accountContext = {}, maxActiveJobs = 8, discoveryContext = {}, managedDesktop }) {
+  managedDesktop ??= createManagedDesktop(store, { stockApps, lockOptions });
   if (!Number.isSafeInteger(maxActiveJobs) || maxActiveJobs < 1) throw new Error('Invalid active job capacity');
   const admitted = new Set();
   const activeImports = new Set();
@@ -398,28 +409,42 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     return { subject: value, reviews: null };
   }
 
-  const setupKey = (a, b, aClient, bClient) => aClient === 'codex' && bClient === 'codex'
-    ? JSON.stringify([a, b]) : JSON.stringify([a, b, aClient, bClient]);
-  async function setupFor(a, b, aClient = 'codex', bClient = 'codex') {
-    const key = setupKey(a, b, aClient, bClient), cached = setups.get(key);
-    if (cached && Date.now() - cached.at < 30000) return cached.value;
+  async function setupRepository(repo) {
+    if (repo === undefined) return undefined;
+    try {
+      if (typeof repo !== 'string' || !isAbsolute(repo) || resolve(repo) !== repo) throw new Error('Use an absolute, normalized project folder.');
+      if (!(await lstat(repo)).isDirectory() || await realpath(repo) !== repo) throw new Error('Use an existing canonical project folder.');
+      return repo;
+    } catch (error) { throw new UiError(400, `Couldn’t read this project: ${error.message}`, 'invalid-project'); }
+  }
+
+  async function setupOptions(name, clientId) {
+    if (name.toLowerCase() === 'default') {
+      const root = join(defaultUserHome, { codex: '.codex', 'claude-code': '.claude', copilot: '.copilot' }[clientId]);
+      if (!(await lstat(root)).isDirectory() || await realpath(root) !== root) throw new Error('The standard client folder is missing or unsafe.');
+      return { clientId };
+    }
+    const selected = find(await store.read(), name);
+    if ((selected.client ?? 'codex') !== clientId) throw new Error('Choose the matching native client.');
+    if (clientId === 'codex') return { clientId };
+    const native = selected.native;
+    const binding = createEnvironmentBinding({ client: clientId, profileId: selected.id, surface: 'cli', executionLocation: 'local', rootMode: 'explicit',
+      roots: { config: native.configRoot, reservation: native.root, user: await realpath(defaultUserHome), runtime: native.configRoot },
+      workspace: null, executable: { path: native.executable, identity: native.executableIdentity, version: native.version }, settingsIdentity: null });
+    return { clientId, binding };
+  }
+
+  const setupKey = (a, b, aClient, bClient, repo) => JSON.stringify([a, b, aClient, bClient, repo ?? null]);
+  async function setupFor(a, b, aClient = 'codex', bClient = 'codex', repo, fresh = false) {
+    const key = setupKey(a, b, aClient, bClient, repo), cached = setups.get(key);
+    if (!fresh && cached && Date.now() - cached.at < 30000) return cached.value;
     let value;
     try {
-      const data = await store.read();
-      const optionsFor = async (name, clientId) => {
-        if (clientId === 'codex') {
-          const selected = data.profiles.find(profile => profile.name === name);
-          if (selected?.client && selected.client !== clientId) throw new Error('Choose the matching native client.');
-          return { clientId };
-        }
-        if (name === 'Default') return { clientId };
-        const selected = data.profiles.find(profile => profile.name === name && profile.client === clientId);
-        if (!selected) throw new Error('The selected native profile is unavailable.');
-        const { sourceBinding } = await copyOptions(name, null, clientId);
-        return { clientId, binding: sourceBinding };
-      };
-      const [leftOptions, rightOptions] = await Promise.all([optionsFor(a, aClient), optionsFor(b, bClient)]);
-      value = await compareAuditProfiles(store, a, b, { defaultUserHome, client: 'cli', includeSourceValues: true, leftOptions, rightOptions });
+      const results = await Promise.allSettled([setupOptions(a, aClient), setupOptions(b, bClient)]);
+      // Invalid binding leaves failure on its own side inside the discovery reader.
+      const side = (result, clientId) => result.status === 'fulfilled' ? result.value : { clientId, binding: null };
+      value = await compareAuditProfiles(store, a, b, { defaultUserHome, client: 'cli', repo, includeSourceValues: true,
+        leftOptions: side(results[0], aClient), rightOptions: side(results[1], bClient) });
     }
     catch (error) { throw new UiError(422, `Couldn’t read these setups: ${error.message}`, 'setup-failed'); }
     setups.set(key, { at: Date.now(), value });
@@ -546,7 +571,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     const conflict = { title: `${name} is open in Codex CLI`, body: `A profile can’t run in Codex CLI and Codex Desktop at the same time. Finish and close ${name}’s Terminal session, then try again. Other profiles aren’t affected.` };
     if (clients.cli.state === 'running') return [{ id: 'show-terminal', label: 'Show Terminal' }, { id: 'open-desktop', label: 'Open Codex Desktop…', conflict }];
     if (clients.desktop.state === 'running') return [{ id: 'focus-desktop', label: 'Show Codex Desktop' }];
-    if (signIn === 'No sign-in saved') return [{ id: 'signin', label: 'Open in Terminal to sign in…' }];
+    if (signIn === 'No sign-in saved') return [{ id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' }, { id: 'signin', label: 'Sign in via Terminal…' }, { id: 'open-desktop', label: 'Open Codex Desktop' }];
     return [{ id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' }, { id: 'open-desktop', label: 'Open Codex Desktop' }];
   }
 
@@ -602,11 +627,11 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     return savedSummary(ref, opened.get(ref));
   }
 
+  const discovery = createProfileDiscovery({ store, profilesBase, defaultUserHome, stockApps,
+    terminalEnvironment: runContext.terminalEnvironment ?? process.env, ...discoveryContext });
   const provider = {
-    apps: async () => {
-      const result = await stockApps.list();
-      return Array.isArray(result) ? { apps: result } : result;
-    },
+    discovery: discovery.discovery,
+    apps: discovery.apps,
     async openApp(input) {
       try { return await stockApps.open(input); }
       catch (error) { throw new UiError(409, error.message, 'stock-app-unavailable'); }
@@ -658,13 +683,21 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
 
     async profiles() {
       const { homes, data, defaultHome } = await profileRecords();
+      let desktopInstallations = [];
+      if (data.profiles.some(profile => ['copilot', 'claude-code'].includes(profile.client))) {
+        try { desktopInstallations = (await discovery.apps())?.apps ?? []; }
+        catch { /* Missing or unreadable installation stays unavailable. */ }
+      }
       let instances = [];
-      try { instances = (await desktopSurface.list({ ...lockOptions, observe: true })).instances; } catch { /* reported as unknown below */ }
+      try { instances = (await desktopSurface.list({ ...lockOptions, observe: false })).instances; } catch { /* reported as unknown below */ }
       const byId = new Map(data.profiles.map(profile => [profile.id, profile]));
       const card = async ({ name, isDefault, home, root, state, reason, profile }) => {
         const instance = instances.find(item => item.profileId === profile?.id);
-        const clients = state === 'ready' && home ? await observeClients(home, { desktopRunning: instance ? instance.observed?.status === 'running' : null })
+        const clients = state === 'ready' && home ? await observeClients(home, { desktopRunning: instance?.observed?.status === 'running' ? true
+            : instance?.observed?.status === 'stopped' ? false : null })
           : { cli: { state: 'unknown', text: 'unknown' }, desktop: { state: 'unknown', text: 'unknown' } };
+        if (instance && !instance.observed && clients.desktop.state !== 'running')
+          clients.desktop = { state: 'unknown', text: 'unknown (Desktop journal has not been checked)' };
         let signIn = 'Sign-in unknown';
         try { if (home) { await lstat(join(home, 'auth.json')); signIn = 'Sign-in saved'; } }
         catch (error) { if (error.code === 'ENOENT') signIn = 'No sign-in saved'; }
@@ -694,26 +727,40 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           observation = await nativeProfiles.observed(profile);
         } catch { /* Show the unavailable binding without offering native actions. */ }
         const ready = Boolean(setup);
+        const desktopName = client === 'claude-code' ? 'Claude' : 'GitHub Copilot';
+        const desktopStatus = await managedDesktop.status(selected.id, { installation: desktopInstallations.find(app => app.client === (client === 'claude-code' ? 'claude' : 'copilot')) });
+        const desktopReady = desktopStatus && ['available', 'running', 'recoverable-stopped'].includes(desktopStatus.state);
+        const desktop = !desktopStatus ? { state: 'unavailable', text: 'Desktop observation is unavailable.' }
+          : desktopStatus.state === 'available' ? { state: 'not-running', text: `${desktopName} Desktop startup and profile storage are supported. Desktop sign-in and task execution are unverified.` }
+          : desktopStatus.state === 'running' ? { state: 'running', text: `${desktopName} Desktop is using this profile’s storage. Desktop sign-in and task execution are unverified.` }
+          : desktopStatus.state === 'recoverable-stopped' ? { state: 'not-running', text: 'Desktop is stopped. Release its reservation before opening another client. Desktop sign-in and task execution are unverified.' }
+          : { state: desktopStatus.state === 'unavailable' ? 'unavailable' : 'unknown', text: desktopStatus.reason ?? 'Desktop ownership needs attention' };
+        const desktopActions = desktopStatus?.state === 'available'
+          ? [{ id: 'open-desktop', label: `Open ${desktopName} Desktop`, appKey: desktopStatus.appKey }]
+          : desktopStatus?.state === 'recoverable-stopped' ? [{ id: 'recover-desktop', label: 'Release closed Desktop reservation' }] : [];
+        const desktopClaimed = desktopStatus && !['available', 'unavailable'].includes(desktopStatus.state);
         const accountScope = client === 'claude-code' ? 'per-root' : observation?.qualification ? 'shared' : 'unverified';
         const signIn = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state] ?? 'Sign-in not checked';
         const repositories = selected.repositories;
-        cards.push({ name: selected.name, client, isDefault: false, state: ready ? 'ready' : 'unavailable',
-          reason: ready ? null : 'The native root or executable no longer matches this binding.',
+        cards.push({ name: selected.name, client, isDefault: false, state: ready || desktopReady ? 'ready' : 'unavailable',
+          reason: ready || desktopReady ? null : 'The native root or executable no longer matches this binding.',
           signIn, accountScope, accountIndependence: 'not verified', setup,
           binding: repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
           summary: selected.description || `${PROFILE_CLIENT_NAMES[client]} folder ${tilde(selected.native?.configRoot ?? '')}`,
-          cli: { state: 'unknown', text: 'Process state not checked' }, desktop: { state: 'unavailable', text: 'Unavailable' },
-          clientActions: ready ? [{ id: 'check', label: 'Check sign-in' }] : [],
+          cli: { state: ready ? 'unknown' : 'unavailable', text: ready ? 'Open in Terminal with this profile. Process state not checked.' : 'CLI or profile root unavailable' },
+          desktop,
+          clientActions: [...(ready && !desktopClaimed ? [{ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` }, { id: 'check', label: 'Check sign-in' }] : []), ...desktopActions],
           moreMenu: [
             ...(ready ? [{ id: 'copy', label: 'Copy settings from another profile…' }] : []),
             { id: 'binding', label: 'Change project binding…' },
             { id: 'rename', label: 'Rename…' },
             { id: 'remove', label: 'Remove from Xenoflux…', detail: 'Keeps the profile’s files on disk.' },
-          ] });
+          ].map(item => desktopClaimed ? { ...item, disabledReason: 'Finish the active client or recover the interrupted reservation before changing this profile.' } : item) });
       }
       const copySources = Object.fromEntries(await Promise.all(PROFILE_CLIENTS.map(async client => [client, [
         ...((client === 'codex' ? !!defaultHome : await nativeProfiles.hasStock(client)) ? ['Default'] : []),
-        ...cards.filter(card => card.client === client && card.state === 'ready' && !card.isDefault).map(card => card.name),
+        ...cards.filter(card => card.client === client && card.state === 'ready' && !card.isDefault
+          && (client === 'codex' || card.setup)).map(card => card.name),
       ]])));
       return { profiles: cards, copySources, simulated: false,
         notes: ['Viewing profiles does not open a client. Checking sign-in asks the selected CLI for account status without starting a task.'] };
@@ -756,36 +803,62 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       return { ref };
     },
 
-    async setupComparison({ a, b, aClient = 'codex', bClient = 'codex' }) {
+    async setupChoices() {
+      const registry = await store.inspect();
+      const warnings = [...registry.limits, ...(registry.reason ? [registry.reason] : [])];
+      const candidates = [...new Map([
+        ...PROFILE_CLIENTS.map(client => ({ name: 'Default', client })),
+        ...registry.rows.filter(row => row.kind === 'supported').map(row => ({ name: row.name, client: row.client })),
+      ].map(choice => [JSON.stringify([choice.client, choice.name]), choice])).values()];
+      const choices = await Promise.all(candidates.map(async ({ name, client }) => {
+        let reason = null;
+        try { await resolveAuditProfile(store, name, { defaultUserHome, ...await setupOptions(name, client) }); }
+        catch (error) { reason = error.message; }
+        return { key: JSON.stringify([client, name]), name, client, label: `${name} · ${client === 'copilot' ? 'GitHub Copilot' : PROFILE_CLIENT_NAMES[client]}`,
+          available: reason === null, reason };
+      }));
+      return { choices, warnings };
+    },
+
+    async profileSetup({ name, client = 'codex', repo }) {
+      if (!plain(name) || !PROFILE_CLIENTS.includes(client)) throw new UiError(400, 'Choose a profile and its client.', 'invalid-selection');
+      repo = await setupRepository(repo);
+      try {
+        const snapshot = await discoverAuditProfile(store, name, { defaultUserHome, repo, includeSourceValues: true, ...await setupOptions(name, client) });
+        return { profile: { name: snapshot.profile.profileName, client, meta: PROFILE_CLIENT_NAMES[client] }, project: repo ?? null,
+          readAt: new Date().toISOString(), inventory: presentSetupInventory(snapshot, { home: defaultUserHome }) };
+      } catch (error) { throw new UiError(422, `Couldn’t read this setup: ${error.message}`, 'setup-failed'); }
+    },
+
+    async setupComparison({ a, b, aClient = 'codex', bClient = 'codex', repo, fresh }) {
       if (!plain(a) || !plain(b) || !PROFILE_CLIENTS.includes(aClient) || !PROFILE_CLIENTS.includes(bClient)) throw new UiError(400, 'Choose two profiles.', 'invalid-selection');
-      if (a === b && aClient === bClient) return { a: { name: a }, b: { name: b }, project: null, readAt: '', counts: { different: 0, same: 0, cannotCompare: 0 }, limits: null, groups: [], blocked: 'Choose two different profiles.' };
-      const value = await setupFor(a, b, aClient, bClient);
+      repo = await setupRepository(repo);
+      if (a === b && aClient === bClient) return { a: { name: a }, b: { name: b }, project: repo ?? null, readAt: '', counts: { different: 0, same: 0, cannotCompare: 0 }, limits: null, groups: [], blocked: 'Choose two different profiles.' };
+      const value = await setupFor(a, b, aClient, bClient, repo, fresh === '1' || fresh === true);
       const view = presentSetupComparison(value, { home: homedir() });
       const mixed = value.comparison?.mode === 'separate';
       const native = aClient !== 'codex' || bClient !== 'codex';
-      const describe = (name, client, profile) => ({ name, meta: `${PROFILE_CLIENT_NAMES[client]} CLI${native
+      const describe = (name, client, profile) => ({ name, meta: `${client === 'copilot' ? 'GitHub Copilot' : PROFILE_CLIENT_NAMES[client]} CLI${native
         ? ` · ${(profile?.rootMode ?? (name === 'Default' ? 'implicit' : 'explicit')) === 'implicit' ? 'stock root' : 'managed root'} · local` : ''}` });
-      const inventory = side => ({ status: side.status, warnings: side.warnings ?? [], resources: side.resources.map(resource => ({
-        name: resource.name, category: resource.category, scope: resource.scope, origin: resource.origin, status: resource.status,
-      })) });
       const target = a === 'Default' ? b : a, source = a === 'Default' ? a : b;
       const missingSourceState = source === a ? 'added' : 'removed';
       const href = id => `/profiles/${encodeURIComponent(target)}/copy?from=${encodeURIComponent(source)}&item=${encodeURIComponent(id)}`;
       const groups = view.groups.map(group => ({ ...group, items: group.items.map(item => ({ ...item, actions: {
         ...(!native && item.actions.copyable && item.exactState !== missingSourceState && target !== 'Default' ? { copy: { from: source === a ? 'a' : 'b', label: `Copy from ${source} into ${target}…`, href: href(item.id) } } : {}),
-        ...(!native && item.actions.package ? { packageHref: `/compare/setups/skills/${encodeURIComponent(item.actions.package)}?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&item=${encodeURIComponent(item.id)}` } : {}),
+        ...(!native && item.actions.package ? { packageHref: `/compare/setups/skills/${encodeURIComponent(item.actions.package)}?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&item=${encodeURIComponent(item.id)}${repo ? `&repo=${encodeURIComponent(repo)}` : ''}` } : {}),
         ...(!native && item.actions.guidance ? { guidance: item.actions.guidance } : {}),
       } })) }));
-      return { a: describe(a, aClient, value.left.profile), b: describe(b, bClient, value.right.profile), project: null,
-        readAt: `Today’s setup, read ${new Date(setups.get(setupKey(a, b, aClient, bClient)).at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`,
+      return { a: describe(a, aClient, value.left.profile), b: describe(b, bClient, value.right.profile), project: repo ?? null,
+        readAt: `Today’s setup, read ${new Date(setups.get(setupKey(a, b, aClient, bClient, repo)).at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`,
         counts: view.counts, limits: view.limits, groups,
-        ...(mixed ? { separate: { reason: value.comparison.reason, a: inventory(value.left), b: inventory(value.right) } } : {}),
+        ...(mixed ? { separate: { reason: value.comparison.reason, a: presentSetupInventory(value.left, { home: defaultUserHome }), b: presentSetupInventory(value.right, { home: defaultUserHome }) } } : {}),
         ...(!mixed && native && target !== 'Default' ? { copyHref: `/profiles/${encodeURIComponent(target)}/copy?from=${encodeURIComponent(source)}` } : {}) };
     },
 
-    async skillDetail({ skill, a, b, item: selectedItem }) {
+    async skillDetail({ skill, a, b, item: selectedItem, repo }) {
       if (!plain(skill) || !plain(a) || !plain(b)) throw new UiError(400, 'Choose a skill and two profiles.', 'invalid-selection');
-      const detail = presentSkillPackage(await setupFor(a, b), skill, { itemId: selectedItem });
+      repo = await setupRepository(repo);
+      const detail = presentSkillPackage(await setupFor(a, b, 'codex', 'codex', repo), skill, { itemId: selectedItem });
       if (!detail) throw new UiError(404, `No skill named ${skill} was found in either profile.`, 'not-found');
       const target = a === 'Default' ? b : a, source = a === 'Default' ? a : b;
       const item = Buffer.from(['skill', '', '', '', skill].join('\u0000')).toString('base64url');
@@ -940,14 +1013,21 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         }
       }
       return { status: 'applied', title: `${name} created`, changes, guidance, undo,
-        note: selectedClient === 'codex' ? 'It has its own settings and no sign-in yet. Use “Open in Terminal to sign in…” on its Profiles card.'
-          : 'Open its Profiles card for the native setup command and sign-in check.' };
+        note: selectedClient === 'codex' ? 'It has its own settings and no sign-in yet. Open Terminal or Codex Desktop from its Profiles card to sign in.'
+          : 'Use Open in Terminal or an available Desktop action on its Profiles card. The sign-in check uses the CLI; Desktop sign-in and task execution are unverified.' };
     },
 
     async profileAccount({ name, client }) {
       if (!plain(name) || !['claude-code', 'copilot'].includes(client))
         throw new UiError(400, 'Choose a Claude Code or Copilot CLI profile.', 'invalid-selection');
-      try { return await nativeProfiles.check(name, client); }
+      try {
+        const selected = (await store.read()).profiles.find(profile => profile.name === name && profile.client === client);
+        if (selected?.native) {
+          const desktop = await managedDesktop.status(selected.id);
+          if (!['available', 'unavailable'].includes(desktop.state)) throw new Error('Release the closed Desktop reservation before checking sign-in');
+        }
+        return await nativeProfiles.check(name, client);
+      }
       catch (error) { throw new UiError(422, error.message, 'native-account-check-failed'); }
     },
 
@@ -973,14 +1053,33 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       return { status: 'success', message: `Removed ${name} from Xenoflux. Its files are still on disk.` };
     },
 
-    async clientAction({ name, action, session }) {
-      const card = (await this.profiles()).profiles.find(profile => profile.name === name);
-      if (card?.client && card.client !== 'codex') {
-        if (action !== 'check') throw new UiError(400, 'Use the native command on the profile card.', 'invalid-action');
-        const result = await this.profileAccount({ name, client: card.client });
+    async clientAction({ name, action, session, appKey }) {
+      const selected = (await store.read()).profiles.find(profile => profile.name === name);
+      if (selected?.client && selected.client !== 'codex') {
+        if (['copilot', 'claude-code'].includes(selected.client) && ['open-desktop', 'recover-desktop'].includes(action)) {
+          try {
+            const result = action === 'open-desktop' ? await managedDesktop.open(selected.id, { appKey })
+              : await managedDesktop.recover(selected.id, { apply: true });
+            return { status: action === 'open-desktop' && result.state === 'running' || result.status === 'recovered' ? 'success' : 'neutral',
+              message: result.status === 'recovered' ? `Released the closed ${selected.client === 'claude-code' ? 'Claude' : 'GitHub Copilot'} Desktop reservation.`
+                : action === 'open-desktop' && result.state === 'running' ? `${selected.client === 'claude-code' ? 'Claude' : 'GitHub Copilot'} Desktop is open for ${name}. Sign-in and task execution are not checked.`
+                : result.reason ?? 'Desktop reservation was preserved. Close the app before recovery.' };
+          } catch (error) { throw new UiError(409, error.message, 'managed-desktop-failed'); }
+        }
+        if (action === 'open-terminal') {
+          try {
+            await nativeProfiles.resolveProfile(selected.client, selected);
+            await clientOps.openTerminal(['launch', name]);
+          }
+          catch (error) { throw new UiError(422, `Couldn’t open Terminal for ${name}: ${error.message}`, 'client-failed'); }
+          return { status: 'success', message: `Opened a Terminal window for ${name}.` };
+        }
+        if (action !== 'check') throw new UiError(400, 'This client does not support that profile action.', 'invalid-action');
+        const result = await this.profileAccount({ name, client: selected.client });
         const text = result.state === 'signed-in' ? 'Signed in' : result.state === 'signed-out' ? 'Signed out' : 'Sign-in route unverified';
         return { status: 'success', message: `${name}: ${text}.` };
       }
+      const card = (await this.profiles()).profiles.find(profile => profile.name === name);
       if (!card) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
       const isDefault = name === 'Default';
       if (action === 'check') return { status: 'neutral', message: `Checked ${name} again.`, profile: card };
@@ -989,7 +1088,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       if (['open-terminal', 'resume', 'signin'].includes(action) && card.desktop.state === 'running')
         throw new UiError(409, `${name} is open in Codex Desktop. Close it there first, or use Show Codex Desktop.`, 'client-conflict');
       try {
-        if (action === 'open-terminal') await clientOps.openTerminal(card.signIn === 'No sign-in saved' ? ['profile', 'signin', name, '--apply'] : ['launch', name]);
+        if (action === 'open-terminal') await clientOps.openTerminal(['launch', name]);
         else if (action === 'signin') await clientOps.openTerminal(['profile', 'signin', name, '--apply']);
         else if (action === 'resume') { const { id } = parseKey(session); await clientOps.openTerminal(['resume', name, id]); }
         else if (action === 'show-terminal') await clientOps.showTerminal();

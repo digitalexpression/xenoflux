@@ -6,10 +6,11 @@ import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
-const APPS = {
+export const STOCK_DESKTOP_APPS = Object.freeze({
   claude: { name: 'Claude', path: '/Applications/Claude.app', bundleId: 'com.anthropic.claudefordesktop', teamIdentifier: 'Q6L2SF6YDW' },
   copilot: { name: 'GitHub Copilot', path: '/Applications/GitHub Copilot.app', bundleId: 'com.github.githubapp', teamIdentifier: 'VEKTX9H2N7' },
-};
+});
+const APPS = STOCK_DESKTOP_APPS;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 1024 && !/[\p{Cc}\p{Cf}]/u.test(value);
 
@@ -30,7 +31,7 @@ async function executableIdentity(path) {
 }
 
 export function createStockDesktopApps({ execFile = promisify(execFileCallback), appPaths = {} } = {}) {
-  async function inspect(client) {
+  async function inspect(client, binding = false) {
     const app = APPS[client];
     if (!app) throw new Error('Unsupported stock desktop client');
     const path = appPaths[client] ?? app.path;
@@ -63,11 +64,20 @@ export function createStockDesktopApps({ execFile = promisify(execFileCallback),
       const scope = { client, path, ...info, identity, signing };
       return { client, name: app.name, status: 'available', appKey: hash(JSON.stringify(scope)), path,
         bundleId: info.bundleId, version: info.version, build: info.build, teamIdentifier: signing.TeamIdentifier,
-        sessionNavigation: client === 'copilot' && info.urlSchemes.includes('ghapp') ? 'available' : 'unavailable' };
+        sessionNavigation: client === 'copilot' && info.urlSchemes.includes('ghapp') ? 'available' : 'unavailable',
+        ...(binding ? { executable, executableIdentity: identity } : {}) };
     } catch { return { client, name: app.name, status: 'unavailable' }; }
   }
   return {
-    async list() { return Promise.all(Object.keys(APPS).map(inspect)); },
+    locations: Object.keys(APPS).map(client => appPaths[client] ?? APPS[client].path),
+    async list() { return Promise.all(Object.keys(APPS).map(client => inspect(client))); },
+    async binding({ client, appKey }) {
+      if (!Object.hasOwn(APPS, client) || typeof appKey !== 'string' || !/^[a-f0-9]{64}$/.test(appKey))
+        throw new Error('Desktop app identity is required');
+      const app = await inspect(client, true);
+      if (app.status !== 'available' || app.appKey !== appKey) throw new Error('Desktop app changed or is unavailable; refresh installed apps');
+      return app;
+    },
     async open({ client, appKey, sessionId } = {}) {
       if (!Object.hasOwn(APPS, client)) throw new Error('Unsupported stock desktop client');
       if (sessionId !== undefined && (client !== 'copilot' || typeof sessionId !== 'string'
@@ -79,7 +89,7 @@ export function createStockDesktopApps({ execFile = promisify(execFileCallback),
         throw new Error('This Copilot app does not register the ghapp session navigation scheme');
       await execFile('/usr/bin/open', ['-a', app.path, ...(sessionId !== undefined ? [`ghapp://sessions/${sessionId}`] : [])], { maxBuffer: 1024 * 1024, timeout: 15000 });
       if (sessionId !== undefined) return { status: 'link-opened', message: `Opened GitHub Copilot link for app-local session ${sessionId}. Session association and completion are not confirmed; no new task was requested.` };
-      return { status: 'opened', message: `Opened ${app.name} using its existing native account. Managed profiles and automated tasks remain unqualified.` };
+      return { status: 'opened', message: `Opened ${app.name} using its existing setup. No managed profile was selected; sign-in and task execution were not checked.` };
     },
   };
 }

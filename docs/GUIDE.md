@@ -6,6 +6,31 @@ requires that link to establish a browser session. Running `xfx ui` again reopen
 the app; Ctrl+C stops its server. `xfx ui --demo` uses marked synthetic data and
 simulated actions without reading/changing profiles or clients.
 
+## Find installed clients and existing profiles
+
+The app opens **Setup** before profile creation. Review CLI and desktop findings
+for Codex, Claude Code and GitHub Copilot, then review existing profiles.
+Setup and Profiles recheck automatically every five seconds while visible and when
+you return to the window. Use **Check again** for an explicit fresh check.
+
+Discovery checks the selected PATH, standard client folders, the profile registry
+and direct folders in Xenoflux's managed profile directory. It does not search
+your whole home directory. Finding a client or folder does not prove sign-in,
+runtime compatibility or account isolation. CLI versions are not checked by
+running the clients.
+
+An updated or removed installation changes its discovery finding. Removing a
+profile from Xenoflux removes its registry entry; manually deleting its folder
+leaves the entry visible as unavailable. Automatic checks do not delete or repair
+profiles. Failed checks retain the previous findings with a stale-state notice
+and retry automatically. Background checks preserve your current form and selection.
+
+Older readable records remain supported. A profile without a native folder needs
+setup; an unsupported record or registry format needs attention. Discovery leaves
+the original files unchanged and offers no automatic migration. An invalid or
+unsupported registry blocks profile operations without hiding installation findings.
+Continue to **Profiles** when you are ready to create a profile or copy settings.
+
 ## Create and compare profiles
 
 In Profiles, choose **Create profile**, select the client and choose **Empty** or
@@ -15,10 +40,38 @@ Creation, native sign-in and opening a client are separate steps; follow the set
 guidance before starting work. Credentials, conversations and generated memory
 are never copied. Profiles subsequently evolve independently.
 
-Compare two setups to inspect current settings, instructions, agents, skills,
-hooks, plugins, MCP and memory settings. **Same**, **Different**, **Could not
-compare** and **Not applicable** describe discovery, not native loading or use.
-Comparing reads files; it copies nothing and does not sign in or activate anything.
+| Profile client | CLI | Desktop with the selected profile |
+| --- | --- | --- |
+| Codex | Open in Terminal | Open Codex Desktop, including to sign in |
+| Claude Code | Open in Terminal; native sign-in guidance on the card | Separate Desktop startup and storage; authenticated session/model use unverified |
+| GitHub Copilot | Open in Terminal; shared account scope remains explicit | Profile-bound local startup and storage; authenticated session/model use unverified |
+
+**Open in Terminal** launches the current selected CLI through Xenoflux with the
+profile's configuration root and an exclusive reservation. A bound project is
+used when present; otherwise it opens the profile's private workspace. Launching
+a CLI starts no task automatically. Close its Terminal session before changing
+or copying that profile. A native startup can still write its own state or run
+configured hooks.
+
+For Copilot, choose **Open GitHub Copilot Desktop** on the profile card. The
+signed installed app opens with that profile's storage. Xenoflux refuses an
+already-running Copilot app or a profile reserved by other work; it never closes
+those clients for you. Desktop sign-in remains inside the vendor app, separate
+from the CLI's shared-account check.
+
+For Claude, choose **Open Claude Desktop** on the profile card. Each profile has
+its own Desktop data folder alongside its Claude Code configuration folder.
+Other Claude Desktop instances can stay open. Xenoflux starts a new instance
+and verifies its selected storage without focusing, closing or changing the
+other instances. Desktop sign-in and its use of Claude Code settings remain
+unverified. The CLI sign-in check does not check Desktop sign-in.
+
+Claude and Copilot Desktop keep their profile reservations when the Xenoflux UI stops.
+After you quit the app, choose **Release closed Desktop reservation** before
+reusing the profile in the CLI, copying settings or editing its registry entry.
+Xenoflux releases only confirmed-stopped ownership with no remaining profile
+holders. Uncertain state stays reserved. A missing CLI does not prevent opening
+an otherwise readable Desktop profile.
 
 Copy preview lists additions, replacements, removals and kept items. Unselected
 and destination-only state is preserved. Selected standalone skills are replaced
@@ -27,13 +80,34 @@ Undo refuses intervening edits. Plugins/hooks/MCP receive optional native/manual
 setup guidance, outside Undo; Xenoflux does not install, enable, connect or trust
 them. A cache or matching definition is not proof of installation or availability.
 Affected clients must be idle; the app reports blockers for you to close manually.
+Other profiles can stay open while you copy. The app checks both copy profiles
+for active reservations and file holders and never closes their clients.
 See [terminal copying and recovery](CLI.md#profiles-copy-and-recovery).
 
 Rename, repository binding and removal affect registry metadata; removing a profile
-leaves its files on disk. Native Open controls submit no task. Managed desktop
-profiles are Codex-only. Signed stock Claude/Copilot opening uses the app's existing
-account and establishes no managed isolation or logical surface. A Copilot session
-link dispatch does not prove that the target session exists.
+leaves its files on disk. Native Open controls submit no task. The separate **Native apps** controls open
+stock Claude/Copilot with the app's existing setup; they do not select a managed
+profile. A Copilot session link dispatch does not prove that the target session exists.
+
+## Inspect and compare setups
+
+From Setup or Profiles, choose **Inspect setup** to read one profile's settings,
+instructions, agents, skills, hooks, plugins, MCP and memory settings. Inspect
+values, file previews, source locations and reading limits. These are current
+local setup sources, not proof of effective precedence, native loading or session use.
+An absent CLI or sign-in does not prevent inspection of a safely readable profile.
+
+Optionally choose a repository to include its project instructions and settings.
+Use **Refresh setup** to reread the selected scope. Invalid repository paths fail
+explicitly; they do not fall back to a comparison without project context.
+
+Choose **Compare with…** to select another profile from the same or a different
+vendor. Same-vendor comparisons retain **Same**, **Different**, **Could not compare**
+and **Not applicable** within the sources read. Different-vendor comparisons align
+categories for inspection while keeping each vendor's observations separate.
+Matching names or values do not establish equivalent behavior. Missing or unreadable
+evidence remains explicit, and copying between vendors is unavailable.
+Inspection and comparison read files without opening, signing in or activating clients.
 
 ## Compare a task
 
@@ -159,6 +233,9 @@ stale-callback recovery is unobserved; synthetic Desktop fixtures do not establi
 real sign-in, Dock behavior or account isolation. Unreported effort/usage stays
 unknown, and sampled ancestry does not prove escaped descendants stopped.
 
-Managed Claude/Copilot desktop profiles, cloud execution, generic configuration
-editing and cross-client setup copying are outside the supported scope. Xenoflux
-never transfers credentials or grants native trust through inspection/copying.
+Claude and Copilot Desktop qualification covers local startup and selected-root storage.
+Desktop authentication, effective session settings, model use and account
+independence remain unverified. Cloud execution,
+generic configuration editing and cross-client setup copying are outside the
+supported scope. Xenoflux never transfers credentials or grants native trust
+through inspection/copying.

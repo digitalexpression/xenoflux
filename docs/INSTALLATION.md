@@ -12,7 +12,8 @@ in beta; stable features may differ. Check the
 - Node.js 22.15.0 or later in the 22.x line, or 23.8.0 or later, on PATH.
   Node.js 23.0–23.7 is unsupported; compressed history needs the Zstandard decoder.
 - The selected Codex, Claude Code or GitHub Copilot CLI installed separately.
-  Codex Desktop is also needed for managed Codex desktop profiles.
+  The corresponding Codex, Claude or GitHub Copilot desktop app is needed for
+  profile-bound desktop startup.
 - An external interactive terminal for native profile or managed-install changes.
 
 The package includes its locked SDK runtime, native library and prebuilt launcher.

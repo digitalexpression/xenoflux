@@ -2,7 +2,7 @@ import { useId, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { ArrowLeftRight } from 'lucide-react';
 import { apiGet } from '@/api/client';
-import type { NativeClientId, ProfilesView, SetupComparison as View, SetupGroup, SetupItem } from '@/api/types';
+import type { SetupChoice, SetupOptions, SetupComparison as View, SetupGroup, SetupItem } from '@/api/types';
 import { ComparisonBadge } from '@/components/badges';
 import { Disclosure, SegmentedControl, SummaryTiles, type TileKey } from '@/components/controls';
 import { DiffBlock } from '@/components/diff';
@@ -13,93 +13,79 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog';
 import { useResource } from '@/lib/useResource';
 import { cn } from '@/lib/cn';
+import { SeparateSetupInventories, setupChoiceKey, setupChoices, setupInspectHref, setupClientLabels, setupLabel, setupParams, setupSelection, type SetupSelection } from '@/components/setup-inventory';
 
 const TILE_LABEL: Record<TileKey, SetupItem['label']> = { different: 'different', same: 'same', cannotCompare: 'cannot-compare' };
 const FILTER_LABEL: Record<TileKey, string> = { different: 'Different only', same: 'Same only', cannotCompare: 'Could not compare only' };
 
-function setupOptions(view: ProfilesView | null) {
-  const stockLabels = { 'claude-code': 'Claude Code', copilot: 'Copilot CLI' } as const;
-  const options = view?.profiles.map(profile => ({
-    value: profile.client && profile.client !== 'codex' ? `${profile.client}:${profile.name}` : profile.name,
-    label: profile.client && profile.client !== 'codex' ? `${profile.name} · ${stockLabels[profile.client]}` : profile.name,
-  })) ?? [];
-  for (const client of ['claude-code', 'copilot'] as const)
-    if (view?.copySources?.[client]?.includes('Default')) options.push({ value: `${client}:Default`, label: `${stockLabels[client]} Default` });
-  return options;
-}
-
-function setupSelection(value: string): [name: string, client: NativeClientId] {
-  const separator = value.indexOf(':');
-  return separator === -1 ? [value, 'codex'] : [value.slice(separator + 1), value.slice(0, separator) as NativeClientId];
-}
-
-function setupParams(first: string, second: string) {
-  const [a, aClient] = setupSelection(first), [b, bClient] = setupSelection(second);
-  return { a, b, ...(aClient === 'codex' ? {} : { aClient }), ...(bClient === 'codex' ? {} : { bClient }) };
-}
-
 export function SetupComparison() {
   const [params, setParams] = useSearchParams();
-  const a = params.get('a') ?? '', b = params.get('b') ?? '';
-  const aClient = params.get('aClient'), bClient = params.get('bClient');
-  if (!a || !b) return <ChooseProfiles />;
-  const first = aClient ? `${aClient}:${a}` : a, second = bClient ? `${bClient}:${b}` : b;
-  return <ComparisonView key={JSON.stringify([first, second])} first={first} second={second} onChange={(x, y) => setParams(setupParams(x, y))} />;
+  const first = setupSelection(params.get('a') ?? '', params.get('aClient'));
+  const second = setupSelection(params.get('b') ?? '', params.get('bClient'));
+  const repo = params.get('repo') ?? '';
+  if (!first || !second) return <ChooseProfiles first={first} repo={repo} />;
+  return <ComparisonView key={JSON.stringify([first, second, repo])} first={first} second={second} repo={repo} onChange={(x, y, repository) => setParams(setupParams(x, y, repository))} />;
 }
 
-function ChooseProfiles() {
+function ChooseProfiles({ first, repo }: { first: SetupSelection | null; repo: string }) {
   const navigate = useNavigate();
-  const profiles = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles');
-  const names = setupOptions(profiles.data);
+  const options = useResource(() => apiGet<SetupOptions>('/api/setups/options'), 'setup-options', { live: true });
+  const available = options.data?.choices.filter(choice => choice.available) ?? [];
+  const managed = available.filter(choice => choice.name !== 'Default');
+  const initialA = first ?? managed[0] ?? available[0] ?? null;
+  const initialB = first ? available.find(choice => choice.name !== first.name || choice.client !== first.client) ?? null
+    : managed[1] ?? available.find(choice => choice.name !== initialA?.name || choice.client !== initialA.client) ?? null;
   return (
     <Page current="compare" title="Compare setups">
       <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare setups' }]} title="Compare setups"
-        subtitle="Choose two profiles. Comparing reads today’s setup only: nothing is copied, activated, signed in or opened." />
-      {profiles.error ? <LoadError error={profiles.error} onRetry={profiles.reload} /> : null}
-      {profiles.loading && !profiles.data ? <Loading label="Reading profiles…" rows={1} /> : null}
-      {profiles.data ? (
-        names.length < 2 ? (
-          <WarningAlert title="You need a second profile">Only {names[0]?.label ?? 'Default'} exists. Create one, empty or from parts of it, then change it in Codex as usual. <Link to="/profiles?create=1">Create profile…</Link></WarningAlert>
-        ) : <ProfilePairForm names={names} initial={[names[1]?.value ?? names[0]?.value ?? '', names[2]?.value ?? names[0]?.value ?? '']} onSubmit={(x, y) => navigate(`/compare/setups?${new URLSearchParams(setupParams(x, y))}`)} submitLabel="Compare setups" />
-      ) : null}
+        subtitle="Choose two profiles from the same or different clients. This reads current local sources; nothing is copied, activated, signed in or opened." />
+      {options.error ? <LoadError error={options.error} onRetry={options.reload} /> : null}
+      {options.loading && !options.data ? <Loading label="Reading setup choices…" rows={1} /> : null}
+      {options.data?.warnings.map((warning, index) => <p className="text-ui" key={index}>{warning}</p>)}
+      {options.data ? <ProfilePairForm choices={options.data.choices} initial={[initialA, initialB]} initialRepo={repo} unavailable={Boolean(options.error)} onSubmit={(x, y, repository) => navigate(`/compare/setups?${new URLSearchParams(setupParams(x, y, repository))}`)} submitLabel="Compare setups" /> : null}
+      {options.data && available.length < 2 ? <WarningAlert title="You need two readable setups">Choose an existing native setup or <Link to="/profiles?create=1">create a profile</Link>.</WarningAlert> : null}
     </Page>
   );
 }
 
-function ProfilePairForm({ names, initial, onSubmit, submitLabel, onCancel }:
-  { names: ReturnType<typeof setupOptions>; initial: [string, string]; onSubmit: (a: string, b: string) => void; submitLabel: string; onCancel?: () => void }) {
+function ProfilePairForm({ choices, initial, initialRepo, onSubmit, submitLabel, unavailable = false }:
+  { choices: SetupChoice[]; initial: [SetupSelection | null, SetupSelection | null]; initialRepo: string; onSubmit: (a: SetupSelection, b: SetupSelection, repo: string) => void; submitLabel: string; unavailable?: boolean }) {
   const [a, setA] = useState(initial[0]);
-  const [b, setB] = useState(initial[1] !== initial[0] ? initial[1] : names.find(n => n.value !== initial[0])?.value ?? '');
+  const [b, setB] = useState(initial[1]);
+  const [repo, setRepo] = useState(initialRepo);
   const [error, setError] = useState(false);
-  const idA = useId(), idB = useId(), errorId = useId();
+  const idA = useId(), idB = useId(), errorId = useId(), repoId = useId();
+  const names = setupChoices(choices, [a, b]);
+  const aKey = setupChoiceKey(names, a), bKey = setupChoiceKey(names, b);
+  const left = names.find(choice => choice.key === aKey), right = names.find(choice => choice.key === bKey);
+  const ready = Boolean(left?.available && right?.available && aKey !== bKey && !unavailable);
   return (
-    <form className="panel flex flex-col gap-4" onSubmit={event => { event.preventDefault(); if (a === b) { setError(true); return; } onSubmit(a, b); }}>
+    <form className="panel flex flex-col gap-4" onSubmit={event => { event.preventDefault(); if (!ready || !a || !b) { setError(true); return; } onSubmit(a, b, repo.trim()); }}>
       <div className="flex flex-wrap gap-4 items-end">
-        <div className="flex-1 min-w-[200px]">
+        <div className="flex-1 min-w-0 basis-[200px]">
           <label htmlFor={idA} className="field-label"><SideText side="a">First</SideText> · left side</label>
-          <select id={idA} className="input font-mono" value={a} onChange={event => { setA(event.target.value); setError(false); }}>{names.map(n => <option key={n.value} value={n.value}>{n.label}</option>)}</select>
+          <select id={idA} className="input" value={aKey} onChange={event => { setA(names.find(choice => choice.key === event.target.value) ?? null); setError(false); }}><option value="">Choose a setup</option>{names.map(choice => <option key={choice.key} value={choice.key} disabled={!choice.available}>{choice.label}{!choice.available ? ' · unavailable' : ''}</option>)}</select>
         </div>
         <Button size="icon" aria-label="Swap the two profiles" onClick={() => { setA(b); setB(a); }}><ArrowLeftRight size={18} aria-hidden="true" /></Button>
-        <div className="flex-1 min-w-[200px]">
+        <div className="flex-1 min-w-0 basis-[200px]">
           <label htmlFor={idB} className="field-label"><SideText side="b">Second</SideText> · right side</label>
-          <select id={idB} className="input font-mono" value={b} onChange={event => { setB(event.target.value); setError(false); }}
-            aria-invalid={error || undefined} aria-describedby={error ? errorId : undefined}>{names.map(n => <option key={n.value} value={n.value}>{n.label}</option>)}</select>
+          <select id={idB} className="input" value={bKey} onChange={event => { setB(names.find(choice => choice.key === event.target.value) ?? null); setError(false); }}
+            aria-invalid={error || undefined} aria-describedby={error ? errorId : undefined}><option value="">Choose a setup</option>{names.map(choice => <option key={choice.key} value={choice.key} disabled={!choice.available}>{choice.label}{!choice.available ? ' · unavailable' : ''}</option>)}</select>
         </div>
       </div>
-      {error ? <p id={errorId} role="alert" className="text-ui" style={{ color: 'var(--color-error)' }}>Choose two different profiles.</p> : null}
-      <div className="flex flex-wrap gap-2">
-        <Button type="submit" variant="primary">{submitLabel}</Button>
-        {onCancel ? <Button onClick={onCancel}>Cancel</Button> : null}
-      </div>
+      {[left, right].filter(choice => choice && !choice.available).map((choice, index) => <p className="text-ui" key={index}>{choice?.label} · {choice?.reason}</p>)}
+      <div><label htmlFor={repoId} className="field-label">Repository scope (optional)</label><input id={repoId} className="input font-mono" value={repo} onChange={event => setRepo(event.target.value)} placeholder="/absolute/path/to/repository" /></div>
+      {error ? <p id={errorId} role="alert" className="text-ui" style={{ color: 'var(--color-error)' }}>Choose two different, available setups.</p> : null}
+      <div><Button type="submit" variant="primary" disabled={!ready}>{submitLabel}</Button></div>
     </form>
   );
 }
 
-function ComparisonView({ first, second, onChange }: { first: string; second: string; onChange: (a: string, b: string) => void }) {
-  const { a, b } = setupParams(first, second);
+function ComparisonView({ first, second, repo, onChange }: { first: SetupSelection; second: SetupSelection; repo: string; onChange: (a: SetupSelection, b: SetupSelection, repo: string) => void }) {
+  const a = first.name, b = second.name;
   const info = useInfo();
-  const view = useResource(() => apiGet<View>('/api/compare/setups', setupParams(first, second)), JSON.stringify([first, second]));
-  const profiles = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles');
+  const view = useResource(() => apiGet<View>('/api/compare/setups', { ...setupParams(first, second, repo), fresh: '1' }), JSON.stringify([first, second, repo]));
+  const options = useResource(() => apiGet<SetupOptions>('/api/setups/options'), 'setup-options', { live: true });
   const [preset, setPreset] = useState<'attention' | 'all'>('attention');
   const [only, setOnly] = useState<TileKey | null>(null);
   const [query, setQuery] = useState('');
@@ -129,26 +115,19 @@ function ComparisonView({ first, second, onChange }: { first: string; second: st
       {info?.mode === 'demo' ? <SimulatedNote /> : null}
       {data?.blocked ? <WarningAlert title={data.blocked} live /> : null}
       <div className="flex flex-wrap items-center gap-3">
-        <ProfileChip side="a" name={a} meta={data?.a.meta} />
-        <Button size="icon" aria-label="Swap the two profiles" onClick={() => onChange(second, first)}><ArrowLeftRight size={18} aria-hidden="true" /></Button>
-        <ProfileChip side="b" name={b} meta={data?.b.meta} />
+        <ProfileChip side="a" name={a} meta={setupClientLabels[first.client]} />
+        <Button size="icon" aria-label="Swap the two profiles" onClick={() => onChange(second, first, repo)}><ArrowLeftRight size={18} aria-hidden="true" /></Button>
+        <ProfileChip side="b" name={b} meta={setupClientLabels[second.client]} />
         {data?.project ? <span className="text-ui">in <span className="font-mono">{data.project}</span></span> : null}
         <Button className="ml-auto" onClick={() => setChanging(true)}>Change profiles…</Button>
+        <Button onClick={view.reload} busy={view.loading} busyLabel="Reading setups…">Refresh setups</Button>
       </div>
-      {view.error ? <LoadError error={view.error} onRetry={view.reload} /> : null}
+      <div className="flex flex-wrap gap-4"><Link to={setupInspectHref(first, repo)}>Inspect {setupLabel(first)}</Link><Link to={setupInspectHref(second, repo)}>Inspect {setupLabel(second)}</Link></div>
+      {view.error ? <>{data ? <p className="hint">Previous read shown. Refresh failed; these observations have not been updated.</p> : null}<LoadError error={view.error} onRetry={view.reload} /></> : null}
       {data?.copyHref ? <div><Link className="btn" to={data.copyHref}>Preview copying selected settings</Link></div> : null}
       {data?.separate ? <>
         <InfoNotice title="Separate setup inventories"><p>{data.separate.reason}</p></InfoNotice>
-        <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))' }}>
-          {(['a', 'b'] as const).map(side => <section className="panel min-w-0 wrap-anywhere" key={side}>
-            <h2 className="text-heading">{data[side].name} · {data[side].meta}</h2>
-            <p className="hint">Discovery {data.separate?.[side].status}</p>
-            {data.separate?.[side].warnings.map(warning => <p key={warning} className="text-ui">{warning}</p>)}
-            <ul className="list-none p-0">{data.separate?.[side].resources.map((item, index) => <li key={index} className="py-2">
-              <p className="text-ui font-medium">{item.name}</p><p className="hint">{[item.category, item.scope, item.origin, item.status].filter(Boolean).join(' · ')}</p>
-            </li>)}</ul>
-          </section>)}
-        </div>
+        <SeparateSetupInventories a={data.separate.a} b={data.separate.b} aLabel={setupLabel(first)} bLabel={setupLabel(second)} />
       </> : <SummaryTiles counts={data?.counts ?? null} loading={view.loading && !data} active={only}
         onFilter={key => { setOnly(key); setSelected(null); }}
         captions={{ different: 'Where the two setups differ. Start here.' }} />}
@@ -200,8 +179,9 @@ function ComparisonView({ first, second, onChange }: { first: string; second: st
       <Dialog open={changing} onOpenChange={setChanging}>
         {changing ? (
           <DialogContent title="Change profiles">
-            <ProfilePairForm names={profiles.data ? setupOptions(profiles.data) : [{ value: first, label: a }, { value: second, label: b }]} initial={[first, second]} submitLabel="Compare these"
-              onSubmit={(x, y) => { setChanging(false); onChange(x, y); }} />
+            {options.error ? <LoadError error={options.error} onRetry={options.reload} /> : null}
+            <ProfilePairForm choices={options.data?.choices ?? []} initial={[first, second]} initialRepo={repo} submitLabel="Compare these" unavailable={options.loading || Boolean(options.error)}
+              onSubmit={(x, y, repository) => { setChanging(false); onChange(x, y, repository); }} />
             <DialogClose asChild><Button>Cancel</Button></DialogClose>
           </DialogContent>
         ) : null}

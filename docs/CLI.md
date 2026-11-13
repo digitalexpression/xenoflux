@@ -8,7 +8,15 @@ before applying and run them from an external interactive terminal.
 ## Profiles, copy and recovery
 
 The following commands describe Codex profiles. Use the app's client selector
-for Claude Code/Copilot setup and native sign-in guidance.
+for Claude Code/Copilot creation and native sign-in guidance. `xfx launch NAME`
+also opens a named Claude Code or Copilot profile in the current interactive
+terminal. `--dry-run --json` previews its selected executable, root and workspace
+without starting a client. Standalone resume and the picker remain Codex-only.
+`xfx profile recover NAME` also previews a stopped Claude/Copilot interactive
+launch; `--apply` requires the same owner and idle-resource checks as Codex recovery.
+For a Claude or Copilot Desktop reservation, the same command previews/releases only
+confirmed-stopped app ownership. Open managed Claude or Copilot Desktop from the profile
+card in `xfx ui`; the `xfx desktop` commands below remain Codex-specific.
 
 ```sh
 xfx profile create Research
