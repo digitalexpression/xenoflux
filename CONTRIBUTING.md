@@ -66,7 +66,7 @@ Keyboard behavior, narrow layouts and both themes remain required.
 | --- | --- |
 | CLI and local web boundary | `bin/xfx.js`, `src/ui-server.js`, `src/ui-engine.js` |
 | Profiles, launch and copying | `src/profiles.js`, `src/profile-launcher.js`, `src/advanced-copy.js`, `src/native-copy.js` |
-| Managed Desktop ownership | `src/desktop-instances.js`, `src/desktop-runtime.js` |
+| Managed Desktop ownership | `src/desktop-instances.js`, `src/managed-desktop.js`, `src/desktop-runtime.js` |
 | Client execution and ordinary reviews | `src/client-runtime.js`, `src/ui-review-tasks.js`, client runtime adapters |
 | Evidence, export and interpretation | `src/audit-store.js`, `src/audit-report.js`, `src/audit-explanation.js` |
 | Structured inputs and limits | `src/audit-spec.js`, `src/audit-review.js`, their validation tests |

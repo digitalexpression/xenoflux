@@ -87,6 +87,20 @@ test('instruction copy preserves config, credentials and history; undo restores 
   await absent(f.options.lockPath);
 });
 
+test('copy refuses a holder anywhere in either endpoint home, including outside the selected file', async t => {
+  for (const side of ['source', 'target']) await t.test(side, async t => {
+    const f = await fixture(t), before = await text(join(f.b.home, 'AGENTS.md'));
+    const occupied = side === 'source' ? f.defaultProfile : f.b.home;
+    const runtime = { async assertIdle({ resourcePaths }) {
+      assert.ok(resourcePaths.includes(f.defaultProfile));
+      assert.ok(resourcePaths.includes(f.b.home));
+      if (resourcePaths.includes(occupied)) throw Object.assign(new Error('RESOURCE_BUSY'), { code: 'RESOURCE_BUSY' });
+    } };
+    await assert.rejects(applyCopy(f.store, 'Default', 'B', { ...f.options, runtime }), { code: 'RESOURCE_BUSY' });
+    assert.equal(await text(join(f.b.home, 'AGENTS.md')), before);
+  });
+});
+
 test('copy and a fresh undo runtime both accept verified orphan reporters without lifecycle commands', async t => {
   const f = await fixture(t), before = await text(join(f.b.home, 'AGENTS.md'));
   const fixtureVersion = 'fixture-version', fixtureBuild = 'fixture-build';

@@ -14,7 +14,7 @@ export const DESKTOP_APP = Object.freeze({
   bundleId: 'com.openai.codex',
   executable: '/Applications/Codex.app/Contents/MacOS/Codex',
 });
-const DEFAULT_APP_PATHS = [DESKTOP_APP.appPath, '/Applications/ChatGPT.app'];
+export const DEFAULT_APP_PATHS = Object.freeze([DESKTOP_APP.appPath, '/Applications/ChatGPT.app']);
 // Publisher identity survives routine releases and certificate renewal. A valid
 // signature alone would also accept a replacement signed by someone else.
 const signingRequirement = 'identifier "com.openai.codex" and anchor apple generic and certificate leaf[subject.OU] = "2DC432GLL2"';

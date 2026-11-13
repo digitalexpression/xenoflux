@@ -174,3 +174,53 @@ test('review task routes carry only the bound report, token, task, and explicit 
   assert.equal((await call(server.port, { method: 'POST', path: `/api/reports/${report}/review-tasks`, headers: { ...headers, origin: 'https://evil.example' }, body: { previewToken: 'preview-id' } })).status, 403);
   assert.equal((await call(server.port, { method: 'POST', path: `/api/reports/${report}/review-tasks`, headers: { ...api, origin }, body: { previewToken: 'preview-id' } })).status, 401);
 });
+
+
+test('discovery GET uses the authenticated read boundary and demo stays synthetic', async t => {
+  const { server, origin, api, login } = await fixture(t);
+  assert.equal((await call(server.port, { path: '/api/discovery', headers: api })).status, 401);
+  const cookie = await login();
+  const response = await call(server.port, { path: '/api/discovery', headers: { ...api, cookie } });
+  assert.equal(response.status, 200);
+  assert.equal(response.json.simulated, true);
+  assert.equal(response.json.clients.length, 3);
+  assert.equal((await call(server.port, { method: 'POST', path: '/api/discovery', headers: { ...api, cookie, origin, 'content-type': 'application/json' }, body: {} })).status, 404);
+});
+
+test('ordinary UI launch enters setup and reuse preserves its exact token without changing server launch URLs', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'xfx-ui-launch-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const opened = [];
+  await writeFile(join(root, 'index.html'), '<!doctype html><title>launch fixture</title>');
+  const app = await runUi({ store: { directory: root }, provider: createDemoProvider(), staticRoot: root,
+    signals: false, open: async url => opened.push(url), out: () => {} });
+  t.after(app.stop);
+  const first = new URL(app.url);
+  assert.equal(first.pathname, '/setup');
+  assert.ok(first.hash.startsWith('#launch='));
+  assert.equal(opened[0], app.url);
+  const token = 'reuse-exact-token_123';
+  await writeFile(join(root, 'ui-server.json'), JSON.stringify({ pid: process.ppid, port: Number(new URL(app.origin).port), launchToken: token }));
+  const reused = await runUi({ store: { directory: root }, provider: {}, staticRoot: null,
+    signals: false, open: async url => opened.push(url), out: () => {} });
+  if (!reused.reused) t.after(reused.stop);
+  assert.equal(reused.reused, true);
+  assert.equal(new URL(reused.url).pathname, '/setup');
+  assert.equal(new URL(reused.url).hash, `#launch=${token}`);
+});
+
+
+test('discovery and app GET routes forward only the explicit fresh flag', async t => {
+  const requests = [];
+  const provider = Object.fromEntries(['discovery', 'apps'].map(name => [name, async input => {
+    requests.push([name, input]); return { ok: true };
+  }]));
+  const { server, api, login } = await fixture(t, provider);
+  const headers = { ...api, cookie: await login() };
+  for (const name of ['discovery', 'apps']) {
+    for (const suffix of ['', '?fresh=1&ignored=value', '?fresh=true']) {
+      assert.equal((await call(server.port, { path: `/api/${name}${suffix}`, headers })).status, 200);
+      assert.deepEqual(requests.at(-1), [name, { fresh: suffix.includes('fresh=1') }]);
+    }
+  }
+});

@@ -227,7 +227,14 @@ test('creates a profile from selected parts, edits and removes profiles without 
   const profiles = (await f.provider.profiles()).profiles;
   const card = profiles.find(profile => profile.name === 'careful-tests');
   assert.equal(card.signIn, 'No sign-in saved');
-  assert.deepEqual(card.clientActions.map(action => action.id), ['signin']);
+  assert.deepEqual(card.clientActions.map(action => action.id), ['open-terminal', 'signin', 'open-desktop']);
+  await f.provider.clientAction({ name: 'careful-tests', action: 'open-terminal' });
+  assert.deepEqual(f.calls, [['openTerminal', ['launch', 'careful-tests']]], 'ordinary opening never invokes sign-in');
+  await f.provider.clientAction({ name: 'careful-tests', action: 'signin' });
+  assert.deepEqual(f.calls.at(-1), ['openTerminal', ['profile', 'signin', 'careful-tests', '--apply']]);
+  f.calls.length = 0;
+  await f.provider.clientAction({ name: 'careful-tests', action: 'open-desktop' });
+  assert.deepEqual(f.calls, [['openDesktop', 'careful-tests']]);
   const data = await f.store.read();
   const home = join(data.profiles.find(profile => profile.name === 'careful-tests').native.root, 'codex-home');
   assert.match(await text(join(home, 'AGENTS.md')), /lint/);

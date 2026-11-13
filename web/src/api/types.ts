@@ -54,7 +54,7 @@ export interface ProfileCard {
   clientActions: ClientAction[];
   moreMenu: MenuAction[] | null;
 }
-export interface ClientAction { id: string; label: string; kind?: 'primary' | 'secondary'; conflict?: ClientConflict }
+export interface ClientAction { id: string; label: string; kind?: 'primary' | 'secondary'; conflict?: ClientConflict; appKey?: string }
 export interface ClientConflict { title: string; body: string }
 export interface MenuAction { id: 'copy' | 'binding' | 'rename' | 'remove'; label: string; detail?: string; disabledReason?: string }
 export interface NativeAppEntry {
@@ -95,9 +95,21 @@ export interface SetupItem {
 }
 export interface SetupGroup { id: string; label: string; items: SetupItem[]; counts: Counts; meta: string; hiddenSame: number }
 export interface CoverageRow { area: string; a: string; b: string }
-interface SetupInventory {
-  status: string; warnings: string[];
-  resources: { name: string; category: string; scope: string; origin: string; status: string }[];
+export interface SetupChoice {
+  key: string; name: string; client: ProfileClient; label: string; available: boolean; reason: string | null;
+}
+export interface SetupOptions { choices: SetupChoice[]; warnings: string[] }
+export interface SetupSourceFile { path: string; status: string; preview: string | null; note: string | null }
+export interface SetupSourceItem {
+  id: string; name: string; category: string; scope: string; origin: string; status: string;
+  value: string | null; valueStatus: string; note: string;
+  sources: { where: string; scope: string; status: string }[];
+  facts: Fact[]; files: SetupSourceFile[];
+}
+export interface SetupInventoryGroup { id: string; label: string; coverage: string; items: SetupSourceItem[] }
+export interface SetupInventory { status: string; warnings: string[]; coverage: Fact[]; groups: SetupInventoryGroup[] }
+export interface SetupInspection {
+  profile: ProfileRef & { client: ProfileClient }; project: string | null; readAt: string; inventory: SetupInventory;
 }
 export interface SetupComparison {
   a: ProfileRef;
@@ -570,3 +582,33 @@ export interface CopyResult {
 }
 
 export interface ApiErrorBody { error: { message: string; code: string; details?: unknown } }
+
+export type InstallationObservation =
+  | { kind: 'found'; label: string; location: string; version: string | null; identity: string }
+  | { kind: 'unavailable'; label: string; reason: string };
+export interface SetupObservation {
+  inspectHref?: string;
+  key: string;
+  name: string;
+  origin: string;
+  kind: 'found' | 'not-found' | 'unavailable' | 'unbound' | 'unsupported';
+  label: string;
+  location: string | null;
+  reason: string;
+}
+export interface DiscoveryView {
+  checkedAt: string;
+  scope: string[];
+  registry: { kind: 'readable'; reason: null } | { kind: 'blocked'; reason: string };
+  clients: {
+    client: ProfileClient;
+    name: string;
+    cli: InstallationObservation;
+    desktop: InstallationObservation;
+    desktopNote: string;
+    setups: SetupObservation[];
+  }[];
+  attention: SetupObservation[];
+  limits: string[];
+  simulated: boolean;
+}

@@ -150,3 +150,15 @@ test('changed scheme registration, app build or signature invalidates navigation
     assert.equal(f.calls.some(call => call.command === '/usr/bin/open'), false);
   });
 });
+
+test('managed binding freshly verifies executable while stock listing retains its public shape', async t => {
+  const f = await fixture(t, 'copilot'), app = (await f.service.list())[1];
+  assert.equal(Object.hasOwn(app, 'executable'), false);
+  const binding = await f.service.binding({ client: 'copilot', appKey: app.appKey });
+  assert.equal(binding.executable, f.executable);
+  assert.match(binding.executableIdentity.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(binding.appKey, app.appKey);
+  await writeFile(f.executable, 'changed signed fixture');
+  await assert.rejects(f.service.binding({ client: 'copilot', appKey: app.appKey }), /changed or is unavailable/);
+  assert.equal(f.calls.some(call => call.command === '/usr/bin/open'), false);
+});

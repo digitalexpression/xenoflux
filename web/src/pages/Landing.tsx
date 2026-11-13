@@ -12,21 +12,15 @@ export function Landing() {
   const info = useInfo();
   const overview = useResource(() => apiGet<Overview>('/api/overview'), 'overview');
   const data = overview.data;
-  const needsTwo = data !== null && data.profileCount < 2;
   return (
     <Page current="compare" title="Compare">
       <PageTitle title="What do you want to compare?" />
       {overview.error ? <LoadError error={overview.error} onRetry={overview.reload} /> : null}
-      {data && data.profileCount === 0 ? (
-        <section className="panel flex flex-col gap-3" aria-labelledby="no-profiles">
-          <h2 id="no-profiles" className="text-heading">Add a profile to start</h2>
-          <p className="muted">Xenoflux compares Codex profiles. Add an existing Codex folder, or create a profile.</p>
-          <div className="flex flex-wrap gap-2">
-            <Link className="btn" to="/profiles?add=1">Add an existing Codex folder…</Link>
-            <Link className="btn" to="/profiles?create=1">Create profile…</Link>
-          </div>
-        </section>
-      ) : (
+      <section className="flex flex-col gap-2" aria-labelledby="discovery-entry">
+        <h2 id="discovery-entry" className="text-heading">Start with what is already on this Mac</h2>
+        <p className="muted">Find installed clients and existing profiles before creating another setup.</p>
+        <div><Link className="btn" to="/setup">Discover clients and profiles</Link></div>
+      </section>
         <div className="grid gap-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))' }}>
           <section className="panel flex flex-col gap-4" aria-labelledby="compare-task">
             <div className="flex flex-col gap-1">
@@ -45,17 +39,14 @@ export function Landing() {
           <section className="panel flex flex-col gap-4" aria-labelledby="compare-setups">
             <div className="flex flex-col gap-1">
               <h2 id="compare-setups" className="text-heading">Compare setups</h2>
-              <p className="muted">See how two profiles’ instructions, skills, tools and settings differ today.</p>
+              <p className="muted">Inspect one profile’s current sources, then compare setups from the same or different clients.</p>
             </div>
-            <p className="text-meta font-medium mt-auto">{data ? (needsTwo ? 'Needs two profiles' : data.setups.text) : 'Reading profiles…'}</p>
+            <p className="text-meta font-medium mt-auto">{data ? data.setups.text : 'Reading profiles…'}</p>
             <div>
-              {needsTwo
-                ? <Link className="btn" to="/profiles">Needs two profiles · open Profiles</Link>
-                : <Link className="btn" to="/compare/setups">Choose two profiles</Link>}
+              <div className="flex flex-wrap gap-2"><Link className="btn" to="/profiles">Inspect a setup</Link><Link className="btn" to="/compare/setups">Choose two profiles</Link></div>
             </div>
           </section>
         </div>
-      )}
       <section className="flex flex-col gap-3" aria-labelledby="recent">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           {data?.recent.length ? <h2 id="recent" className="text-heading">Recent</h2> : <h2 id="recent" className="sr-only">Saved reports</h2>}

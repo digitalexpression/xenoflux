@@ -425,7 +425,7 @@ try {
         if (result.truncated) process.stdout.write('More tasks are available; narrow --search or increase --limit.\n');
       }
     }
-    else if (!json && ['launch','resume','pick'].includes(command) && result.reportPath) process.stdout.write(`Codex ${result.status}${result.error ? ` (${result.error})` : ''}.\nLaunch record: ${result.reportPath}\n`);
+    else if (!json && ['launch','resume','pick'].includes(command) && result.reportPath) process.stdout.write(`${({ 'claude-code': 'Claude Code', copilot: 'Copilot CLI' })[result.client] ?? 'Codex'} ${result.status}${result.error ? ` (${result.error})` : ''}.\nLaunch record: ${result.reportPath}\n`);
     else process.stdout.write(`${displayJSON(result)}\n`);
   }
 } catch (error) {

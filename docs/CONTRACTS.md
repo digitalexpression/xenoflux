@@ -8,6 +8,20 @@ reconstruction. [The guide](GUIDE.md) owns user-facing support/limits;
 
 ## Identity and selected installations
 
+Discovery is read-only and separates installation observations, profile
+structure and operational eligibility. Inspect bounded known locations without
+native client execution, account checks, Desktop reconciliation or registry writes.
+An inspection-only registry projection may describe unsupported records. Operational
+profile reads and mutations retain strict registry validation. Missing client
+attribution on a supported older Codex record does not require migration. An unbound
+record is not proof of an obsolete format. Discovery never authorizes creation,
+copying or launch.
+
+Automatic discovery reads are serialized and reject superseded responses. Current
+filesystem metadata invalidates cached installation and profile observations;
+failed refreshes cannot turn previous findings into fresh or empty evidence.
+Cached discovery never replaces an operation's current identity validation.
+
 Each prepared operation binds client, surface, profile/root mode, canonical roots,
 selected executable/SDK identity, workspace/settings fingerprint and job/side owner.
 Client identity is independent of model vendor. Implicit Default and explicit roots
@@ -27,8 +41,10 @@ borrow another login. Do not collect/copy credentials or use credential hashes a
 identity. Refuse unsupported ambient token/provider/root overrides, including empty
 values where the native override contract treats them as present. Native HOME/USER/
 LOGNAME must stay consistent; use client-qualified configuration roots explicitly.
-Custom endpoints, BYOK, SSH/cloud execution and managed Claude/Copilot desktops
-are outside the supported boundary.
+Custom endpoints, BYOK and SSH/cloud execution are outside
+the supported boundary. Claude and Copilot Desktop admission covers local selected-root
+startup/storage only; authenticated sessions, model operation and account
+independence are not qualified by that admission.
 
 ## Profile creation, copying and Undo
 
@@ -78,7 +94,7 @@ protocol/account/event interpretation. Reuse capture, report projection, atomic 
 metadata and `.run-lock` memberships across controllers. Independent jobs have separate
 sessions, requests, workspaces and cancellation; canonical writable review workspaces
 cannot overlap active/unresolved claims. Capacity defaults to eight per controller.
-Profile mutations and new Desktop startup remain exclusive. Verified managed Desktop
+Profile mutations and new Desktop startup remain exclusive. Verified managed Codex Desktop
 can participate in comparison/review execution without losing its own reservation.
 
 Ordinary review uses the selected profile's normal cwd, sign-in, settings, instructions,
@@ -167,6 +183,21 @@ or retry. A deliberate new attempt has a fresh preview/record.
 
 ## Desktop and native helpers
 
+Claude and Copilot Desktop own one durable, exclusive reservation per profile independent of
+the UI server. Before startup, bind the current signed installation, canonical
+profile roots and their identities, persist intent and refuse a conflicting reservation.
+Copilot also refuses an existing vendor app. Claude uses a distinct Desktop data
+folder and allows other instances without controlling them. Require a new exact native process identity and
+positive selected-root storage evidence before reporting profile-bound startup.
+For Claude, that evidence can come from an exact owned descendant holding the
+selected Desktop storage. A configuration environment variable alone is insufficient.
+Do not pass prompts, authentication choices or account overrides. Readonly status
+never releases the reservation. Explicit recovery rechecks the exact stopped
+owner, roots and complete holder observations; uncertain startup, reused process
+identities and incomplete scans retain ownership. Other Claude instances alone
+do not block recovery of a confirmed-stopped profile. Never broaden shared task
+participant admission to bypass this exclusive claim.
+
 Open/focus/quit verifies the signed vendor app, selected profile routes and exact
 PID/kernel start identity. Preserve signatures/entitlements; never re-sign vendor
 executables/helpers. Stock opening sends no prompt or account/surface selection and
@@ -195,6 +226,14 @@ invoked, successful read and adherence are distinct. Hashes/paths/publishers do 
 resolve ambiguous ownership or establish identical loaded bytes. Current catalogs/files
 never fill historical gaps. Same-task declarations/titles do not override conflicting
 recorded inputs. Imports freeze a new derivation; originals remain unchanged.
+
+Single-profile inspection and mixed-client inventories share one bounded source
+projection. Category alignment provides navigation, not semantic equivalence or
+cross-client copy eligibility. Static inspection of known safe roots requires no
+native executable or sign-in. Repository scope is validated before discovery and
+belongs in snapshot cache identity; an invalid scope cannot silently become global.
+Explicit refresh rereads current sources without upgrading them to historical or
+effective harness evidence.
 
 Replay retains each side's independent order, stable references and owned child links,
 with explicit absent clocks/content/children. Do not invent synchronized matches or

@@ -216,8 +216,8 @@ test('reject create when selected source instructions changed after preview', as
 test('compare two setups and inspect all lines of a skill package', async ({ app, page }) => {
   await openProfiles(page);
   const baseline = page.locator('article').filter({ has: page.getByRole('heading', { name: 'baseline', exact: true }) });
-  await baseline.getByRole('button', { name: 'Compare with…' }).click();
-  await page.getByLabel('Second profile').selectOption({ label: 'strict-review' });
+  await baseline.getByRole('link', { name: 'Compare with…' }).click();
+  await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'strict-review · Codex' });
   await page.getByRole('button', { name: 'Compare setups', exact: true }).last().click();
   await expect(page.getByRole('heading', { name: 'Compare setups', exact: true })).toBeVisible();
 
@@ -289,10 +289,19 @@ test('Claude creation previews and cancels without launching; selected copy and 
   await page.getByRole('link', { name: 'Back to Profiles' }).click();
   const card = page.getByRole('article', { name: 'claude-parts' });
   await expect(card.getByText('Account independence: not verified.')).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Open Claude Desktop for claude-parts', exact: true })).toHaveCount(0);
   await card.getByRole('button', { name: 'Native setup and sign-in' }).click();
   await expect(card.getByText(/CLAUDE_CONFIG_DIR=.*auth login/)).toBeVisible();
   await expect(card.getByText('This command uses the currently installed Claude Code.', { exact: false })).toBeVisible();
   await card.getByRole('button', { name: 'Check sign-in for claude-parts' }).click();
-  await expect(card.getByText(/Claude Code · Signed out/)).toBeVisible();
+  await expect(card.getByText(/Claude Code · CLI: Signed out/)).toBeVisible();
   expect(await readFile(app.nativeProfileLog, 'utf8')).toBe('--version\nauth status\n');
+  const opens = [];
+  await page.route('**/api/profiles/claude-parts/clients', async route => {
+    opens.push(route.request().postDataJSON());
+    await route.fulfill({ json: { status: 'success', message: 'Fixture terminal opened for claude-parts.' } });
+  });
+  await card.getByRole('button', { name: 'Open in Terminal (Claude Code) for claude-parts', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Fixture terminal opened for claude-parts.');
+  expect(opens).toEqual([{ action: 'open-terminal' }]);
 });

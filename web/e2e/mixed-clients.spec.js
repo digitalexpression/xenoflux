@@ -54,8 +54,8 @@ test('profile-bound native sessions and mixed setup inventories remain usable in
     await page.goto(app.url);
     await page.goto(app.origin + '/compare/setups?a=Claude+managed&b=baseline&aClient=claude-code');
     await expect(page.getByText('Separate setup inventories')).toBeVisible();
-    await expect(page.getByRole('heading', { name: /Claude managed · Claude Code/ })).toBeVisible();
-    await expect(page.getByRole('heading', { name: /baseline · Codex/ })).toBeVisible();
+    await expect(page.getByRole('heading', { name: /Claude managed · Claude Code/ }).first()).toBeVisible();
+    await expect(page.getByRole('heading', { name: /baseline · Codex/ }).first()).toBeVisible();
     await page.goto(app.origin + '/compare/setups?a=Claude+managed&b=Default&aClient=claude-code&bClient=claude-code');
     await expect(page.getByRole('link', { name: 'Preview copying selected settings' })).toBeVisible();
     await expect(page.getByRole('button', { name: /Could not compare settings.json/ }).first()).toBeVisible();

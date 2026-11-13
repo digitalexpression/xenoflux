@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test as base, expect } from '@playwright/test';
@@ -10,18 +11,28 @@ const test = base.extend({
   copilotSessions: [false, { option: true }],
   app: async ({ copilotSessions }, use) => {
     const root = await mkdtemp(join(tmpdir(), 'xfx-stock-apps-ui-'));
+    const claudePath = join(root, 'Claude.app');
+    const copilotPath = join(root, 'GitHub Copilot.app');
+    const writeBundle = (path, version) => {
+      mkdirSync(join(path, 'Contents'), { recursive: true });
+      writeFileSync(join(path, 'Contents', 'Info.plist'), `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>${version}</string></dict></plist>`);
+    };
+    writeBundle(claudePath, '1.0');
+    if (copilotSessions) writeBundle(copilotPath, '1.1.35');
     const store = new Store(join(root, 'store'));
     await store.update(() => {});
-    let appKey = 'a'.repeat(64), listCalls = 0, unavailable = false, delayed = false, release;
+    let appKey = 'a'.repeat(64), version = '1.0', listCalls = 0, unavailable = false, delayed = false, release;
     const openCalls = [], opened = [];
     const provider = createEngineProvider({ store, defaultUserHome: join(root, 'no-account-home'),
       reportsRoot: join(root, 'reports'), profilesBase: join(root, 'profiles'),
       desktopSurface: { list: async () => ({ instances: [] }), inspect: async () => { throw new Error('No Codex app in fixture'); } },
+      discoveryContext: { desktopLocations: [], inspectDesktop: async () => { throw new Error('No fixture Codex desktop app is installed'); } },
       stockApps: {
+        locations: [claudePath, copilotPath],
         list: async () => { listCalls++; return { apps: [
-          { client: 'claude', name: 'Claude', status: unavailable ? 'unavailable' : 'available', appKey, version: '1.0', build: '10' },
+          { client: 'claude', name: 'Claude', status: unavailable ? 'unavailable' : 'available', path: claudePath, appKey, version, build: '10' },
           copilotSessions
-            ? { client: 'copilot', name: 'GitHub Copilot', status: 'available', appKey, version: '1.1.35', build: '35', sessionNavigation: 'available' }
+            ? { client: 'copilot', name: 'GitHub Copilot', status: 'available', path: copilotPath, appKey, version: '1.1.35', build: '35', sessionNavigation: 'available' }
             : { client: 'copilot', name: 'GitHub Copilot', status: 'unavailable', reason: 'Not installed in fixture' },
         ] }; },
         open: async input => {
@@ -42,7 +53,8 @@ const test = base.extend({
     const app = { url: server.launchUrl, openCalls, opened,
       get listCalls() { return listCalls; },
       delay: () => { delayed = true; }, release: () => { delayed = false; release?.(); },
-      changeIdentity: () => { appKey = 'b'.repeat(64); }, hide: () => { unavailable = true; } };
+      changeIdentity: () => { appKey = 'b'.repeat(64); version = '2.0'; writeBundle(claudePath, version); },
+      hide: () => { unavailable = true; rmSync(claudePath, { recursive: true, force: true }); } };
     try { await use(app); }
     finally { app.release(); await provider.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
   },
@@ -59,8 +71,8 @@ test('app discovery is read-only; explicit stock opening uses its exact app iden
   await openProfiles(page, app);
   const section = page.getByRole('region', { name: 'Native apps' });
   await expect(section).toBeVisible();
-  await expect(section.getByText(/existing account/)).toBeVisible();
-  await expect(section.getByText(/Managed profiles and automated tasks/)).toBeVisible();
+  await expect(section.getByText(/app with its existing setup/)).toBeVisible();
+  await expect(section.getByText(/Use a profile card for separate Desktop storage/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Open GitHub Copilot', exact: true })).toHaveCount(0);
   await expect(section.getByLabel('Copilot app-local session ID', { exact: true })).toHaveCount(0);
   expect(app.openCalls).toEqual([]);
@@ -178,4 +190,41 @@ test.describe('Copilot existing session links', () => {
     await expect(page.getByRole('heading', { name: 'Profiles', exact: true })).toBeVisible();
     expect(app.openCalls).toHaveLength(2);
   });
+});
+
+
+test('automatic app checks show updates and removals, preserve focused input and recover safely after transport failures', async ({ page, app }) => {
+  await page.clock.install({ time: 0 });
+  await openProfiles(page, app);
+  await page.clock.pauseAt(1000);
+  const section = page.getByRole('region', { name: 'Native apps' });
+  const check = section.getByRole('button', { name: 'Check apps again', exact: true });
+  await check.focus();
+  app.changeIdentity();
+  let response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/apps');
+  await page.clock.fastForward(5000);
+  await response;
+  await expect(section.getByText('Version 2.0 · Build 10', { exact: true })).toBeVisible();
+  await expect(check).toBeFocused();
+  await expect(check).toBeEnabled();
+  expect(app.openCalls).toEqual([]);
+  await page.route('**/api/apps*', route => route.fulfill({ status: 503, contentType: 'application/json',
+    body: JSON.stringify({ error: { message: 'Fixture app inspection failed', code: 'fixture' } }) }));
+  response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/apps');
+  await page.clock.fastForward(5000);
+  await response;
+  await expect(section.getByText(/Previous app findings are shown/)).toBeVisible();
+  await expect(section.getByRole('button', { name: 'Open Claude', exact: true })).toBeDisabled();
+  await expect(section.getByText('Version 2.0 · Build 10', { exact: true })).toBeVisible();
+  await page.unroute('**/api/apps*');
+  response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/apps');
+  await page.clock.fastForward(5000);
+  await response;
+  await expect(section.getByRole('button', { name: 'Open Claude', exact: true })).toBeEnabled();
+  app.hide();
+  response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/apps');
+  await page.clock.fastForward(5000);
+  await response;
+  await expect(section).toHaveCount(0);
+  expect(app.openCalls).toEqual([]);
 });

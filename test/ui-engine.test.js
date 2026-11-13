@@ -54,7 +54,7 @@ test('lists real profiles and sessions without reading content or starting clien
   const profiles = await f.provider.profiles();
   assert.deepEqual(profiles.profiles.map(p => p.name), ['baseline', 'strict-review']);
   assert.ok(profiles.profiles.every(p => p.state === 'ready' && p.moreMenu.some(item => item.id === 'remove')));
-  assert.deepEqual(profiles.profiles[0].clientActions.map(action => action.id), ['signin'], 'no saved sign-in offers sign-in first');
+  assert.deepEqual(profiles.profiles[0].clientActions.map(action => action.id), ['open-terminal', 'signin', 'open-desktop'], 'opening a new profile is separate from explicit sign-in');
   const sessions = await f.provider.sessions({});
   assert.equal(sessions.sessions.length, 2);
   const clients = Object.fromEntries(sessions.sessions.map(row => [row.profile, row.client]));

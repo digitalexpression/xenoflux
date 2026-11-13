@@ -14,11 +14,12 @@ export function SkillDetail() {
   const [params] = useSearchParams();
   const a = params.get('a') ?? '', b = params.get('b') ?? '';
   const item = params.get('item') ?? undefined;
-  const view = useResource(() => apiGet<View>(`/api/compare/setups/skills/${encodeURIComponent(skill)}`, { a, b, item }), JSON.stringify([skill, a, b, item]));
+  const repo = params.get('repo') ?? undefined;
+  const view = useResource(() => apiGet<View>(`/api/compare/setups/skills/${encodeURIComponent(skill)}`, { a, b, item, repo }), JSON.stringify([skill, a, b, item, repo]));
   const [current, setCurrent] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const data = view.data;
-  const back = `/compare/setups?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`;
+  const back = `/compare/setups?${new URLSearchParams({ a, b, ...(repo ? { repo } : {}) })}`;
   return (
     <Page current="compare" title={`${skill} package`}>
       <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare setups', to: back }, { label: 'Skills' }]}

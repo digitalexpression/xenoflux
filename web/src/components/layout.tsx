@@ -6,12 +6,13 @@ import { cn } from '@/lib/cn';
 import { ErrorPanel } from './notices';
 import { Button } from './ui/button';
 
-export type NavKey = 'compare' | 'profiles' | 'sessions' | 'open' | null;
+export type NavKey = 'setup' | 'compare' | 'profiles' | 'sessions' | 'open' | null;
 
 export const InfoContext = createContext<Info | null>(null);
 export const useInfo = () => useContext(InfoContext);
 
 const NAV: { key: Exclude<NavKey, null>; label: string; to: string }[] = [
+  { key: 'setup', label: 'Setup', to: '/setup' },
   { key: 'compare', label: 'Compare', to: '/' },
   { key: 'profiles', label: 'Profiles', to: '/profiles' },
   { key: 'sessions', label: 'Browse sessions', to: '/sessions' },

@@ -806,6 +806,54 @@ function setupItemId(resource) {
   return Buffer.from([resource.category, resource.scope, resource.sourceRole ?? '', resource.provider ?? '', resource.name, resource.path ?? ''].join('\u0000')).toString('base64url');
 }
 
+/** One source snapshot, without inferring equivalence or session use. */
+export function presentSetupInventory(snapshot, { home } = {}) {
+  const coverageText = (key, status) => key === 'sourceValues'
+    ? status === 'complete' ? 'Included in full' : status === 'partial' ? 'Some read values omitted (detail limit)' : 'Not known'
+    : READ_TEXT[status] ?? 'Not known';
+  const coverage = Object.entries(snapshot.coverage ?? {}).map(([key, status]) => ({
+    label: COVERAGE_AREA[key] ?? key, value: coverageText(key, status),
+  }));
+  const items = list(snapshot.resources).map(resource => {
+    const detail = resource.detail;
+    const scope = SCOPE_TEXT[resource.scope] ?? resource.scope ?? 'Unknown scope';
+    const files = list(detail?.files).map(file => ({ path: tildePath(file.path, home), status: file.status ?? 'unknown',
+      preview: typeof file.content === 'string' ? file.content : null,
+      note: [file.contentReason, file.comparisonReason, file.truncated ? 'Text preview truncated' : null].filter(Boolean).join('; ') || null }));
+    if (typeof detail?.text === 'string' || detail && !detail.files) files.push({
+      path: tildePath(resource.path, home) ?? resource.name, status: detail.status ?? 'unknown',
+      preview: typeof detail.text === 'string' ? detail.text : null,
+      note: [detail.truncated ? 'Text preview truncated' : null, detail.redacted ? 'Some source text was redacted' : null].filter(Boolean).join('; ') || null,
+    });
+    const valueStatus = resource.valueStatus ?? (resource.value !== undefined ? 'present' : 'unavailable');
+    return { id: resource.id ?? setupItemId(resource), name: resource.name ?? 'Unnamed source', category: resource.category,
+      scope, origin: resource.origin ?? 'Unknown origin', status: resource.status ?? 'unknown',
+      value: resource.value === undefined || ['omitted', 'redacted'].includes(valueStatus) ? null
+        : typeof resource.value === 'object' ? JSON.stringify(resource.value, null, 2) : String(resource.value),
+      valueStatus, note: [resource.note, 'Observed source evidence. Effective overrides, runtime availability, loading and session use are not established.'].filter(Boolean).join(' '),
+      sources: [{ where: tildePath(resource.path, home) ?? 'Not recorded', scope,
+        status: READ_TEXT[detail?.status] ?? (resource.status === 'present' ? 'Present' : resource.status ?? 'Not known') }],
+      facts: [
+        ...[['Source role', resource.sourceRole], ['Provider', resource.provider], ['Integration', resource.integrationId], ['Version', resource.version]].filter(([, value]) => value !== undefined)
+          .map(([label, value]) => ({ label, value: String(value) })),
+        ...Object.entries(resource.category === 'plugin'
+          ? Object.fromEntries(['configured', 'cached', 'installed', 'enabled', 'available', 'loaded', 'used'].map(key => [key, resource.state?.[key] ?? 'unknown']))
+          : resource.state ?? {}).map(([label, value]) => ({ label, value: String(value) })),
+        ...Object.entries(detail?.coverage ?? {}).map(([label, value]) => ({ label: `Package ${label}`, value: String(value) })),
+      ], files };
+  });
+  const groupAreas = { settings: ['config', 'client'], instructions: ['instructions', 'agents', 'rules'], skills: ['skills'],
+    integrations: ['mcp', 'plugins', 'hooks'], tools: ['tools'], memory: ['memorySettings'] };
+  const seen = new Set();
+  const groups = SETUP_GROUP.map(([id, label, matches]) => ({ id, label,
+    coverage: groupAreas[id].map(key => `${COVERAGE_AREA[key]}: ${coverageText(key, snapshot.coverage?.[key])}`).join('; '),
+    items: items.filter(item => matches(item) && !seen.has(item.id) && seen.add(item.id)),
+  }));
+  const other = items.filter(item => !seen.has(item.id));
+  if (other.length) groups.push({ id: 'other', label: 'Other', coverage: 'See source evidence and coverage below.', items: other });
+  return { status: snapshot.status ?? 'unavailable', warnings: list(snapshot.warnings), coverage, groups };
+}
+
 /** Plain view of an `audit-profile-comparison` in the order: summary, limits, groups. */
 export function presentSetupComparison(value, { home } = {}) {
   const names = { a: value.left?.profile?.profileName ?? 'Left', b: value.right?.profile?.profileName ?? 'Right' };

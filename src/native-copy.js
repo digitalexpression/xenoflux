@@ -31,7 +31,7 @@ function overlap(a, b) {
   return inside(a, b) || inside(b, a);
 }
 function targetResourcePaths(home, paths = []) {
-  return [...new Set(paths.filter(value => typeof value === 'string').map(path => join(home, path)))];
+  return [...new Set([home, ...paths.filter(value => typeof value === 'string').map(path => join(home, path))])];
 }
 function packageResourcePaths(packages = []) {
   return packages.flatMap(pkg => [pkg.path, ...[...(pkg.before?.directories ?? []), ...(pkg.after?.directories ?? [])]
