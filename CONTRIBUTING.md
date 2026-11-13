@@ -8,7 +8,8 @@ Contributor material stays in the repository and is excluded from npm.
 ## Checkout and checks
 
 Use macOS with a supported Node version from [installation](docs/INSTALLATION.md#requirements).
-Release packaging requires Apple Silicon and arm64 Node. From the checkout:
+Release packaging requires Apple Silicon and arm64 Node. For initial setup or full
+validation:
 
 ```sh
 npm ci
@@ -20,9 +21,15 @@ npx playwright install chromium
 npm run check:ui
 ```
 
+During development, batch related edits and run checks relevant to the affected
+behavior. Instruction/documentation-only edits need `check:docs`, plus
+`check:storage` when private maintainer instructions change. Keep the required UI,
+native and release checks below. Repeat checks only after relevant changes,
+failures or unresolved concerns.
+
 `check` validates JavaScript syntax and, when private context exists, the maintainer
 storage boundary. Run `npm run check:storage` for that check alone; task scripts/logs/
-receipts belong in `private/work/` and completed records in `private/archive/`.
+receipts belong in `private/work/`; task completion does not require an archive.
 `check:native` checks the universal launcher's
 source/binary identities, architectures, signature and entitlements. `check:docs`
 checks source and packaged links, documentation ownership and package membership.
@@ -37,8 +44,8 @@ HOME/USER/LOGNAME consistent; pass isolated client/controller paths explicitly.
 `dist/ui` is tracked and shipped. After UI changes run `npm run build:ui` and
 `node scripts/check-ui-build.mjs`. Run browser/build commands sequentially when
 outputs are shared. Failure traces/screenshots are under `test-results/ui-e2e/`;
-`npx playwright show-report` opens the HTML report. Preserve failed full-run
-results separately from passing targeted reruns.
+`npx playwright show-report` opens the HTML report. Keep failed full-run results
+in place; direct targeted reruns to a separate output directory.
 
 The explicit synthetic LaunchServices fixture opens only its own windowless app:
 
@@ -139,6 +146,19 @@ Preserve caches used by running instances.
 README routes readers; installation owns requirements/channels; the guide owns
 normal journeys and known limits; CLI owns terminal recipes; this file owns checks;
 contracts owns implementation invariants. Keep one owner and link to it. Channel
-notices belong only in README and installation. Record current assignments,
-release decisions and raw evidence privately; use public issues for published plans.
-Preserve full originals in verified compressed storage before removing them.
+notices belong only in README and installation. Keep assignment tracking,
+release records and raw receipts private; use public issues for published plans.
+Use normal version control for source and documentation changes. An authorized
+development or fix task includes working notes, debugging evidence, test outputs
+and recovery checkpoints directly needed to implement, verify, coordinate or resume
+that task; no separate approval is needed. Reuse existing outputs where possible.
+A skill checklist alone does not establish that need.
+
+Create backups or archives only when explicitly requested by the user. Optional
+historical or traceability records beyond task needs, such as decision logs,
+handover bundles or verification receipts, also require an explicit request.
+Editing, pruning, consolidation, autonomous work and task completion do not imply
+that request. Report outcomes, checks and limitations in the task response.
+Normal test outputs, required release artifacts and product persistence/recovery
+keep their existing requirements. This does not authorize deleting existing user
+data, release originals or evidence.

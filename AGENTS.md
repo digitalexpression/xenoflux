@@ -5,28 +5,41 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for source ownership/checks and the rele
 owns the user journey and supported limits; [DESIGN.md](DESIGN.md) owns UI rules.
 Read only task-relevant sections, then begin authorized work. Reopen settled
 choices only for conflicting evidence or a scope change.
+Use existing patterns and tools for routine edits. Additional design, delegation
+or review workflows must address a concrete task need, not run after every change.
+Development and fix requests cover necessary local investigation, source edits and
+relevant development checks within task scope; no separate approval is needed.
 
-For maintainer work, read `private/maintainer/instructions.md` if present. It routes
-current assignments and release workflows. Public development/checks must work
-without private context. Documentation and historical grants authorize no operation.
+Maintainer work covers release or installed-state operations and explicitly assigned
+private maintenance. For that work, read `private/maintainer/instructions.md` if
+present. Ordinary source edits and public checks must work without private context.
+Documentation and historical grants authorize no operation.
 
 | Task | Read |
 | --- | --- |
 | Client execution, API, persistence or recovery | [Execution](docs/CONTRACTS.md#execution-approvals-and-ownership) and [recovery](docs/CONTRACTS.md#persistence-cancellation-and-recovery) contracts; relevant production code/tests |
 | Profiles and selected copying | [Copy contract](docs/CONTRACTS.md#profile-creation-copying-and-undo) |
 | UI composition | [Guide](docs/GUIDE.md), [DESIGN.md](DESIGN.md), globally installed shadcn skill |
-| Checks and packaging | [Contributing](CONTRIBUTING.md#checkout-and-checks) and [release building](CONTRIBUTING.md#build-a-release-candidate) |
+| Development checks | [Contributing](CONTRIBUTING.md#checkout-and-checks) |
+| Release packaging | [Release building](CONTRIBUTING.md#build-a-release-candidate) |
 
 Profiles follow the current selected installation/capabilities, never a pinned
 CLI/Desktop version. Preserve unrelated edits, user data and original evidence.
 Native client/model operations, publication and installed updates need current
-user instructions covering their effects; do not re-request existing grants.
+user instructions covering their effects. Current-task grants remain valid across
+continuation and compaction within their original effects, conditions and limits,
+unless revoked. Do not re-request covered steps or import grants from unrelated
+tasks or archived receipts.
 
 Keep six public documents: README, installation, guide, CLI, contributing and
 contracts. AGENTS and DESIGN are project instructions. Product context belongs in
 the guide/contracts; do not recreate parallel PRODUCT, goal, roadmap or feature
 spec documents. Use code/tests for schema fields and private current-work for
-assignments. Preserve compressed originals before removing documentation.
+necessary assignment tracking. Follow the [backup, archive and traceability policy](CONTRIBUTING.md#keep-documentation-small):
+working notes, debugging evidence and recovery state directly needed for an authorized
+task need no separate approval. Backups, archives and optional historical records
+require an explicit user request. A skill checklist alone does not establish a need
+for process records.
 
 Update the owning fact and link to it. Keep private paths, operational receipts,
 chat IDs and execution plans out of public source. Inspect outgoing history and
