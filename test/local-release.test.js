@@ -6,7 +6,13 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { archiveRuntimeDependency, assertInstallHooks, buildBundledPackage, bundledManifest, hasReadCorroboration, manifestFor, packageInventory, parseArguments, preservesFrozenAuditFields } from '../scripts/local-release.mjs';
+import { archiveRuntimeDependency, assertInstallHooks, buildBundledPackage, bundledManifest, hasReadCorroboration, manifestFor, packageInventory, parseArguments, preservesFrozenAuditFields, smokeLocalApp } from '../scripts/local-release.mjs';
+
+test('local app smoke accepts the discovery-first setup launch URL and checks served assets and API security', async t => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'xfx-local-app-smoke-')));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await smokeLocalApp(fileURLToPath(new URL('../bin/xfx.js', import.meta.url)), join(directory, 'store'), directory);
+});
 
 test('local release arguments and manifests retain only reviewable artifact facts', () => {
   assert.deepEqual(parseArguments(['--output', '/tmp/release', '--smoke']), {

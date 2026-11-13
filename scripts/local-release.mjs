@@ -304,7 +304,7 @@ async function writeInstaller(directory) {
 }
 
 /** The packaged app serves its bundled assets on loopback and refuses unauthenticated API calls. */
-async function smokeLocalApp(installed, store, cwd, env = process.env) {
+export async function smokeLocalApp(installed, store, cwd, env = process.env) {
   const child = spawn(installed, ['--store', store, 'ui', '--demo', '--no-open'], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
   try {
     const launch = await new Promise((resolveUrl, reject) => {
@@ -312,12 +312,12 @@ async function smokeLocalApp(installed, store, cwd, env = process.env) {
       const timer = setTimeout(() => reject(new Error('Installed xfx ui did not report its address')), 15000);
       child.stdout.on('data', chunk => {
         output += chunk;
-        const match = /Open this link in your browser: (http:\/\/127\.0\.0\.1:\d+)\/#launch=[\w-]+/.exec(output);
+        const match = /Open this link in your browser: (http:\/\/127\.0\.0\.1:\d+)\/setup#launch=[\w-]+/.exec(output);
         if (match) { clearTimeout(timer); resolveUrl(match[1]); }
       });
       child.once('exit', code => { clearTimeout(timer); reject(new Error(`Installed xfx ui exited early (${code})`)); });
     });
-    const page = await fetch(`${launch}/`);
+    const page = await fetch(`${launch}/setup`);
     const html = await page.text();
     if (page.status !== 200 || !/default-src 'self'/.test(page.headers.get('content-security-policy') ?? ''))
       throw new Error('Installed local app did not serve its page with the expected policy');
