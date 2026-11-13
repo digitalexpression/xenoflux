@@ -89,7 +89,7 @@ export function createStockDesktopApps({ execFile = promisify(execFileCallback),
         throw new Error('This Copilot app does not register the ghapp session navigation scheme');
       await execFile('/usr/bin/open', ['-a', app.path, ...(sessionId !== undefined ? [`ghapp://sessions/${sessionId}`] : [])], { maxBuffer: 1024 * 1024, timeout: 15000 });
       if (sessionId !== undefined) return { status: 'link-opened', message: `Opened GitHub Copilot link for app-local session ${sessionId}. Session association and completion are not confirmed; no new task was requested.` };
-      return { status: 'opened', message: `Opened ${app.name} using its existing native account. Managed profiles and automated tasks remain unqualified.` };
+      return { status: 'opened', message: `Opened ${app.name} using its existing setup. No managed profile was selected; sign-in and task execution were not checked.` };
     },
   };
 }

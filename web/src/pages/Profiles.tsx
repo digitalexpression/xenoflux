@@ -166,7 +166,7 @@ function ProfileCardView({ profile, busyAction, onClient, onMenu }:
   const clientLabel = clientLabels[profile.client ?? 'codex'];
   const cliLabel = profile.client === 'copilot' ? 'Copilot CLI' : clientLabel;
   return (
-    <article className="panel flex flex-col gap-4" aria-labelledby={titleId}>
+    <article className="panel min-w-0 wrap-anywhere flex flex-col gap-4" aria-labelledby={titleId}>
       <div className="flex flex-col gap-1">
         <h2 id={titleId} className="font-mono text-body font-semibold wrap-anywhere">{profile.name}</h2>
         <p className="meta">{clientLabel} · {profile.client === 'copilot' || profile.client === 'claude-code' ? `CLI: ${profile.signIn}` : profile.signIn} · {profile.binding}</p>

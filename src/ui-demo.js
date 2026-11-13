@@ -330,7 +330,7 @@ export function createDemoProvider({ version = 'demo' } = {}) {
         clients: [['codex', 'Codex'], ['claude-code', 'Claude Code'], ['copilot', 'GitHub Copilot']].map(([client, name]) => ({
           client, name, cli: { kind: 'found', label: 'Found (simulated)', location: `[DEMO]/bin/${client}`, version: null, identity: `demo-${client}` },
           desktop: { kind: 'unavailable', label: 'Could not confirm (simulated)', reason: 'No real app is inspected in demo mode.' },
-          desktopNote: client === 'codex' ? 'Managed desktop profiles are supported separately in Profiles.' : 'Stock app only. Managed desktop profiles are not supported.',
+          desktopNote: 'Open a managed profile from Profiles. Desktop startup and profile storage are supported; sign-in and task execution remain unverified.',
           setups: [{ key: `demo-${client}`, name: 'Default', origin: 'Synthetic standard folder', kind: 'found', label: 'Folder found (simulated)',
             location: `[DEMO]/${client}`, reason: 'Simulated folder presence. Sign-in and eligibility are not checked.', inspectHref: `/profiles/Default/setup?client=${client}` }],
         })) };

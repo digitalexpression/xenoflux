@@ -48,8 +48,8 @@ test('open rechecks the exact app and passes only its absolute path to native op
   f.calls.length = 0;
   const result = await f.service.open({ client: 'claude', appKey: app.appKey });
   assert.equal(result.status, 'opened');
-  assert.match(result.message, /existing native account/);
-  assert.match(result.message, /Managed profiles and automated tasks remain unqualified/);
+  assert.match(result.message, /existing setup/);
+  assert.match(result.message, /No managed profile was selected/);
   assert.deepEqual(f.calls.filter(call => call.command === '/usr/bin/open'), [{ command: '/usr/bin/open', args: ['-a', f.path] }]);
   assert.ok(f.calls.findIndex(call => call.command === '/usr/bin/codesign') < f.calls.findIndex(call => call.command === '/usr/bin/open'));
 });

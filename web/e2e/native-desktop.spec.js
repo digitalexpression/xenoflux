@@ -8,7 +8,7 @@ for (const [client, vendor, cli] of [['copilot', 'GitHub Copilot', 'Copilot CLI'
     const requests = [];
     const card = () => ({ name, client, isDefault: false, state: 'ready', reason: null,
       signIn: 'Sign-in not checked', accountScope: client === 'claude-code' ? 'per-root' : 'unverified', accountIndependence: 'not verified',
-      binding: 'no project', summary: 'Disposable native startup boundary.',
+      binding: 'no project', summary: `Disposable native startup boundary at /fixtures/${'a'.repeat(140)}/profile.`,
       cli: { state: 'unavailable', text: `${cli} is not installed in this fixture.` },
       desktop: { state: phase === 'running' ? 'running' : 'not-running', text: phase === 'running'
         ? 'Running with the selected profile storage. Account scope and model use remain unverified.'

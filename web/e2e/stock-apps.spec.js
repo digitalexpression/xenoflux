@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,7 @@ import { startUiServer, UiError } from '../../src/ui-server.js';
 const test = base.extend({
   copilotSessions: [false, { option: true }],
   app: async ({ copilotSessions }, use) => {
-    const root = await mkdtemp(join(tmpdir(), 'xfx-stock-apps-ui-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-stock-apps-ui-')));
     const claudePath = join(root, 'Claude.app');
     const copilotPath = join(root, 'GitHub Copilot.app');
     const writeBundle = (path, version) => {
