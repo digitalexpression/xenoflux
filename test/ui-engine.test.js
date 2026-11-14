@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Store, create } from '../src/profiles.js';
@@ -29,7 +29,7 @@ async function seedSession(home, taskId, { title, model, originator = 'codex_cli
 }
 
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'xfx-ui-engine-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-engine-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const executable = join(root, 'fake-codex');
   await writeFile(executable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
