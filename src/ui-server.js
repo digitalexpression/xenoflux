@@ -28,7 +28,7 @@ const REQUEST_HEADER = 'x-xenoflux-request';
 // (for example, a profile name or an encoded frozen report reference), so a
 // filename-extension check cannot tell them apart from static assets.
 function isClientRoute(path) {
-  return /^\/(?:profiles(?:\/[^/]+(?:\/copy)?)?|compare(?:\/.*)?|sessions|reports(?:\/.*)?|runs(?:\/.*)?)$/.test(path);
+  return /^\/(?:profiles(?:\/[^/]+(?:\/copy)?)?|compare(?:\/.*)?|sessions(?:\/.*)?|reports(?:\/.*)?|runs(?:\/.*)?)$/.test(path);
 }
 
 export const randomToken = () => randomBytes(32).toString('base64url');
@@ -116,12 +116,15 @@ export function uiRoutes(provider) {
     route('GET', '/api/compare/setups', call('setupComparison', q)),
     route('GET', '/api/compare/setups/skills/:skill', call('skillDetail', ({ params, query }) => ({ skill: params.skill, ...q({ query }) }))),
     route('GET', '/api/sessions', call('sessions', q)),
+    route('POST', '/api/sessions/inspect', call('inspectSession', ({ body }) => body), { bodyLimit: 2048 }),
+    route('GET', '/api/sessions/inspect/:ref', call('sessionInspection', ({ params }) => params)),
     route('GET', '/api/sessions/codex', call('codexSessions', q)),
     route('GET', '/api/sessions/copilot', call('copilotSessions', q)),
     route('GET', '/api/sessions/claude-code', call('claudeSessions', q)),
     route('GET', '/api/compare/sessions/association', call('association', q)),
     route('POST', '/api/compare/sessions/import', call('importListedComparison', ({ body }) => body), { bodyLimit: 2 << 10 }),
     route('POST', '/api/compare/sessions', call('compareSessions', ({ body }) => body)),
+    route('POST', '/api/compare/inspections', call('compareInspections', ({ body }) => body), { bodyLimit: 2048 }),
     route('GET', '/api/reports/recent', call('savedReports', () => ({}))),
     route('POST', '/api/reports/open', call('openReport', ({ body }) => body), { bodyLimit: 64 << 20 }),
     route('POST', '/api/reports/import/copilot', call('importCopilotComparison', ({ body }) => body), { bodyLimit: 2 << 10 }),

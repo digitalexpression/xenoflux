@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectRetainedAuditRun } from '../src/audit-replay.js';
+import { createHash } from 'node:crypto';
+import { deriveRetainedAuditRun, joinRetainedNativeTurnEvidence, projectRetainedAuditRun } from '../src/audit-replay.js';
 import { buildAuditExplanation, freezeAuditComparisonEvidence } from '../src/audit-explanation.js';
+import { buildAuditComparisonConditions } from '../src/audit-conditions.js';
 
 const root = '11111111-1111-4111-8111-111111111111';
 const turnId = '22222222-2222-4222-8222-222222222222';
@@ -213,4 +215,106 @@ test('an inherited executable can reopen exact retained evidence while a refused
   assert.equal(refused.reportProjection.context, 'unavailable');
   assert.deepEqual(refused.comparisonEvidence, f.current.report.comparisonEvidence);
   assert.equal(freezeAuditComparisonEvidence(refused).verification.nativeCompletion, 'completed');
+});
+
+function frozenFixture() {
+  const f = fixture();
+  f.current.report.comparisonConditions = buildAuditComparisonConditions({
+    spec: { ...f.parent.record.spec, task: f.parent.record.task }, baseline: f.current.record.baseline,
+    profile: f.parent.record.spec.profiles[0], profileOrder: ['Default'], trialIndex: null });
+  const event = { id: `${root}:${fingerprint}:8`, sessionId: root, turnId, sourceLine: 8,
+    kind: 'message', label: 'Assistant message', role: 'assistant', timestamp: null,
+    body: null, bodyStatus: 'omitted', bodyReason: 'content-not-selected', bodyBytes: 12 };
+  f.current.report.sessionReplay = { schemaVersion: 1, kind: 'session-replay', sessions: [{ id: root,
+    parentId: null, depth: 0, status: 'ready', source: { fingerprint }, events: [event], limits: [
+      { kind: 'capture-boundary', message: 'Frozen at the original completion.' },
+      { kind: 'unprojected-records', message: 'Old unsupported, streaming metadata, or private reasoning.' },
+    ] }] };
+  f.current.report.replayCapture = { status: 'ready', boundary: 'finalized-native-history-snapshot', sourceFingerprint: fingerprint };
+  f.current.report.coverage = { agents: 'complete', usage: 'complete', workspaceDiff: 'complete', skills: 'partial' };
+  f.current.report.settingsEvidence = { requested: { model: 'request-model' }, confirmed: { model: 'startup-model' } };
+  f.native.sessionReplay = structuredClone(f.current.report.sessionReplay);
+  f.native.sessionReplay.sessions[0].events = [{ ...event, label: 'Reinterpreted assistant message',
+    body: 'kept private', bodyStatus: 'included', bodyReason: undefined }];
+  f.native.sessionReplay.sessions[0].limits = [{ kind: 'unprojected-records', message: 'Metadata records are outside conversation replay.' }];
+  f.current.report.comparisonEvidence = freezeAuditComparisonEvidence(f.current.report);
+  const originalReportFingerprint = createHash('sha256').update(JSON.stringify(f.current.report)).digest('hex');
+  return { ...f, originalReportFingerprint };
+}
+
+test('explicit derived evidence keeps owned receipts and source omissions while joining exact frozen native turns', async () => {
+  const f = frozenFixture(), before = structuredClone(f.current);
+  const run = await deriveRetainedAuditRun({}, f.current, { native: f.native,
+    originalReportFingerprint: f.originalReportFingerprint, read: f.adapters.read });
+  assert.deepEqual(f.current, before);
+  assert.equal(run.turns[0].model, 'actual-model');
+  assert.equal(run.turns[0].reasoningEffort, 'low');
+  assert.equal(run.turns[0].status, 'completed');
+  assert.equal(run.nativeControls.turns[0].sourceLine, 8);
+  assert.equal(run.nativeControls.turns[0].sourceFingerprint, fingerprint);
+  assert.deepEqual(run.coverage, before.report.coverage);
+  assert.deepEqual(run.settingsEvidence, before.report.settingsEvidence);
+  assert.deepEqual(run.execution, before.report.execution);
+  assert.deepEqual(run.checks, before.report.checks);
+  assert.equal(run.sessionReplay.sessions[0].events[0].label, 'Reinterpreted assistant message');
+  assert.equal(run.sessionReplay.sessions[0].events[0].body, null);
+  assert.equal(run.sessionReplay.sessions[0].events[0].bodyStatus, 'omitted');
+  assert.equal(run.sessionReplay.sessions[0].events[0].bodyReason, 'content-not-selected');
+  assert.deepEqual(run.sessionReplay.sessions[0].limits, [
+    { kind: 'capture-boundary', message: 'Frozen at the original completion.' },
+    { kind: 'unprojected-records', message: 'Metadata records are outside conversation replay.' },
+  ]);
+  assert.match(before.report.sessionReplay.sessions[0].limits[1].message, /Old unsupported/);
+  assert.equal(run.reportProjection.originalReportFingerprint, f.originalReportFingerprint);
+  assert.equal(run.reportProjection.nativeSourceFingerprint, fingerprint);
+  assert.equal(run.comparisonEvidence, undefined);
+  assert.equal(freezeAuditComparisonEvidence(run).status, 'recorded');
+});
+
+test('derived evidence refuses changed original reports, native bytes, actors and child source bindings', async () => {
+  const child = '33333333-3333-4333-8333-333333333333';
+  for (const change of [f => { f.current.report.status = 'changed'; },
+    f => { f.native.source.fingerprint = 'b'.repeat(64); },
+    f => { f.native.source.nativeSessionId = child; },
+    f => { f.native.sessionReplay.sessions[0].source.fingerprint = 'b'.repeat(64); },
+    f => { f.native.sessionReplay.sessions.push({ ...f.native.sessionReplay.sessions[0], id: child, parentId: root }); },
+    f => { f.parent.record.task = 'changed task'; }]) {
+    const f = frozenFixture(); change(f);
+    await assert.rejects(deriveRetainedAuditRun({}, f.current, { native: f.native,
+      originalReportFingerprint: f.originalReportFingerprint, read: f.adapters.read }));
+  }
+});
+
+test('native turn evidence requires exact owned actor, turn and workspace identity', () => {
+  const child = '33333333-3333-4333-8333-333333333333';
+  const childTurn = '44444444-4444-4444-8444-444444444444';
+  const f = fixture();
+  f.current.report.agents.push({ id: child, parentId: root });
+  f.current.report.turns.push({ agentId: child, turnId: childTurn });
+  f.native.agents = [{ id: child, parentId: root, status: 'ready', source: { fingerprint: 'b'.repeat(64) } }];
+  f.native.turns.push({ agentId: child, turnId: childTurn, model: 'child-model', reasoningEffort: 'medium',
+    sourceLine: 9, workspaceMatched: true, status: 'completed' });
+  const joined = joinRetainedNativeTurnEvidence(f.current.report, f.native, f.current.record.profile);
+  assert.equal(joined.fields.turns[1].model, 'child-model');
+  assert.equal(joined.fields.turns[1].status, 'completed');
+  assert.equal(joined.fields.nativeControls.turns[1].sourceFingerprint, 'b'.repeat(64));
+  for (const change of [n => { n.turns[1].workspaceMatched = null; },
+    n => { n.turns[1].turnId = root; }, n => { n.agents[0].parentId = child; },
+    n => { n.agents[0].status = 'unavailable'; }, n => { n.turns.push({ ...n.turns[1] }); }]) {
+    const native = structuredClone(f.native); change(native);
+    const refused = joinRetainedNativeTurnEvidence(f.current.report, native, f.current.record.profile);
+    assert.equal(refused.fields.turns[1].model, undefined);
+    assert.equal(refused.fields.nativeControls.turns.some(turn => turn.agentId === child), false);
+  }
+});
+
+test('partial native fields keep independently captured turn settings without inventing a combined native proof', () => {
+  const f = fixture();
+  f.current.report.turns[0].model = 'captured-model';
+  f.native.turns[0].model = null;
+  const joined = joinRetainedNativeTurnEvidence(f.current.report, f.native, f.current.record.profile);
+  assert.equal(joined.fields.turns[0].model, 'captured-model');
+  assert.equal(joined.fields.turns[0].reasoningEffort, 'low');
+  assert.deepEqual(joined.fields.nativeControls.turns, []);
+  assert.equal(freezeAuditComparisonEvidence({ ...f.current.report, ...joined.fields }).status, 'recorded');
 });

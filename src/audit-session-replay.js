@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
+import { redactText } from './redact.js';
 
 export const REPLAY_LIMITS = Object.freeze({ sourceBytes: 32 * 1024 * 1024,
   bodyBytes: 1024 * 1024, totalBodyBytes: 16 * 1024 * 1024, records: 10000 });
@@ -7,6 +9,9 @@ const boundedText = (value, max = 500) => typeof value === 'string' && value.len
   && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 const uuid = value => typeof value === 'string'
   && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value);
+const replayCwd = value => boundedText(value, 4096) && value.startsWith('/')
+  && posix.normalize(value) === value && !value.includes('[REDACTED]')
+  && redactText(value, 'metadata.txt') === value;
 const isoTimestamp = value => {
   if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return null;
   return new Date(value).toISOString();
@@ -189,6 +194,24 @@ function replayEvent(row, line, sessionId, fingerprint, budget) {
       relatedKey = callId ? `${boundedText(envelope.turn_id, 128) ? envelope.turn_id : ''}\0${callId}` : null;
     } else if (itemType === 'file_change') {
       kind = 'file-change'; label = 'File change'; bodyValue = item.changes ?? item.content ?? null;
+    } else if (itemType === 'additional_tools') {
+      kind = 'session'; label = 'Offered tool catalog'; status = 'advertised';
+      const names = []; let omittedEntries = 0;
+      const add = name => {
+        if (typeof name === 'string' && name.length > 0 && boundedText(name, 500) && names.length < 200) names.push(name);
+        else omittedEntries++;
+      };
+      if (!Array.isArray(item.tools)) omittedEntries++;
+      for (const tool of Array.isArray(item.tools) ? item.tools : []) {
+        if (tool?.type === 'namespace') {
+          if (!boundedText(tool.name, 200) || !tool.name || !Array.isArray(tool.tools)) { omittedEntries++; continue; }
+          for (const child of tool.tools) {
+            if (child?.type === 'namespace' || typeof child?.name !== 'string' || !child.name) { omittedEntries++; continue; }
+            add(`${tool.name}.${child.name}`);
+          }
+        } else add(tool?.name);
+      }
+      bodyValue = { scope: 'offered-not-invoked', recordedToolCount: names.length, tools: names, omittedEntries };
     } else if (itemType === 'reasoning') return null;
     else {
       kind = 'unsupported';
@@ -281,10 +304,14 @@ function replayEvent(row, line, sessionId, fingerprint, budget) {
         break;
       }
       case 'turn_started': kind = 'turn'; label = 'Turn started'; status = 'started'; break;
-      case 'turn_completed': kind = 'turn'; label = 'Turn completed'; status = 'completed'; break;
+      case 'turn_complete': case 'turn_completed':
+        kind = 'turn'; status = envelope.error ? 'failed' : 'completed'; label = status === 'failed' ? 'Turn failed' : 'Turn completed'; break;
+      case 'turn_aborted': kind = 'turn'; label = 'Turn interrupted'; status = 'interrupted'; break;
       case 'error': kind = 'error'; label = 'Session error'; bodyValue = envelope.error?.message ?? null; status = 'error'; break;
       case 'task_started': kind = 'session'; label = 'Session started'; status = 'started'; break;
-      case 'task_complete': kind = 'session'; label = 'Session completed'; status = 'completed'; break;
+      case 'task_complete':
+        kind = 'session'; status = envelope.error ? 'failed' : 'completed'; label = status === 'failed' ? 'Session failed' : 'Session completed'; break;
+      case 'context_compacted': kind = 'compaction'; label = 'Context compacted'; break;
       case 'mcp_tool_call_begin': case 'mcp_tool_call_end': {
         phase = type.endsWith('_begin') ? 'started' : 'completed';
         kind = phase === 'started' ? 'tool-call' : 'tool-result';
@@ -338,6 +365,9 @@ function replayEvent(row, line, sessionId, fingerprint, budget) {
       }
       default: return null;
     }
+  } else if (record.type === 'compacted') {
+    kind = 'compaction'; label = 'Recorded compaction summary';
+    bodyValue = typeof envelope.message === 'string' ? envelope.message : null;
   } else return null;
 
   const turnId = boundedText(envelope.turn_id, 128) ? envelope.turn_id : null;
@@ -368,22 +398,32 @@ export function projectNativeReplaySession({ id, parentId = null, depth = 0, sta
     throw new Error('Replay session identity, fingerprint, depth, or records are invalid');
   const session = { id, parentId, depth, status: boundedText(status, 80) ? status : 'unavailable',
     source: { fingerprint: sourceFingerprint?.toLowerCase() ?? null }, events: [], limits: [] };
+  const header = records[0]?.record;
+  const metadata = header?.type === 'session_meta' ? header.payload : null;
+  const ownedHeader = metadata?.id === id
+    && (metadata.session_id === undefined || uuid(metadata.session_id))
+    && (parentId ? uuid(metadata.session_id) && metadata.parent_thread_id === parentId
+      && metadata.source?.subagent?.thread_spawn?.parent_thread_id === parentId
+      && (metadata.forked_from_id === undefined || metadata.forked_from_id === parentId)
+      : metadata.source?.subagent === undefined);
   if (boundedText(reason, 500)) session.reason = reason;
   const callEvents = new Map(), resultEvents = new Map(); let unprojectedRecords = 0;
-  const unsupportedTypes = new Set();
+  const unprojectedTypes = new Set();
   const count = Math.min(records.length, REPLAY_LIMITS.records, Number.isSafeInteger(bodyBudget.remainingRecords)
     ? Math.max(0, bodyBudget.remainingRecords) : REPLAY_LIMITS.records);
+  if (count > 0 && ownedHeader && replayCwd(metadata.cwd)) session.cwd = metadata.cwd;
   if (Number.isSafeInteger(bodyBudget.remainingRecords)) bodyBudget.remainingRecords -= count;
   const projectedItems = new Map();
   for (let index = 0; index < count; index++) {
     const row = records[index];
+    if (index === 0 && header?.type === 'session_meta') continue;
     const line = Number.isSafeInteger(row?.sourceLine) && row.sourceLine > 0 ? row.sourceLine : index + 1;
     const parsed = replayEvent(row, line, id, sourceFingerprint?.toLowerCase() ?? 'unavailable', bodyBudget);
     if (!parsed) {
       unprojectedRecords++;
       const record = row?.record, payload = record?.payload;
       const nativeKind = payload?.item?.type ?? payload?.type;
-      if (boundedText(record?.type, 40) && boundedText(nativeKind, 60)) unsupportedTypes.add(`${record.type}:${nativeKind}`);
+      if (boundedText(record?.type, 40) && boundedText(nativeKind, 60)) unprojectedTypes.add(`${record.type}:${nativeKind}`);
       continue;
     }
     const event = parsed.event ?? parsed;
@@ -445,8 +485,8 @@ export function projectNativeReplaySession({ id, parentId = null, depth = 0, sta
   if (count < records.length) session.limits.push({ kind: 'replay-total-record-limit', omitted: records.length - count,
     message: 'Additional records exceeded the shared replay record budget.' });
   if (unprojectedRecords) session.limits.push({ kind: 'unprojected-records', omitted: unprojectedRecords,
-    message: 'Some native record types are unsupported, streaming metadata, or private reasoning.',
-    ...(unsupportedTypes.size ? { types: [...unsupportedTypes].sort().slice(0, 40) } : {}) });
+    message: `${unprojectedRecords} native records were not projected into conversation replay. Stream metadata and private reasoning are excluded.`,
+    ...(unprojectedTypes.size ? { types: [...unprojectedTypes].sort().slice(0, 40) } : {}) });
   if (ambiguousLinks) session.limits.push({ kind: 'ambiguous-call-links', omitted: ambiguousLinks,
     message: 'Repeated native call identifiers prevented safe call/result matching.' });
   if (session.events.some(event => event.timestamp === null)) session.limits.push({ kind: 'missing-timestamps', message: 'Some native records have no usable timestamp.' });
@@ -496,7 +536,7 @@ export function normalizeSessionReplay(replay, { includeBodies = true } = {}) {
   const safeString = (value, max) => boundedText(value, max);
   const ids = new Set(), eventIds = new Map(); let bodyBytes = 0, eventCount = 0;
   const sessions = replay.sessions.map(session => {
-    onlyKeys(session, new Set(['id','parentId','depth','status','reason','source','events','limits']), 'session');
+    onlyKeys(session, new Set(['id','parentId','depth','status','reason','cwd','source','events','limits']), 'session');
     onlyKeys(session.source, new Set(['fingerprint']), 'source');
     if (!uuid(session.id) || ids.has(session.id) || !Array.isArray(session.events) || session.events.length > REPLAY_LIMITS.records
       || !Array.isArray(session.limits) || session.limits.length > 1000
@@ -504,12 +544,14 @@ export function normalizeSessionReplay(replay, { includeBodies = true } = {}) {
       || !Number.isSafeInteger(session.depth) || session.depth < 0 || session.depth > 5
       || (session.parentId !== null && !uuid(session.parentId))
       || !['ready','partial','unavailable','not-found'].includes(session.status)
+      || (session.cwd !== undefined && (!replayCwd(session.cwd) || !session.source.fingerprint))
       || (session.reason !== undefined && !safeString(session.reason, 500)))
       throw new Error('Stored session replay contains an invalid session');
     ids.add(session.id);
     const safeSession = { id: session.id, parentId: session.parentId, depth: session.depth, status: session.status,
       source: { fingerprint: session.source.fingerprint }, events: [], limits: [] };
     if (session.reason !== undefined) safeSession.reason = session.reason;
+    if (session.cwd !== undefined) safeSession.cwd = session.cwd;
     for (const event of session.events) {
       onlyKeys(event, new Set(['id','sessionId','turnId','kind','label','timestamp','sourceLine','body','bodyStatus',
         'bodyReason','bodyBytes','callId','relatedEventId','itemId','role','status','phase','linkStatus',
@@ -517,7 +559,7 @@ export function normalizeSessionReplay(replay, { includeBodies = true } = {}) {
       if (event.sessionId !== session.id || typeof event.id !== 'string' || !Number.isSafeInteger(event.sourceLine)
         || event.sourceLine < 1 || event.id !== `${session.id}:${session.source.fingerprint}:${event.sourceLine}`
         || (event.turnId !== null && !uuid(event.turnId))
-        || !['message','tool-call','tool-result','command','file-change','delegation','hook','turn','error','session','unsupported'].includes(event.kind)
+        || !['message','tool-call','tool-result','command','file-change','delegation','hook','turn','error','session','compaction','unsupported'].includes(event.kind)
         || !safeString(event.label, 200) || (event.timestamp !== null && isoTimestamp(event.timestamp) !== event.timestamp)
         || !['included','omitted','truncated','unavailable'].includes(event.bodyStatus)
         || (event.body !== null && typeof event.body !== 'string')

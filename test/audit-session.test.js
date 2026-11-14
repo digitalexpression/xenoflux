@@ -15,6 +15,8 @@ import { resolveAuditProfile } from '../src/audit-discovery.js';
 import { auditExitCode, compareAuditRuns, renderAudit } from '../src/audit-report.js';
 import { compactAuditTrial } from '../src/audit-statistics.js';
 import { exportAuditReport, readAuditReport, projectReportResourceProvenance } from '../src/audit-store.js';
+import { presentRunExecution } from '../src/audit-presentation.js';
+import { joinRetainedNativeTurnEvidence } from '../src/audit-replay.js';
 
 const exec = promisify(execFile), id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const rec = (timestamp, type, payload) => ({ timestamp, type, payload });
@@ -47,6 +49,110 @@ async function writeCompressedRollout(path, rows) {
 }
 const meta = idValue => rec('2026-10-15T10:00:00.000Z', 'session_meta', { id: idValue, session_id: idValue, cli_version: '0.153.4', originator: 'codex_cli_rs' });
 const context = (turn, extras = {}) => rec('2026-10-15T10:00:01.000Z', 'turn_context', { turn_id: turn, cwd: '/repo', model: 'gpt-test', effort: 'medium', ...extras });
+
+test('native replay freezes each actors own header workspace and leaves missing source context unknown', async t => {
+  const f = await fixture(t), root = id(96500), child = id(96501), rootTurn = id(96502), childTurn = id(96503);
+  const rootPath = join(f.home, 'sessions', '2026', '10', '15', `rollout-root-${root}.jsonl`);
+  const childPath = join(dirname(rootPath), `rollout-child-${child}.jsonl`);
+  const source = { subagent: { thread_spawn: { parent_thread_id: root } } };
+  await seedIndex(f.home, [{ id: root, path: rootPath }, { id: child, path: childPath, source }]);
+  const rootHeader = meta(root); rootHeader.payload.cwd = '/recorded/root';
+  const childHeader = rec('2026-10-15T10:00:00Z', 'session_meta', { id: child, session_id: root,
+    parent_thread_id: root, source, forked_from_id: root, cwd: '/recorded/child' });
+  const childRows = [childHeader, rootHeader, context(rootTurn, { cwd: '/inherited/root' }), context(childTurn),
+    rec('2026-10-15T10:00:02Z', 'token_usage_record', { thread_id: child, session_id: root, turn_id: childTurn,
+      root_turn_id: rootTurn, total_token_usage: { input_tokens: 1 } })];
+  await writeRollout(rootPath, [rootHeader, context(rootTurn)]);
+  await writeRollout(childPath, childRows);
+  const retained = await readFile(childPath);
+  const profile = { profileId: 'A', profileName: 'A', home: f.home, userHome: f.home };
+  const report = await auditRetainedNativeSession(profile, root, { includeReplay: true });
+  assert.deepEqual(report.sessionReplay.sessions.map(session => [session.id, session.cwd]),
+    [[root, '/recorded/root'], [child, '/recorded/child']]);
+  assert.deepEqual(await readFile(childPath), retained);
+  delete rootHeader.payload.cwd;
+  await writeRollout(rootPath, [rootHeader, context(rootTurn)]);
+  childHeader.payload.cwd = '/recorded/api_key=sk-abcdefghijklmnopqrstuv';
+  await writeRollout(childPath, childRows);
+  const unknown = await auditRetainedNativeSession(profile, root, { includeReplay: true });
+  assert.deepEqual(unknown.sessionReplay.sessions.map(session => Object.hasOwn(session, 'cwd')), [false, false]);
+});
+
+test('native completion records establish turn completion independently of success claims', async t => {
+  const f = await fixture(t), task = id(96000), first = id(96001), second = id(96002), rollout = join(f.home, 'sessions', 'completion.jsonl');
+  await seedIndex(f.home, [{ id: task, path: rollout, source: 'cli' }]);
+  await writeRollout(rollout, [meta(task), context(first),
+    rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'task_complete', turn_id: first,
+      last_agent_message: 'PRIVATE RESPONSE', completed_at: 1792062002 }),
+    context(second), rec('2026-10-15T10:00:03Z', 'event_msg', { type: 'turn_completed', turn_id: second }),
+  ]);
+  const report = await auditNativeSession(f.store, 'A', task);
+  assert.deepEqual(report.turns.map(turn => turn.status), ['completed', 'completed']);
+  assert.equal(presentRunExecution(report).state, 'completed');
+  assert.equal(report.outcome.claim.success, null);
+  assert.equal(report.outcome.claim.status, null);
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE RESPONSE/);
+});
+
+test('native terminal attribution rejects wrong turns and earlier records while failures dominate completion', async t => {
+  const f = await fixture(t), task = id(96100), turn = id(96101), other = id(96102), rollout = join(f.home, 'sessions', 'terminal-attribution.jsonl');
+  await seedIndex(f.home, [{ id: task, path: rollout, source: 'cli' }]);
+  await writeRollout(rollout, [meta(task),
+    rec('2026-10-15T10:00:00.500Z', 'event_msg', { type: 'task_complete', turn_id: turn }),
+    context(turn), rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'task_complete', turn_id: other }),
+  ]);
+  let report = await auditNativeSession(f.store, 'A', task);
+  assert.equal(report.turns[0].status, undefined);
+  assert.equal(presentRunExecution(report).state, 'unknown');
+  await writeRollout(rollout, [meta(task), context(turn),
+    rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'turn_aborted', turn_id: turn }),
+    rec('2026-10-15T10:00:03Z', 'event_msg', { type: 'task_complete', turn_id: turn }),
+  ]);
+  report = await auditNativeSession(f.store, 'A', task);
+  assert.equal(report.turns[0].status, 'interrupted');
+  assert.equal(presentRunExecution(report).state, 'failed');
+  await writeRollout(rollout, [meta(task), context(turn),
+    rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'turn_complete', turn_id: turn, error: { message: 'PRIVATE ERROR' } }),
+    rec('2026-10-15T10:00:03Z', 'event_msg', { type: 'task_complete', turn_id: turn }),
+  ]);
+  report = await auditNativeSession(f.store, 'A', task);
+  assert.equal(report.turns[0].status, 'failed');
+  assert.equal(presentRunExecution(report).state, 'failed');
+});
+
+test('a negative task success claim stays separate from native completion', async t => {
+  const f = await fixture(t), task = id(96300), turn = id(96301), rollout = join(f.home, 'sessions', 'negative-claim.jsonl');
+  await seedIndex(f.home, [{ id: task, path: rollout, source: 'cli' }]);
+  await writeRollout(rollout, [meta(task), context(turn),
+    rec('2026-10-15T10:00:02Z', 'event_msg', { type: 'task_complete', turn_id: turn, success: false, status: 'failed' })]);
+  const report = await auditNativeSession(f.store, 'A', task);
+  assert.equal(report.turns[0].status, 'completed');
+  assert.equal(presentRunExecution(report).state, 'completed');
+  assert.equal(report.outcome.claim.success, false);
+  assert.equal(report.outcome.claim.status, 'failed');
+});
+
+test('a selected child gets terminal status only for its positively owned turns', async t => {
+  const f = await fixture(t), parent = id(96200), child = id(96201), inherited = id(96202), own = id(96203);
+  const parentPath = join(f.home, 'sessions', 'terminal-parent.jsonl'), childPath = join(f.home, 'sessions', 'terminal-child.jsonl');
+  await seedIndex(f.home, [{ id: parent, path: parentPath, source: 'cli' },
+    { id: child, path: childPath, source: { subagent: { thread_spawn: { parent_thread_id: parent } } } }]);
+  await writeRollout(parentPath, [meta(parent), context(inherited)]);
+  const records = [rec('2026-10-15T10:00:00Z', 'session_meta', { id: child, session_id: parent, parent_thread_id: parent,
+    source: { subagent: { thread_spawn: { parent_thread_id: parent } } }, forked_from_id: parent }), context(inherited), context(own),
+  rec('2026-10-15T10:00:03Z', 'token_usage_record', { thread_id: child, session_id: parent, turn_id: own, root_turn_id: inherited }),
+  rec('2026-10-15T10:00:04Z', 'event_msg', { type: 'task_complete', turn_id: inherited, error: { message: 'parent failed' } })];
+  await writeRollout(childPath, records);
+  let report = await auditNativeSession(f.store, 'A', child);
+  assert.deepEqual(report.turns.map(turn => turn.turnId), [own]);
+  assert.equal(report.turns[0].status, undefined);
+  assert.equal(presentRunExecution(report).state, 'unknown');
+  await writeRollout(childPath, [...records,
+    rec('2026-10-15T10:00:05Z', 'event_msg', { type: 'task_complete', turn_id: own })]);
+  report = await auditNativeSession(f.store, 'A', child);
+  assert.equal(report.turns[0].status, 'completed');
+  assert.equal(presentRunExecution(report).state, 'completed');
+});
 
 test('ingests a selected archived CLI session with whitelisted timeline, tool evidence, catalogs, and no content leakage', async t => {
   const f = await fixture(t), task = id(1), turn = id(2), rollout = join(f.home, 'sessions', 'rollout.jsonl');
@@ -1191,6 +1297,35 @@ test('captured child-discovery manifest survives runtime index removal and prove
   const partial = await auditRetainedNativeSession(profile, root, { includeReplay: true, recordedDiscovery: tampered });
   assert.equal(partial.coverage.agents, 'partial');
   assert.ok(partial.sessionReplay.sessions[0].limits.some(limit => limit.kind === 'child-discovery-partial'));
+});
+
+test('retained child controls join only owned turns in the requested workspace', async t => {
+  const f = await fixture(t), root = id(93500), child = id(93501), rootTurn = id(93502), childTurn = id(93503);
+  const rootPath = join(f.home, 'sessions', '2026', '10', '15', `rollout-root-${root}.jsonl`);
+  const childPath = join(dirname(rootPath), `rollout-child-${child}.jsonl`);
+  const source = { subagent: { thread_spawn: { parent_thread_id: root } } };
+  await seedIndex(f.home, [{ id: root, path: rootPath }, { id: child, path: childPath, source }]);
+  await writeRollout(rootPath, [rec('2026-10-15T10:00:00Z', 'session_meta', { ...meta(root).payload, cwd: '/repo' }), context(rootTurn)]);
+  const profile = { profileId: 'A', profileName: 'A', home: f.home, userHome: f.home };
+  const run = { id: id(93504), profile, source: { kind: 'native-app-server-v2', threadId: root },
+    agents: [{ id: root, parentId: null }, { id: child, parentId: root }],
+    turns: [{ agentId: root, turnId: rootTurn }, { agentId: child, turnId: childTurn }] };
+  for (const cwd of ['/repo', '/another-workspace']) {
+    await writeRollout(childPath, [rec('2026-10-15T10:00:00Z', 'session_meta', { id: child, session_id: root,
+      parent_thread_id: root, source, forked_from_id: root, cwd: '/repo' }), context(rootTurn),
+    context(childTurn, { cwd, model: 'child-model', effort: 'high' }),
+    rec('2026-10-15T10:00:02Z', 'token_usage_record', { thread_id: child, session_id: root, turn_id: childTurn,
+      root_turn_id: rootTurn, total_token_usage: { input_tokens: 1 } })]);
+    const native = await auditRetainedNativeSession(profile, root, { includeReplay: true, actionRepoRoot: '/repo' });
+    const childTurns = native.turns.filter(turn => turn.agentId === child);
+    assert.deepEqual(childTurns.map(turn => [turn.turnId, turn.model, turn.reasoningEffort, turn.workspaceMatched]),
+      [[childTurn, 'child-model', 'high', cwd === '/repo']]);
+    const joined = joinRetainedNativeTurnEvidence(run, native, profile);
+    const proof = joined.fields.nativeControls.turns.find(turn => turn.agentId === child);
+    assert.equal(joined.fields.turns[1].model, cwd === '/repo' ? 'child-model' : undefined);
+    assert.equal(joined.fields.turns[1].reasoningEffort, cwd === '/repo' ? 'high' : undefined);
+    assert.equal(proof?.sourceFingerprint, cwd === '/repo' ? native.agents.find(actor => actor.id === child).source.fingerprint : undefined);
+  }
 });
 
 test('root-only replay stays partial when the child index cannot be read', async t => {

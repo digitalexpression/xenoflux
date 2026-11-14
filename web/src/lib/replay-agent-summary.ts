@@ -6,14 +6,26 @@ export interface AgentEvidence {
   text: string
 }
 
+export interface ParentArtifactAction {
+  artifactPath: string
+  childChange: AgentEvidence
+  command: AgentEvidence
+  recordedCommand: string
+  exitCode: number
+  output: string
+}
+
 export interface AgentSummary {
   assignment: AgentEvidence | null
   assignmentNote: string | null
+  acknowledgement: AgentEvidence | null
+  parentAssignmentStatement: AgentEvidence | null
   taskContext?: AgentEvidence | null
   result: AgentEvidence | null
   resultNote: string | null
   received: AgentEvidence | null
   followUps: AgentEvidence[]
+  parentActions: ParentArtifactAction[]
   parentNote: string | null
 }
 
@@ -165,25 +177,21 @@ function wrapper(body: string): { type: string; taskName: string; sender: string
   return type && taskName && sender && payload !== undefined ? { type, taskName, sender, payload } : null
 }
 
-function receivedByParent(parent: ReplaySession | undefined, candidate: ReplayEvent | null, canonicalName: string | null, parentCanonicalName: string | null, names: string[]): AgentEvidence | null {
+function receivedByParent(parent: ReplaySession | undefined, child: ReplaySession, candidate: ReplayEvent | null, canonicalName: string | null, parentCanonicalName: string | null, names: string[]): AgentEvidence | null {
   if (!parent || !candidate || !canonicalName) return null
   if (names.filter(name => name === canonicalName).length !== 1) return null
-  const exact = parent.events.filter(event => {
-    if (!isAssistantMessage(event) || event.label !== 'Agent update') return false;
-    const body = usableBody(event)
-    const parsed = body ? wrapper(body) : null
-    return parsed?.sender === canonicalName
-      && (!parentCanonicalName || parsed.taskName === parentCanonicalName)
-      && parsed.payload === candidate.body?.trim()
-  })
-  const siblings = parent.events.flatMap(event => {
+  const payload = usableBody(candidate)
+  if (!payload || child.events.filter(event => plainAssistant(event) && usableBody(event) === payload).length !== 1) return null
+  const receipts = parent.events.flatMap(event => {
     if (!isAssistantMessage(event) || event.label !== 'Agent update') return [];
     const body = usableBody(event)
     const parsed = body ? wrapper(body) : null
     return parsed ? [{ event, parsed }] : []
   }).filter(item => item.parsed.sender === canonicalName
     && (!parentCanonicalName || item.parsed.taskName === parentCanonicalName))
-  return exact.length === 1 && siblings.length === 1 && exact[0] ? evidence(parent.id, exact[0]) : null
+  const exact = receipts.filter(item => item.parsed.payload === payload)
+  const match = exact[0]
+  return exact.length === 1 && match === receipts.at(-1) && match ? evidence(parent.id, match.event) : null
 }
 
 function mentionsCanonicalName(text: string, name: string): boolean {
@@ -191,21 +199,137 @@ function mentionsCanonicalName(text: string, name: string): boolean {
   return new RegExp(`(^|[^A-Za-z0-9_/-])${escaped}(?![A-Za-z0-9_/-])`).test(text)
 }
 
-function followUps(parent: ReplaySession | undefined, received: AgentEvidence | null, canonicalName: string | null, names: string[]): AgentEvidence[] {
+function mentionsChild(text: string, canonicalName: string, siblings: ReplaySession[]): boolean {
+  const alias = canonicalName.split('/').at(-1)
+  const aliases = siblings.map(childName).filter(name => name?.split('/').at(-1) === alias)
+  return mentionsCanonicalName(text, canonicalName)
+    || (!!alias && aliases.length === 1 && mentionsCanonicalName(text, alias))
+}
+
+function followUps(parent: ReplaySession | undefined, received: AgentEvidence | null, canonicalName: string | null, names: string[], siblings: ReplaySession[]): AgentEvidence[] {
   if (!parent || !received || !canonicalName) return []
   if (names.filter(name => name === canonicalName).length !== 1) return []
+  const mentions = (text: string) => mentionsChild(text, canonicalName, siblings)
   const receiptIndex = parent.events.indexOf(received.event)
   return parent.events.slice(receiptIndex + 1).filter(plainAssistant).filter(event => {
     const body = usableBody(event)
-    return body !== null && mentionsCanonicalName(body, canonicalName)
+    return body !== null && mentions(body)
   }).map(event => {
     const paragraphs = usableBody(event)!.split(/\n\s*\n/);
-    const mentioned = paragraphs.filter(text => mentionsCanonicalName(text, canonicalName));
+    const mentioned = paragraphs.filter(mentions);
     const lead = paragraphs[0];
     const text = lead && lead.length < 160 && !mentioned.includes(lead)
       ? [lead, ...mentioned].join('\n\n…\n\n') : mentioned.join('\n\n…\n\n');
     return evidence(parent.id, event, text);
   })
+}
+
+function parentAssignmentStatement(parent: ReplaySession | undefined, assignment: AgentEvidence | null,
+  name: string | null, siblings: ReplaySession[]): AgentEvidence | null {
+  if (!parent || !assignment || !name || !assignment.event.turnId
+    || siblings.filter(session => childName(session) === name).length !== 1) return null
+  const before = parent.events.indexOf(assignment.event)
+  const statement = parent.events.slice(0, before).reverse().find(event => event.turnId === assignment.event.turnId
+    && plainAssistant(event) && usableBody(event) && mentionsChild(usableBody(event)!, name, siblings))
+  return statement ? evidence(parent.id, statement) : null
+}
+
+function artifactPath(value: string, cwd: string | undefined): string | null {
+  if (!value || /[\\$`*?\[\]{}~\r\n]/.test(value)) return null
+  if (!value.startsWith('/') && !cwd?.startsWith('/')) return null
+  const parts: string[] = []
+  for (const part of (value.startsWith('/') ? value : `${cwd}/${value}`).split('/')) {
+    if (part === '..') parts.pop()
+    else if (part && part !== '.') parts.push(part)
+  }
+  return `/${parts.join('/')}`
+}
+
+function writtenArtifacts(session: ReplaySession, before: number): Map<string, AgentEvidence> {
+  const paths = new Map<string, AgentEvidence>()
+  for (const event of session.events.slice(0, before)) {
+    if (event.kind !== 'file-change' || event.status !== 'completed' || event.contentOmitted) continue
+    const changes = parseCall(event)?.changes
+    if (!changes || typeof changes !== 'object' || Array.isArray(changes)) continue
+    for (const [path, change] of Object.entries(changes)) {
+      if (!change || typeof change !== 'object' || !('type' in change)
+        || !['add', 'update'].includes(String(change.type))) continue
+      const resolved = artifactPath(path, session.cwd)
+      if (resolved) paths.set(resolved, evidence(session.id, event, `Recorded child file change: ${path}`))
+    }
+  }
+  return paths
+}
+
+function commandReferences(command: unknown, cwd: string | undefined): { text: string; paths: string[] } | null {
+  if (!Array.isArray(command) || !command.length || !command.every(value => typeof value === 'string')) return null
+  const shell = /(?:^|\/)(?:zsh|bash|sh)$/.test(command[0] ?? '')
+  const source = shell && command.length === 3 && /^-[a-z]*c$/.test(command[1] ?? '') ? command[2] ?? null : null
+  if (shell && source === null) return null
+  if (source && /[|\n\r$`\\(){}<>]/.test(source)) return null
+  const segments: string[][] = source === null ? [command] : source.split(/&&|;/).map(segment => {
+    const tokens = segment.trim().match(/'[^']*'|"[^"\n]*"|[^\s'"&;]+/g) ?? []
+    if (tokens.join(' ') !== segment.trim().replace(/\s+/g, ' ')) return []
+    return tokens.map(token => /^['"]/.test(token) ? token.slice(1, -1) : token)
+  })
+  const paths: string[] = []
+  for (const tokens of segments) {
+    const [program, ...args] = tokens
+    const name = program?.split('/').at(-1)
+    let files: string[] = []
+    if (name === 'node' && (args[0] === '--test' || args[0] === '--check')
+      && args.length > 1 && args.slice(1).every(arg => !arg.startsWith('-'))) files = args.slice(1)
+    else if (name === 'cat' && args.every(arg => !arg.startsWith('-'))) files = args
+    else if (name === 'sed' && args.length === 3 && args[0] === '-n') files = args.slice(2)
+    else if (name === 'git' && args[0] === 'diff') {
+      const separator = args.indexOf('--')
+      if (separator >= 0) files = args.slice(separator + 1)
+      else if (args.includes('--no-index')) files = args.slice(1).filter(arg => !arg.startsWith('-'))
+    }
+    else if (!(name === 'git' && args[0] === 'status')) return null
+    paths.push(...files.flatMap(arg => {
+      const path = artifactPath(arg, cwd)
+      return path ? [path] : []
+    }))
+  }
+  return { text: source ?? command.join(' '), paths }
+}
+
+function parentArtifactActions(parent: ReplaySession | undefined, child: ReplaySession, result: AgentEvidence | null,
+  received: AgentEvidence | null, siblings: ReplaySession[]): ParentArtifactAction[] {
+  if (!parent || !result || !received) return []
+  const written = writtenArtifacts(child, child.events.indexOf(result.event))
+  const otherPaths = new Set(siblings.filter(session => session.id !== child.id)
+    .flatMap(session => [...writtenArtifacts(session, session.events.length).keys()]))
+  const actions: ParentArtifactAction[] = []
+  for (const event of parent.events.slice(parent.events.indexOf(received.event) + 1)) {
+    if (event.kind !== 'command' || event.status !== 'completed' || event.contentOmitted) continue
+    const payload = parseCall(event)
+    if (!payload || !Number.isSafeInteger(payload.exitCode) || typeof payload.exitCode !== 'number'
+      || typeof payload.output !== 'string') continue
+    for (const [path, change] of written) {
+      if (otherPaths.has(path)) continue
+      const reference = commandReferences(payload.command, parent.cwd)
+      if (reference?.paths.includes(path)) actions.push({ artifactPath: path, childChange: change,
+        command: evidence(parent.id, event, reference.text), recordedCommand: reference.text,
+        exitCode: payload.exitCode, output: excerpt(payload.output) })
+    }
+  }
+  return actions
+}
+
+function taskAcknowledgement(child: ReplaySession, result: AgentEvidence | null): AgentEvidence | null {
+  const wrapperIndex = child.events.findIndex(event => isAssistantMessage(event)
+    && usableBody(event)?.startsWith('Message Type: NEW_TASK'))
+  if (wrapperIndex < 0) return null
+  for (const event of child.events.slice(wrapperIndex + 1)) {
+    if (['tool-call', 'command', 'file-change', 'delegation'].includes(event.kind)) return null
+    if ((event.kind === 'message' && event.role === 'user') || (event.kind === 'turn' && event.status === 'started')) return null
+    if (plainAssistant(event) && usableBody(event)) {
+      return event === result?.event ? null : evidence(child.id, event)
+    }
+  }
+  return null
 }
 
 /** Derive conservative, event-linked per-agent summaries from this frozen replay only. */
@@ -218,21 +342,26 @@ export function deriveAgentSummaries(replay: SessionReplay): Map<string, AgentSu
     const name = childName(session)
     const names = replay.sessions.map(childName).filter((value): value is string => !!value)
     const candidate = finalCandidate(session)
-    const received = receivedByParent(parent, candidate, name, childParentName(session), names)
+    const received = receivedByParent(parent, session, candidate, name, childParentName(session), names)
     const completed = terminalResult(session, candidate, !!received)
-    const followUp = followUps(parent, received, name, names)
+    const siblings = replay.sessions.filter(candidate => candidate.parentId === session.parentId)
+    const followUp = followUps(parent, received, name, names, siblings)
+    const parentActions = parentArtifactActions(parent, session, completed.result, received, siblings)
     summaries.set(session.id, {
       ...assigned,
+      acknowledgement: parent && assigned.assignmentNote ? taskAcknowledgement(session, completed.result) : null,
+      parentAssignmentStatement: assigned.assignmentNote ? parentAssignmentStatement(parent, assigned.assignment, name, siblings) : null,
       ...(parent && assigned.assignmentNote ? { taskContext: rootOpeningTask(replay, session) } : {}),
       ...completed,
       received,
       followUps: followUp,
+      parentActions,
       parentNote: session.parentId === null
         ? 'Main session has no parent.'
         : !parent
           ? 'The recorded parent session is unavailable; delivery and follow-up cannot be established.'
         : received
-          ? followUp.length ? null : 'A matching delivery is recorded; no later parent message explicitly names this child.'
+          ? followUp.length || parentActions.length ? null : 'A matching delivery is recorded; no linked parent statement or supported artifact command is available.'
           : 'No unique exact parent delivery is linked to this result. Later activity is not treated as evidence of use.',
     })
   }

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from '
 import { Link, useParams, useSearchParams } from 'react-router';
 import { apiGet } from '@/api/client';
 import type { Report as View, SessionReplay, Side } from '@/api/types';
+import { InspectSessionButton } from '@/components/inspect-session-button';
 import { SessionReplayView, type ReplayHandle } from '@/components/session-replay';
 import { StatusBadge, TagPill } from '@/components/badges';
 import { Disclosure } from '@/components/controls';
@@ -15,6 +16,7 @@ import { useResource } from '@/lib/useResource';
 import { deriveAgentSummaries, type AgentEvidence } from '@/lib/replay-agent-summary';
 import { WorkflowMeasurements } from '@/components/workflow-measurements';
 import { CheckAssessment } from '@/components/check-assessment';
+import { SessionControlsComparison } from '@/components/session-controls-comparison';
 
 export function Report() {
   const { ref = '' } = useParams();
@@ -39,7 +41,7 @@ export function Report() {
       {view.error ? <LoadError error={view.error} onRetry={view.reload} /> : null}
       {view.loading && !data ? <Loading label="Comparing sessions… reading recorded history only." rows={4} /> : null}
       {data ? <>
-        <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: data.breadcrumb, to: data.progressHref ?? (data.saved ? '/reports/open' : '/compare/sessions') }, { label: 'Report' }]}
+        <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: data.breadcrumb, to: data.progressHref ?? (data.retained ? '/sessions' : data.saved ? '/reports/open' : '/compare/sessions') }, { label: 'Report' }]}
           title={data.title} actions={<><Link className="btn btn-primary" to={`${base}/reviews?new=1`}>Review</Link><Link className="btn btn-secondary" to={`${base}/export`}>Export report</Link></>} />
         {data.attempt ? data.attempt.cells.every(cell => cell.state === 'completed') ? null : data.attempt.notStarted ? <InfoNotice title={data.attempt.title}>{data.attempt.text}</InfoNotice>
           : <div className="flex flex-col gap-1"><p className="text-body font-semibold">{data.attempt.title}</p><p className="hint">{data.attempt.text}</p></div>
@@ -47,6 +49,9 @@ export function Report() {
           <ul className="list-disc pl-5">{data.verification.cells.flatMap(cell => (cell.executionFailures ?? []).map(failure => `${cell.profile}: ${failure}`)).map(failure => <li key={failure}>{failure}</li>)}</ul>
         </ErrorPanel> : null}
         {info?.mode === 'demo' ? <SimulatedNote /> : null}
+        {data.retained ? <InfoNotice title="Retained comparison">
+          <p>Both sides use the evidence already inspected. Native histories and today’s profile files are not reread. Export this comparison to keep it after the app closes.</p>
+        </InfoNotice> : null}
         {data.saved ? <InfoNotice title={<span className="inline-flex flex-wrap gap-2 items-center"><TagPill>Saved report</TagPill>Shown exactly as saved</span>}>
           <p>Saved {data.saved.savedAt}{data.saved.recordedAt === 'time not recorded' ? '' : ` · session recorded ${data.saved.recordedAt}`}. Today’s setup and project files aren’t used.</p>
           {data.saved.notInReport.length ? <p>Not in this report: {data.saved.notInReport.join(', ')}.</p> : null}
@@ -54,6 +59,7 @@ export function Report() {
 
         <div className="report-sides" role="group" aria-label="Compared profiles">
           {[data.a, data.b].map((side, index) => <section aria-label={`${side.profile} task outcome`} key={side.side} className="panel flex flex-col gap-2" style={{ borderTop: `3px solid var(--color-side-${side.side})` }}>
+            <InspectSessionButton selection={{ report: ref, side: side.side }} />
             <span className="meta">{index ? 'Right profile' : 'Left profile'}</span>
             <div><ProfileChip side={side.side} name={side.profile} meta={side.client} /></div>
             {side.provenance ? <p className="meta">{[
@@ -80,6 +86,10 @@ export function Report() {
           </section>)}
         </div>
         <p className="text-body"><strong className="font-semibold">{associationLead(data.association.basis)}</strong> {data.association.text}</p>
+
+        {data.sessionControls || data.sessionHarness ? <SessionControlsComparison controls={data.sessionControls} harness={data.sessionHarness}
+          profiles={{ a: data.a.profile, b: data.b.profile }}
+          onOpenCompaction={(side, sessionId, eventId) => replayRef.current?.openSourceEvent(side, sessionId, eventId)} /> : null}
 
         <section className="flex flex-col gap-3" aria-labelledby="responses">
           <h2 id="responses" className="text-heading">Last recorded response</h2>
@@ -147,7 +157,7 @@ export function Report() {
                 {patch.sourceCommit ? <p className="meta wrap-anywhere">Source baseline: <span className="font-mono">{patch.sourceCommit}</span></p> : null}
                 {patch.text !== null ? <Disclosure label={`Inspect ${data[side].profile} patch`} expandedLabel={`Hide ${data[side].profile} patch`}>
                   <pre className="code-block max-h-[480px] overflow-auto" tabIndex={0} aria-label={`${data[side].profile} captured patch`}>{patch.text}</pre>
-                </Disclosure> : <StatusBadge status="neutral">{patch.status === 'omitted' ? 'Content omitted' : 'Not captured'}</StatusBadge>}
+                </Disclosure> : <StatusBadge status="neutral">{patch.status === 'unchanged' ? 'No patch changes' : patch.status === 'omitted' ? 'Content omitted' : 'Not captured'}</StatusBadge>}
               </section>;
             })}
           </div> : null}
@@ -178,7 +188,7 @@ export function Report() {
         </InfoNotice>
 
         <footer className="flex flex-col gap-2 pt-4 border-t" style={{ borderColor: 'var(--color-divider)' }}>
-          <div className="flex flex-wrap gap-2"><Link className="btn btn-primary" to={`${base}/export`}>Export report</Link><CopyButton text={data.cliCommand} label="Copy CLI command" /></div>
+          <div className="flex flex-wrap gap-2"><Link className="btn btn-primary" to={`${base}/export`}>Export report</Link>{data.cliCommand ? <CopyButton text={data.cliCommand} label="Copy CLI command" /> : null}</div>
           <p className="hint">Export saves a readable Markdown file and its JSON companion together in one folder.</p>
         </footer>
       </> : null}
@@ -186,24 +196,28 @@ export function Report() {
   );
 }
 
-function ClosingResponse({ replay, side, profile, onOpen }: { replay: SessionReplay; side: Side; profile: string;
+export function ClosingResponse({ replay, side, profile, onOpen, single = false }: { replay: SessionReplay; side: Side; profile: string; single?: boolean;
   onOpen: (side: Side, evidence: AgentEvidence, trigger: HTMLButtonElement) => void;
 }) {
   const summary = useMemo(() => {
     const roots = replay.sessions.filter(session => session.parentId === null);
     return roots.length === 1 ? deriveAgentSummaries(replay).get(roots[0]!.id) : null;
   }, [replay]);
-  const event = summary?.result ? replay.sessions.find(session => session.id === summary.result!.sessionId)?.events.find(item => item.id === summary.result!.event.id) : null;
+  const roots = replay.sessions.filter(session => session.parentId === null);
+  const fallback = single && !summary?.result && roots.length === 1 ? [...roots[0]!.events].reverse().find(event =>
+    event.kind === 'message' && event.role === 'assistant' && event.bodyStatus === 'included' && event.body?.trim()) : null;
+  const result = summary?.result ?? (fallback?.body ? { event: fallback, sessionId: fallback.sessionId, text: fallback.body } : null);
+  const event = result ? replay.sessions.find(session => session.id === result.sessionId)?.events.find(item => item.id === result.event.id) : null;
   const body = event?.bodyStatus === 'included' && typeof event.body === 'string' ? event.body : null;
-  return <article className="panel min-w-0 flex flex-col gap-3" aria-label={`${profile} last recorded response`} style={{ borderTop: `3px solid var(--color-side-${side})` }}>
-    <SideText side={side} className="font-semibold">{profile}</SideText>
-    {summary?.result && body !== null ? <>
-      <p className="hint">{summary.resultNote ?? 'Recorded main-session response.'} This is not verification of success.</p>
+  return <article className="panel min-w-0 flex flex-col gap-3" aria-label={`${profile} last recorded response`} style={single ? undefined : { borderTop: `3px solid var(--color-side-${side})` }}>
+    {single ? <span className="font-semibold wrap-anywhere">{profile}</span> : <SideText side={side} className="font-semibold">{profile}</SideText>}
+    {result && body !== null ? <>
+      <p className="hint">{fallback ? 'Last recorded assistant message. Completion and final-answer status are unknown.' : summary?.resultNote ?? 'Recorded main-session response.'} This is not verification of success.</p>
       <Message align="start"><MessageContent><Bubble variant="secondary" className="max-w-full"><BubbleContent className="max-h-64 overflow-y-auto"><pre className="font-sans whitespace-pre-wrap wrap-break-word">{body}</pre></BubbleContent></Bubble></MessageContent></Message>
       <Disclosure label="Read full response" expandedLabel="Hide full response">
         <pre className="code-block max-h-[70vh] overflow-auto whitespace-pre-wrap wrap-break-word" style={{ background: 'var(--color-surface-raised)' }}>{body}</pre>
       </Disclosure>
-      <Button variant="secondary" onClick={event => onOpen(side, { ...summary.result!, text: body }, event.currentTarget)}>Open response event</Button>
+      <Button variant="secondary" onClick={event => onOpen(side, { ...result, text: body }, event.currentTarget)}>Open response event</Button>
     </> : <p className="hint">{summary?.resultNote ?? 'A closing response cannot be identified for a unique main session.'}</p>}
   </article>;
 }

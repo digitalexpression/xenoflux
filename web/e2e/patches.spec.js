@@ -34,6 +34,21 @@ async function exportValue(page, include) {
   return JSON.parse(await readFile(path, 'utf8'));
 }
 
+test('empty captured patches show no changes without a missing-content warning', async ({ app, page }) => {
+  const pair = bookingLedgerPair();
+  const patchSha256 = createHash('sha256').update('').digest('hex');
+  const fingerprint = 'a'.repeat(64);
+  for (const run of pair) run.workspace.taskEnd = { status: 'clean', fingerprint, baselineFingerprint: fingerprint, patchSha256,
+    captureComplete: true, timing: 'task-end', fileCount: 0,
+    patchContent: captureAuditWorkspacePatch(Buffer.alloc(0), { fingerprint, patchSha256 }, {
+      baselineFingerprint: fingerprint, sourceBaselineCommit: run.sourceWorkspace.sourceCommit, sourceBaselineTree: run.sourceWorkspace.sourceTree,
+    }) };
+  await openValue(page, app, compareAuditRuns(...pair));
+  await expect(page.getByText('No patch changes', { exact: true })).toHaveCount(2);
+  await expect(page.getByText(/^Not in this report:/)).toHaveCount(0);
+  await expect(page.getByText('Content omitted', { exact: true })).toHaveCount(0);
+});
+
 test('task-end patches remain inspectable only with selected content and explain absent evidence', async ({ app, page }, testInfo) => {
   const value = comparisonWithPatch();
   await openValue(page, app, value);

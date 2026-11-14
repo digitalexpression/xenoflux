@@ -356,6 +356,7 @@ test('caps captured events and marks coverage partial without losing the process
   assert.equal(capture.status, 'partial');
   assert.equal(run.coverage.timeline, 'partial');
   assert.ok(run.warnings.includes('event-limit'));
+  assert.equal(run.reason, 'Capture is incomplete; inspect warnings and coverage');
 });
 
 test('only treats one completed literal skill read as observed; masked commands remain intent', async t => {
@@ -525,8 +526,36 @@ test('joins native skill telemetry to root and corroborated child catalogs witho
   assert.equal(foreign.resolution, 'unattributed');
   assert.equal(run.skills.find(skill => skill.name === 'plug:skill').observations[0].kind, 'native-invocation-observed');
   assert.equal(capture.capabilities.skillUseObservability, 'native-runtime-detected');
-  assert.equal(run.coverage.skillUsage, 'partial');
+  assert.equal(run.coverage.skillUsage, 'observed');
   assert.equal(run.skillTelemetry.delivery, 'best-effort');
+});
+
+test('separates required observed skill capture from exhaustive coverage and telemetry loss', async t => {
+  const events = [
+    { source: 'native-otel-skill-invocation', threadId: 'root-thread', turnId: 'root-turn', skillName: 'repo-skill', scope: 'repo', invocationType: 'explicit' },
+    { source: 'native-otel-skill-invocation', threadId: 'child-thread', turnId: 'child-turn', skillName: 'system-skill', scope: 'system', invocationType: 'implicit' },
+  ];
+  const requirements = { skills: [
+    { agent: 'root', name: 'repo-skill', invocationType: 'explicit' },
+    { agent: 'descendant', name: 'system-skill', invocationType: 'implicit' },
+  ] };
+  for (const mode of ['observed', 'empty', 'truncated']) await t.test(mode, async subtest => {
+    const f = await fixture(subtest);
+    const { run, capture } = await runAuditCapture({ ...f.options, telemetryFactory: async () => ({ args: [],
+      close: async () => ({ events: mode === 'empty' ? [] : events,
+        metadata: { transport: 'otlp-http-json', delivery: 'best-effort', warnings: mode === 'truncated' ? ['skill-telemetry-limit'] : [] } }),
+    }) });
+    const acceptance = evaluateCaptureRequirements(run, requirements);
+    assert.equal(acceptance.status, mode === 'empty' ? 'failed' : 'passed');
+    assert.equal(acceptance.exhaustiveConsumption, false);
+    assert.equal(run.coverage.skillUsage, mode === 'observed' ? 'observed' : 'partial');
+    assert.equal(run.coverage.skillInvocationTelemetry, mode === 'empty' ? 'empty' : mode === 'truncated' ? 'partial' : 'observed');
+    assert.equal(run.coverage.skills, 'partial');
+    assert.equal(run.status, 'partial');
+    assert.equal(capture.status, 'partial');
+    assert.equal(run.skills.find(skill => skill.name === 'repo-skill').observations.some(row => row.kind === 'definition-read-observed'), true);
+    assert.match(run.skillTelemetry.boundary, /not exhaustive/);
+  });
 });
 
 test('discovers a grandchild from hydrated child collaboration metadata before the task-end snapshot', async t => {

@@ -16,6 +16,16 @@ export function ReplayAgentPanel({ name, profile, summary, onOpen }: {
       <h3 className="text-body font-semibold">Assignment</h3>
       {summary.assignmentNote ? <p className="hint">{summary.assignmentNote}</p> : null}
       {summary.assignment ? source(summary.assignment, 'View assignment event') : null}
+      {summary.parentAssignmentStatement ? <div className="flex flex-col gap-2">
+        <p className="text-ui font-semibold">Parent's assignment statement</p>
+        <p className="hint">Recorded parent statement before the linked spawn. It does not establish the exact delivered assignment wording.</p>
+        {source(summary.parentAssignmentStatement, 'View parent assignment statement')}
+      </div> : null}
+      {summary.acknowledgement ? <div className="flex flex-col gap-2">
+        <p className="text-ui font-semibold">Child's task acknowledgement</p>
+        <p className="hint">The child's opening statement before recorded tool activity. It does not recover the exact delivered assignment wording.</p>
+        {source(summary.acknowledgement, 'View child acknowledgement')}
+      </div> : null}
       {summary.taskContext ? <details><summary className="cursor-pointer text-ui">Opening task (context)</summary>
         {source(summary.taskContext, 'View opening task event')}</details> : null}
     </section>
@@ -29,6 +39,17 @@ export function ReplayAgentPanel({ name, profile, summary, onOpen }: {
       {summary.parentNote ? <p className="hint">{summary.parentNote}</p> : null}
       {summary.received ? <div className="flex flex-col gap-2"><p className="text-ui">The parent received this result.</p>
         <Button variant="ghost-link" onClick={() => onOpen(summary.received!)}>View parent receipt</Button></div> : null}
+      {summary.parentActions.length ? <p className="hint">After receipt, recorded parent commands reference a file written by this child. This links the actions to the artifact; it does not establish causality or overall verification.</p> : null}
+      {summary.parentActions.map((item, index) => <div key={`${item.command.event.id}:${item.artifactPath}`} className="flex flex-col gap-2">
+        <p className="text-ui break-words">Child-written file: {item.artifactPath}</p>
+        {source(item.command, `View parent command ${index + 1}`)}
+        <p className="meta">Recorded whole-command exit code: {item.exitCode}</p>
+        <details><summary className="cursor-pointer text-ui">Full recorded command</summary>
+          <pre className="text-ui whitespace-pre-wrap break-words">{item.recordedCommand}</pre></details>
+        {item.output ? <details><summary className="cursor-pointer text-ui">Recorded command output excerpt</summary>
+          <pre className="text-ui whitespace-pre-wrap break-words">{item.output}</pre></details> : null}
+        <Button variant="ghost-link" onClick={() => onOpen(item.childChange)}>View child file change {index + 1}</Button>
+      </div>)}
       {summary.followUps.length ? <p className="hint">Parent statements naming this agent; integration is not independently verified.</p> : null}
       {summary.followUps.map((item, index) => <div key={item.event.id}>{source(item, `View parent follow-up ${index + 1}`)}</div>)}
     </section>

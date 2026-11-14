@@ -218,6 +218,7 @@ export interface ReplayEvent {
 export interface ReplaySession {
   id: string;
   parentId: string | null;
+  cwd?: string;
   depth?: number;
   status: string;
   reason?: string | null;
@@ -230,6 +231,45 @@ export interface SessionReplay {
   kind: 'session-replay';
   sessions: ReplaySession[];
   limits?: string[];
+}
+export interface SkillSourceTime {
+  schemaVersion: 1;
+  nativeEvent: { source: 'event.timestamp'; clock: 'producer-reported'; unixNano: string | null };
+  otlpEvent: { source: 'timeUnixNano'; clock: 'otlp-event'; unixNano: string | null };
+  otlpObserved: { source: 'observedTimeUnixNano'; clock: 'otlp-observed'; unixNano: string | null };
+  clockRelationship: 'unknown';
+}
+export type SkillSourceReference =
+  | { kind: 'file-line'; line: number; itemId: string | null; source: string | null }
+  | { kind: 'structured-selection'; source: string }
+  | { kind: 'native-telemetry'; source: string | null; observationId: string | null; invocationType: string | null;
+      sourceTime: SkillSourceTime | null; timestampNs: string | null; timestamps: { clock: string; source: string; iso: string }[] }
+  | { kind: 'unavailable' };
+export interface SessionInspection {
+  ref: string; title: string; profile: string; client: string | null; sessionId: string | null;
+  mode: string; sourceKind: string; surface: string | null; readContext: string | null; setupHref: string | null;
+  savedAt: string | null; frozen: boolean; exportHref: string; execution: { state: string; text: string };
+  coverage: { name: string; state: string; note?: string }[]; replay: SessionReplay | null;
+  settings: { name: string; requested: string | null; sent: string | null; confirmed: string | null; observed: string | null }[];
+  turns: { agentId: string | null; turnId: string | null; model: string | null; effort: string | null; recordedAt: string | null; sourceLine: number | null; source: string }[];
+  workflow: { counters: { input: number | null; cachedInput: number | null; output: number | null; reasoning: number | null; total: number | null };
+    durationMs: number | null; timingNote: string; usageNote: string; coverageNote: string };
+  agents: { id: string; name: string; durationMs: number | null; timingNote: string; usageNote: string;
+    counters: SessionInspection['workflow']['counters'] }[];
+  skills: { name: string; observations: { kind: string; agentId: string | null; turnId: string | null; sourceLine: number | null;
+    sourceRef: SkillSourceReference }[] }[];
+  compactions: { sessionId: string; eventId: string; label: string }[]; limits: string[];
+}
+export type SessionHarnessEvidence = Pick<SessionInspection, 'settings' | 'turns' | 'skills' | 'compactions' | 'setupHref' | 'mode' | 'coverage'>;
+export interface SessionControlsComparison {
+  schemaVersion: 1;
+  basis: 'retained-evidence';
+  requested: { kind: string; label: string; text: string };
+  recorded: { kind: string; label: string; text: string };
+  rows: { id: string; name: string; group: 'model' | 'harness' | 'inputs';
+    stage: 'requested' | 'sent' | 'confirmed' | 'observed' | null;
+    status: 'same' | 'different' | 'unknown' | 'not-comparable'; a: string; b: string; note: string }[];
+  limits: string[];
 }
 export interface CheckResult { status: StatusKind; text: string }
 export interface VerificationCell { side: Side; profile: string; claim: string; checks: CheckResult[]; executionFailures?: string[] }
@@ -280,11 +320,14 @@ export interface WorkflowMeasurement {
   runnerDurationMs: number | null;
 }
 export interface Report {
+  sessionControls?: SessionControlsComparison;
+  sessionHarness?: Record<Side, SessionHarnessEvidence>;
   ref: string;
   progressHref?: string;
   title: string;
   breadcrumb: string;
   saved: { recordedAt: string; savedAt: string; notInReport: string[] } | null;
+  retained?: boolean;
   a: ReportSide;
   b: ReportSide;
   replay?: { a: SessionReplay | null; b: SessionReplay | null } | null;
@@ -453,6 +496,7 @@ export interface ReviewTaskDecision {
 
 /* Export and reopen */
 export interface ExportPlan {
+  href?: string;
   ref: string;
   title: string;
   folder: string;
@@ -467,6 +511,7 @@ export interface ExportPlan {
 }
 export interface ExportResult { warning?: string; folder: string; files: string[]; contentIncluded: string; replayContentIncluded?: string; reviewPacketFingerprint?: string; reviewPacketRef?: string }
 export interface SavedSummary {
+  href?: string;
   origin?: 'claude-code-import' | 'copilot-import';
   id: string;
   title: string;

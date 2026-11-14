@@ -43,6 +43,10 @@ test('mixed clients expose native choices and keep path and command decisions se
     await expect(page.getByText('Claude fixture completed.', { exact: true }).first()).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.getByRole('button', { name: 'Inspect session', exact: true }).first().click();
+    await expect(page.getByText(/Retained xfx capture/).first()).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Session timeline', exact: true })).toHaveCount(1);
+    await expect(page.getByRole('region', { name: 'Right timeline', exact: true })).toHaveCount(0);
   } finally { await app.close(); }
 });
 

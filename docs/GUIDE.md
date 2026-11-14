@@ -135,6 +135,39 @@ not overlap. Profile mutations and new Desktop startup are blocked by execution
 reservations. The controller's default capacity is eight jobs. Shared activity
 limits timing comparisons.
 
+## Inspect a session
+
+From **Browse sessions**, choose **Inspect** beside a Codex session, or choose
+**Choose a session by profile** for Codex, Claude Code or GitHub Copilot.
+Profiles also offers **Inspect sessions** with that profile selected. Listing
+Copilot history uses its CLI and existing sign-in; managed profiles need a bound
+repository. Inspection submits no model task and never resumes the session.
+
+The inspector shows coverage, the last recorded response, model and permission
+observations, turn settings, skills, time, tokens and recorded activity. Open an
+event for its retained content and source reference. Available compaction markers
+and summaries link to their events; absent summaries do not prove scope loss.
+Today's setup is a separate snapshot, never a substitute for historical context.
+
+On a comparison report, choose **Inspect session** on either side to inspect its
+retained capture. Owned captures and historical imports keep their own coverage
+limits. The inspector does not add later native activity. **Export session** saves
+one session using the [report export choices](#read-and-export-a-report), and its
+JSON companion reopens without the original history.
+
+Owned captures show skill catalog coverage, observed invocation telemetry and
+declared capture requirements separately. A captured catalog does not prove
+invocation. Skill observations identify structured selection, definition-read
+source lines and telemetry receipt references. Observed receipts and passed
+requirements do not establish exhaustive skill use. Frozen reports keep their
+original capture status. **No checks selected** means no independent task verification
+was requested; native completion is shown separately.
+
+Choose **Compare with another session** to keep this inspected evidence as the
+left side while selecting a right session by profile. The left history is not
+reread. Reopen an expired inspection before comparing; the same native session
+cannot fill both sides.
+
 ## Compare existing sessions
 
 Select two sessions; the first is the left side and **Swap sides** reverses them.
@@ -153,6 +186,23 @@ so native histories are no longer needed. Raw transcripts remain private.
 
 ## Read and export a report
 
+**Session and harness comparison** separates requested variation from recorded
+differences. **Model-only request** means only the model differs among the listed
+recorded requests. It does not establish that the complete harness stayed fixed.
+Read the separate recorded assessment for changes in effort, permission mode,
+client, version, original surface or task inputs.
+
+Expand **Inspect recorded controls** for each setting's requested, sent, confirmed
+and response-reported values. Expand each session's harness evidence for its own
+turn observations, skills and compaction links. The two timelines remain independent.
+Cross-client effort and permission labels do not establish equivalent behavior.
+Unknown context, integrations and cache state remain explicit.
+
+Setup fingerprints cover setup recipes and native overrides, which can include
+the model. A different fingerprint alone cannot identify a harness change, and
+matching fingerprints do not establish full historical equality. Export and reopen
+use the same interpretation of the retained evidence, without reading today's files.
+
 | View | Meaning |
 | --- | --- |
 | Responses and replay | Recorded text, events, owned delegations, references and explicit gaps. Each side has its own order and elapsed-time origin. |
@@ -165,6 +215,13 @@ restores that side's event/search/scroll. Select an event for the inspector;
 **F6** switches focus and **Escape** closes it. **Source and event details** shows
 recorded references. Reopening never adds later activity or reconstructs missing
 history from today's files.
+
+Select an agent name for its assignment, result and parent use. When the native
+assignment is encrypted, readable parent assignment statements and child task
+acknowledgements remain separate recorded claims. They do not reveal the exact
+encrypted payload. Parent actions link a completed child file change to a later
+recorded parent command after a matching result delivery. Inspect the source links
+and full command; its exit code applies to the whole recorded command.
 
 Completion, verification and reviewer judgment are separate. No checks means
 unverified. Discovery, selection, invocation, successful read and adherence are

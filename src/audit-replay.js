@@ -30,6 +30,72 @@ function withCheckpointArtifacts(run, original, current, saved, rootId) {
   return run;
 }
 
+export function joinRetainedNativeTurnEvidence(run, native, saved, { expectedSourceFingerprint } = {}) {
+  const rootId = retainedNativeReference(run, saved, run.id, run.source?.threadId)?.sessionId;
+  const fingerprint = native?.source?.fingerprint;
+  if (!rootId || native?.source?.nativeSessionId !== rootId || !/^[a-f0-9]{64}$/.test(fingerprint ?? '')
+    || expectedSourceFingerprint !== undefined && fingerprint !== expectedSourceFingerprint
+    || !['ready', 'partial'].includes(native?.status)) return { status: 'source-binding-mismatch', fields: {}, contexts: [] };
+  const actors = new Map(list(run.agents).map(actor => [actor.id, actor]));
+  const nativeActors = new Map(list(native.agents).map(actor => [actor.id, actor]));
+  const actorCount = (rows, id) => rows.filter(actor => actor.id === id).length;
+  const replaySources = native.sessionReplay ? new Map(list(native.sessionReplay.sessions)
+    .map(session => [session.id, session.source?.fingerprint])) : null;
+  const sourceFor = agentId => {
+    const seen = new Set();
+    let id = agentId;
+    while (id !== rootId) {
+      const actor = actors.get(id), proof = nativeActors.get(id);
+      if (!actor || !proof || seen.has(id) || actor.parentId !== proof.parentId
+        || actorCount(run.agents, id) !== 1 || actorCount(native.agents, id) !== 1
+        || !['ready', 'partial'].includes(proof.status) || !/^[a-f0-9]{64}$/.test(proof.source?.fingerprint ?? '')) return null;
+      if (replaySources && replaySources.get(id) !== proof.source.fingerprint) return null;
+      seen.add(id); id = actor.parentId;
+    }
+    if (!actors.has(rootId) || actors.get(rootId).parentId != null || actorCount(run.agents, rootId) !== 1
+      || actorCount(list(native.agents), rootId) > 1) return null;
+    return agentId === rootId ? fingerprint : nativeActors.get(agentId).source.fingerprint;
+  };
+  const key = turn => `${turn.agentId}:${turn.turnId}`;
+  const originalTurns = list(run.turns), counts = new Map(), originalCounts = new Map();
+  for (const row of list(native.turns)) counts.set(key(row), (counts.get(key(row)) ?? 0) + 1);
+  for (const row of originalTurns) originalCounts.set(key(row), (originalCounts.get(key(row)) ?? 0) + 1);
+  let status = [...counts.values()].some(count => count > 1) ? 'partial' : native.status;
+  const contexts = list(native.turns).filter(row => counts.get(key(row)) === 1 && originalCounts.get(key(row)) === 1
+    && row.workspaceMatched === true && sourceFor(row.agentId));
+  const conflicts = new Set();
+  const turns = originalTurns.map(turn => {
+    const proof = contexts.find(row => key(row) === key(turn));
+    if (!proof) return turn;
+    if (turn.model != null && proof.model != null && turn.model !== proof.model
+      || turn.reasoningEffort != null && proof.reasoningEffort != null && turn.reasoningEffort !== proof.reasoningEffort) {
+      status = 'conflicting-turn-controls'; conflicts.add(key(turn));
+      return { ...turn, model: null, reasoningEffort: null };
+    }
+    return { ...turn, ...(proof.model != null ? { model: proof.model } : {}),
+      ...(proof.reasoningEffort != null ? { reasoningEffort: proof.reasoningEffort } : {}),
+      ...(proof.sourceLine != null ? { sourceLine: proof.sourceLine } : {}),
+      ...(proof.recordedAt != null ? { recordedAt: proof.recordedAt } : {}),
+      ...(turn.status == null && proof.status != null ? { status: proof.status } : {}) };
+  });
+  const qualified = contexts.filter(row => !conflicts.has(key(row))).map(row => ({ ...row,
+    sourceFingerprint: sourceFor(row.agentId) }));
+  const configured = saved?.nativeConfig ?? {};
+  const nativeControls = { schemaVersion: 1,
+    configured: run.nativeControls?.configured ?? { model: configured.model ?? null,
+      modelReasoningEffort: configured.model_reasoning_effort ?? null,
+      planModeReasoningEffort: configured.plan_mode_reasoning_effort ?? null, loginMethod: configured.forced_login_method ?? null },
+    startup: run.nativeControls?.startup ?? { agentId: rootId, model: run.source?.model ?? null,
+      reasoningEffort: run.source?.reasoningEffort ?? null, source: 'thread/start' },
+    turns: qualified.filter(row => {
+      const turn = turns.find(turn => key(row) === key(turn));
+      return (turn.model ?? null) === (row.model ?? null) && (turn.reasoningEffort ?? null) === (row.reasoningEffort ?? null);
+    }).map(row => ({ agentId: row.agentId, turnId: row.turnId, model: row.model ?? null,
+      reasoningEffort: row.reasoningEffort ?? null, source: 'turn_context', sourceLine: row.sourceLine,
+      sourceFingerprint: row.sourceFingerprint, workspaceMatched: true })) };
+  return { status, sourceFingerprint: fingerprint, fields: { turns, nativeControls }, contexts: qualified };
+}
+
 async function retainedContext(store, current, read) {
   const parent = await read(store, current.record.experimentId);
   const saved = current.record.profile;
@@ -138,41 +204,13 @@ export async function projectRetainedAuditRun(store, current, { read = readAudit
     && (original.source.fingerprint == null || original.source.fingerprint === native.source.fingerprint)
     && ['ready', 'partial'].includes(native.status);
   if (sameSource) {
-    projection.native = native.status;
+    const joined = joinRetainedNativeTurnEvidence(run, native, saved,
+      { expectedSourceFingerprint: original.source.fingerprint ?? undefined });
+    projection.native = joined.status;
     projection.nativeSourceFingerprint = native.source.fingerprint;
-    const originalTurns = list(original.turns), seen = new Set(), duplicateTurns = new Set();
-    for (const row of list(native.turns)) {
-      const key = `${row.agentId}:${row.turnId}`;
-      if (seen.has(key)) duplicateTurns.add(key);
-      seen.add(key);
-    }
-    if (duplicateTurns.size) projection.native = 'partial';
-    const contexts = list(native.turns).filter(row => {
-      const key = `${row.agentId}:${row.turnId}`;
-      if (duplicateTurns.has(key) || row.workspaceMatched !== true || row.agentId !== rootId || !originalTurns.some(turn => turn.agentId === row.agentId
-        && turn.turnId === row.turnId)) return false;
-      return true;
-    });
-    const conflicts = new Set();
-    run.turns = originalTurns.map(turn => {
-      const proof = contexts.find(row => row.agentId === turn.agentId && row.turnId === turn.turnId);
-      // An observed mismatch is retained, never masked by startup/configuration.
-      const conflict = proof && ((turn.model != null && turn.model !== proof.model)
-        || (turn.reasoningEffort != null && turn.reasoningEffort !== proof.reasoningEffort));
-      if (conflict) {
-        projection.native = 'conflicting-turn-controls';
-        conflicts.add(`${turn.agentId}:${turn.turnId}`);
-        return { ...turn, model: null, reasoningEffort: null };
-      }
-      return proof ? { ...turn, model: proof.model, reasoningEffort: proof.reasoningEffort } : turn;
-    });
-    run.nativeControls.turns = contexts.filter(row => !conflicts.has(`${row.agentId}:${row.turnId}`)).map(row => ({ agentId: row.agentId, turnId: row.turnId,
-      model: row.model, reasoningEffort: row.reasoningEffort, source: 'turn_context',
-      sourceLine: row.sourceLine, sourceFingerprint: native.source.fingerprint, workspaceMatched: true }));
-    run.actions = list(native.actions).filter(row => row.agentId === rootId
-      && contexts.some(turn => turn.turnId === row.turnId)
-      && !conflicts.has(`${row.agentId}:${row.turnId}`)
-      && row.sourceFingerprint === native.source.fingerprint);
+    Object.assign(run, joined.fields);
+    run.actions = list(native.actions).filter(row => joined.contexts.some(turn => turn.agentId === row.agentId
+      && turn.turnId === row.turnId && row.sourceFingerprint === turn.sourceFingerprint));
     run.actionCoverage = native.actionCoverage ?? 'partial';
   } else {
     projection.native = native?.status ?? 'unavailable';
@@ -184,5 +222,49 @@ export async function projectRetainedAuditRun(store, current, { read = readAudit
   run = withCheckpointArtifacts(run, original, current, saved, rootId);
   if (context.spec.quality) run.quality = evaluateAuditQuality(run, context.spec.quality,
     { checks: context.spec.checks, review: original.quality?.review ?? null });
+  return run;
+}
+
+export async function deriveRetainedAuditRun(store, current, { native, originalReportFingerprint,
+  read = readAuditRecord, includeReplay = true } = {}) {
+  const original = current.report;
+  if (!/^[a-f0-9]{64}$/.test(originalReportFingerprint ?? '') || digest(original) !== originalReportFingerprint)
+    throw new Error('The original report fingerprint does not match; preserving the frozen report.');
+  const frozen = await projectRetainedAuditRun(store, current, { read, includeReplay });
+  if (frozen.reportProjection?.context !== 'verified' || frozen.reportProjection.native !== 'frozen'
+    || original.replayCapture?.boundary !== 'finalized-native-history-snapshot'
+    || !/^[a-f0-9]{64}$/.test(original.replayCapture.sourceFingerprint ?? ''))
+    throw new Error('The owned frozen capture cannot be verified for derived evidence.');
+  const joined = joinRetainedNativeTurnEvidence(frozen, native, current.record.profile,
+    { expectedSourceFingerprint: original.replayCapture.sourceFingerprint });
+  if (joined.status === 'source-binding-mismatch')
+    throw new Error('The native source fingerprint does not match the frozen capture.');
+  const sessions = list(original.sessionReplay?.sessions), replacements = list(native.sessionReplay?.sessions);
+  const bindings = rows => rows.map(session => [session.id, session.parentId ?? null, session.source?.fingerprint])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  const actorEdges = rows => rows.map(actor => [actor.id, actor.parentId ?? null]).sort((a, b) => a[0].localeCompare(b[0]));
+  if (!sessions.length || sessions.some(session => !/^[a-f0-9]{64}$/.test(session.source?.fingerprint ?? ''))
+    || !isDeepStrictEqual(bindings(sessions), bindings(replacements))
+    || !isDeepStrictEqual(actorEdges(original.agents), actorEdges(sessions)))
+    throw new Error('The native replay actors or source fingerprints do not match the frozen capture.');
+  const { comparisonEvidence, ...run } = frozen;
+  Object.assign(run, joined.fields);
+  if (includeReplay) {
+    run.sessionReplay = structuredClone(native.sessionReplay);
+    for (const session of run.sessionReplay.sessions) {
+      const before = sessions.find(previous => previous.id === session.id);
+      session.limits = [...new Map([...list(before.limits).filter(limit => limit.kind !== 'unprojected-records'), ...list(session.limits)]
+        .map(limit => [JSON.stringify(limit), limit])).values()];
+      for (const event of session.events) {
+        const previous = before.events.find(row => row.id === event.id);
+        if (previous?.bodyStatus === 'omitted' || /redact/.test(previous?.bodyReason ?? '')) {
+          event.body = previous.body; event.bodyStatus = previous.bodyStatus;
+          event.bodyReason = previous.bodyReason; event.bodyBytes = previous.bodyBytes;
+        }
+      }
+    }
+  }
+  run.reportProjection = { ...frozen.reportProjection, native: joined.status,
+    sourceAttestation: 'read-time-retained-snapshot', nativeSourceFingerprint: joined.sourceFingerprint };
   return run;
 }

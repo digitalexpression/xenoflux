@@ -185,7 +185,7 @@ export function OpenSaved() {
             {summary.kept.map(item => <div key={item.label}><dt className="font-medium">{item.label}</dt><dd>{item.value}</dd></div>)}
           </dl>
           <div className="flex flex-wrap gap-2">
-            <Link className="btn btn-primary" to={`/reports/${encodeURIComponent(summary.ref)}`}>View report</Link>
+            <Link className="btn btn-primary" to={summary.href ?? `/reports/${encodeURIComponent(summary.ref)}`}>View report</Link>
             <CopyButton text={summary.cliCommand} label="Copy CLI command" />
           </div>
         </section>

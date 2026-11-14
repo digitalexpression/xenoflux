@@ -1,5 +1,6 @@
 import { Link, type RouteObject } from 'react-router';
 import { Page, PageTitle } from './components/layout';
+import { Session } from './pages/Session';
 import { BrowseSessions } from './pages/BrowseSessions';
 import { NativeSessions } from './pages/NativeSessions';
 import { ChooseSessions } from './pages/ChooseSessions';
@@ -37,6 +38,8 @@ export const routes: RouteObject[] = [
   { path: '/compare/setups/skills/:skill', element: <SkillDetail /> },
   { path: '/compare/sessions/native', element: <NativeSessions /> },
   { path: '/compare/sessions', element: <ChooseSessions /> },
+  { path: '/sessions/native', element: <NativeSessions inspect /> },
+  { path: '/sessions/:ref', element: <Session /> },
   { path: '/sessions', element: <BrowseSessions /> },
   { path: '/reports/open', element: <OpenSaved /> },
   { path: '/reports/:ref', element: <Report /> },

@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import { Link } from 'react-router';
 import { apiGet, apiPost } from '@/api/client';
 import type { ClientActionResult, SessionsView, StatusKind } from '@/api/types';
+import { InspectSessionButton } from '@/components/inspect-session-button';
 import { Disclosure } from '@/components/controls';
 import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
 import { InfoNotice, SimulatedNote } from '@/components/notices';
@@ -29,8 +30,9 @@ export function BrowseSessions() {
 
   return (
     <Page current="sessions" title="Browse sessions">
-      <PageTitle title="Browse sessions" subtitle="Recent work from every profile. Resume a session in its own profile, or start a comparison from it." />
+      <PageTitle title="Browse sessions" subtitle="Inspect recorded work, its harness and evidence limits. Choose recent sessions by profile for Codex, Claude Code or GitHub Copilot." />
       {info?.mode === 'demo' ? <SimulatedNote /> : null}
+      <div><Link className="btn" to="/sessions/native">Choose a session by profile</Link></div>
       {message ? <div role="status" className={message.status === 'error' ? 'alert-error' : message.status === 'success' ? 'alert-success' : 'notice'}>{message.text}</div> : null}
       {view.data?.partial ? (
         <InfoNotice title="Partly listed"><p>{view.data.partial.text}</p>
@@ -62,6 +64,7 @@ export function BrowseSessions() {
                     <span className={cn(row.history !== 'complete' && 'font-medium')}>{row.historyText.toLowerCase()}</span></span>
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <InspectSessionButton selection={{ key: row.key }} label={`Inspect ${row.title}`} />
                   <Link className="btn" to={`/compare/sessions?left=${encodeURIComponent(row.key)}`} state={{ leftSession: row }} aria-label={`Compare ${row.title} (${row.profile}) with another session`}>Compare with…</Link>
                   {row.startedHere ? <Link className="btn" to={row.startedHere.reportHref}>Open its report</Link>
                     : info?.features.clientControls ? (

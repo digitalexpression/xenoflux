@@ -3,7 +3,9 @@
 // simulated in memory and every view says so.
 import { randomUUID } from 'node:crypto';
 import { UiError } from './ui-server.js';
-import { ASSOCIATION, comparisonLabel, countLabels, exactStateText, groupMeta, presentSetupInventory } from './audit-presentation.js';
+import { ASSOCIATION, comparisonLabel, countLabels, exactStateText, groupMeta, presentComparison, presentSetupInventory } from './audit-presentation.js';
+import { presentSession, presentSessionHarness } from './audit-session-presentation.js';
+import { compareAuditRuns } from './audit-report.js';
 
 const A = 'baseline', B = 'strict-review';
 const SETUP_CLIENTS = { codex: 'Codex', 'claude-code': 'Claude Code', copilot: 'GitHub Copilot' };
@@ -266,6 +268,10 @@ function evidence(ref, rep) {
 }
 
 export function createDemoProvider({ version = 'demo' } = {}) {
+  const inspections = new Map();
+  const inspectionRuns = new Map();
+  const inspectedPairs = new Map();
+  const selections = new Map();
   const reports = new Map();
   const copies = new Map();
   const runs = new Map();
@@ -278,6 +284,13 @@ export function createDemoProvider({ version = 'demo' } = {}) {
   ];
   const clientState = { [A]: { cli: 'running', desktop: 'not-running' }, [B]: { cli: 'unavailable', desktop: 'running' }, 'docs-only': { cli: 'not-running', desktop: 'not-running' }, Default: { cli: 'not-running', desktop: 'not-running' } };
   const reportFor = ref => {
+    if (inspectedPairs.has(ref)) {
+      const pair = inspectedPairs.get(ref);
+      const view = presentComparison(pair.value, { title: pair.title });
+      return { ...view, ref, breadcrumb: 'Session inspections', retained: true, saved: null, cliCommand: '',
+        sessionHarness: { a: presentSessionHarness(pair.value.left), b: presentSessionHarness(pair.value.right) },
+        verification: { ...view.verification, reviews: { ...view.verification.reviews, href: null } } };
+    }
     if (ref === 'demo-run') return report(ref, { left: 's6', right: 's1' });
     if (ref === 'demo-saved') return { ...report(ref, { left: 's4', right: 's1' }), title: 'Add CSV export to the report' };
     const frozen = [...reviewTasks.values()].find(task => task.reportRef === ref);
@@ -417,6 +430,44 @@ export function createDemoProvider({ version = 'demo' } = {}) {
         partial: { text: 'docs-only’s history couldn’t be read (access denied). Sessions from the other profiles are listed.', help: 'macOS asks before an app reads some folders. Allow access for the terminal that runs xfx ui in System Settings › Privacy & Security › Files and Folders, then reload.' },
         truncated: false };
     },
+    async codexSessions({ profile }) { return this.demoSessionList('codex', profile); },
+    async claudeSessions({ profile }) { return this.demoSessionList('claude-code', profile); },
+    async copilotSessions({ profile }) { return this.demoSessionList('copilot', profile); },
+    async demoSessionList(client, profile) {
+      const token = randomUUID(); selections.set(token, { client, profile });
+      return { client, profileId: profile, rootMode: profile === 'Default' ? 'implicit' : 'explicit', executionLocation: 'local',
+        sessions: [{ token, title: 'Synthetic session for inspection', modifiedAt: '2026-11-13T10:00:00Z' }] };
+    },
+    async inspectSession(input = {}) {
+      const selected = input.token ? selections.get(input.token) : null;
+      const row = sessionRows().find(row => row.key === input.key);
+      if (!selected && !row && !input.report) throw new UiError(400, 'Choose a synthetic session.', 'invalid-session-selection');
+      const ref = `demo-inspect-${randomUUID()}`, sessionId = '00000000-0000-4000-8000-000000000001';
+      const client = selected?.client ?? 'codex', profile = selected?.profile ?? row?.profile ?? A;
+      const run = { kind: 'audit-run', schemaVersion: 1, profile: { profileName: profile }, clientIdentity: { client },
+        source: { kind: 'demo-history-import', nativeSessionId: sessionId }, coverage: { timeline: 'partial' },
+        sessionReplay: { schemaVersion: 1, kind: 'session-replay', sessions: [{ id: sessionId, parentId: null, status: 'partial',
+          source: { fingerprint: 'a'.repeat(64) }, limits: [{ message: 'Synthetic evidence only.' }],
+          events: [{ id: 'demo-opening', sessionId, turnId: null, kind: 'message', role: 'user', label: 'User message',
+            timestamp: null, sourceLine: 1, body: 'Inspect the recorded session and its harness.', bodyStatus: 'included' }] }] } };
+      inspectionRuns.set(ref, run);
+      inspections.set(ref, { ...presentSession(run, { title: row?.title ?? 'Synthetic session inspection' }), ref, savedAt: null,
+        exportHref: `/reports/${ref}/export` });
+      return { ref, href: `/sessions/${ref}` };
+    },
+    async sessionInspection({ ref }) {
+      if (!inspections.has(ref)) throw new UiError(404, 'Choose the synthetic session again.', 'not-found');
+      return structuredClone(inspections.get(ref));
+    },
+    async compareInspections({ left, right } = {}) {
+      const a = inspectionRuns.get(left), b = inspectionRuns.get(right);
+      if (!a || !b) throw new UiError(410, 'Choose both synthetic inspections again.', 'session-inspection-missing');
+      if (left === right || a.clientIdentity.client === b.clientIdentity.client && a.profile.profileName === b.profile.profileName)
+        throw new UiError(400, 'Choose two different synthetic sessions.', 'duplicate-session-selection');
+      const ref = `demo-pair-${randomUUID()}`;
+      inspectedPairs.set(ref, { value: compareAuditRuns(a, b), title: inspections.get(left).title });
+      return { ref };
+    },
     async association({ left, right }) {
       const rows = Object.fromEntries(sessionRows().map(row => [row.key, row]));
       const l = rows[left], r = rows[right];
@@ -505,6 +556,12 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       throw new UiError(409, 'The demo simulation has no native approval or input requests.', 'stale-review-request');
     },
     async exportPlan({ ref }) {
+      if (inspections.has(ref)) {
+        const view = inspections.get(ref);
+        return { ref, href: `/sessions/${ref}`, title: view.title, folder: '[REPORTS FOLDER]/Synthetic session/', name: 'session', files: ['session.md', 'session.md.audit.json'],
+          included: ['Retained session evidence and limits'], neverIncluded: ['Private internal reasoning', 'Credentials'], contentFiles: [], replayAvailable: true,
+          privacy: 'Synthetic content only. Real session content can contain private information.' };
+      }
       const rep = reportFor(ref);
       return { ref, title: rep.title, folder: `[REPORTS FOLDER]/${rep.title} — 26 Oct/`, name: 'date-parsing-fix', files: ['date-parsing-fix.md', 'date-parsing-fix.md.audit.json'],
         included: ['Recorded conditions', 'Findings with their limits', 'Evidence references', 'Checks', 'Reviews attached earlier, with their reviewers', 'Time and token measurements with their scope', 'What couldn’t be seen'],

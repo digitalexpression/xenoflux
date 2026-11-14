@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Store, create } from '../src/profiles.js';
@@ -29,7 +29,7 @@ async function seedSession(home, taskId, { title, model, originator = 'codex_cli
 }
 
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'xfx-ui-engine-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-engine-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const executable = join(root, 'fake-codex');
   await writeFile(executable, '#!/bin/sh\nexit 99\n', { mode: 0o700 });
@@ -166,7 +166,7 @@ test('exports a Markdown and JSON pair, never overwrites, and reopens after the 
   const recent = await f.provider.savedReports();
   assert.equal(recent.recent.length, 2);
   assert.deepEqual(recent.recent[0].sides.map(side => [side.side, side.profile]), [['A', 'baseline'], ['B', 'strict-review']]);
-  assert.ok(recent.recent[0].sides.every(side => side.state === 'unknown' && side.detail === 'Task completion not recorded'));
+  assert.ok(recent.recent[0].sides.every(side => side.state === 'completed' && side.detail === 'Model task completed'));
   assert.equal(recent.recent[0].sides[0].checks, 'Checks not recorded');
   assert.deepEqual((await f.provider.openRecentReport({ id: recent.recent[0].id })).sides, recent.recent[0].sides);
   const reopened = await f.provider.openRecentReport({ id: recent.recent[0].id });
@@ -294,4 +294,108 @@ test('session client filtering finds matches older than the unfiltered limit and
   const byProject = await f.provider.sessions({ profile: 'baseline', query: 'new-project' });
   assert.equal(byProject.sessions.length, 100);
   assert.equal(byProject.truncated, true);
+});
+
+test('single session inspection freezes one run and reopens its export without native sources', async t => {
+  const f = await fixture(t);
+  const row = (await f.provider.sessions({ profile: 'baseline' })).sessions[0];
+  const opened = await f.provider.inspectSession({ key: row.key });
+  assert.match(opened.href, /^\/sessions\/f\./);
+  const inspection = await f.provider.sessionInspection({ ref: opened.ref });
+  assert.equal(inspection.profile, 'baseline');
+  assert.equal(inspection.mode, 'Historical import');
+  assert.equal(inspection.turns[0].model, 'model-a');
+  assert.equal(inspection.workflow.counters.total, null);
+  assert.equal(inspection.settings[0].confirmed, null);
+  const exported = await f.provider.exportReport({ ref: opened.ref });
+  const evidencePath = join(exported.folder.replace(/\/$/, ''), exported.files[1]);
+  const frozen = JSON.parse(await readFile(evidencePath, 'utf8'));
+  assert.equal(frozen.kind, 'audit-run');
+  assert.equal(frozen.left, undefined);
+  await Promise.all(f.rollouts.map(path => rm(path)));
+  assert.deepEqual(await f.provider.sessionInspection({ ref: opened.ref }), inspection);
+  const reopened = await f.provider.openReport({ fileName: exported.files[1], text: await readFile(evidencePath, 'utf8') });
+  const retained = await f.provider.sessionInspection({ ref: reopened.ref });
+  assert.equal(retained.turns[0].model, 'model-a');
+  assert.ok(retained.replay.sessions.every(session => session.events.every(event => !event.body)));
+  await assert.rejects(f.provider.inspectSession({ key: row.key, unexpected: true }), /Choose one session/);
+});
+
+test('single sessions refuse paired report and review routes before saving output', async t => {
+  const f = await fixture(t);
+  const row = (await f.provider.sessions({ profile: 'baseline' })).sessions[0];
+  const opened = await f.provider.inspectSession({ key: row.key });
+  const before = await f.provider.savedReports();
+  await assert.rejects(f.provider.report({ ref: opened.ref }), /single session.*session inspection/i);
+  await assert.rejects(f.provider.exportReport({ ref: opened.ref, prepareReview: true }), /two-session comparison/i);
+  await assert.rejects(readdir(f.reportsRoot), { code: 'ENOENT' });
+  assert.deepEqual(await f.provider.savedReports(), before);
+});
+
+test('one comparison side opens with the retained evidence without creating a fake pair', async t => {
+  const f = await fixture(t);
+  const comparison = await f.provider.compareSessions({ left: `baseline:${f.task}`, right: `strict-review:${f.task}` });
+  const single = await f.provider.inspectSession({ report: comparison.ref, side: 'b' });
+  const view = await f.provider.sessionInspection({ ref: single.ref });
+  assert.equal(view.profile, 'strict-review');
+  assert.equal(view.turns[0].model, 'model-b');
+  await assert.rejects(f.provider.inspectSession({ report: comparison.ref, side: 'c' }), /Choose one session/);
+});
+
+test('single inspection uses the existing profile-bound selection and refuses changed sources', async t => {
+  const f = await fixture(t);
+  const listing = await f.provider.codexSessions({ profile: 'baseline' });
+  const selection = { client: 'codex', token: listing.sessions[0].token };
+  const result = await f.provider.inspectSession(selection);
+  const inspected = await f.provider.sessionInspection({ ref: result.ref });
+  assert.equal(inspected.profile, 'baseline');
+  assert.match(inspected.readContext, /baseline/);
+  await writeFile(f.rollouts[0], '{}\n');
+  await assert.rejects(f.provider.inspectSession(selection), { code: 'session-inspection-unavailable' });
+  assert.deepEqual(await f.provider.sessionInspection({ ref: result.ref }), inspected);
+});
+
+test('historical compaction summary reaches the single-session source inspector', async t => {
+  const f = await fixture(t);
+  const rows = await readFile(f.rollouts[0], 'utf8');
+  await writeFile(f.rollouts[0], rows + JSON.stringify(record('compacted', { message: 'Retain the task and pending verification.' })) + '\n');
+  const result = await f.provider.inspectSession({ key: `baseline:${f.task}` });
+  const view = await f.provider.sessionInspection({ ref: result.ref });
+  assert.equal(view.compactions.length, 1);
+  const event = view.replay.sessions[0].events.find(event => event.kind === 'compaction');
+  assert.equal(event.body, 'Retain the task and pending verification.');
+  assert.equal(event.sourceLine, 4);
+});
+
+test('inspected sessions compare retained sides without rereading lost history, and reopen the same qualified controls', async t => {
+  const f = await fixture(t);
+  const a = await f.provider.inspectSession({ key: `baseline:${f.task}` });
+  const duplicate = await f.provider.inspectSession({ key: `baseline:${f.task}` });
+  const b = await f.provider.inspectSession({ key: `strict-review:${f.task}` });
+  await assert.rejects(f.provider.compareInspections({ left: a.ref, right: a.ref }), { code: 'duplicate-session-selection' });
+  await assert.rejects(f.provider.compareInspections({ left: a.ref, right: duplicate.ref }), { code: 'duplicate-session-selection' });
+  await assert.rejects(f.provider.compareInspections({ left: a.ref, right: 'missing' }), { code: 'session-inspection-missing' });
+  await Promise.all(f.rollouts.map(path => rm(path)));
+  const pair = await f.provider.compareInspections({ left: a.ref, right: b.ref });
+  const view = await f.provider.report({ ref: pair.ref });
+  assert.equal(view.retained, true);
+  assert.equal(view.saved, null);
+  assert.equal(view.cliCommand, '');
+  assert.equal(view.sessionHarness.a.turns[0].model, 'model-a');
+  assert.equal(view.sessionHarness.b.turns[0].model, 'model-b');
+  assert.equal(Object.hasOwn(view.sessionHarness.a, 'replay'), false);
+  assert.equal(view.sessionControls.recorded.label, 'Harness controls differ');
+  assert.equal(view.sessionControls.rows.find(row => row.id === 'surface').status, 'different');
+  assert.equal(view.sessionControls.rows.find(row => row.id === 'historical-harness').status, 'unknown');
+  const exported = await f.provider.exportReport({ ref: pair.ref });
+  const text = await readFile(join(exported.folder, exported.files[1]), 'utf8');
+  const reopened = await f.provider.openReport({ fileName: exported.files[1], text });
+  const frozen = await f.provider.report({ ref: reopened.ref });
+  assert.equal(frozen.retained, false);
+  assert.ok(frozen.saved);
+  assert.deepEqual(frozen.sessionControls, view.sessionControls);
+  assert.deepEqual(frozen.sessionHarness, view.sessionHarness);
+  const markdown = await readFile(join(exported.folder, exported.files[0]), 'utf8');
+  assert.match(markdown, /Recorded comparison: Harness controls differ/);
+  assert.match(markdown, /Full historical harness/);
 });

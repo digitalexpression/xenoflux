@@ -11,6 +11,7 @@ import { presentWorkflowMeasurements } from './audit-workflow-measurements.js';
 import { projectAuditFileInventory } from './audit-file-inventory.js';
 import { presentCheckRows } from './audit-check-presentation.js';
 import { projectAuditWorkspacePatch } from './audit-workspace-patch.js';
+import { compareSessionControls } from './audit-session-controls.js';
 
 const list = value => Array.isArray(value) ? value : [];
 const MAX_PRESENTED_STEPS = 80;
@@ -318,7 +319,8 @@ export function presentTaskEndPatch(run) {
     'no-changes': 'The captured patch contains no changes against the source baseline.',
     'source-baseline-unavailable': 'The source baseline for this patch is unavailable.',
   };
-  return { status: patch.status, text: patch.status === 'available' ? patch.text : null,
+  return { status: patch.status === 'omitted' && patch.reason === 'no-changes' && patch.sourcePatchBytes === 0 ? 'unchanged' : patch.status,
+    text: patch.status === 'available' ? patch.text : null,
     sourceCommit: patch.sourceBaseline?.commit ?? null,
     note: patch.status === 'available'
       ? `${snapshot.timing === 'after-process-fallback' ? 'Captured after the process ended; exact task-end timing is not established. ' : snapshot.timing !== 'task-end' || snapshot.captureComplete !== true ? 'Task-end capture boundary is unverified. ' : ''}${patch.captureProvenance === 'verified-retained-artifact' ? 'Added from a verified retained snapshot to this new report. ' : ''}Captured task-end patch against the source baseline; may include setup changes. Known secret patterns are redacted. Ignored file contents and unchanged source files are not included.`
@@ -329,6 +331,7 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
   const left = value.left ?? {}, right = value.right ?? {};
   const explanation = value.comparison?.explanation ?? buildAuditExplanation(left, right, retainedAuditSelectionOptions(value.selection));
   const c = gateAuditComparisonDeltas(value.comparison ?? {}, explanation.conditions);
+  const sessionControls = compareSessionControls(left, right, { conditions: explanation.conditions });
   const names = {
     a: left.profile?.profileName ?? value.selection?.left?.profileName ?? 'Left',
     b: right.profile?.profileName ?? value.selection?.right?.profileName ?? 'Right',
@@ -423,6 +426,19 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
   if (!['recorded', 'user-declared'].includes(explanation.conditions.taskAssociation?.status))
     limits.push('Whether both sessions got the same task — the records don’t show it.');
   for (const key of Object.keys(COVERAGE)) {
+    if (key === 'skills' && [left, right].some(run => run.coverage?.skillInvocationTelemetry)) {
+      for (const [field, label] of [['skillInventory', 'Skill catalog'], ['skillInvocationTelemetry', 'Skill invocation telemetry']]) {
+        const gaps = [left, right].map((run, index) => {
+          const state = run.coverage?.[field];
+          return COMPLETE.has(state) ? null : `${state === 'empty' ? 'no events recorded' : coverageText(state)} for ${index ? names.b : names.a}`;
+        }).filter(Boolean);
+        if (gaps.length) limits.push(`${label}: ${gaps.join(', ')}.`);
+      }
+      limits.push([left, right].some(run => run.coverage?.skillInvocationTelemetry === 'observed')
+        ? 'Native skill invocation receipts are recorded; exhaustive skill use remains unverified.'
+        : 'Native skill invocation telemetry does not establish exhaustive skill use.');
+      continue;
+    }
     const states = ['left', 'right'].map(sideKey => (sideKey === 'left' ? left : right).coverage?.[key]);
     const gaps = states.map((state, index) => state && !COMPLETE.has(state) ? `${coverageText(state)} for ${index ? names.b : names.a}` : null).filter(Boolean);
     if (gaps.length) limits.push(`${COVERAGE[key]}: ${gaps.join(', ')}.`);
@@ -538,6 +554,7 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
   });
   return {
     title: title || 'Session comparison',
+    sessionControls,
     a: sides[0], b: sides[1],
     replayRootContext: { a: rootContext(left), b: rootContext(right) },
     replay: { a: left.sessionReplay ?? null, b: right.sessionReplay ?? null },
@@ -666,6 +683,12 @@ export function comparisonSummaryLines(report) {
   return {
     conditions: [
       `${report.a.profile} (${report.a.client}, ${report.a.time}) vs ${report.b.profile} (${report.b.client}, ${report.b.time}).`,
+      ...(report.sessionControls ? [
+        `Requested comparison: ${report.sessionControls.requested.label}. ${report.sessionControls.requested.text}`,
+        `Recorded comparison: ${report.sessionControls.recorded.label}. ${report.sessionControls.recorded.text}`,
+        ...report.sessionControls.rows.map(control => row(`${control.name}${control.stage ? ` (${control.stage})` : ''}: ${report.a.profile} ${control.a} · ${report.b.profile} ${control.b} · ${control.status}. ${control.note}`)),
+        ...report.sessionControls.limits.map(limit => row(limit)),
+      ] : []),
       ...[report.a, report.b].flatMap(side => [
         ...(side.provenance ? [row(`${side.profile} · ${side.provenance.basis} · ${[side.provenance.profileName, side.provenance.surface,
           side.provenance.rootMode, side.provenance.executionLocation].filter(Boolean).join(' · ')}`)] : []),

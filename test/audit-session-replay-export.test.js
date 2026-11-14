@@ -48,6 +48,20 @@ test('replay exports omit bodies by default and reopen with stable source and ev
   assert.match(markdown, /Omitted from frozen export/);
 });
 
+test('frozen replay preserves captured workspace without filling missing older context', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-replay-cwd-export-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  for (const includeReplayContent of [false, true]) {
+    const value = report();
+    value.sessionReplay.sessions[0].cwd = '/recorded/workspace';
+    const receipt = await exportAuditReport(value, { output: join(directory, `workspace-${includeReplayContent}.json`), includeReplayContent });
+    const saved = await readAuditReport(receipt.evidencePath);
+    assert.equal(saved.sessionReplay.sessions[0].cwd, '/recorded/workspace');
+    assert.equal(Object.hasOwn(saved.sessionReplay.sessions[1], 'cwd'), false);
+    assert.equal(Object.hasOwn(value.sessionReplay.sessions[1], 'cwd'), false);
+  }
+});
+
 test('event citations in reviews survive default source-free export and reopen', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'xfx-replay-review-event-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
