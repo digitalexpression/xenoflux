@@ -88,7 +88,7 @@
   .replay-session > .replay-session { padding-left: var(--space-12); border-left: 1px solid var(--color-divider); }
   .btn.btn-replay { min-height: 28px; padding: var(--space-4); border-color: transparent; background: transparent; justify-content: flex-start; text-align: left; }
   .btn.btn-replay:hover { background: var(--color-surface-raised); }
-  [data-replay-event][aria-current='true'] { outline: 2px solid var(--color-link-focus); outline-offset: 1px; }
+  [data-replay-event][aria-current='true']:not(:focus-visible) { outline: 2px solid var(--color-link-focus); outline-offset: 1px; }
   .sheet { inset: 0 0 0 auto; width: var(--replay-inspector-width); height: 100dvh; border-left: 1px solid var(--color-divider); box-shadow: 0 16px 40px rgb(10 13 22 / 0.25); }
   .sheet [data-slot='sheet-header'] { flex-shrink: 0; padding: var(--space-24) var(--space-48) var(--space-16) var(--space-16); border-bottom: 1px solid var(--color-divider); }
   .replay-inspector-content { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--space-16); overflow-wrap: anywhere; flex: 1; }
@@ -211,7 +211,7 @@
   .btn-primary { background: var(--color-action); color: var(--color-on-action); border-color: var(--color-action-border); }
   .btn-primary:hover { background: var(--color-action-hover); color: var(--color-on-action); }
   .btn-primary:active { background: var(--color-action-pressed); }
-  .btn-destructive { background: var(--color-destructive); color: #ffffff; border-color: var(--color-destructive); }
+  .btn-destructive { background: var(--color-destructive); color: #ffffff; border-color: var(--color-error); }
   .btn-destructive:hover { background: var(--color-destructive-hover); color: #ffffff; }
   .btn-destructive:active { background: var(--color-destructive-pressed); }
   .btn-destructive-outline { color: var(--color-error); border-color: var(--color-error); }
@@ -232,9 +232,10 @@
     border: 1px solid var(--color-control-border); border-radius: var(--radius-control);
     background: var(--color-surface); color: var(--color-text); font-size: var(--text-ui);
   }
-  .input:hover { background: var(--color-surface-raised); }
+  .input:not(:disabled):hover { background: var(--color-surface-raised); }
   .input::placeholder { color: var(--color-text-muted); }
   .input[aria-invalid='true'] { border-color: var(--color-error); }
+  .input:disabled { background: var(--color-surface-raised); color: var(--color-text-muted); border-color: var(--color-divider); cursor: not-allowed; }
   textarea.input { resize: vertical; min-height: 96px; }
 
   /* Badges */
@@ -288,7 +289,7 @@
 
   /* Segmented control */
   .segmented { display: inline-flex; gap: 2px; padding: 3px; border-radius: var(--radius-control); background: var(--color-surface-raised); border: 1px solid var(--color-divider); flex-wrap: wrap; }
-  .segmented button { min-height: 34px; padding: 4px 12px; border-radius: 6px; border: 0; background: transparent; color: var(--color-text-muted); font-size: var(--text-ui); cursor: pointer; }
+  .segmented button { min-height: var(--control-height); padding: var(--space-4) var(--space-12); border-radius: var(--radius-control); border: 0; background: transparent; color: var(--color-text-muted); font-size: var(--text-ui); cursor: pointer; }
   .segmented button[aria-pressed='true'] { background: var(--color-surface); color: var(--color-text); font-weight: 600; box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
 
   /* Summary tiles */
@@ -298,8 +299,9 @@
     background: var(--color-surface); color: var(--color-text); cursor: pointer;
     transition: background-color 120ms ease-out, border-color 120ms ease-out;
   }
-  .tile:hover { background: var(--color-surface-raised); color: var(--color-text); }
+  .tile:where(:not(:disabled)):hover { background: var(--color-surface-raised); color: var(--color-text); }
   .tile[aria-pressed='true'] { background: var(--color-selected); border-color: var(--color-link-focus); box-shadow: inset 0 0 0 1px var(--color-link-focus); }
+  .tile:disabled { background: var(--color-surface-raised); color: var(--color-text-muted); border-color: var(--color-divider); box-shadow: none; cursor: not-allowed; }
   .tile-count { font-size: var(--text-count-secondary); line-height: 1.1; font-weight: 600; font-variant-numeric: tabular-nums; }
   .tile-primary .tile-count { font-size: var(--text-count); }
 

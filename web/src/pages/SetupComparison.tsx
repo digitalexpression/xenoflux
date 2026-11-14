@@ -259,7 +259,7 @@ function DetailPanel({ item, a, b }: { item: SetupItem; a: string; b: string }) 
             <div key={box.side} className={cn('rounded-control px-3 py-2 flex flex-col gap-1', item.label === 'different' ? (box.side === 'a' ? 'edge-a' : 'edge-b') : '')}
               style={item.label === 'different' ? undefined : { border: '1px solid var(--color-divider)' }}>
               {item.label === 'different' ? <SideText side={box.side} className="text-meta">{box.label}</SideText> : <span className="meta">{box.label}</span>}
-              <span className={cn('text-ui whitespace-pre-wrap wrap-anywhere', box.mono && 'font-mono')}>{box.value}</span>
+              <span className={cn('text-ui whitespace-pre-wrap wrap-anywhere', box.mono && 'font-mono', item.label === 'different' ? (box.side === 'a' ? 'side-a' : 'side-b') : 'muted')}>{box.value}</span>
             </div>
           ))}
         </div>
@@ -274,7 +274,7 @@ function DetailPanel({ item, a, b }: { item: SetupItem; a: string; b: string }) 
                 <h3 className="text-ui font-semibold">{record.name} · {record.scope}</h3>
                 <div className="flex flex-wrap items-center gap-2"><ComparisonBadge label={record.label} exactState={record.exactState} /><span className="text-ui">{record.exactText}</span></div>
                 {record.reason ? <p className="text-ui">{record.reason}</p> : null}
-                {record.detail.values?.map(box => <p key={box.side} className="text-ui whitespace-pre-wrap wrap-anywhere"><SideText side={box.side}>{box.label}</SideText>: <span className="font-mono">{box.value}</span></p>)}
+                {record.detail.values?.map(box => <p key={box.side} className={cn('text-ui whitespace-pre-wrap wrap-anywhere', record.label === 'different' ? (box.side === 'a' ? 'side-a' : 'side-b') : 'muted')}><span className="font-semibold">{box.label}</span>: <span className="font-mono">{box.value}</span></p>)}
                 {record.detail.diff ? <DiffBlock lines={record.detail.diff} a={a} b={b} label={`Differences in ${record.name}`} /> : null}
                 <dl><SetupSources sources={record.detail.sources} a={a} b={b} />
                   {record.detail.facts.filter(fact => fact.label.startsWith('Cache aliases')).map(fact => <div key={fact.label} className="text-ui wrap-anywhere"><dt className="font-medium">{fact.label}</dt><dd className="muted">{fact.value}</dd></div>)}

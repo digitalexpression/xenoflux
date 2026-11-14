@@ -1,16 +1,25 @@
-# Xenoflux — Style Reference
+# Xenoflux design reference
 
-> A precise technical workspace: cobalt actions and soft mint accents on clear light surfaces or an Obsidian canvas.
-
-**Theme:** light + dark, following the system preference.
-
-**Status:** adopted design direction. This standalone guide covers Xenoflux's local web app. The [user guide](docs/GUIDE.md#supported-clients-and-known-limits) owns supported scope and limits; this design specification is not proof that its behavior has been verified.
+**Status:** adopted design direction. This reference owns composition, tokens and interaction presentation for the local web app. [Product intent](PRODUCT.md) owns purpose and priorities. The [user guide](docs/GUIDE.md) owns journeys and supported limits; [contracts](docs/CONTRACTS.md) owns invariants. These rules describe the design target, not verified implementation coverage.
 
 Xenoflux combines IBM Plex Sans, compact rounded controls and opaque layered surfaces. Cobalt identifies actions and links; Soft Mint supports the identity without implying success. Dark mode uses Obsidian `#0a0d16`, raised navy surfaces and lighter cobalt interaction cues. Content stays calm and readable, with technical character concentrated in typography and small header accents.
 
 Show the decision, its evidence and its important limitation first; reveal technical detail on demand. Generated mockups illustrate this direction, but the tokens below define the intended values. Show only supported actions and keep unavailable evidence explicit.
 
-## Tokens — Colors
+## Composition priorities
+
+Xenoflux is a working tool. Setup and selection screens help people act; reports help them read evidence. Use familiar controls and restrained surfaces. Keep the cobalt, Plex typography and profile labels consistent across both.
+
+- Lead each page with its title, current profile or comparison scope, and next meaningful action. Give peer workflows equal weight before selection; use one primary action in each active task region.
+- Put the result and any limitation that changes its interpretation before supporting detail. Keep the limitation beside the affected evidence, even when technical details are collapsed.
+- Use a shared summary strip, labeled rows and dividers for related facts. Add a panel only when it groups a distinct task or evidence set. Do not wrap every section in a card.
+- Align paired observations under the same field heading, with persistent Left/Right and profile names. Give both sides equal width and the same type scale. A longer response does not make that side more important.
+- Reserve filled comparison badges, larger counts and stronger type for Different. Keep Same readable but quieter; keep Could not compare and its reason visible. Never style missing evidence as zero or an empty successful result. Do not imply an overall winner from a single comparison.
+- Put routine metadata after the finding. Disclose paths, identifiers and raw evidence on demand; keep source scope and consequential choices visible.
+
+Use 8px within a label/value or action group, 16px between related groups, and 32px between sections. A heading sits closer to its content than to the preceding section. The token tables below define the shared scale. Keep working views free of marketing heroes, permanent terminal decoration, nested cards and glowing outlines.
+
+## Colors
 
 Use semantic roles rather than raw colors in components. Both themes preserve the same meanings and hierarchy. Default to the system theme; use a simple System / Light / Dark override remembered locally. Follow system changes only while System is selected. Do not invert screenshots or evidence assets.
 
@@ -36,16 +45,13 @@ Use semantic roles rather than raw colors in components. Both themes preserve th
 | First profile (side A) | `#6d28d9` | `#c4b5fd` | `--color-side-a` | Violet; identifies the first or left profile |
 | First profile surface | `#f5f3ff` | `#262046` | `--surface-side-a` | Tint behind side A values and lines only in side A |
 | Second profile (side B) | `#0e7490` | `#67e8f9` | `--color-side-b` | Teal; identifies the second or right profile |
-| Uncached input measurement | #2f80ed | #5aa2ff | --color-measure-input | Token mix category; never profile identity or status |
-| Cached input measurement | #087d92 | #39c8dd | --color-measure-cached | Token mix category; included within input |
-| Other output measurement | #635bff | #a29aff | --color-measure-output | Token mix category; output excluding reasoning |
-| Reasoning measurement | #c94f00 | #ff9857 | --color-measure-reasoning | Token mix category; included within output |
 | Second profile surface | `#ecfeff` | `#10323b` | `--surface-side-b` | Tint behind side B values and lines only in side B |
+| Uncached input measurement | `#2f80ed` | `#5aa2ff` | `--color-measure-input` | Token mix category; never profile identity or status |
+| Cached input measurement | `#087d92` | `#39c8dd` | `--color-measure-cached` | Token mix category; included within input |
+| Other output measurement | `#635bff` | `#a29aff` | `--color-measure-output` | Token mix category; output excluding reasoning |
+| Reasoning measurement | `#c94f00` | `#ff9857` | `--color-measure-reasoning` | Token mix category; included within output |
 
-Use the four measurement category colors together only in the shared token
-composition legend and bars. They identify non-overlapping quantities: cached
-input and reasoning are subsets of input and output. Keep category names visible,
-and scale every bar in one comparison against the same maximum.
+Use the four measurement colors together only in the shared token composition legend and bars. Draw disjoint segments for uncached input, cached input, output excluding reasoning, and reasoning. Cached input and reasoning remain subsets of input and output. Keep category names visible and scale every bar across both sides and all actors against the same maximum.
 
 Use cobalt for actions, links, selection and focus in both themes. Soft Mint is a supporting accent, not small text on a white background. In dark mode, keep cobalt primary actions with pale mint text; use lighter cobalt for links, focus, checkboxes and selection marks, with navy-blue selection surfaces. Keep the primary action's visible boundary against dark surrounding surfaces. Underline links within prose and separate focus outlines from controls with a visible offset. Selection also needs a checkmark, indicator or explicit label.
 
@@ -62,13 +68,13 @@ Keep status tokens separate from brand tokens. Use these foreground/background p
 | Error | `#991b1b` / `#fef2f2` | `#fca5a5` / `#341c24` | A named operation or check failed |
 | Neutral / unknown | `#4d5970` / `#ffffff` | `#b0bdd3` / `#121a2c` | Same, Could not compare, unknown, unavailable, not applicable, not reviewed and review verdicts; retain the exact label |
 
-Name status tokens `--color-{success,warning,error,neutral}` and their backgrounds `--surface-{success,warning,error,neutral}`. Neutral badges also carry a 1px `--color-control-border` outline so they stay visible on content and raised surfaces alike.
+Name status tokens `--color-{success,warning,error,neutral}` and their backgrounds `--surface-{success,warning,error,neutral}`. Neutral badges carry a 1px `--color-control-border` outline unless the comparison label table specifies a quieter treatment for Same.
 
 Supporting interaction and alert tokens:
 
 | Token | Light | Dark | Role |
 | --- | --- | --- | --- |
-| `--color-action-hover` / `--color-action-pressed` | `#1e3aaf` / `#1e328f` | `#1e3aaf` / `#1e328f` | Primary action hover and pressed fills (Interaction States) |
+| `--color-action-hover` / `--color-action-pressed` | `#1e3aaf` / `#1e328f` | `#1e3aaf` / `#1e328f` | Primary action hover and pressed fills (Interaction states) |
 | `--color-link-hover` | `#1e3aaf` | `#b3c7ff` | Link hover text |
 | `--border-warning` | `#e3c27a` | `#6b5a22` | Decorative outline of a warning alert panel |
 | `--border-error` | `#e8a3a3` | `#7a3a44` | Decorative outline of an error alert panel |
@@ -81,17 +87,17 @@ Do not distinguish the two compared profiles with success/failure colors. Keep t
 
 ### Profile identity colors
 
-Violet (side A) and teal (side B) say **which profile** something belongs to, never which is better. Use them for the profile chip, column headers, each profile's value in a detail view, and diff lines that exist only on one side. Apply them consistently: the first or left profile is always side A, on every screen of one comparison, and Swap sides swaps the colors with the profiles.
+Violet (side A) and teal (side B) say **which profile** something belongs to, never which is better. Use them for profile chips and column headers, and for Different values and lines. Left is always violet (side A), and Right is always teal (side B). Swap sides moves the profiles between those positions and updates every chip, value and diff tint together. The colors identify positions within this comparison, not permanent profile identities.
 
 - Always pair the color with the profile name; the colors are close for some color-vision deficiencies, so they never carry meaning alone.
-- Use side colors only on Different items. Same and Could not compare items keep secondary text so the differences stand out.
+- Keep profile chips and column headers side-colored for orientation. Within result rows, use side colors only on Different values and lines. Same and Could not compare values use secondary text.
 - Do not use side colors for status, buttons, links or selection, and do not use them outside a two-profile comparison.
-- Do not add more profile colors. Each UI task comparison has two sides, which may select the same profile; setup comparisons require two distinct profiles.
+- Do not add more profile colors. Use the two side roles even when the task compares sessions from the same profile. Profile eligibility belongs to the [comparison journeys](docs/GUIDE.md#compare-a-task).
 - Show the colors as soon as the two profiles are chosen (for a new task, in the profile pickers and the pre-start review), so the run visibly leads to its report.
 
 ### Comparison, review and run labels
 
-Success, warning and error are reserved for named operations and checks. Comparison results and review verdicts describe evidence, not quality, so they never use those colors. Direct attention with fill and weight instead of hue: Different is the only filled badge, Same recedes, Could not compare stays outlined. Show the exact engine state in details and exports.
+Success, warning and error are reserved for named operations and checks. Comparison results and review verdicts describe evidence, not quality, so they never use those colors. Direct attention with fill and weight instead of hue. Among comparison labels, Different is the only filled badge, Same recedes, and Could not compare stays outlined. Show the exact engine state in details and exports.
 
 | Label | Treatment | Covers |
 | --- | --- | --- |
@@ -115,19 +121,15 @@ Success, warning and error are reserved for named operations and checks. Compari
 
 Setup and content diffs use `+` / `−` gutter marks and an "only in [profile]" label. Lines only in side A use the side A surface with a 3px side A leading edge; lines only in side B use side B. Changed-in-place lines use the raised surface. Do not use green/red diff colors; they would read as better/worse.
 
-Token composition bars use dedicated uncached-input, cached-input, other-output
-and reasoning measurement tokens. Keep one textual legend and a common scale
-across both sides and all actors. Cached input is part of input, and reasoning
-is part of output: subtract these subsets before drawing disjoint bar segments.
-Exact counts remain available beside the bars.
+Token composition bars follow the measurement roles above. Subtract cached input from input and reasoning from output before drawing segments. Keep exact counts and unavailable totals visible beside the bars; a missing quantity is not a zero-length measurement.
 
-## Tokens — Typography
+## Typography tokens
 
 ### IBM Plex Sans · `--font-ui`
 
 Use the bundled **IBM Plex Sans** at weights 400, 500 and 600, with a system sans fallback. Retain its license notices; normal use must not fetch remote fonts. Use the existing/system monospace stack for code, paths and identifiers.
 
-### Type Scale
+### Type scale
 
 | Role | Size / line height | Weight | Token |
 | --- | --- | --- | --- |
@@ -145,13 +147,13 @@ Summary counts are the only numerals outside the scale: they appear only in comp
 
 Use `ui-monospace, SFMono-Regular, Menlo, Consolas, monospace` for code, paths and identifiers only. Keep ordinary labels and report prose in the sans family.
 
-## Tokens — Spacing & Shapes
+## Spacing and shape tokens
 
 **Base unit:** 4px
 
 **Density:** comfortable controls with compact, readable data rows.
 
-### Spacing Scale
+### Spacing scale
 
 | Name | Value | Token |
 | --- | --- | --- |
@@ -163,7 +165,7 @@ Use `ui-monospace, SFMono-Regular, Menlo, Consolas, monospace` for code, paths a
 | Section gap | 32px | `--space-32` |
 | Major separation | 48px | `--space-48` |
 
-### Border Radius
+### Border radius
 
 | Element | Value | Token |
 | --- | --- | --- |
@@ -171,11 +173,11 @@ Use `ui-monospace, SFMono-Regular, Menlo, Consolas, monospace` for code, paths a
 | Panels | 12px | `--radius-panel` |
 | Tags and filter pills | 9999px | `--radius-pill` |
 
-### Borders & Shadows
+### Borders and shadows
 
 Use 1px structural borders. Keep reading panels flat; reserve modest shadows for floating menus and dialogs. Focus rings are separate from decorative borders. See Elevation for surface relationships.
 
-### Layout Tokens
+### Layout tokens
 
 | Role | Value | Token |
 | --- | --- | --- |
@@ -188,63 +190,63 @@ Let content determine height. Dense tables may reduce padding, but retain readab
 
 ## Components
 
-### Primary Action Button
+### Primary action button
 
 **Role:** The next meaningful step, such as Compare sessions or Export report.
 
 Use action fill, on-action text and action-border tokens, 8px corners, 40px minimum height and 8px 16px padding. Text is 14px/500. Preserve equal visual weight for equal choices; emphasize a next step only after a workflow is selected.
 
-### Secondary Button & Text Link
+### Secondary button and text link
 
 **Role:** Browse sessions, View details, Back and supporting navigation.
 
 Use a neutral surface, primary text and control boundary for buttons. Text links use link/focus color; underline links within prose. Keep secondary actions visible without competing with the primary action.
 
-### Destructive Button
+### Destructive button
 
 **Role:** A supported operation with destructive consequences.
 
-Use a specific verb, explain consequences and use the danger colors in Interaction States. Do not borrow cobalt primary styling or make ordinary navigation look destructive.
+Use a specific verb, explain consequences and use the danger colors in Interaction states. Do not borrow cobalt primary styling or make ordinary navigation look destructive.
 
-### Form Field
+### Form field
 
 **Role:** Search, filters and user input.
 
 Use surface fill, primary text, control boundary and 8px corners. Keep a persistent label and associate help/error text with the field. Placeholder text does not replace a label. Preserve values after validation failures.
 
-### Session Picker Row
+### Session picker row
 
 **Role:** Select two recorded sessions for comparison.
 
-Show task title, profile, client, project, recorded date and state, with identifiers in details. Use one grouped list with separators, visible checkboxes, selected background/foreground tokens and a 3px link/focus-colored leading edge on selected rows. Preserve keyboard operation and selection across filters and responsive layouts. Selection never starts or resumes a session; same-task declarations are never prechecked.
+Select exactly two sessions with checkboxes, without a select-all control or separate side slots. Keep deselection available at the limit and explain why another selection is unavailable. Show task title, profile, client, project, recorded date and state, with identifiers in details. Use one grouped list with separators, visible checkboxes, selected background/foreground tokens and a 3px link/focus-colored leading edge on selected rows. Preserve keyboard operation and selection across filters and responsive layouts. Inspection and selection never start or resume a session. Show the recorded, user-declared or unknown task-association basis; matching titles never precheck a declaration or establish recorded equivalence.
 
 Below the list, a selection summary names the comparison sides: **Left** and **Right**, each with its profile name and task title, plus a **Swap sides** button. The first ticked session fills Left and the second fills Right; unticking one frees that side for the next tick. The summary is the only place sides are assigned, so the report's column order is always visible before Compare.
 
-### Evidence Panel & Disclosure
+### Evidence panel and disclosure
 
 **Role:** A finding with paired observations and inspectable detail.
 
-Use neutral surfaces, 12px corners where a container is needed, and 24px padding. Prefer headings and dividers over nested cards. Keep profile labels and important limits visible; expand supporting detail with a clearly labeled disclosure that exposes its expanded state.
+Use neutral surfaces, 12px corners where a container is needed, and the responsive panel padding token. Prefer headings and dividers over nested cards. Keep profile labels and important limits visible; expand supporting detail with a clearly labeled disclosure that exposes its expanded state.
 
-### Status Badge & Informational Notice
+### Status badge and informational notice
 
 **Role:** Communicate a specific state or evidence limit.
 
-Use the status pairs with text and an optional icon, following the label tables under Status colors. Distinguish running, interrupted, failed, unknown, unavailable, not applicable and not reviewed. An informational notice uses info-surface with primary/secondary text, a 3px link/focus-colored leading edge and a link-colored icon. Evidence limits such as **What we could not see** use this notice; it is never styled as success.
+Use the status pairs with text and an optional icon, following the label tables under Status colors and Comparison, review and run labels. Distinguish running, interrupted, failed, unknown, unavailable, not applicable and not reviewed. An informational notice uses info-surface with primary/secondary text, a 3px link/focus-colored leading edge and a link-colored icon. Evidence limits such as **What we could not see** use this notice; it is never styled as success.
 
-### Dialog & Inspector
+### Dialog and inspector
 
 **Role:** Focused decisions or supporting inspection.
 
 Give the surface a clear title and accessible controls. Modal dialogs contain focus and restore it when closed. Nonmodal inspectors do not trap focus. Keep background text out of translucent overlays.
 
-### Empty, Loading & Interrupted States
+### Empty, loading and interrupted states
 
 **Role:** Explain absence, progress or a failure and the supported next step.
 
 Distinguish No sessions found from Could not read sessions. Show measured progress only when known, prevent duplicate starts and expose cancellation only where supported. Explain what was preserved after interruption and retain useful partial results.
 
-### Interaction States
+### Interaction states
 
 | State | Treatment in both themes |
 | --- | --- |
@@ -261,27 +263,6 @@ Distinguish No sessions found from Could not read sessions. Show measured progre
 Destructive buttons use white text with light-theme fills `#b91c1c` / `#991b1b` / `#7f1d1d` for default / hover / pressed. Dark-theme fills are `#991b1b` / `#7f1d1d` / `#681717`, with an error-foreground boundary. Use a specific verb and consequence; keep routine primary actions cobalt.
 
 Hover must not be the only way to discover an action. Keep links underlined in prose. Use native buttons, inputs and checkboxes or equivalent accessible components. Validation errors must have programmatic associations; for a failed submit, focus an error summary or the first invalid field as appropriate. Do not present an untouched required field as an error. Hide unfinished features rather than presenting inactive promises. Disable an implemented action only when its current prerequisites are unmet, with an understandable reason.
-
-The paired-session picker selects exactly two sessions with checkboxes and has no select-all control or separate side slots. Keep deselection available at the limit; explain why another selection is unavailable. Assign Left and Right only in the selection summary, with Swap sides. Show the recorded, user-declared or unknown task-association basis. Never precheck a user declaration merely because titles match, and never invent recorded equivalence. Inspection and selection do not start or resume sessions.
-
-## Do's and Don'ts
-
-### Do
-
-- Use semantic tokens consistently in both themes, with system-following appearance and a local override.
-- Keep primary actions cobalt, text readable, and Soft Mint separate from success semantics.
-- Use IBM Plex Sans, the 4px spacing scale, 8px controls and 12px panels.
-- Preserve labels, evidence limits, keyboard access and explicit selection indicators.
-- Use whitespace, grouping and dividers before adding tinted containers or elevation.
-- Keep one token source and reuse the existing shadcn/ui + Tailwind component stack.
-
-### Don't
-
-- Do not use Soft Mint as small text on white, color alone for meaning, or success/failure colors to identify compared profiles.
-- Do not add marketing heroes, permanent terminal panels, nested cards or glowing outlines everywhere.
-- Do not hide limitations, shrink type to fit, or require hover to discover an action.
-- Do not invent evidence, capabilities, progress percentages, overall winners or task equivalence.
-- Do not introduce a second report renderer, a separate design-system package or per-screen token variants without an intentional design decision.
 
 ## Surfaces
 
@@ -307,23 +288,23 @@ Use a compact header with direct access to Profiles and saved reports. Add navig
 
 Use this navigation and report structure:
 
-- Open the app on Setup, with installed CLI and desktop findings before existing profiles and the next profile action. Keep discovery separate from native opening and creation controls. Use flat labeled rows, neutral discovery states and disclosures for paths and reasons. Keep unsupported profiles visible and label retained results as a previous check during refresh or refresh failure. Automatic checks stay quiet, preserve focus and form input, and announce observed changes rather than every check. A missing selected copy source requires a new selection; never silently substitute another profile.
+- Open the app on Setup, with installed CLI and desktop findings before existing profiles and the next profile action. Keep discovery separate from native opening and creation controls. Use flat labeled rows, neutral discovery states and disclosures for paths and reasons. Keep unsupported profiles visible and label retained results as a previous check during refresh or refresh failure. Automatic checks stay quiet, preserve focus and form input, and announce observed changes rather than every check. Follow the [discovery and profile journey](docs/GUIDE.md#find-installed-clients-and-existing-profiles) for refresh and selection behavior.
 - Confirmation screens such as the pre-start review lead with a ready summary (a success badge naming what was checked, the two profiles, the run size) plus the primary action and any consequential choice, such as no verification checks, as an informational notice. Details follow below.
 - A single-profile inspector leads with qualified profile identity, repository scope and read time. Keep source values, files, provenance and reading limits inspectable. Carry the selected profile and scope into Compare with another profile. Single-profile observations use neutral source states rather than comparison badges.
-- Lead same-client setup comparisons with a summary strip of Different / Same / Could not compare counts, with Different largest. The counts filter the list. Show the compared profiles as one compact line of side-colored chips with Swap and Change once both are chosen. Put any reading limit in an informational notice right below the summary. Mixed-client comparisons align category sections with independent labeled source observations, preserve each side's limits and omit equivalence counts and copy controls.
+- Lead same-client setup comparisons with a summary strip of Different / Same / Could not compare counts, with Different largest. The counts filter the list. Show the compared profiles as one compact line of side-colored chips with Swap and Change once both are chosen. Put any reading limit in an informational notice right below the summary. Mixed-client comparisons align category sections with independent labeled source observations, preserve each side's limits and omit equivalence counts and copy controls. The [setup journey](docs/GUIDE.md#inspect-and-compare-setups) owns comparison scope and eligibility.
 - Filtering setup items selects the first matching result. A summary status filter names its scope beside the result count and leaves both list presets unselected. When list and detail stack, offer **View details** at the selected row and **Back to selected item** in the detail; selecting a row keeps keyboard focus there until the user follows a link.
 - Give **Compare a task** and **Compare setups** equal prominence. Equal choices use equal visual weight; do not make one a filled primary action and the other a faint link.
 - Within task comparison, give **Use existing sessions** and **Run a new task** equal prominence. Once a path is chosen, emphasize its next meaningful action.
-- Task comparison leads with conditions/coverage, closing responses and checks, then side-by-side timeline and compact conversations using shadcn/ui AI Elements. Keep expandable session/turn lineage, independent order and a persistent nonmodal event inspector. Preserve delegation, supported timing and missing evidence; the shared goal owns the replay contract.
+- Task comparison leads with conditions/coverage, closing responses and checks, then side-by-side timeline and compact conversations using shadcn/ui AI Elements. Keep expandable session/turn lineage, independent order and a persistent nonmodal event inspector. Preserve delegation, supported timing and missing evidence. Follow the [report journey](docs/GUIDE.md#read-and-export-a-report) and [evidence contract](docs/CONTRACTS.md#evidence-privacy-and-accounting) for replay behavior.
 - Keep Export report discoverable and technical inspection available on demand. Use profile names and task titles as primary labels; identifiers remain in details.
 
 Use a fluid layout with a 1152px content maximum, 24px page gutters, and 16px gutters below 800px. Below 800px, stack landing choices, search/filter controls and paired observations; repeat profile labels. Wrap navigation and action groups without changing their reading order or hiding essential actions. Let content pressure trigger stacking earlier when needed.
 
 In a narrow session picker, render each session as a labeled row with its checkbox, task title, profile, client, project, recorded date and state. Keep all fields available; move metadata onto additional lines rather than shrinking text or dropping columns. Preserve selection across layout changes. The selection summary, with its Left/Right sides and Swap sides, and the next action follow the list in normal flow and never cover content. Wrap long names; keep full identifiers accessible in details. Confine necessary horizontal scrolling to code or genuinely two-dimensional data tables, not the whole page. Preserve all meaningful content at zoom; do not hide limitations to simplify a small screen.
 
-## Motion Philosophy
+## Motion
 
-Use brief 120–200ms transitions to explain state changes, without moving controls or shifting surrounding content. Respect reduced motion by removing nonessential movement. Avoid animated ambient backgrounds, pulsing decoration and loading indicators that imply measurable progress when none is known.
+Keep row selection, filtering and keyboard navigation immediate. Use 120–200ms transitions only when they clarify feedback or a disclosure state. Do not animate every section on arrival, move controls on press or shift evidence while it is being read. Respect reduced motion by removing nonessential movement. Avoid animated ambient backgrounds, pulsing decoration and loading indicators that imply measurable progress when none is known.
 
 ## Accessibility
 
@@ -343,10 +324,30 @@ is not a light-theme text link. Test actual composition, focus and disabled/busy
 states, including keyboard, long/empty/error/partial states and narrow reflow
 in both themes. Record results/limits in release summaries.
 
-## Quick Start
+## Implementation and review
 
-Declare each semantic token once per theme and map that same source into CSS and
-Tailwind. System preference is default; explicit Light/Dark overrides it. Text-size
-tokens hold size only; apply documented weight/line-height separately. Use relative
-font sizes, the documented font stacks and layout breakpoint. Consume the existing
-components/tokens instead of maintaining another palette or stylesheet example.
+Keep [tokens.css](web/src/styles/tokens.css) as the single value source. [app.css](web/src/styles/app.css) maps it into Tailwind and shared component styles. Consume semantic tokens in both themes; do not create per-screen palettes or a second report renderer. Text-size tokens hold size only; apply the documented weight and line height separately.
+
+Reuse the existing shadcn/ui components and AI Elements. Preserve the project's configured base, icon family and aliases in [components.json](web/components.json); this reference does not require a preset change, new component package or component installation.
+
+| Component role | Xenoflux token mapping |
+| --- | --- |
+| Background, foreground | Surface, primary text; page chrome uses canvas |
+| Primary action | Action, on-action and action-border; explicit hover and pressed roles |
+| Muted content | Raised surface and secondary text |
+| Selection | Selected and on-selected, with a persistent indicator |
+| Decorative border | Divider; never substitute it for an essential control boundary |
+| Input outline, focus | Control-border and link-focus respectively |
+| Brand decoration | Soft Mint; never map it to a generic interactive accent |
+| Status, profile identity, measurements | Their dedicated semantic roles; never infer them from a default Badge or chart palette |
+
+Style shared component variants at their owner. Use page classes for layout rather than repeated color, radius or type overrides. Preserve native button, link and checkbox semantics when composing controls.
+
+For a UI change, review the affected screen and states against these questions:
+
+- Can the user identify the scope, result, important limitation and next action without opening technical details?
+- Do both themes preserve the action, selection, profile and status meanings? Are essential outlines and focus rings visible on the actual background?
+- Do paired evidence and long names remain understandable when stacked below 800px? Can keyboard users reach details and return without losing their place?
+- Are loading, empty, unavailable, failed and interrupted states distinct, with useful retained content and a supported next step?
+
+Run the relevant [development checks](CONTRIBUTING.md#checkout-and-checks). Documentation-only changes require `check:docs`; token-table edits also warrant `node scripts/check-design-tokens.mjs`. UI changes need the required build and browser checks. Report which states were inspected and any limitations; a token match or green build alone does not prove visual quality or accessibility.

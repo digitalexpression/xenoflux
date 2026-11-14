@@ -56,7 +56,7 @@ function ThemeSelect() {
   return (
     <label className="meta inline-flex items-center gap-2">
       Theme
-      <select className="input py-1 min-h-0 w-auto" value={choice}
+      <select className="input w-auto" value={choice}
         onChange={event => { const value = event.target.value as ThemeChoice; setChoice(value); setTheme(value); }}>
         <option value="system">System</option>
         <option value="light">Light</option>
