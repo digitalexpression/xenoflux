@@ -1,9 +1,10 @@
 # Contribute to Xenoflux
 
-Use the [user guide](docs/GUIDE.md) for behavior and [contracts](docs/CONTRACTS.md)
-for invariants. [AGENTS.md](AGENTS.md) routes agent work; [DESIGN.md](DESIGN.md)
-owns UI composition. Installed-user docs are README, installation, guide and CLI.
-Contributor material stays in the repository and is excluded from npm.
+Use [product intent](PRODUCT.md) for purpose and priorities, the
+[user guide](docs/GUIDE.md) for behavior and [contracts](docs/CONTRACTS.md) for
+invariants. [AGENTS.md](AGENTS.md) routes agent work; [DESIGN.md](DESIGN.md) owns
+UI composition. Installed-user docs are README, installation, guide and CLI.
+PRODUCT and contributor material stay in the repository and are excluded from npm.
 
 ## Checkout and checks
 
@@ -143,10 +144,13 @@ Preserve caches used by running instances.
 
 ## Keep documentation small
 
-README routes readers; installation owns requirements/channels; the guide owns
-normal journeys and known limits; CLI owns terminal recipes; this file owns checks;
-contracts owns implementation invariants. Keep one owner and link to it. Channel
-notices belong only in README and installation. Keep assignment tracking,
+README gives a brief orientation and routes readers; PRODUCT owns durable purpose,
+users and product priorities; installation owns requirements/channels; the guide
+owns normal journeys and known limits; CLI owns terminal recipes; this file owns
+checks; contracts owns implementation invariants. AGENTS routes agent work and
+DESIGN owns UI rules. Keep one owner and link to it. PRODUCT is repository-only;
+do not duplicate journey steps, support matrices, invariants or visual rules there.
+Channel notices belong only in README and installation. Keep assignment tracking,
 release records and raw receipts private; use public issues for published plans.
 Use normal version control for source and documentation changes. An authorized
 development or fix task includes working notes, debugging evidence, test outputs

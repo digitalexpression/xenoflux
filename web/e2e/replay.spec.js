@@ -326,6 +326,15 @@ test('replay keeps both sides readable at narrow widths and enlarged text in lig
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${mode}, ${width}px, text ${fontSize}`).toBe(true);
         await expect(page.getByText('baseline', { exact: true }).first()).toBeVisible();
         await expect(page.getByText('strict-review', { exact: true }).first()).toBeVisible();
+        for (const target of [left.getByRole('button', { name: /User message/ }).first(), left.getByRole('button', { name: /Run check/ }).first()]) {
+          await target.focus();
+          await page.keyboard.press('Tab');
+          await page.keyboard.press('Shift+Tab');
+          await expect(target).toBeFocused();
+          await expect(target).toHaveCSS('outline-style', 'solid');
+          await expect(target).toHaveCSS('outline-width', '2px');
+          await expect(target).toHaveCSS('outline-offset', '2px');
+        }
         await page.screenshot({ path: resolve(receiptDir, `replay-${mode}-${width}-${fontSize.replace('%', '')}.png`), fullPage: true });
       }
     }

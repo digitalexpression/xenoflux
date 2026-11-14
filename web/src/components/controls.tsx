@@ -50,7 +50,7 @@ export function SummaryTiles({ counts, active, onFilter, hrefs, captions, loadin
         const body = (
           <>
             <span className={cn('tile-count', tile.key === 'different' && count ? '' : 'muted')}>{loading || count === null ? '–' : count}</span>
-            <span className="font-semibold">{tile.title}</span>
+            <span className="font-semibold">{tile.title}{active === tile.key && <span aria-hidden="true" className="font-normal"> · Selected</span>}</span>
             <span className="hint">{loading ? 'Reading…' : captions?.[tile.key] ?? tile.caption}</span>
           </>
         );

@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 const userDocs = ['README.md', 'docs/INSTALLATION.md', 'docs/GUIDE.md', 'docs/CLI.md'];
-const sourceDocs = [...userDocs, 'CONTRIBUTING.md', 'docs/CONTRACTS.md'];
+const sourceDocs = [...userDocs, 'PRODUCT.md', 'CONTRIBUTING.md', 'docs/CONTRACTS.md'];
 
 export async function checkDocumentationPolicy(root, sourcePaths, packagePaths) {
   const errors = [];
@@ -91,7 +91,7 @@ export async function main() {
     const errors = [...await checkPackagedDocs(root, paths), ...await checkPackagedDocs(root, sourcePaths),
       ...await checkDocumentationPolicy(root, sourcePaths, paths)];
     if (errors.length) throw new Error(errors.join('\n'));
-    console.log('Documentation passed: six document owners, four packaged user documents, source/package links and channel wording.');
+    console.log('Documentation passed: seven document owners, four packaged user documents, source/package links and channel wording.');
   } finally {
     await rm(cache, { recursive: true, force: true });
   }

@@ -87,6 +87,30 @@ export function Report() {
         </div>
         <p className="text-body"><strong className="font-semibold">{associationLead(data.association.basis)}</strong> {data.association.text}</p>
 
+        <section className="flex flex-col gap-3" aria-labelledby="conditions">
+          <h2 id="conditions" className="text-heading">Conditions</h2>
+          <p className="hint">Recorded when each session ran.</p>
+          {data.conditions.scopeNote ? <p className="hint">{data.conditions.scopeNote}</p> : null}
+          {data.conditions.rows.length === 0 ? <p className="text-body">No recorded condition differs between the two sessions.</p> : null}
+          {data.conditions.rows.length ? <PairRows label="Differing conditions" names={[data.a.profile, data.b.profile]} rows={data.conditions.rows.map(row => ({ ...row,
+            note: row.intent === 'intended' ? <span className="badge badge-selected">You meant to vary this</span>
+              : row.intent === 'not-marked' ? <span className="badge badge-warning">Not marked as intended</span> : undefined,
+          }))} /> : null}
+          <p className="hint">{data.conditions.footer}</p>
+          <Disclosure label="Show all recorded conditions" expandedLabel="Hide all recorded conditions">
+            {data.conditions.allRows ? <PairRows label="All recorded conditions" names={[data.a.profile, data.b.profile]} rows={data.conditions.allRows} /> : <dl className="grid gap-x-6 gap-y-1 text-ui" style={{ gridTemplateColumns: 'minmax(140px, auto) 1fr' }}>
+              {data.conditions.all.map(fact => <div key={fact.label} className="contents"><dt className="font-medium">{fact.label}</dt><dd className="wrap-anywhere">{fact.value}</dd></div>)}
+            </dl>}
+          </Disclosure>
+          {data.conditions.setupHref ? <Link to={data.conditions.setupHref}>Today’s setup (a separate snapshot)</Link> : null}
+        </section>
+
+        <InfoNotice as="section" title="What we could not see" headingLevel={2} className="scroll-mt-4">
+          <div>{data.attempt?.notStarted ? <><p>No model task started, so the missing actions, claims and token usage cannot be recovered from this attempt.</p>
+            <Disclosure label="Show recorded coverage limits" expandedLabel="Hide recorded coverage limits"><ul className="list-disc pl-5">{data.limits.map(limit => <li key={limit}>{limit}</li>)}</ul></Disclosure></>
+            : <ul className="list-disc pl-5 flex flex-col gap-1">{data.limits.length ? data.limits.map(limit => <li key={limit}>{limit}</li>) : <li>Nothing that this report depends on was missing.</li>}</ul>}</div>
+        </InfoNotice>
+
         {data.sessionControls || data.sessionHarness ? <SessionControlsComparison controls={data.sessionControls} harness={data.sessionHarness}
           profiles={{ a: data.a.profile, b: data.b.profile }}
           onOpenCompaction={(side, sessionId, eventId) => replayRef.current?.openSourceEvent(side, sessionId, eventId)} /> : null}
@@ -162,30 +186,6 @@ export function Report() {
             })}
           </div> : null}
         </section>
-
-        <section className="flex flex-col gap-3" aria-labelledby="conditions">
-          <h2 id="conditions" className="text-heading">Conditions</h2>
-          <p className="hint">Recorded when each session ran.</p>
-          {data.conditions.scopeNote ? <p className="hint">{data.conditions.scopeNote}</p> : null}
-          {data.conditions.rows.length === 0 ? <p className="text-body">No recorded condition differs between the two sessions.</p> : null}
-          {data.conditions.rows.length ? <PairRows label="Differing conditions" names={[data.a.profile, data.b.profile]} rows={data.conditions.rows.map(row => ({ ...row,
-            note: row.intent === 'intended' ? <span className="badge badge-selected">You meant to vary this</span>
-              : row.intent === 'not-marked' ? <span className="badge badge-warning">Not marked as intended</span> : undefined,
-          }))} /> : null}
-          <p className="hint">{data.conditions.footer}</p>
-          <Disclosure label="Show all recorded conditions" expandedLabel="Hide all recorded conditions">
-            {data.conditions.allRows ? <PairRows label="All recorded conditions" names={[data.a.profile, data.b.profile]} rows={data.conditions.allRows} /> : <dl className="grid gap-x-6 gap-y-1 text-ui" style={{ gridTemplateColumns: 'minmax(140px, auto) 1fr' }}>
-              {data.conditions.all.map(fact => <div key={fact.label} className="contents"><dt className="font-medium">{fact.label}</dt><dd className="wrap-anywhere">{fact.value}</dd></div>)}
-            </dl>}
-          </Disclosure>
-          {data.conditions.setupHref ? <Link to={data.conditions.setupHref}>Today’s setup (a separate snapshot)</Link> : null}
-        </section>
-
-        <InfoNotice as="section" title="What we could not see" headingLevel={2} className="scroll-mt-4">
-          <div>{data.attempt?.notStarted ? <><p>No model task started, so the missing actions, claims and token usage cannot be recovered from this attempt.</p>
-            <Disclosure label="Show recorded coverage limits" expandedLabel="Hide recorded coverage limits"><ul className="list-disc pl-5">{data.limits.map(limit => <li key={limit}>{limit}</li>)}</ul></Disclosure></>
-            : <ul className="list-disc pl-5 flex flex-col gap-1">{data.limits.length ? data.limits.map(limit => <li key={limit}>{limit}</li>) : <li>Nothing that this report depends on was missing.</li>}</ul>}</div>
-        </InfoNotice>
 
         <footer className="flex flex-col gap-2 pt-4 border-t" style={{ borderColor: 'var(--color-divider)' }}>
           <div className="flex flex-wrap gap-2"><Link className="btn btn-primary" to={`${base}/export`}>Export report</Link>{data.cliCommand ? <CopyButton text={data.cliCommand} label="Copy CLI command" /> : null}</div>

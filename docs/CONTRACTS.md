@@ -1,10 +1,8 @@
 # Implementation contracts
 
-Xenoflux's primary job is task comparison: create/select profiles, compare a task,
-inspect its evidence and optionally request an attributed review in the bundled
-local app. Normal use requires no authored JSON, manual report transfer or session-ID
-reconstruction. [The guide](GUIDE.md) owns user-facing support/limits;
-[contributing](../CONTRIBUTING.md) owns checks and source entry points.
+[Product intent](../PRODUCT.md) owns purpose and priorities. These contracts own
+implementation invariants. [The guide](GUIDE.md) owns user-facing journeys and
+support limits; [contributing](../CONTRIBUTING.md) owns checks and source entry points.
 
 ## Identity and selected installations
 
