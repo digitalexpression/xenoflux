@@ -246,6 +246,27 @@ hash-bound journal checkpoint; storage failure latches rejection. Recovery repla
 committed prefixes; interrupted tails remain uncertain. Durability and sender
 acknowledgement are different facts.
 
+Single-session inspection uses the same retained run, replay and accounting owners
+as comparison. It never creates a second session to fill a comparison. Native
+turn controls are joined only to matching owned actors and turns in the verified
+workspace, then frozen with their source references before finalization. Ordinary
+reopen does not reread native history. An explicit new derivation can reinterpret
+the exact retained source bytes when the original report, actor and source hashes
+match; it preserves original receipts and deliberate content omissions.
+Native compaction markers and explicit summary text retain their source references and
+content limits; replacement history and hidden reasoning are not summary content.
+A marker and a summary are distinct records, not an inferred compaction count or
+proof of the complete effective context. Frozen single-session exports reopen
+without reading current profiles or native histories.
+
+Paired control interpretation reuses the single-session control projection and
+the validated frozen comparison conditions. Requested variation is separate from
+runtime observations; a model-only request covers only its listed recorded controls.
+Setup input hashes can include model overrides, so their differences do not alone
+establish harness changes. Native client semantics, original execution attribution,
+task/baseline conflicts and unknown historical context remain explicit. Interpretation
+never changes task or measurement eligibility and reads no current profile files.
+
 Token subsets and overlapping spans are not additive. Whole-turn/workflow totals need
 verified baselines, continuity, identity and accounting; missing fields, regressions,
 resets, invalid subsets and incomplete lineage block affected totals. Captured-session

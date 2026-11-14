@@ -1116,7 +1116,7 @@ export async function runAuditCapture(options = {}) {
         : run.coverage.timeline === 'complete' && usageAgentsComplete && everyTurnHasUsableUsage && usageContinuityClean ? 'complete' : 'partial';
       recordWarning('skill-use-observability-limited');
       run.status = 'partial';
-      run.reason = 'Skill invocation detection and delivery are best effort; exhaustive use cannot be established';
+      run.reason ??= 'Skill invocation detection and delivery are best effort; exhaustive use cannot be established';
       capture.status = run.status;
       capture.byOrigin = run.skills.reduce((acc, skill) => { acc[skill.origin] = (acc[skill.origin] ?? 0) + 1; return acc; }, {});
       // Persist the fully hydrated tree and its tool/skill events before the
@@ -1216,6 +1216,7 @@ export async function runAuditCapture(options = {}) {
     ? hooks.coverage.hooks : 'partial';
   for (const warning of hooks.warnings) recordWarning(warning);
   mergeAuditSkillTelemetry(run, telemetrySnapshot);
+  run.coverage.skillUsage = run.coverage.skillInvocationTelemetry === 'observed' ? 'observed' : 'partial';
   capture.capabilities.skillUseObservability = run.skillInvocations?.length ? 'native-runtime-detected' : receiver ? 'enabled-unverified' : 'unavailable';
   if (!runtime && !ordinary) capture.observer = { transport: receiver ? 'loopback-otlp-http-json' : 'unavailable', savedSettingsChanged: false,
     effects: receiver ? ['per-process native log exporter override', 'prompt logging disabled', 'non-skill telemetry discarded'] : [] };

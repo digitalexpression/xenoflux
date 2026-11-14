@@ -7,6 +7,37 @@ import { captureAuditWorkspacePatch } from '../src/audit-workspace-patch.js';
 import { compareAuditResourceDetails } from '../src/audit-profile-diff.js';
 import { bookingLedgerPair } from '../test-support/audit-explanation/booking-ledger.js';
 
+test('comparison limits distinguish observed skill receipts from exhaustive skill use', () => {
+  const pair = bookingLedgerPair();
+  for (const run of pair) run.coverage = { ...run.coverage, skills: 'partial',
+    skillInventory: 'complete', skillUsage: 'partial', skillInvocationTelemetry: 'observed', captureRequirements: 'passed' };
+  const original = structuredClone(pair);
+  const limits = presentComparison(compareAuditRuns(...pair)).limits.join('\n');
+  assert.doesNotMatch(limits, /Skill use: partly recorded/);
+  assert.match(limits, /Native skill invocation receipts are recorded/);
+  assert.match(limits, /exhaustive skill use remains unverified/);
+  assert.deepEqual(pair, original);
+  pair[1].coverage.skillInvocationTelemetry = 'partial';
+  assert.match(presentComparison(compareAuditRuns(...pair)).limits.join('\n'), /Skill invocation telemetry: partly recorded/);
+  pair[1].coverage.skillInventory = 'partial';
+  assert.match(presentComparison(compareAuditRuns(...pair)).limits.join('\n'), /Skill catalog: partly recorded/);
+});
+
+test('an explicitly empty captured patch is unchanged rather than missing content', () => {
+  const run = bookingLedgerPair()[0];
+  const fingerprint = 'a'.repeat(64), patchSha256 = createHash('sha256').update('').digest('hex');
+  run.workspace.taskEnd = { fingerprint, baselineFingerprint: fingerprint, patchSha256, timing: 'task-end', captureComplete: true,
+    patchContent: captureAuditWorkspacePatch(Buffer.alloc(0), { fingerprint, patchSha256 }, {
+      baselineFingerprint: fingerprint, sourceBaselineCommit: run.sourceWorkspace.sourceCommit, sourceBaselineTree: run.sourceWorkspace.sourceTree,
+    }) };
+  const before = structuredClone(run);
+  assert.equal(presentTaskEndPatch(run).status, 'unchanged');
+  assert.match(presentTaskEndPatch(run).note, /no changes/);
+  assert.deepEqual(run, before);
+  run.workspace.taskEnd.patchContent.reason = 'recorded-content-not-included';
+  assert.equal(presentTaskEndPatch(run).status, 'omitted');
+});
+
 test('patch presentation distinguishes verified task end, unverified boundary and post-process fallback', () => {
   const run = bookingLedgerPair()[0];
   const patch = Buffer.from('diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n');

@@ -17,6 +17,107 @@ const row = (sourceLine, type, payload, timestamp = '2026-10-28T12:00:00.000Z') 
 const msg = (role, text, turnId = turnA) => ({ type: 'message', role,
   content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }], turn_id: turnId });
 
+test('replay captures only the owned native session header workspace', () => {
+  const childHeader = { id: sessionB, session_id: sessionA, parent_thread_id: sessionA,
+    source: { subagent: { thread_spawn: { parent_thread_id: sessionA } } }, forked_from_id: sessionA,
+    cwd: '/workspace/child' };
+  const replay = projectSessionReplay([
+    { id: sessionA, sourceFingerprint: fingerprint, records: [row(1, 'session_meta', { id: sessionA, cwd: '/workspace/root' })] },
+    { id: sessionB, parentId: sessionA, depth: 1, sourceFingerprint: fingerprint,
+      records: [row(1, 'session_meta', childHeader), row(2, 'session_meta', { id: sessionA, cwd: '/inherited/root' })] },
+  ]);
+  assert.deepEqual(replay.sessions.map(session => session.cwd), ['/workspace/root', '/workspace/child']);
+  assert.deepEqual(normalizeSessionReplay(replay), replay);
+  const rejectedHeaders = [
+    { ...childHeader, id: sessionA },
+    { ...childHeader, parent_thread_id: sessionB },
+    { ...childHeader, source: { subagent: { thread_spawn: { parent_thread_id: sessionB } } } },
+    { ...childHeader, forked_from_id: sessionB },
+    { ...childHeader, session_id: 'invalid' },
+    { ...childHeader, cwd: 'relative/workspace' },
+    { ...childHeader, cwd: '/workspace/../other' },
+    { ...childHeader, cwd: '/workspace\n/other' },
+    { ...childHeader, cwd: '/workspace/' + 'x'.repeat(4096) },
+    { ...childHeader, cwd: '/workspace/api_key=sk-abcdefghijklmnopqrstuv' },
+    { ...childHeader, cwd: '/workspace/[REDACTED]' },
+  ];
+  for (const header of rejectedHeaders) {
+    const candidate = projectSessionReplay([{ id: sessionB, parentId: sessionA, depth: 1,
+      sourceFingerprint: fingerprint, records: [row(1, 'session_meta', header)] }]);
+    assert.equal(Object.hasOwn(candidate.sessions[0], 'cwd'), false, JSON.stringify(header));
+  }
+  const lateHeader = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint,
+    records: [row(1, 'response_item', msg('assistant', 'Recorded reply')),
+      row(2, 'session_meta', { id: sessionA, cwd: '/forged/late-header' })] }]);
+  assert.equal(Object.hasOwn(lateHeader.sessions[0], 'cwd'), false);
+  const missing = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint, records: [] }]);
+  assert.equal(Object.hasOwn(normalizeSessionReplay(missing).sessions[0], 'cwd'), false);
+  for (const cwd of [null, '', 'relative', '/a/../b', '/a\0b', '/workspace/[REDACTED]', '/' + 'a'.repeat(4096)]) {
+    const malformed = structuredClone(missing); malformed.sessions[0].cwd = cwd;
+    assert.throws(() => normalizeSessionReplay(malformed), /invalid session/);
+  }
+});
+
+test('replay retains offered tool names without treating a catalog as tool use', () => {
+  const replay = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint, records: [
+    row(3, 'response_item', { type: 'additional_tools', role: 'developer', tools: [
+      { type: 'namespace', name: 'functions', description: 'PRIVATE DESCRIPTION', tools: [
+        { type: 'custom', name: 'exec', format: { definition: 'PRIVATE SCHEMA' } },
+        { type: 'function', name: 'wait', parameters: { private_schema: 'PRIVATE SCHEMA' } },
+      ] },
+      { type: 'function', name: 'lookup', description: 'PRIVATE DESCRIPTION' },
+    ] }),
+    row(4, 'response_item', { type: 'function_call', name: 'lookup', arguments: '{}', call_id: call, turn_id: turnA }),
+  ] }]);
+  const [catalog] = replay.sessions[0].events;
+  assert.equal(catalog.kind, 'session');
+  assert.equal(catalog.label, 'Offered tool catalog');
+  assert.equal(catalog.status, 'advertised');
+  assert.equal(catalog.sourceLine, 3);
+  assert.deepEqual(JSON.parse(catalog.body), { scope: 'offered-not-invoked', recordedToolCount: 3,
+    tools: ['functions.exec', 'functions.wait', 'lookup'], omittedEntries: 0 });
+  assert.equal(replay.sessions[0].events.filter(event => event.kind === 'tool-call').length, 1);
+  assert.doesNotMatch(JSON.stringify(catalog), /PRIVATE|developer/);
+  assert.deepEqual(normalizeSessionReplay(replay), replay);
+});
+
+test('replay bounds offered tool identifiers and preserves terminal failure states', () => {
+  const replay = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint, records: [
+    row(1, 'response_item', { type: 'additional_tools', tools: [
+      ...Array.from({ length: 201 }, (_, index) => ({ name: `tool_${index}` })),
+      { name: 'x'.repeat(501) }, { name: 'invalid\nname' },
+    ] }),
+    row(2, 'event_msg', { type: 'task_complete', turn_id: turnA, error: { message: 'failed' } }),
+    row(3, 'event_msg', { type: 'turn_aborted', turn_id: turnB }),
+    row(4, 'event_msg', { type: 'turn_complete', turn_id: turnB }),
+  ] }]);
+  const [catalog, failed, interrupted, completed] = replay.sessions[0].events;
+  const body = JSON.parse(catalog.body);
+  assert.equal(body.recordedToolCount, 200);
+  assert.equal(body.tools.length, 200);
+  assert.equal(body.omittedEntries, 3);
+  assert.equal(failed.status, 'failed');
+  assert.equal(interrupted.status, 'interrupted');
+  assert.equal(completed.status, 'completed');
+  assert.deepEqual(normalizeSessionReplay(replay), replay);
+});
+
+test('replay distinguishes intentionally unprojected records from visible unsupported items', () => {
+  const replay = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint, records: [
+    row(1, 'event_msg', { type: 'token_count', input_tokens: 12 }),
+    row(2, 'response_item', { type: 'reasoning', content: 'PRIVATE REASONING' }),
+    row(3, 'response_item', { type: 'future_native_item', private_field: 'PRIVATE NATIVE FIELD' }),
+  ] }]);
+  const [session] = replay.sessions, limit = session.limits.find(row => row.kind === 'unprojected-records');
+  assert.equal(limit.omitted, 2);
+  assert.equal(limit.message, '2 native records were not projected into conversation replay. Stream metadata and private reasoning are excluded.');
+  assert.deepEqual(limit.types, ['event_msg:token_count', 'response_item:reasoning']);
+  assert.equal(session.events.length, 1);
+  assert.equal(session.events[0].kind, 'unsupported');
+  assert.equal(session.events[0].label, 'Unsupported native item: future_native_item');
+  assert.doesNotMatch(JSON.stringify(replay), /PRIVATE REASONING|PRIVATE NATIVE FIELD/);
+});
+
 test('replay pairs tool results with their exact call and keeps source lines', () => {
   const replay = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint, records: [
     row(4, 'response_item', { type: 'custom_tool_call', name: 'exec_command', input: 'npm test', call_id: call, turn_id: turnA }),
@@ -269,4 +370,26 @@ test('legacy MCP result error envelopes keep their failure status', () => {
   const replay = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint, records: results.map((result, index) =>
     row(index + 1, 'event_msg', { type: 'mcp_tool_call_end', turn_id: turnA, call_id: `legacy-${index}`, result })) }]);
   assert.deepEqual(replay.sessions[0].events.map(event => event.status), results.map(() => 'error'));
+});
+
+test('compaction markers and explicit summaries survive replay/export without replacement history', async t => {
+  const replay = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint, records: [
+    row(1, 'event_msg', { type: 'context_compacted', turn_id: turnA }),
+    row(2, 'compacted', { message: 'Keep the original goal and pending checks.', replacement_history: [{ type: 'reasoning', text: 'PRIVATE_REPLACEMENT' }], turn_id: turnA }),
+  ] }]);
+  assert.deepEqual(replay.sessions[0].events.map(event => event.kind), ['compaction', 'compaction']);
+  assert.equal(replay.sessions[0].events[0].bodyStatus, 'unavailable');
+  assert.equal(replay.sessions[0].events[1].sourceLine, 2);
+  assert.equal(replay.sessions[0].events[1].body, 'Keep the original goal and pending checks.');
+  assert.equal(JSON.stringify(replay).includes('PRIVATE_REPLACEMENT'), false);
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-compaction-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const run = { schemaVersion: 1, kind: 'audit-run', id: sessionA, sessionReplay: replay };
+  for (const includeReplayContent of [false, true]) {
+    const output = join(directory, `${includeReplayContent}.json`);
+    await exportAuditReport(run, { output, includeReplayContent });
+    const reopened = await readAuditReport(output);
+    assert.equal(reopened.sessionReplay.sessions[0].events[1].kind, 'compaction');
+    assert.equal(reopened.sessionReplay.sessions[0].events[1].bodyStatus, includeReplayContent ? 'included' : 'omitted');
+  }
 });

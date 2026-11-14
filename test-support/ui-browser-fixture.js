@@ -163,7 +163,7 @@ esac
         processSnapshot: async () => [{ pid: process.pid, ppid: 1, uid: process.getuid(), startedAt: 'fixture', executable: process.execPath }] }),
     });
     server = await startUiServer({ provider, staticRoot, log: message => serverLogs.push(message) });
-    return { url: server.launchUrl, origin: server.origin, root, store,
+    return { url: server.launchUrl, origin: server.origin, root, store, provider,
       homes: { baseline, strict }, defaultUserHome, reportsRoot, rollouts, instructions, skillLines, longSkillNames, privacyMarkers, nativeProfileLog,
       serverLogs, setupSources,
       close: async () => { await server.close(); await rm(root, { recursive: true, force: true }); } };

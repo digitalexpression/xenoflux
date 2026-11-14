@@ -46,6 +46,7 @@ import { importClaudeTranscript } from './claude-transcript.js';
 import { importCopilotTranscript } from './copilot-transcript.js';
 import { auditNativeSession } from './audit-session.js';
 import { compareAuditRuns } from './audit-report.js';
+import { presentSession, presentSessionHarness } from './audit-session-presentation.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const plain = value => typeof value === 'string' && value.trim() !== '' && value.length <= 200 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
@@ -587,7 +588,9 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
 
   async function reportView(ref) {
     const { value, selection, saved, execution } = await comparisonFor(ref);
+    const retained = saved?.frozen === false;
     const { subject, reviews } = subjectOf(value);
+    if (subject?.kind === 'audit-run') throw new UiError(422, 'This is a single session. Open it with session inspection.', 'single-session-view');
     const view = presentComparison(subject, { title: execution ? 'Task comparison' : await titleFor(ref, selection, saved), reviews, sameTaskLabel: selection?.t });
     const quote = text => `"${String(text).replace(/(["\\$`])/g, '\\$1')}"`;
     const left = subject.selection?.left, right = subject.selection?.right;
@@ -595,18 +598,27 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     const setupSelection = left && right && new URLSearchParams({ a: left.profileName, b: right.profileName,
       ...(view.a.nativeClient && view.a.nativeClient !== 'codex' ? { aClient: view.a.nativeClient } : {}),
       ...(view.b.nativeClient && view.b.nativeClient !== 'codex' ? { bClient: view.b.nativeClient } : {}) });
-    return { ...view, ref, breadcrumb: saved ? 'Open saved report' : execution ? 'Run progress' : 'Choose sessions',
+    return { ...view, ref, retained, breadcrumb: retained ? 'Session inspections' : saved ? 'Open saved report' : execution ? 'Run progress' : 'Choose sessions',
+      sessionHarness: { a: presentSessionHarness(subject.left ?? {}), b: presentSessionHarness(subject.right ?? {}) },
       ...(execution ? { progressHref: `/runs/${execution}` } : {}),
-      saved: saved ? { recordedAt: view.a.time, savedAt: saved.savedAt ?? 'date not recorded', notInReport: ['a', 'b'].filter(side => view.outcome.patches?.[side]?.status !== 'available').map(side => `Task-end patch content for ${view[side].profile}`) } : null,
+      saved: saved && !retained ? { recordedAt: view.a.time, savedAt: saved.savedAt ?? 'date not recorded', notInReport: ['a', 'b'].filter(side => !['available', 'unchanged'].includes(view.outcome.patches?.[side]?.status)).map(side => `Task-end patch content for ${view[side].profile}`) } : null,
       conditions: { ...view.conditions, setupHref: !saved && setupSelection && !sameProfile ? `/compare/setups?${setupSelection}` : null },
       verification: { ...view.verification, reviews: { text: view.verification.reviews.text,
         href: subject?.kind === 'audit-comparison' ? `/reports/${encodeURIComponent(ref)}/reviews` : null } },
-      cliCommand: execution ? `xfx audit show ${execution}` : saved?.path ? `xfx audit show ${quote(saved.path)}`
+      cliCommand: retained ? '' : execution ? `xfx audit show ${execution}` : saved?.path ? `xfx audit show ${quote(saved.path)}`
         : `xfx audit diff --left-profile ${quote(left?.profileName ?? '')} --left-id ${left?.sessionId} --right-profile ${quote(right?.profileName ?? '')} --right-id ${right?.sessionId}${selection?.t ? ` --same-task ${quote(selection.t)}` : ''}${selection?.v?.length ? ` --variables ${quote(selection.v.join(','))}` : ''}`,
     };
   }
 
   function savedSummary(ref, entry) {
+    if (entry.value.kind === 'audit-run') {
+      const view = presentSession(entry.value, { title: entry.title });
+      return { id: ref, ref, href: `/sessions/${encodeURIComponent(ref)}`, title: entry.title,
+        recordedAt: view.turns.find(turn => turn.recordedAt)?.recordedAt ?? 'time not recorded',
+        savedAt: entry.savedAt ?? 'date not recorded',
+        kept: [{ label: 'Single-session evidence', value: 'Retained with coverage and omissions' }],
+        cliCommand: entry.path ? `xfx audit show ${shellQuote(entry.path)}` : 'xfx audit show REPORT.md.audit.json' };
+    }
     const { subject, reviews } = subjectOf(entry.value);
     const view = presentComparison(subject, { title: entry.title, reviews });
     return { id: ref, title: entry.title, recordedAt: view.a.time, savedAt: entry.savedAt ?? 'date not recorded', ref,
@@ -614,15 +626,15 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       kept: [{ label: 'Conditions, replay and measurements', value: 'Kept' },
         { label: 'Reviews attached earlier', value: reviews ? 'Kept, with reviewers and earlier revisions' : 'None attached' },
         { label: 'Evidence references', value: 'Kept; the original history isn’t read' },
-        { label: 'Task-end patches', value: ['a', 'b'].map(side => `${view[side].profile}: ${view.outcome.patches?.[side]?.status === 'available' ? 'retained' : 'content unavailable'}`).join(' · ') }],
+        { label: 'Task-end patches', value: ['a', 'b'].map(side => `${view[side].profile}: ${view.outcome.patches?.[side]?.status === 'available' ? 'retained' : view.outcome.patches?.[side]?.status === 'unchanged' ? 'no patch changes' : 'content unavailable'}`).join(' · ') }],
       cliCommand: entry.path ? `xfx audit show "${entry.path}"` : 'xfx audit show REPORT.md.audit.json' };
   }
 
-  function register(value, { title, savedAt, path }) {
+  function register(value, { title, savedAt, path, frozen = true }) {
     const kind = value?.kind === 'audit-evaluation-report' ? value.subject?.kind : value?.kind;
-    if (kind !== 'audit-comparison') throw new UiError(422, `This saved report is a ${String(value?.kind ?? 'unknown').replace(/^audit-/, '')}. Open it with xfx audit show; the app opens two-session comparisons.`, 'unsupported-kind');
+    if (kind !== 'audit-comparison' && value?.kind !== 'audit-run') throw new UiError(422, `This saved report is a ${String(value?.kind ?? 'unknown').replace(/^audit-/, '')}. Open it with xfx audit show; the app opens sessions and two-session comparisons.`, 'unsupported-kind');
     const ref = `f.${randomUUID()}`;
-    opened.set(ref, { value, title, savedAt, path });
+    opened.set(ref, { value, title, savedAt, path, frozen });
     while (opened.size > 20) opened.delete(opened.keys().next().value);
     return savedSummary(ref, opened.get(ref));
   }
@@ -776,6 +788,76 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         partial: unreadable.length ? { text: `${unreadable.map(home => `${home.profileName}’s history couldn’t be read${home.reason ? ` (${home.reason})` : ''}`).join('; ')}. Sessions from the other profiles are listed.`,
           help: 'macOS asks before an app reads some folders. If a profile lives in Documents, Desktop or Downloads, allow access for the terminal that runs xfx ui in System Settings › Privacy & Security › Files and Folders, then reload.' } : null,
         truncated };
+    },
+
+    async inspectSession(input = {}) {
+      if (closing) throw new UiError(409, 'The app is stopping.', 'stopping');
+      if (!input || typeof input !== 'object' || Array.isArray(input)) throw new UiError(400, 'Choose one session from a session list or report.', 'invalid-session-selection');
+      const keys = Object.keys(input);
+      const fromKey = keys.length === 1 && typeof input.key === 'string';
+      const fromReport = keys.length === 2 && typeof input.report === 'string' && ['a', 'b'].includes(input.side);
+      const fromList = keys.length === 2 && PROFILE_CLIENTS.includes(input.client) && UUID.test(input.token ?? '');
+      if (!fromKey && !fromReport && !fromList) throw new UiError(400, 'Choose one session from a session list or report.', 'invalid-session-selection');
+      if (fromKey) parseKey(input.key);
+      const operation = (async () => {
+        const id = randomUUID(), directories = [];
+        await admission.acquire(id);
+        try {
+          let value, title;
+          if (fromReport) {
+            const source = await comparisonFor(input.report);
+            const { subject } = subjectOf(source.value);
+            value = subject?.[input.side === 'a' ? 'left' : 'right'];
+            if (subject?.kind !== 'audit-comparison' || !value) throw new Error('The selected report session is unavailable.');
+            title = await titleFor(input.report, source.selection, source.saved);
+          } else if (fromKey) {
+            const selected = parseKey(input.key), row = await rowFor(input.key);
+            if (!row) throw new Error('The selected session is no longer listed in its profile.');
+            value = await auditNativeSession(store, selected.profile, selected.id, { defaultUserHome, includeReplay: true });
+            title = row.title;
+          } else {
+            const parent = join(store.directory, 'ui-imports');
+            await privateDirectory(store.directory, true); await privateDirectory(parent, true);
+            value = await importListedSession(input.client, input.token, join(parent, randomUUID()), directories);
+          }
+          return register(value, { title: title ?? 'Session inspection', savedAt: null, path: null, frozen: false });
+        } catch {
+          for (const artifact of directories) {
+            const current = await lstat(artifact.directory).catch(() => null);
+            if (current?.dev === artifact.dev && current.ino === artifact.ino) await rm(artifact.directory, { recursive: true, force: true });
+          }
+          throw new UiError(422, 'The selected session or profile is no longer available. List sessions again in its original profile.', 'session-inspection-unavailable');
+        } finally { admission.release(id); }
+      })();
+      activeImports.add(operation);
+      try { return await operation; } finally { activeImports.delete(operation); }
+    },
+
+    async sessionInspection({ ref }) {
+      const entry = opened.get(ref);
+      if (entry?.value.kind !== 'audit-run') throw new UiError(404, 'This inspection is no longer open. Choose the session again or reopen its saved report.', 'session-inspection-missing');
+      return { ...presentSession(entry.value, { title: entry.title }), ref,
+        savedAt: entry.savedAt, frozen: entry.frozen, exportHref: `/reports/${encodeURIComponent(ref)}/export` };
+    },
+
+    async compareInspections(input = {}) {
+      if (closing) throw new UiError(409, 'The app is stopping.', 'stopping');
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2
+        || !['left', 'right'].every(key => typeof input[key] === 'string'))
+        throw new UiError(400, 'Choose two open session inspections.', 'invalid-session-selection');
+      const a = opened.get(input.left), b = opened.get(input.right);
+      if (a?.value.kind !== 'audit-run' || b?.value.kind !== 'audit-run')
+        throw new UiError(410, 'A session inspection is no longer open. Reopen its saved report or choose the session again.', 'session-inspection-missing');
+      const identity = run => {
+        const client = run.clientIdentity?.client ?? run.nativeReference?.client ?? (run.source?.kind === 'native-rollout' ? 'codex' : null);
+        const profile = run.source?.readContext?.profileId ?? run.profile?.profileId ?? run.profile?.profileName;
+        const session = run.nativeReference?.sessionId ?? run.source?.nativeSessionId ?? run.source?.threadId;
+        return client && profile && (session || run.id) ? JSON.stringify([client, profile, session ? 'native' : 'job', session ?? run.id]) : null;
+      };
+      if (input.left === input.right || a.value === b.value
+        || identity(a.value) !== null && identity(a.value) === identity(b.value))
+        throw new UiError(400, 'Choose two different sessions. The same native session cannot stand in for an independent comparison.', 'duplicate-session-selection');
+      return register(compareAuditRuns(a.value, b.value), { title: a.title, savedAt: null, path: null, frozen: false });
     },
 
     async association({ left, right }) {
@@ -1179,17 +1261,19 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     },
 
     async exportPlan({ ref }) {
-      const report = await reportView(ref);
       const { value } = await comparisonFor(ref);
+      const single = value.kind === 'audit-run';
+      const report = single ? { title: opened.get(ref).title, replay: { a: value.sessionReplay } } : await reportView(ref);
       const { reviews } = subjectOf(value);
       const date = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
       const safe = text => text.replace(/[/:\\\p{Cc}]/gu, '-').replace(/\s+/g, ' ').trim().slice(0, 80) || 'Comparison';
       const slug = report.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'comparison';
       const folder = join(reportsRoot, `${safe(report.title)} — ${date}`);
       return { ref, title: report.title, folder: `${tilde(folder)}/`, name: slug, files: [`${slug}.md`, `${slug}.md.audit.json`],
+        ...(single ? { href: `/sessions/${encodeURIComponent(ref)}` } : {}),
         included: ['Recorded conditions', 'Replay events, relationships and source references when available; bodies only if selected below', 'Check results and definition metadata; commands and output only if selected below', 'Captured task-end patch metadata; patch text only if recorded content is selected', 'What each agent said', 'Reviews attached earlier, with their reviewers', 'Time and token measurements with their scope', 'What couldn’t be seen'],
         neverIncluded: ['Private internal reasoning', 'Credential stores or bulk memory archives'],
-        replayAvailable: Boolean(report.replay?.a || report.replay?.b || ['a', 'b'].some(side => report.outcome.patches?.[side]?.status === 'available') || report.verification?.rows?.some(row =>
+        replayAvailable: Boolean(report.replay?.a || report.replay?.b || ['a', 'b'].some(side => report.outcome?.patches?.[side]?.status === 'available') || report.verification?.rows?.some(row =>
           [row.a, row.b].some(check => check?.definition.command !== null && check?.definition.command !== undefined || check?.output.status === 'retained'))),
         contentFiles: [], reviewedEvidence: Boolean(reviews?.reviews?.length),
         privacy: 'Recorded content can contain private prompts, source code, tool output and paths. Known secret patterns are redacted, but this cannot remove every secret. Replay retains up to 1 MiB per body and 16 MiB per workflow; task-end patches retain at most 256 KiB per side. Omissions remain explicit. Exports are limited to 64 MiB. Read the report before sharing it.' };
@@ -1200,6 +1284,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         throw new UiError(400, 'Choose whether to include recorded content and prepare a review packet.', 'invalid-content-choice');
       const plan = await this.exportPlan({ ref });
       const { value } = await comparisonFor(ref);
+      if (prepareReview && value.kind === 'audit-run')
+        throw new UiError(422, 'Review packets require a two-session comparison. Export this session without review preparation.', 'unsupported-review-kind');
       const base = plan.folder.replace(/^~/, homedir()).replace(/\/$/, '');
       await mkdir(dirname(base), { recursive: true, mode: 0o700 });
       let folder;

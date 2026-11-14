@@ -35,6 +35,23 @@ test('completed run replay is frozen with a source fingerprint and explicit read
   assert.match(captured.sessionReplay.sessions[0].limits[0].message, /later activity is outside this replay/);
 });
 
+test('completed captures retain the native turn model and effort alongside the frozen replay', async () => {
+  const turnId = '22222222-2222-4222-8222-222222222222';
+  const original = { source: { threadId: root, workspace: '/workspace', model: 'startup-model' },
+    agents: [{ id: root, parentId: null }], turns: [{ agentId: root, turnId, status: 'completed' }],
+    settingsEvidence: { confirmed: { model: 'startup-model' } } };
+  const captured = await captureFrozenSessionReplay({ readReplay: async () => ({ ...native(replay([])),
+    turns: [{ agentId: root, turnId, model: 'observed-model', reasoningEffort: 'low', sourceLine: 10,
+      recordedAt: '2026-10-29T00:00:01.000Z', workspaceMatched: true }] }) }, {}, {}, original, undefined);
+  assert.equal(captured.turns?.[0].model, 'observed-model');
+  assert.equal(captured.turns?.[0].reasoningEffort, 'low');
+  assert.equal(captured.turns?.[0].sourceLine, 10);
+  assert.equal(captured.nativeControls?.turns[0].sourceFingerprint, fingerprint);
+  assert.equal(captured.turns?.[0].status, 'completed');
+  assert.equal(original.turns[0].model, undefined);
+  assert.deepEqual(original.settingsEvidence, { confirmed: { model: 'startup-model' } });
+});
+
 test('frozen report replay survives reopen unchanged even when native history grows', async () => {
   const frozen = replay([{ id: 'first', sessionId: root, sourceLine: 1, kind: 'message' }]);
   const profile = { profileId: 'p', profileName: 'Default', home: '/home', executable: '/codex' };
@@ -178,7 +195,9 @@ test('frozen replay persists through the run store, retained read, and source-fr
     assert.equal(savedProfile.home, nativeHome); assert.equal(id, root);
     captureOptions = options;
     return auditRetainedNativeSession(savedProfile, id, options);
-  } }, store, profile, { source: { threadId: root, workspace: '/workspace', version: '9.0.0' } },
+  } }, store, profile, { source: { threadId: root, workspace: '/workspace', version: '9.0.0' },
+    agents: [{ id: root, parentId: null }],
+    turns: [{ agentId: root, turnId: '22222222-2222-4222-8222-222222222222', status: 'completed' }] },
   join(store.directory, 'audits', run.id), '2026-10-29T00:00:00.000Z');
   const frozen = capture.sessionReplay, captureBoundary = capture.replayCapture;
   assert.equal(captureOptions.childIndexHome, join(store.directory, 'audits', run.id, 'runtime', 'sqlite'));
@@ -187,12 +206,14 @@ test('frozen replay persists through the run store, retained read, and source-fr
   assert.ok(frozen.sessions[0].events.some(event => event.body === 'captured fixture message'));
   const report = { schemaVersion: 1, kind: 'audit-run', id: run.id, status: 'complete', profile,
     source: { kind: 'native-app-server-v2', threadId: root, workspace: '/workspace', version: '9.0.0' },
-    agents: [{ id: root, parentId: null }, { id: child, parentId: root }], turns: [],
+    agents: [{ id: root, parentId: null }, { id: child, parentId: root }], turns: capture.turns, nativeControls: capture.nativeControls,
     sessionReplay: frozen, replayCapture: captureBoundary };
   await finalizeAuditRecord(store, run.id, report);
   const saved = await readAuditRecord(store, run.id);
   assert.deepEqual(saved.report.sessionReplay, frozen);
   assert.deepEqual(saved.report.replayCapture, captureBoundary);
+  assert.equal(saved.report.turns[0].model, 'fixture');
+  assert.equal(saved.report.turns[0].reasoningEffort, 'medium');
   const later = replay([{ id: `${root}:${fingerprint}:1`, sessionId: root, turnId: null, kind: 'message',
     label: 'Assistant message', timestamp: null, sourceLine: 1, bodyStatus: 'unavailable' },
     { id: `${root}:${fingerprint}:2`, sessionId: root, turnId: null, kind: 'message',
@@ -208,4 +229,6 @@ test('frozen replay persists through the run store, retained read, and source-fr
   const reopened = await readAuditReport(receipt.output);
   assert.deepEqual(reopened.sessionReplay, frozen);
   assert.deepEqual(reopened.replayCapture, captureBoundary);
+  assert.deepEqual(reopened.turns, report.turns);
+  assert.deepEqual(reopened.nativeControls, report.nativeControls);
 });

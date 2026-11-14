@@ -196,8 +196,10 @@ export interface ReplayHandle {
   openSourceEvent: (side: Side, sessionId: string, eventId: string) => void;
 }
 
-export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySide]; ref?: Ref<ReplayHandle> }) {
+export function SessionReplayView({ sides, ref }: { sides: [ReplaySide] | [ReplaySide, ReplaySide]; ref?: Ref<ReplayHandle> }) {
+  const single = sides.length === 1;
   const labelled = useId();
+  const profileLabel = (side: Side, profile: string) => single ? <span className="font-semibold wrap-anywhere">{profile}</span> : <SideText side={side}>{profile}</SideText>;
   const [selectedKey, setSelectedKey] = useState('');
   const [sideSelections, setSideSelections] = useState<Record<Side, string>>({ a: '', b: '' });
   const [query, setQuery] = useState('');
@@ -221,8 +223,8 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
     }
     return source.map(row => ({ ...row, elapsedMs: row.at !== null && origins.get(row.side) !== null ? row.at - origins.get(row.side)! : null })) as Row[];
   }, [sides]);
-  const names = useMemo(() => ({ a: replayNames(sides[0].replay), b: replayNames(sides[1].replay) }), [sides]);
-  const summaries = useMemo(() => ({ a: deriveAgentSummaries(sides[0].replay ?? { schemaVersion: 1, kind: 'session-replay', sessions: [] }), b: deriveAgentSummaries(sides[1].replay ?? { schemaVersion: 1, kind: 'session-replay', sessions: [] }) }), [sides]);
+  const names = useMemo(() => ({ a: replayNames(sides[0].replay), b: replayNames(sides[1]?.replay ?? null) }), [sides]);
+  const summaries = useMemo(() => ({ a: deriveAgentSummaries(sides[0].replay ?? { schemaVersion: 1, kind: 'session-replay', sessions: [] }), b: deriveAgentSummaries(sides[1]?.replay ?? { schemaVersion: 1, kind: 'session-replay', sessions: [] }) }), [sides]);
   const agentSummary = agentView ? summaries[agentView.side].get(agentView.sessionId) : null;
   const needle = query.trim().toLocaleLowerCase();
   const filtered = useMemo(() => all.filter(row => !needle || revealedSides[row.side]
@@ -424,7 +426,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
       }}>
       <div className="flex flex-col gap-2">
         <h2 id={`${labelled}-title`} className="text-heading">Session replay</h2>
-        <p className="hint">Each side’s timeline starts at that side’s root session’s first recorded event. The shared elapsed scale compares durations; it does not imply a shared wall clock. Missing timestamps stay unplaced.</p>
+        <p className="hint">{single ? "The timeline starts at the main session’s first recorded event. Missing timestamps stay unplaced; recorded order is preserved." : "Each side’s timeline starts at that side’s root session’s first recorded event. The shared elapsed scale compares durations; it does not imply a shared wall clock. Missing timestamps stay unplaced."}</p>
       </div>
       {sides.some(side => !side.replay) ? <InfoNotice title="Replay is only partly available">
         <p>{sides.map(side => `${side.profile}: ${side.replay ? 'native replay available' : 'native history unavailable'}`).join(' · ')}</p>
@@ -436,11 +438,11 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
         ]) ?? [])}</ul>
       </InfoNotice></details> : null}
       <p className="hint">Select an agent name for its assignment, result and parent follow-up. Dots open individual events; the conversations below show every recorded event.</p>
-      <div className="report-sides" role="group" aria-label="Session timelines">
+      <div className={single ? "flex flex-col gap-4" : "report-sides"} role="group" aria-label="Session timelines">
         {sides.map(({ side, profile, replay }) => {
           const rootId = replay?.sessions.find(session => !session.parentId)?.id ?? replay?.sessions[0]?.id ?? '';
-          return <section key={side} className="panel replay-timeline flex flex-col gap-2" aria-label={`${side === 'a' ? 'Left' : 'Right'} timeline`}>
-            <SideText side={side}>{profile}</SideText>
+          return <section key={side} className="panel replay-timeline flex flex-col gap-2" aria-label={single ? "Session timeline" : `${side === 'a' ? 'Left' : 'Right'} timeline`}>
+            {profileLabel(side, profile)}
             {replay ? <>
               <p className="hint">{replay.sessions.length} recorded session{replay.sessions.length === 1 ? '' : 's'}{replay.limits?.length ? ` · ${replay.limits.join(' ')}` : ''}</p>
               <p className="meta">0 = this root session’s first timestamp · scale ends at {elapsed(axisEnd)} · {rootSpan(replay) === null ? 'root span unavailable' : `root span ${elapsed(rootSpan(replay))}`}</p>
@@ -458,7 +460,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
                         tabIndex={row.key === selectedKey ? 0 : -1}
                         onKeyDown={event => { if (['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft'].includes(event.key)) { event.preventDefault(); move(event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1, true); } }}
                         aria-label={`${profile}: ${eventLabel(row.event)}, ${elapsed(row.elapsedMs)}`} aria-pressed={row.key === sideSelections[side]}
-                        onClick={() => select(row.event, row.session, side, true)} title={`${eventLabel(row.event)} · ${elapsed(row.elapsedMs)}`}><span aria-hidden="true" className="size-2 rounded-full" style={{ background: `var(--color-side-${side})`, boxShadow: row.key === sideSelections[side] ? '0 0 0 2px var(--color-text)' : undefined }} /></Button>)}
+                        onClick={() => select(row.event, row.session, side, true)} title={`${eventLabel(row.event)} · ${elapsed(row.elapsedMs)}`}><span aria-hidden="true" className="size-2 rounded-full" style={{ background: single ? "var(--color-link-focus)" : `var(--color-side-${side})`, boxShadow: row.key === sideSelections[side] ? '0 0 0 2px var(--color-text)' : undefined }} /></Button>)}
                     </div>
                     {points.some(row => row.elapsedMs === null) ? <span className="hint">Some events have no timestamp or cannot align to this root’s timeline.</span> : null}
                   </li>;
@@ -474,14 +476,14 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
           <label className="flex flex-col gap-1 text-ui" htmlFor={`${labelled}-search`}>Search recorded events
             <input id={`${labelled}-search`} className="input" type="search" value={query} onChange={event => { setQuery(event.target.value); setRevealedSides({ a: false, b: false }); restoreScroll('a', 0); restoreScroll('b', 0); }} />
           </label>
-          {needle && (revealedSides.a || revealedSides.b) ? <p className="hint" role="status">Search is temporarily paused on {(["a", "b"] as Side[]).filter(side => revealedSides[side]).map(side => side === 'a' ? 'Left' : 'Right').join(' and ')} to show linked events.</p> : null}
+          {needle && (revealedSides.a || revealedSides.b) ? <p className="hint" role="status">Search is temporarily paused on {(["a", "b"] as Side[]).filter(side => revealedSides[side]).map(side => single ? sides[0].profile : side === 'a' ? 'Left' : 'Right').join(' and ')} to show linked events.</p> : null}
           <div className="flex items-center justify-between gap-3"><p className="hint">↑ / ↓ browses events. F6 switches focus between the conversation and inspector.</p><Button onClick={focusInspector} disabled={!selected}>Inspect selected event</Button></div>
           {needle && filtered.length ? <p className="hint" role="status">{sides.map(({ side, profile }) => `${profile}: ${filtered.filter(row => row.side === side).length} events ${revealedSides[side] ? 'shown' : 'match'}`).join(' · ')}</p> : null}
           {!filtered.length ? <p role="status" className="hint">No events match this search.</p> : null}
         </section>
-        <div aria-label="Recorded session event trees" className="report-sides">
+        <div aria-label="Recorded session event trees" className={single ? "flex flex-col gap-4" : "report-sides"}>
           {sides.map(({ side, profile, replay }) => <section key={side} aria-label={`${profile} session tree`} className="panel replay-transcript min-w-0 flex flex-col gap-3">
-            <SideText side={side}>{profile}</SideText>
+            {profileLabel(side, profile)}
             {replay ? <MessageScrollerProvider autoScroll={false} defaultScrollPosition="start">
               <div className="replay-chat"><MessageScroller>
                 <MessageScrollerViewport role="region" aria-label="Conversation" data-replay-side={side} tabIndex={0}>
@@ -517,10 +519,10 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide, ReplaySi
             else if (selected) focusEvent(selected.key);
           }}>
           <SheetHeader><SheetTitle id={`${labelled}-inspector-title`} tabIndex={-1}>{agentView ? 'Agent summary' : 'Event inspector'}</SheetTitle>
-            <SheetDescription id={`${labelled}-inspector-description`}>{agentView ? 'Recorded excerpts and direct source links. Missing evidence stays explicit.' : 'Select events from either conversation while this panel stays open.'}</SheetDescription>
+            <SheetDescription id={`${labelled}-inspector-description`}>{agentView ? 'Recorded excerpts and direct source links. Missing evidence stays explicit.' : 'Select recorded events while this panel stays open.'}</SheetDescription>
           </SheetHeader>
           {agentView && agentSummary ? <ReplayAgentPanel key={`${agentView.side}:${agentView.sessionId}`} name={names[agentView.side].get(agentView.sessionId) ?? 'Agent'} profile={sides.find(side => side.side === agentView.side)!.profile} summary={agentSummary} onOpen={openAgentEvidence} /> : selected ? <><div key={selected.key} className="replay-inspector-content flex flex-col gap-3">
-            <p className="text-ui"><strong>{eventLabel(selected.event)}</strong> · {selected.side === 'a' ? 'Left' : 'Right'} · {clock(selected.event.timestamp)}</p>
+            <p className="text-ui"><strong>{eventLabel(selected.event)}</strong> · {single ? selected.profile : selected.side === 'a' ? 'Left' : 'Right'} · {clock(selected.event.timestamp)}</p>
             <p className="hint">{selected.profile} · {names[selected.side].get(selected.session.id)}</p>
             <p className="hint">{statusText(selected.event)}</p>
             {selected.event.contentOmitted ? <p className="hint" role="note">Some recorded content was omitted for privacy; hidden content is not available in this replay.</p> : null}

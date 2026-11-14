@@ -109,6 +109,7 @@ test('static files are served with a strict policy, without escaping the build f
   for (const path of [
     '/reports/s.eyJsIjoibGVmdCIsInIiOiJyaWdodCJ9',
     '/reports/f.saved-report-id',
+    '/sessions/f.retained-inspection-id',
     '/compare/setups/skills/review-helper.v2?a=baseline&b=strict',
     '/profiles/strict.review/copy?from=baseline',
   ]) {

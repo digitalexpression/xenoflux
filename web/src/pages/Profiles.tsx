@@ -196,6 +196,7 @@ function ProfileCardView({ profile, busyAction, onClient, onMenu }:
       </div>}
       <div className="flex flex-wrap gap-2">
         <Link className="btn" to={setupInspectHref({ name: profile.name, client: profile.client ?? 'codex' })}>Inspect setup</Link>
+        <Link className="btn" to={`/sessions/native?${new URLSearchParams({ profile: profile.name, client: profile.client ?? 'codex' })}`}>Inspect sessions</Link>
         <Link className="btn" to={`/compare/setups?${new URLSearchParams(setupParams({ name: profile.name, client: profile.client ?? 'codex' }))}`}>Compare with…</Link>
         {profile.moreMenu ? (
           <DropdownMenu>

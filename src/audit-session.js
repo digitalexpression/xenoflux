@@ -579,7 +579,7 @@ async function readRollout(profile, id, path, options = {}) {
     let sourceLine = 0, relevant = 0, recordsTotal = 0, physicalLines = 0, pending = Buffer.alloc(0), pos = 0, discarding = false;
     const physicalLimit = Number.isSafeInteger(options.maxPhysicalLines)
       ? Math.max(1, Math.min(MAX_PHYSICAL_LINES, options.maxPhysicalLines)) : MAX_PHYSICAL_LINES;
-    let header = false, badIdentity = false, firstAt = null, lastAt = null, headerPayload, outcomeClaim = null, actionRepoRoot = null;
+    let header = false, badIdentity = false, firstAt = null, lastAt = null, headerPayload, headerSourceLine, outcomeClaim = null, actionRepoRoot = null;
     let actionCallsSeen = false, actionEvidencePartial = false, replayUnownedRecordCount = 0;
     let recordedInputIncomplete = false;
     const turns = [], events = [], skills = new Map(), usageRows = [], artifacts = [], actions = [], warnings = new Set();
@@ -607,7 +607,7 @@ async function readRollout(profile, id, path, options = {}) {
           && record.payload.source?.subagent?.thread_spawn?.parent_thread_id === parentId
           && (record.payload.forked_from_id === undefined || record.payload.forked_from_id === parentId);
         if (!validRoot && !validChild) { badIdentity = true; return; }
-        header = true; headerPayload = record.payload;
+        header = true; headerPayload = record.payload; headerSourceLine = sourceLine;
         const sessionCwd = nativeCwd(record.payload.cwd);
         // Named actions are derived only from the cwd recorded in this native
         // session. Never probe the current checkout: historical workspaces may
@@ -625,14 +625,14 @@ async function readRollout(profile, id, path, options = {}) {
       if (!uuid(turnId) && turnId !== null) {
         const subType = record.type === 'event_msg' ? p.type : null;
         if (record.type === 'token_usage_record' || record.type === 'turn_context'
-          || ['task_complete', 'turn_complete', 'turn_aborted'].includes(subType)) recordedInputIncomplete = true;
+          || ['task_complete', 'turn_complete', 'turn_completed', 'turn_aborted'].includes(subType)) recordedInputIncomplete = true;
         const rawItem = p.item ?? p;
         const typedTool = rawItem && typeof rawItem === 'object' && HISTORICAL_TOOL_TYPES.has(firstOwn(rawItem, 'type', 'item_type', 'itemType'));
         if (['item_started','item_completed','mcp_tool_call_begin','mcp_tool_call_end','exec_command_begin','exec_command_end','hook_started','hook_completed'].includes(subType) || typedTool)
           warnings.add('Malformed native tool or hook turn identity omitted.');
         return;
       }
-      if (options.includeReplay && ['event_msg', 'response_item'].includes(record.type)) {
+      if (options.includeReplay && ['event_msg', 'response_item', 'compacted'].includes(record.type)) {
         const replayPayload = { ...p, ...(p.turn_id == null && turnId ? { turn_id: turnId } : {}) };
         replayRecords.push({ sourceLine, record: { ...record, payload: replayPayload } });
       }
@@ -711,7 +711,7 @@ async function readRollout(profile, id, path, options = {}) {
           for (const action of extracted) actions.push({ ...action, agentId: id });
         }
         if (sub === 'task_started' && uuid(turnId)) currentTurn = turnId;
-        if (['task_complete', 'turn_complete', 'turn_aborted'].includes(sub)) recordedTerminals.push({ turnId,
+        if (['task_complete', 'turn_complete', 'turn_completed', 'turn_aborted'].includes(sub)) recordedTerminals.push({ turnId,
           terminalLine: sourceLine, status: sub === 'turn_aborted' ? 'interrupted' : p.error ? 'failed' : 'completed' });
         if (sub === 'item_started' || sub === 'item_completed') {
           const rawItem = p.item && typeof p.item === 'object' ? p.item : p;
@@ -903,7 +903,7 @@ async function readRollout(profile, id, path, options = {}) {
             ...projectRecordedArtifactPath(item?.path, turnId, actionRepoRoot, turnWorkspaceCwds),
             status: safeMetaText(item?.kind ?? item?.status, 48) });
         }
-        if (['task_complete','turn_complete'].includes(sub)) currentTurn = null;
+        if (['task_complete','turn_complete','turn_completed','turn_aborted'].includes(sub)) currentTurn = null;
       } else if (record.type === 'response_item') {
         const response = p.item ?? p, responseType = response.type ?? p.type;
         if (actionRepoRoot && responseType === 'custom_tool_call') {
@@ -1130,7 +1130,12 @@ async function readRollout(profile, id, path, options = {}) {
     if (recordedInputIncomplete && recordedUsageAccounting(headerPayload.cli_version))
       warnings.add('Malformed native usage or terminal identity omitted.');
     const usage = summarizeUsage(usageRows, warnings);
-    for (const turn of turns) if (actionRepoRoot) turn.workspaceMatched = turnWorkspaceCwds.get(turn.turnId) === actionRepoRoot;
+    for (const turn of turns) {
+      if (actionRepoRoot) turn.workspaceMatched = turnWorkspaceCwds.get(turn.turnId) === actionRepoRoot;
+      const terminals = recordedTerminals.filter(row => row.turnId === turn.turnId && row.terminalLine > turn.sourceLine);
+      const status = ['failed', 'interrupted', 'completed'].find(value => terminals.some(row => row.status === value));
+      if (status) turn.status = status;
+    }
     const sortedSkills = [...skills.values()].filter(skill => skill.observations.length).map(skill => ({ ...skill, observations: skill.observations }));
     const agentStatus = warnings.size ? 'partial' : 'ready';
     const fingerprint = hash.digest('hex');
@@ -1166,7 +1171,8 @@ async function readRollout(profile, id, path, options = {}) {
     const finalStatus = sourceComplete ? 'ready' : 'partial';
     const finalReason = warnings.size ? [...warnings].join(' ') : (!turns.length ? 'No turn contexts were recorded.' : null);
     const sessionReplay = options.includeReplay ? projectNativeReplaySession({ id, parentId: options.parentId ?? null,
-      depth: options.depth ?? 0, status: finalStatus, reason: finalReason, sourceFingerprint: fingerprint, records: replayRecords,
+      depth: options.depth ?? 0, status: finalStatus, reason: finalReason, sourceFingerprint: fingerprint,
+      records: [{ sourceLine: headerSourceLine, record: { type: 'session_meta', payload: headerPayload } }, ...replayRecords],
       budget: options.replayBudget }) : undefined;
     if (sessionReplay && replayUnownedRecordCount) sessionReplay.limits.push({ kind: 'unowned-child-records',
       omitted: replayUnownedRecordCount, message: 'Native rows without corroborated child-turn ownership were omitted.' });
@@ -1472,9 +1478,10 @@ export async function auditRetainedNativeSession(savedProfile, id, options = {})
   base.status = root.status; base.reason = root.reason;
   base.source = { ...base.source, ...root.source, path: null };
   base.agents = (root.agents ?? []).map(agent => ({ ...agent, status: root.status, source: { ...agent.source, path: null } }));
-  base.turns = (root.turns ?? []).map(turn => ({ agentId: turn.agentId, turnId: turn.turnId,
+  const projectTurn = turn => ({ agentId: turn.agentId, turnId: turn.turnId,
     model: turn.model ?? null, reasoningEffort: turn.reasoningEffort ?? null, sourceLine: turn.sourceLine,
-    workspaceMatched: turn.workspaceMatched === true }));
+    workspaceMatched: turn.workspaceMatched === true });
+  base.turns = (root.turns ?? []).map(projectTurn);
   base.actions = root.actions ?? [];
   if (options.includeReplay && root.sessionReplay) {
     const replaySessions = [root.sessionReplay];
@@ -1521,7 +1528,7 @@ export async function auditRetainedNativeSession(savedProfile, id, options = {})
           }
           const childAudit = await readRollout(profile, child.id, rolloutPath, { parentId: parent.id,
             sessionRootId: root.sessionRootId, depth, owners, ownedTurns, maxPhysicalLines: options.maxPhysicalLines,
-            includeReplay: true, replayBudget, rootTurnIds: root.turns.map(turn => turn.turnId) });
+            actionRepoRoot: options.actionRepoRoot, includeReplay: true, replayBudget, rootTurnIds: root.turns.map(turn => turn.turnId) });
           const verified = childAudit._verifiedChild === true;
           base.agents.push({ id: child.id, parentId: parent.id, depth, role: 'subagent', sessionId: child.id,
             status: verified ? childAudit.status : 'unavailable', source: { ...childAudit.source, path: null },
@@ -1530,7 +1537,10 @@ export async function auditRetainedNativeSession(savedProfile, id, options = {})
           const childReplay = verified ? childAudit.sessionReplay : unavailableReplay(child.id, 'unavailable',
             childAudit.reason ?? 'Child ownership could not be corroborated.', parent.id, depth).sessions[0];
           replaySessions.push(childReplay);
-          if (verified) queue.push({ id: child.id, depth });
+          if (verified) {
+            base.turns.push(...childAudit.turns.map(projectTurn));
+            queue.push({ id: child.id, depth });
+          }
         }
       }
       if (childIndex.partial || !actorsComplete) {

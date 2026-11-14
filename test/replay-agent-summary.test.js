@@ -94,6 +94,56 @@ test('an exact final-answer receipt may corroborate a result without a terminal 
   assert.equal(summary.received.event.id, 'receipt')
 })
 
+function resumedPair() {
+  const replay = pair({ later: null })
+  const [parent, child] = replay.sessions
+  const correction = 'Corrected the fixture and reran the requested tests.'
+  child.events.push(
+    event('next-task', { sessionId: 'child', role: 'assistant', label: 'Agent update', body: 'Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\nCorrect the fixture.' }),
+    event('corrected-result', { sessionId: 'child', role: 'assistant', body: correction }),
+  )
+  parent.events.push(
+    event('correction-request', { kind: 'tool-call', label: 'collaboration.followup_task', body: JSON.stringify({ target: '/root/worker', message: 'Correct the fixture.' }) }),
+    event('corrected-receipt', { role: 'assistant', label: 'Agent update', body: `Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n${correction}` }),
+    event('corrected-follow-up', { role: 'assistant', body: 'I used /root/worker to correct the fixture.' }),
+  )
+  return replay
+}
+
+test('a distinct earlier result receipt does not hide the last result of a resumed child', () => {
+  const summary = deriveAgentSummaries(resumedPair()).get('child')
+  assert.equal(summary.result?.event.id, 'corrected-result')
+  assert.equal(summary.received?.event.id, 'corrected-receipt')
+  assert.equal(summary.resultNote, null)
+  assert.deepEqual(summary.followUps.map(item => item.event.id), ['corrected-follow-up'])
+})
+
+test('duplicate exact parent deliveries remain ambiguous across child result cycles', () => {
+  const replay = resumedPair()
+  const parent = replay.sessions[0]
+  parent.events.push({ ...parent.events.find(item => item.id === 'corrected-receipt'), id: 'duplicate-receipt' })
+  const summary = deriveAgentSummaries(replay).get('child')
+  assert.equal(summary.received, null)
+  assert.equal(summary.result, null)
+  assert.deepEqual(summary.followUps, [])
+})
+
+test('a later different receipt from the same child cannot corroborate an earlier matching payload', () => {
+  const replay = resumedPair()
+  replay.sessions[0].events.push(event('later-receipt', { role: 'assistant', label: 'Agent update', body: 'Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\nA different later result.' }))
+  assert.equal(deriveAgentSummaries(replay).get('child').received, null)
+})
+
+test('one old receipt cannot certify an identical payload repeated by a resumed child', () => {
+  const replay = resumedPair()
+  const [parent, child] = replay.sessions
+  child.events.at(-1).body = child.events.find(item => item.id === 'result').body
+  parent.events = parent.events.filter(item => item.id !== 'corrected-receipt')
+  const summary = deriveAgentSummaries(replay).get('child')
+  assert.equal(summary.received, null)
+  assert.equal(summary.result, null)
+})
+
 test('identical sibling payload and wrong sender cannot receive another child result', () => {
   const replay = pair()
   const root = replay.sessions[0]
@@ -203,4 +253,133 @@ test('an unanswered later task does not reuse the preceding completed response',
   const summary = deriveAgentSummaries(replay).get('child')
   assert.equal(summary.result, null)
   assert.match(summary.resultNote, /later task or turn started/)
+})
+
+function artifactPair() {
+  const replay = pair({ later: 'The child completed its task.' })
+  const [parent, child] = replay.sessions
+  parent.cwd = child.cwd = '/captured/workspace'
+  child.events.splice(1, 0, event('child-change', { sessionId: child.id, kind: 'file-change', status: 'completed',
+    body: JSON.stringify({ changes: { '/captured/workspace/test/result.test.js': { type: 'add', content: 'retained test' } } }) }))
+  parent.events.push(event('parent-command', { sessionId: parent.id, kind: 'command', status: 'completed',
+    body: JSON.stringify({ command: ['/bin/zsh', '-lc', 'node --test test/result.test.js && git status --short'], output: '5 tests passed', exitCode: 0 }) }))
+  return replay
+}
+
+test('links recorded parent commands to exact child-written artifacts after exact receipt', () => {
+  const summary = deriveAgentSummaries(artifactPair()).get('child')
+  assert.equal(summary.parentActions.length, 1)
+  const action = summary.parentActions[0]
+  assert.equal(action.artifactPath, '/captured/workspace/test/result.test.js')
+  assert.equal(action.childChange.event.id, 'child-change')
+  assert.equal(action.command.event.id, 'parent-command')
+  assert.equal(action.command.sessionId, 'root')
+  assert.equal(action.command.text, 'node --test test/result.test.js && git status --short')
+  assert.equal(action.recordedCommand, 'node --test test/result.test.js && git status --short')
+  assert.equal(action.exitCode, 0)
+  assert.equal(action.output, '5 tests passed')
+  assert.deepEqual(summary.followUps, [])
+})
+
+test('records failure exit codes without claiming checks succeeded', () => {
+  const replay = artifactPair()
+  const command = replay.sessions[0].events.at(-1)
+  command.body = JSON.stringify({ command: ['node', '--test', '/captured/workspace/test/result.test.js'], output: '1 test failed', exitCode: 1 })
+  const action = deriveAgentSummaries(replay).get('child').parentActions[0]
+  assert.equal(action.exitCode, 1)
+  assert.equal(action.output, '1 test failed')
+})
+
+for (const [name, mutate] of [
+  ['missing cwd', replay => { delete replay.sessions[0].cwd }],
+  ['different cwd', replay => { replay.sessions[0].cwd = '/different/workspace' }],
+  ['same basename in another directory', replay => { const e = replay.sessions[0].events.at(-1); e.body = e.body.replace('test/result.test.js', 'other/result.test.js') }],
+  ['command before receipt', replay => { const events = replay.sessions[0].events; events.splice(0, 0, events.pop()) }],
+  ['missing receipt', replay => { replay.sessions[0].events = replay.sessions[0].events.filter(e => e.id !== 'receipt') }],
+  ['truncated command', replay => { replay.sessions[0].events.at(-1).bodyStatus = 'truncated' }],
+  ['missing command body', replay => { delete replay.sessions[0].events.at(-1).body }],
+  ['tool call only', replay => { replay.sessions[0].events.at(-1).kind = 'tool-call' }],
+  ['missing recorded output', replay => { const e = replay.sessions[0].events.at(-1); const b = JSON.parse(e.body); delete b.output; e.body = JSON.stringify(b) }],
+  ['truncated child change', replay => { replay.sessions[1].events.find(e => e.id === 'child-change').bodyStatus = 'truncated' }],
+  ['unfinished child change', replay => { replay.sessions[1].events.find(e => e.id === 'child-change').status = 'started' }],
+  ['child change after result', replay => { const events = replay.sessions[1].events; events.push(events.splice(1, 1)[0]) }],
+  ['foreign parent command', replay => { const command = replay.sessions[0].events.pop(); replay.sessions.push({ ...replay.sessions[0], id: 'foreign', events: [command] }) }],
+  ['ambiguous child artifact', replay => { const child = structuredClone(replay.sessions[1]); child.id = 'other-child'; child.events[0].body = child.events[0].body.replace('/root/worker', '/root/other'); replay.sessions.push(child) }],
+  ['changed shell cwd', replay => { const e = replay.sessions[0].events.at(-1); e.body = e.body.replace('node --test', 'cd /elsewhere; node --test') }],
+  ['unsupported earlier command', replay => { const e = replay.sessions[0].events.at(-1); e.body = e.body.replace('node --test', 'unrecognized_cd_helper && node --test') }],
+  ['echo is not a read or check', replay => { const e = replay.sessions[0].events.at(-1); e.body = e.body.replace('node --test', 'echo') }],
+]) test(`artifact evidence rejects ${name}`, () => {
+  const replay = artifactPair()
+  mutate(replay)
+  assert.deepEqual(deriveAgentSummaries(replay).get('child').parentActions, [])
+})
+
+test('resolves full relative paths and literal inspection commands from retained cwd', () => {
+  const replay = artifactPair()
+  const e = replay.sessions[0].events.at(-1)
+  e.body = JSON.stringify({ command: ['/bin/zsh', '-lc', "sed -n '1,120p' ./test/result.test.js; cat /captured/workspace/test/result.test.js"], output: 'retained file contents', exitCode: 0 })
+  const action = deriveAgentSummaries(replay).get('child').parentActions[0]
+  assert.match(action.command.text, /sed -n '1,120p'/)
+  assert.match(action.command.text, /cat \/captured\/workspace\/test\/result.test.js/)
+})
+
+test('unique direct-child basename mentions are explicit parent narrative', () => {
+  const replay = pair({ later: 'I integrated worker and ran its checks.' })
+  assert.equal(deriveAgentSummaries(replay).get('child').followUps.length, 1)
+  const foreign = structuredClone(replay.sessions[1])
+  foreign.id = 'foreign-child'; foreign.parentId = 'foreign-parent'
+  foreign.events[0].body = foreign.events[0].body.replaceAll('/root', '/foreign')
+  replay.sessions.push(foreign)
+  assert.equal(deriveAgentSummaries(replay).get('child').followUps.length, 1)
+  const sibling = structuredClone(foreign)
+  sibling.id = 'ambiguous-sibling'; sibling.parentId = 'root'
+  replay.sessions.push(sibling)
+  assert.deepEqual(deriveAgentSummaries(replay).get('child').followUps, [])
+})
+
+test('generic child statements and partial basename matches are not narrative links', () => {
+  for (const later of ['I integrated the child.', 'I integrated worker_extra.', 'I integrated /foreign/worker.']) {
+    assert.deepEqual(deriveAgentSummaries(pair({ later })).get('child').followUps, [])
+  }
+})
+
+test('opaque assignments show a distinct pre-tool child acknowledgement with its source', () => {
+  const replay = pair()
+  replay.sessions[1].events.splice(1, 0, event('acknowledgement', { sessionId: 'child', role: 'assistant', body: 'I own the requested test file and will cover edge cases.' }))
+  const summary = deriveAgentSummaries(replay).get('child')
+  assert.equal(summary.acknowledgement.event.id, 'acknowledgement')
+  assert.match(summary.assignmentNote, /opaque/)
+})
+
+test('acknowledgements never reuse a final result or post-tool statement', () => {
+  assert.equal(deriveAgentSummaries(pair()).get('child').acknowledgement, null)
+  const replay = artifactPair()
+  replay.sessions[1].events.splice(2, 0, event('too-late', { sessionId: 'child', role: 'assistant', body: 'I wrote the tests.' }))
+  assert.equal(deriveAgentSummaries(replay).get('child').acknowledgement, null)
+  const readable = pair()
+  readable.sessions[0].events[0].body = JSON.stringify({ task_name: 'worker', message: 'Write tests.' })
+  readable.sessions[1].events.splice(1, 0, event('acknowledgement', { sessionId: 'child', role: 'assistant', body: 'I will write tests.' }))
+  assert.equal(deriveAgentSummaries(readable).get('child').acknowledgement, null)
+})
+
+test('opaque assignments expose the nearest same-turn named parent statement separately', () => {
+  const replay = pair()
+  const parent = replay.sessions[0]
+  parent.events.unshift(event('earlier-statement', { role: 'assistant', turnId: 'turn-1', body: 'Assignment for worker: earlier plan.' }),
+    event('statement', { role: 'assistant', turnId: 'turn-1', body: 'Assignment for worker: write the requested tests.' }))
+  const summary = deriveAgentSummaries(replay).get('child')
+  assert.equal(summary.parentAssignmentStatement.event.id, 'statement')
+  assert.equal(summary.parentAssignmentStatement.sessionId, 'root')
+  assert.match(summary.assignmentNote, /opaque/)
+})
+
+for (const [name, statement] of [
+  ['another turn', { turnId: 'other-turn', body: 'Assignment for worker: write tests.' }],
+  ['generic child name', { turnId: 'turn-1', body: 'Assignment for the child: write tests.' }],
+  ['another canonical child', { turnId: 'turn-1', body: 'Assignment for /foreign/worker: write tests.' }],
+  ['truncated body', { turnId: 'turn-1', body: 'Assignment for worker: write tests.', bodyStatus: 'truncated' }],
+]) test(`parent assignment statement rejects ${name}`, () => {
+  const replay = pair()
+  replay.sessions[0].events.unshift(event('statement', { role: 'assistant', ...statement }))
+  assert.equal(deriveAgentSummaries(replay).get('child').parentAssignmentStatement, null)
 })

@@ -22,6 +22,7 @@ import { probeAuditVersion } from './audit-native-version.js';
 import { evaluateCaptureRequirements } from './audit-evidence.js';
 import { buildAuditComparisonConditions } from './audit-conditions.js';
 import { auditRetainedNativeSession } from './audit-session.js';
+import { joinRetainedNativeTurnEvidence } from './audit-replay.js';
 import { deriveAuditFileInventory } from './audit-file-inventory.js';
 import { buildAuditCheckEvidence, readAuditCheckOutput } from './audit-check-evidence.js';
 
@@ -204,10 +205,11 @@ export async function captureFrozenSessionReplay(deps, store, profile, capturedR
       capturedAt: discovery.capturedAt, fingerprint: discovery.fingerprint, indexFingerprint: discovery.indexFingerprint,
       actorCount: replayEdges.length + 1, boundary: 'owned-native-process-terminated' };
     const coverage = { ...(capturedRun.coverage ?? {}), agents: discoveryComplete ? 'complete' : 'partial' };
+    const controls = client === 'codex' ? joinRetainedNativeTurnEvidence(capturedRun, native, profile) : null;
     // The durable run reader has a 16 MiB record cap. Leave 4 MiB for the
     // remaining finalized run fields and keep replay within the same bound.
     const maxCapturedRun = 12 * 1024 * 1024;
-    let bytes = Buffer.byteLength(JSON.stringify({ ...capturedRun, sessionReplay, replayCapture, coverage }));
+    let bytes = Buffer.byteLength(JSON.stringify({ ...capturedRun, ...controls?.fields, sessionReplay, replayCapture, coverage }));
     if (bytes > maxCapturedRun) {
       const omittedBySession = new Map();
       for (const event of sessionReplay.sessions.slice().reverse().flatMap(session => session.events.slice().reverse())) {
@@ -223,9 +225,9 @@ export async function captureFrozenSessionReplay(deps, store, profile, capturedR
           message: 'Some event bodies were omitted to keep the completed replay within the durable report size limit.' });
       }
     }
-    bytes = Buffer.byteLength(JSON.stringify({ ...capturedRun, sessionReplay, replayCapture, coverage }));
+    bytes = Buffer.byteLength(JSON.stringify({ ...capturedRun, ...controls?.fields, sessionReplay, replayCapture, coverage }));
     if (bytes > maxCapturedRun) return unavailable('Replay metadata exceeded the bounded finalized report size.');
-    return { sessionReplay, replayCapture, coverage, childDiscovery: undefined };
+    return { ...controls?.fields, sessionReplay, replayCapture, coverage, childDiscovery: undefined };
   } catch { return unavailable('The selected native history could not be read at the finalized capture boundary.'); }
 }
 

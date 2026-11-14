@@ -411,29 +411,37 @@ test('real-style delegation is searchable, named and reachable from its assignme
   } finally { await page.close(); await server.close(); }
 });
 
-test('agent summaries link assignment, result and parent follow-up without search or side confusion', async ({ browser }) => {
+for (const [theme, width] of [['light', 1280], ['dark', 390]]) {
+test(`agent summaries link assignment, result and parent follow-up without search or side confusion in ${theme}`, async ({ browser }) => {
   const provider = createDemoProvider();
   const left = replay('left'), right = replay('right');
   for (const [capture, side] of [[left, 'Left'], [right, 'Right']]) {
     const [root, child] = capture.sessions;
+    root.cwd = child.cwd = '/captured/workspace';
     const result = `${side} worker produced the navigation changes.`;
     root.events.push(
-      event(90, root.id, 'spawn_agent', '2026-10-28T12:26:41Z', { kind: 'tool-call', callId: 'summary-call', bodyStatus: 'included', body: JSON.stringify({ task_name: 'worker', message: `${side} assignment: implement return navigation.` }) }),
+      event(89, root.id, 'Assistant message', '2026-10-28T12:26:40Z', { kind: 'message', role: 'assistant', bodyStatus: 'included', body: `${side} assignment for worker: implement return navigation.` }),
+      event(90, root.id, 'spawn_agent', '2026-10-28T12:26:41Z', { kind: 'tool-call', callId: 'summary-call', bodyStatus: 'included', body: JSON.stringify({ task_name: 'worker', message: 'gAAAAopaque' }) }),
       event(91, root.id, 'Delegated agent started', '2026-10-28T12:26:41Z', { kind: 'delegation', status: 'started', callId: 'summary-call', childSessionIds: [child.id] }),
     );
     child.events.push(
       event(90, child.id, 'Agent update', '2026-10-28T12:26:42Z', { kind: 'message', role: 'assistant', bodyStatus: 'included', body: 'Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n' }),
+      event(93, child.id, 'Assistant message', '2026-10-28T12:26:43Z', { kind: 'message', role: 'assistant', bodyStatus: 'included', body: `${side} child acknowledges return navigation ownership.` }),
+      event(94, child.id, 'File change completed', '2026-10-28T12:26:44Z', { kind: 'file-change', status: 'completed', bodyStatus: 'included', body: JSON.stringify({ changes: { '/captured/workspace/test/navigation.test.js': { type: 'add', content: 'retained test' } } }) }),
       event(91, child.id, 'Assistant message', '2026-10-28T12:26:49Z', { kind: 'message', role: 'assistant', bodyStatus: 'included', body: result }),
       event(92, child.id, 'Session completed', '2026-10-28T12:26:50Z', { kind: 'session', status: 'completed' }),
     );
     if (side === 'Left') root.events.push(
       event(92, root.id, 'Agent update', '2026-10-28T12:26:51Z', { kind: 'message', role: 'assistant', bodyStatus: 'included', body: `Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n${result}` }),
       event(93, root.id, 'Assistant message', '2026-10-28T12:26:52Z', { kind: 'message', role: 'assistant', bodyStatus: 'included', body: 'I reviewed and integrated /root/worker and corrected its focus handling.' }),
+      event(94, root.id, 'Command execution completed', '2026-10-28T12:26:53Z', { kind: 'command', status: 'completed', bodyStatus: 'included', body: JSON.stringify({ command: ['/bin/zsh', '-lc', 'node --test test/navigation.test.js'], output: '5 tests passed', exitCode: 0 }) }),
     );
   }
   const server = await startUiServer({ provider, staticRoot: resolve('dist/ui') });
   const page = await browser.newPage();
   try {
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript(value => localStorage.setItem('xenoflux-theme', value), theme);
     await page.route('**/api/reports/demo-run', async route => route.fulfill({ json: { ...await provider.report({ ref: 'demo-run' }), replay: { a: left, b: right } } }));
     await page.goto(server.launchUrl);
     await page.goto(`${server.origin}/reports/demo-run`);
@@ -446,7 +454,12 @@ test('agent summaries link assignment, result and parent follow-up without searc
     const trigger = page.getByRole('region', { name: 'Left timeline', exact: true }).getByRole('button', { name: 'View worker summary', exact: true });
     await trigger.click();
     const summary = page.getByRole('dialog', { name: 'Agent summary', exact: true });
-    await expect(summary).toContainText('Left assignment: implement return navigation.');
+    await expect(summary).toContainText('Left assignment for worker: implement return navigation.');
+    await expect(summary).toContainText('The recorded assignment prompt is opaque');
+    await expect(summary).toContainText("Child's task acknowledgement");
+    await expect(summary).toContainText('Left child acknowledges return navigation ownership.');
+    await expect(summary).toContainText('node --test test/navigation.test.js');
+    await expect(summary).toContainText('Recorded whole-command exit code: 0');
     await expect(summary).toContainText('Left worker produced the navigation changes.');
     await expect(summary).toContainText('I reviewed and integrated /root/worker');
     await expect(summary.getByRole('heading', { name: 'Agent summary', exact: true })).toBeFocused();
@@ -457,10 +470,14 @@ test('agent summaries link assignment, result and parent follow-up without searc
     await expect(summary.getByRole('heading', { name: 'Agent summary', exact: true })).toBeFocused();
     const inspector = page.getByRole('dialog', { name: 'Event inspector', exact: true });
     for (const [link, expected, actor] of [
-      ['View assignment event', 'Left assignment:', 'Main session'],
+      ['View assignment event', 'gAAAAopaque', 'Main session'],
+      ['View parent assignment statement', 'Left assignment for worker:', 'Main session'],
+      ['View child acknowledgement', 'Left child acknowledges', 'worker'],
       ['View result event', 'Left worker produced', 'worker'],
       ['View parent receipt', 'Message Type: FINAL_ANSWER', 'Main session'],
       ['View parent follow-up 1', 'I reviewed and integrated', 'Main session'],
+      ['View parent command 1', 'node --test test/navigation.test.js', 'Main session'],
+      ['View child file change 1', '/captured/workspace/test/navigation.test.js', 'worker'],
     ]) {
       await summary.getByRole('button', { name: link, exact: true }).click();
       await expect(inspector).toContainText(expected);
@@ -475,15 +492,18 @@ test('agent summaries link assignment, result and parent follow-up without searc
       await inspector.getByRole('button', { name: 'Back to worker summary', exact: true }).click();
       await expect(summary).toBeVisible();
     }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await summary.getByRole('heading', { name: 'Agent summary', exact: true }).press('Escape');
     await expect(trigger).toBeFocused();
     await page.getByRole('region', { name: 'Right timeline', exact: true }).getByRole('button', { name: 'View worker summary', exact: true }).click();
     await expect(summary).toContainText('Right worker produced');
     await expect(summary.getByRole('button', { name: 'View parent receipt', exact: true })).toHaveCount(0);
     await expect(summary.getByRole('button', { name: 'View parent follow-up 1', exact: true })).toHaveCount(0);
+    await expect(summary.getByRole('button', { name: 'View parent command 1', exact: true })).toHaveCount(0);
     await expect(summary).toContainText('No unique exact parent delivery');
   } finally { await page.close(); await server.close(); }
 });
+}
 
 test('comparison reconciles task outcomes, scoped measurements and recorded closing responses', async ({ browser }) => {
   const provider = createDemoProvider();

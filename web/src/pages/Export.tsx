@@ -38,7 +38,7 @@ export function Export() {
       {plan.loading && !data ? <Loading label="Preparing the export…" rows={2} /> : null}
       {data ? (
         <>
-          <PageTitle breadcrumb={[{ label: data.title, to: `/reports/${encodeURIComponent(ref)}` }, { label: 'Export' }]} title="Export this report"
+          <PageTitle breadcrumb={[{ label: data.title, to: data.href ?? `/reports/${encodeURIComponent(ref)}` }, { label: 'Export' }]} title="Export this report"
             subtitle={prepareReview ? 'Creates a portable review packet bound to the exported evidence. It saves a Markdown report and JSON sidecar for an external reviewer, without starting an AI review.'
               : 'Saves two files together in one folder: a Markdown report you can read in any text editor, and the JSON file Xenoflux uses to reopen it later, even after the original sessions are gone.'} />
           {info?.mode === 'demo' ? <SimulatedNote>Exporting is simulated; no files are written.</SimulatedNote> : null}
@@ -101,7 +101,7 @@ export function Export() {
                   {result.warning ? <WarningAlert title="Recent could not be updated"><p>{result.warning}</p></WarningAlert> : null}
                   {result.reviewPacketFingerprint ? <p className="hint">Review packet fingerprint: <span className="font-mono">{result.reviewPacketFingerprint}</span>. The packet matches this exported content choice.</p> : null}
                   <div className="flex flex-wrap gap-2"><CopyButton text={result.folder} label="Copy folder location" />
-                    {result.reviewPacketRef ? <Link className="btn btn-primary" to={`/reports/${encodeURIComponent(result.reviewPacketRef)}/reviews`}>Return to this review packet</Link> : <Link className="btn" to={`/reports/${encodeURIComponent(ref)}`}>Back to the report</Link>}</div>
+                    {result.reviewPacketRef ? <Link className="btn btn-primary" to={`/reports/${encodeURIComponent(result.reviewPacketRef)}/reviews`}>Return to this review packet</Link> : <Link className="btn" to={data.href ?? `/reports/${encodeURIComponent(ref)}`}>Back to the report</Link>}</div>
                 </div>
               ) : <Button variant="primary" busy={busy} busyLabel="Saving…" onClick={() => void save()}>{prepareReview ? 'Prepare review packet' : 'Export'}</Button>}
             </aside>
