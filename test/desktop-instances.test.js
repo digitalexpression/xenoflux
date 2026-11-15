@@ -258,6 +258,54 @@ test('open reconciles stopped opening and running journals without manual recove
   assert.deepEqual(f.rows.find(row => row.pid === f.original.pid), f.original);
 });
 
+test('an updated vendor is selected after safely recovering an old unverified signed launch', async t => {
+  const f = await fixture(t);
+  const previous = { ...app, version: 'old', build: '1', asarSha256: 'a'.repeat(64) };
+  const updated = { ...app, version: 'new', build: '2', asarSha256: 'b'.repeat(64) };
+  f.runtime.inspectApp = async () => previous;
+  const prepare = f.options.prepareLauncher;
+  f.options.prepareLauncher = async (...args) => {
+    const shortcut = await prepare(...args);
+    shortcut.signedShortcut = true;
+    shortcut.application.executable = shortcut.bootstrapExecutable;
+    return shortcut;
+  };
+  await prepareDesktopInstance(f.store, 'A', f.options);
+  const registry = await readFile(f.store.file);
+  f.runtime.open = async () => { throw Object.assign(new Error('fixture launch verification failed'), { code: 'DESKTOP_OPEN_FAILED' }); };
+  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /reservation preserved/);
+  const id = (await f.store.read()).profiles.find(profile => profile.name === 'A').id;
+  const failed = JSON.parse(await readFile(statePath(f, id)));
+  assert.equal(failed.phase, 'opening'); assert.equal(failed.main, null);
+
+  f.runtime.inspectApp = async () => updated;
+  f.rows.splice(0, f.rows.length, { ...row(70), startedAt: 'Sun Nov 15 12:00:00 2026 UTC' });
+  for (const action of [openDesktopInstance, recoverDesktopInstance]) {
+    await assert.rejects(action(f.store, 'A', f.options), error => /PID 70/.test(error.message)
+      && /Close these Codex instances normally/.test(error.message) && /current vendor installation/.test(error.message));
+    await access(lockPath(f, 'A'));
+    assert.equal(JSON.parse(await readFile(statePath(f, id))).runId, failed.runId);
+  }
+  f.rows.length = 0;
+  const idle = f.runtime.assertResourcesIdle;
+  f.runtime.assertResourcesIdle = async () => { throw new Error('resource scan incomplete'); };
+  await assert.rejects(recoverDesktopInstance(f.store, 'A', f.options), /resource scan incomplete/);
+  await access(lockPath(f, 'A'));
+  f.runtime.assertResourcesIdle = idle;
+  assert.equal((await recoverDesktopInstance(f.store, 'A', f.options)).status, 'recovered');
+  f.runtime.open = async plan => {
+    assert.deepEqual(plan.app, updated);
+    assert.equal(plan.home, failed.plan.home);
+    const main = row(80, plan.app.executable);
+    f.rows.push(main);
+    return { main, processes: [main] };
+  };
+  assert.equal((await openDesktopInstance(f.store, 'A', f.options)).status, 'opened');
+  assert.deepEqual(JSON.parse(await readFile(statePath(f, id))).plan.app, updated);
+  assert.deepEqual(await readFile(f.store.file), registry);
+  assert.equal(f.calls.filter(call => call.operation === 'close' || call.operation === 'focus').length, 0);
+});
+
 test('normal Desktop quit reconciliation releases only its stopped instance reservation and control', async t => {
   const f = await fixture(t), a = await openDesktopInstance(f.store, 'A', f.options), b = await openDesktopInstance(f.store, 'B', f.options);
   const aProcesses = JSON.parse(await readFile(statePath(f, a.profileId))).processes;

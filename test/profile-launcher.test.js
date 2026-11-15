@@ -300,6 +300,81 @@ test('renames only a validated owned bundle when a closed profile changes its di
   assert.equal(info.CFBundleDisplayName, 'Codex · Renamed');
 });
 
+test('refreshes an owned signed shortcut beside Finder metadata and preserves its profile binding', async t => {
+  const { root, store, plan, options } = await fixture(t);
+  const source = join(root, 'profile-launcher.swift');
+  await writeFile(source, 'fixture helper source v1');
+  const shortcutOptions = { ...options, source, signedShortcut: true };
+  const initial = await prepareProfileApp(store, plan, shortcutOptions);
+  const profileDir = join(store.directory, 'desktop-instances', 'apps', plan.profileId);
+  const ownerPath = join(profileDir, '.xfx-profile-app-owner.json');
+  const owner = JSON.parse(await readFile(ownerPath, 'utf8'));
+  const finderPath = join(profileDir, '.DS_Store');
+  const finderBytes = Buffer.from('Finder metadata\0\x01');
+  await writeFile(finderPath, finderBytes, { mode: 0o644 });
+  await chmod(finderPath, 0o644);
+  const finderInfo = await lstat(finderPath);
+  await writeFile(source, 'fixture helper source v2');
+
+  await assert.rejects(loadPreparedProfileApp(store, plan, shortcutOptions), { code: 'PROFILE_APP_REFRESH_REQUIRED' });
+  const refreshed = await prepareProfileApp(store, plan, shortcutOptions);
+  assert.deepEqual(await loadPreparedProfileApp(store, plan, shortcutOptions), refreshed);
+  assert.equal(refreshed.signedShortcut, true);
+  assert.deepEqual(refreshed.application, initial.application);
+  assert.notEqual(refreshed.helperExecutable, initial.helperExecutable);
+  assert.deepEqual(await readFile(finderPath), finderBytes);
+  assert.equal((await lstat(finderPath)).mode & 0o777, 0o644);
+  assert.equal((await lstat(finderPath)).ino, finderInfo.ino);
+  const refreshedOwner = JSON.parse(await readFile(ownerPath, 'utf8'));
+  for (const key of ['kind', 'store', 'profileId', 'nativeRoot', 'appPath', 'bundleId', 'signingPolicy'])
+    assert.equal(refreshedOwner[key], owner[key], `${key} must survive the refresh`);
+  assert.notEqual(refreshedOwner.helperSourceSha256, owner.helperSourceSha256);
+  const info = JSON.parse(await readFile(join(refreshed.application.appPath, 'Contents', 'Info.plist'), 'utf8'));
+  assert.equal(info.XfxStore, store.directory);
+  assert.equal(info.XfxProfileId, plan.profileId);
+  assert.equal(info.XfxNativeRoot, plan.nativeRoot);
+  assert.equal(info.XfxSignedShortcut, true);
+});
+
+for (const entry of ['symlink', 'directory', 'hardlink', 'foreign-owner', 'writable-by-others', 'unexpected-file']) {
+  test(`refuses signed shortcut refresh beside ${entry} metadata without changing the owned app`, async t => {
+    const { root, store, plan, options } = await fixture(t);
+    const source = join(root, 'profile-launcher.swift');
+    await writeFile(source, 'fixture helper source v1');
+    const shortcutOptions = { ...options, source, signedShortcut: true };
+    const initial = await prepareProfileApp(store, plan, shortcutOptions);
+    const profileDir = join(store.directory, 'desktop-instances', 'apps', plan.profileId);
+    const ownerPath = join(profileDir, '.xfx-profile-app-owner.json');
+    const ownerBytes = await readFile(ownerPath);
+    const bootstrapBytes = await readFile(initial.bootstrapExecutable);
+    const entryPath = join(profileDir, entry === 'unexpected-file' ? 'foreign.data' : '.DS_Store');
+    const externalPath = join(root, 'outside-metadata');
+    if (entry === 'directory') await mkdir(entryPath, { mode: 0o700 });
+    else if (entry === 'symlink' || entry === 'hardlink') {
+      await writeFile(externalPath, 'keep outside metadata', { mode: 0o644 });
+      if (entry === 'symlink') await symlink(externalPath, entryPath);
+      else await link(externalPath, entryPath);
+    } else await writeFile(entryPath, 'keep metadata', { mode: 0o644 });
+    if (entry === 'writable-by-others') await chmod(entryPath, 0o666);
+    if (entry === 'foreign-owner') {
+      shortcutOptions.lstat = async path => {
+        const info = await lstat(path);
+        return path === entryPath ? Object.assign(Object.create(info), { uid: info.uid + 1 }) : info;
+      };
+    }
+    const entryInfo = await lstat(entryPath);
+    await writeFile(source, 'fixture helper source v2');
+
+    await assert.rejects(prepareProfileApp(store, plan, shortcutOptions), { code: 'PROFILE_APP_OWNERSHIP_MISMATCH' });
+    assert.deepEqual(await readFile(ownerPath), ownerBytes);
+    assert.deepEqual(await readFile(initial.bootstrapExecutable), bootstrapBytes);
+    assert.equal((await lstat(entryPath)).ino, entryInfo.ino);
+    if (entry === 'symlink' || entry === 'hardlink')
+      assert.equal(await readFile(externalPath, 'utf8'), 'keep outside metadata');
+    await validateProfileApp(store, plan, initial.application, shortcutOptions);
+  });
+}
+
 test('keeps cloned profiles separate while sharing the source-hash helper', async t => {
   const { store, plan, options } = await fixture(t);
   const other = { ...plan, profileId: profileB, name: 'Green' };
@@ -318,6 +393,16 @@ test('refuses a profile directory containing an unknown app or marker', async t 
   await writeFile(join(profileDir, 'foreign.data'), 'keep');
   await assert.rejects(prepareProfileApp(store, plan, options), { code: 'PROFILE_APP_OWNERSHIP_MISMATCH' });
   assert.equal(await readFile(join(profileDir, 'foreign.data'), 'utf8'), 'keep');
+});
+
+test('refuses Finder metadata without an owned app marker', async t => {
+  const { store, plan, options } = await fixture(t);
+  const profileDir = join(store.directory, 'desktop-instances', 'apps', profileA);
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  const finderPath = join(profileDir, '.DS_Store');
+  await writeFile(finderPath, 'keep metadata', { mode: 0o644 });
+  await assert.rejects(prepareProfileApp(store, plan, options), { code: 'PROFILE_APP_OWNERSHIP_MISMATCH' });
+  assert.equal(await readFile(finderPath, 'utf8'), 'keep metadata');
 });
 
 test('rejects symlinked app directories and external links in source bundle', async t => {
