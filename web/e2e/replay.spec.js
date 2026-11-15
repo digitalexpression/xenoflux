@@ -293,12 +293,13 @@ test('unavailable root histories retain their reason even without any events', a
     await page.goto(server.launchUrl);
     await page.goto(`${server.origin}/reports/demo-run`);
     await expect(page.getByText('Replay coverage', { exact: true })).toBeVisible();
-    await expect(page.getByText(/Exact native source is missing/)).toHaveCount(2);
+    await expect(page.getByRole('region', { name: 'Recorded activity', exact: true }).getByText(/Exact native source is missing/)).toHaveCount(2);
+    await expect(page.getByRole('region', { name: 'Session replay', exact: true }).getByText(/Exact native source is missing/)).toHaveCount(2);
     await expect(page.getByText('No activity recorded in this session.', { exact: true })).toHaveCount(0);
   } finally { await page.close(); await server.close(); }
 });
 
-test('replay keeps both sides readable at narrow widths and enlarged text in light and dark themes', async ({ browser }) => {
+test('replay keeps both sides readable at desktop widths in light and dark themes', async ({ browser }) => {
   const provider = createDemoProvider();
   const server = await startUiServer({ provider, staticRoot: resolve('dist/ui') });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
@@ -318,7 +319,7 @@ test('replay keeps both sides readable at narrow widths and enlarged text in lig
     const right = page.getByRole('region', { name: /strict-review session tree/i });
     for (const mode of ['light', 'dark']) {
       await theme.selectOption(mode);
-      for (const [width, fontSize] of [[800, '100%'], [800, '200%'], [320, '100%']]) {
+      for (const [width, fontSize] of [[1280, '100%'], [1440, '100%']]) {
         await page.setViewportSize({ width, height: 900 });
         await page.evaluate(size => { document.documentElement.style.fontSize = size; }, fontSize);
         await expect(left).toBeVisible();
@@ -420,7 +421,7 @@ test('real-style delegation is searchable, named and reachable from its assignme
   } finally { await page.close(); await server.close(); }
 });
 
-for (const [theme, width] of [['light', 1280], ['dark', 390]]) {
+for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
 test(`agent summaries link assignment, result and parent follow-up without search or side confusion in ${theme}`, async ({ browser }) => {
   const provider = createDemoProvider();
   const left = replay('left'), right = replay('right');

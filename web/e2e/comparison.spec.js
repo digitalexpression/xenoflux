@@ -20,6 +20,10 @@ async function assertReportSides(page, { leftName = 'strict-review', rightName =
   await expect(page.locator('.chip-b')).toContainText(rightName);
   await expect(page.locator('.chip-b')).toContainText(rightClient);
   const sides = page.getByRole('group', { name: 'Compared profiles' });
+  for (const side of await sides.locator(':scope > section').all()) {
+    const details = side.locator('details.comparison-side-details');
+    if (await details.getAttribute('open') === null) await details.locator('summary').click();
+  }
   await expect(sides.getByText('Root model (reported): fixture-model', { exact: true })).toHaveCount(2);
   await expect(sides.getByText('Root reasoning effort (reported): medium', { exact: true })).toHaveCount(2);
 }
@@ -163,12 +167,49 @@ test('export report files and reopen JSON after source histories are removed', a
   expect(await page.locator('section').filter({ has: page.getByRole('heading', { name: 'What we could not see', exact: true }) }).innerText()).toBe(limits);
 });
 
+test('collect two sessions in the library tray, swap them and compare', async ({ page }) => {
+  await page.goto(`${new URL(page.url()).origin}/sessions`);
+  await expect(page.getByRole('heading', { name: 'Sessions', level: 1 })).toBeVisible();
+  const tray = page.getByRole('region', { name: 'Comparison', exact: true });
+  await expect(tray).toHaveCount(0);
+  await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Fix the date test');
+  const addBaseline = page.getByRole('button', { name: 'Add Fix the date test (baseline) to the comparison' });
+  await addBaseline.focus();
+  await page.keyboard.press('Enter');
+  const removeBaseline = page.getByRole('list', { name: 'Sessions' }).getByRole('button', { name: 'Remove Fix the date test (baseline) from the comparison' });
+  await expect(removeBaseline).toBeFocused();
+  await expect(removeBaseline).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'Add Fix the date test (strict-review) to the comparison' }).click();
+  await expect(page.getByText('Two sessions are in the comparison. Remove one to add another.')).toBeVisible();
+  expect((await tray.innerText()).indexOf('baseline')).toBeLessThan((await tray.innerText()).indexOf('strict-review'));
+  await tray.getByRole('button', { name: 'Swap sides' }).click();
+  await expect.poll(async () => { const text = await tray.innerText(); return text.indexOf('strict-review') < text.indexOf('baseline'); }).toBe(true);
+  // The pair follows the reader to other pages.
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Profiles' }).click();
+  await tray.getByRole('link', { name: 'Compare…' }).click();
+  await expect(page.getByRole('heading', { name: 'Choose two sessions' })).toBeVisible();
+  await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Fix the date test');
+  await expect(page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop.*left side/ })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: /Fix the date test, baseline, Codex CLI.*right side/ })).toBeChecked();
+  await page.getByRole('button', { name: 'Compare sessions' }).click();
+  await expect(page.getByRole('heading', { name: 'Conditions' })).toBeVisible();
+  await expect(tray).toHaveCount(0);
+  expect(await page.evaluate(() => window.sessionStorage.getItem('xenoflux.comparison-tray'))).toBeNull();
+});
+
 test('find and carry an older session beyond the latest hundred into comparison', async ({ page }) => {
   await page.goto(`${new URL(page.url()).origin}/sessions`);
   await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Rare older task');
-  const compare = page.getByRole('link', { name: 'Compare Rare older task (baseline) with another session' });
-  await compare.click();
+  await page.getByRole('button', { name: 'Add Rare older task (baseline) to the comparison' }).click();
+  const tray = page.getByRole('region', { name: 'Comparison', exact: true });
+  await expect(tray.getByText('Rare older task', { exact: true })).toBeVisible();
+  await expect(tray.getByText('Add one more session')).toBeVisible();
+  // The pair survives a reload and follows the reader to the picker.
+  await page.reload();
+  await expect(tray.getByText('Rare older task', { exact: true })).toBeVisible();
+  await page.goto(`${new URL(page.url()).origin}/compare/sessions`);
   await expect(page.getByRole('heading', { name: 'Choose two sessions' })).toBeVisible();
+  await expect(tray).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Your comparison' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Untick Rare older task (baseline)' })).toBeVisible();
   await expect(page.getByText('Rare older task', { exact: true })).toBeVisible();

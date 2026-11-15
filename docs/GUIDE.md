@@ -46,7 +46,11 @@ are never copied. Profiles subsequently evolve independently.
 | Claude Code | Sign in through the browser; Open in Terminal for interactive work | Separate Desktop startup and storage; authenticated session/model use unverified |
 | GitHub Copilot | Sign in through the browser with the shared GitHub CLI account; Open in Terminal for interactive work | Profile-bound local startup and storage; authenticated session/model use unverified |
 
-For Claude Code or Copilot, choose **Sign in** on the profile card. Complete
+Profiles groups entries by client. Each entry keeps inspection links separate
+from sign-in and opening actions. **More** contains the available registry edits
+and selected-copy actions.
+
+For Claude Code or Copilot, choose **Sign in** on the profile entry. Complete
 authorization in your browser. Xenoflux checks sign-in automatically and updates
 the profile when verification finishes. You do not need to run a command or return
 to **Check sign-in**. GitHub may ask you to enter the device code shown in Xenoflux.
@@ -72,13 +76,13 @@ a CLI starts no task automatically. Close its Terminal session before changing
 or copying that profile. A native startup can still write its own state or run
 configured hooks.
 
-For Copilot, choose **Open GitHub Copilot Desktop** on the profile card. The
+For Copilot, choose **Open GitHub Copilot Desktop** on the profile entry. The
 signed installed app opens with that profile's storage. Xenoflux refuses an
 already-running Copilot app or a profile reserved by other work; it never closes
 those clients for you. Desktop sign-in remains inside the vendor app, separate
 from the CLI's shared-account check.
 
-For Claude, choose **Open Claude Desktop** on the profile card. Each profile has
+For Claude, choose **Open Claude Desktop** on the profile entry. Each profile has
 its own Desktop data folder alongside its Claude Code configuration folder.
 Other Claude Desktop instances can stay open. Xenoflux starts a new instance
 and verifies its selected storage without focusing, closing or changing the
@@ -104,8 +108,8 @@ for active reservations and file holders and never closes their clients.
 See [terminal copying and recovery](CLI.md#profiles-copy-and-recovery).
 
 Rename, repository binding and removal affect registry metadata; removing a profile
-leaves its files on disk. Native Open controls submit no task. The separate **Native apps** controls open
-stock Claude/Copilot with the app's existing setup; they do not select a managed
+leaves its files on disk. Native Open controls submit no task. The separate **Native apps** controls
+under **Clients on this Mac** open stock Claude/Copilot with the app's existing setup; they do not select a managed
 profile. A Copilot session link dispatch does not prove that the target session exists.
 
 ## Inspect and compare setups
@@ -136,6 +140,11 @@ commit, model/effort, permissions, limits and any setup/check commands before
 **Start 2 model runs**. Sides run sequentially in separate copies of committed
 source; dirty, untracked and ignored files are excluded.
 
+Preparation groups **Task and source**, **Two setups**, and **Checks and limits**
+on one page. Use the stage links to move between them without losing entered
+values. **Review before starting** checks the preparation; edit links return to
+the relevant section before requesting a fresh preview.
+
 No checks are selected automatically. Setup/check programs run outside the Codex
 sandbox and can affect external files/services; select trusted commands. Codex
 comparisons default to workspace-write with networking disabled and offer read-only.
@@ -154,9 +163,14 @@ not overlap. Profile mutations and new Desktop startup are blocked by execution
 reservations. The controller's default capacity is eight jobs. Shared activity
 limits timing comparisons.
 
+Open **Activity** in the sidebar for current comparisons and reviews and recent
+comparison records. Open a job to see its current state, answer its native requests
+or cancel that job. The list updates automatically; **Refresh activity** rereads
+the list and recent records. Opening a record never resumes or retries model work.
+
 ## Inspect a session
 
-From **Browse sessions**, choose **Inspect** beside a Codex session, or choose
+From **Sessions**, choose **Inspect** beside a Codex session, or choose
 **Choose a session by profile** for Codex, Claude Code or GitHub Copilot.
 Profiles also offers **Inspect sessions** with that profile selected. Listing
 Copilot history uses its CLI and existing sign-in; managed profiles need a bound
@@ -167,6 +181,13 @@ observations, turn settings, skills, time, tokens and recorded activity. Open an
 event for its retained content and source reference. Available compaction markers
 and summaries link to their events; absent summaries do not prove scope loss.
 Today's setup is a separate snapshot, never a substitute for historical context.
+
+Use **Overview**, **Activity**, **Harness**, **Context**, **Usage**, **Outcome**
+and **Source** to read one kind of evidence at a time. The selected section stays
+in the address for reload and Back. Activity keeps its event selection and search
+when you switch sections. Source holds the detailed coverage, identity and limits.
+Overview and Context show the first retained user message where available; earlier
+messages may be missing. Its source link opens the recorded event in Activity.
 
 On a comparison report, choose **Inspect session** on either side to inspect its
 retained capture. Owned captures and historical imports keep their own coverage
@@ -189,7 +210,9 @@ cannot fill both sides.
 
 ## Compare existing sessions
 
-Select two sessions; the first is the left side and **Swap sides** reverses them.
+On **Sessions**, choose **Compare** beside two sessions. The sidebar keeps the pair
+while you search or open other pages; **Compare…** continues to the picker, where
+you can also select both. The first is the left side and **Swap sides** reverses them.
 For different profiles/clients, use **Choose recent sessions by profile**, select
 each profile and **List recent sessions**. Changed context needs a fresh selection.
 Managed Copilot listing uses its first bound repository; bind one before listing.
@@ -204,6 +227,13 @@ surface/location, completion and usage remain unknown. Export freezes the projec
 so native histories are no longer needed. Raw transcripts remain private.
 
 ## Read and export a report
+
+Comparison reports are designed for desktop windows at least 1280 CSS pixels wide.
+Their Overview leads with recorded finding counts, paired activity lines and
+conditions. Different, Same and Could not compare count findings, not condition
+rows or task quality. Hollow activity stops have no per-turn token total; dotted
+lines preserve recorded order where stop timestamps do not support a time scale.
+Choose a stop to open its retained event. Each session keeps its own clock.
 
 **Session and harness comparison** separates requested variation from recorded
 differences. **Model-only request** means only the model differs among the listed

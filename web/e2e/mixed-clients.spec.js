@@ -7,7 +7,7 @@ test('mixed clients expose native choices and keep path and command decisions se
   const app = await createMixedClientFixture();
   try {
     await writeFile(app.copilotConfig, JSON.stringify({ label: 'Copilot fixture', storedText: 'Stored Copilot answer.' }), { mode: 0o600 });
-    await page.setViewportSize({ width: 390, height: 844 });
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.addInitScript(() => localStorage.setItem('xenoflux-theme', 'dark'));
     await page.goto(app.url);
     await page.getByRole('link', { name: 'Run a new task' }).click();
@@ -37,6 +37,7 @@ test('mixed clients expose native choices and keep path and command decisions se
     await expect(path).toHaveCount(0);
     await command.getByRole('button', { name: 'Reject' }).click();
     await page.getByRole('link', { name: 'Open the report' }).click();
+    await page.locator('details.comparison-side-details > summary').first().click();
     await expect(page.getByText('Copilot Auto · repeating this pair may route to different models.')).toBeVisible();
     await expect(page.getByText(/Turn 1 · fixture-routed-model/)).toBeVisible();
     await expect(page.getByText('Pinned fixture input', { exact: true }).first()).toBeVisible();
@@ -45,6 +46,7 @@ test('mixed clients expose native choices and keep path and command decisions se
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.getByRole('button', { name: 'Inspect session', exact: true }).first().click();
     await expect(page.getByText(/Retained xfx capture/).first()).toBeVisible();
+    await page.getByRole('navigation', { name: 'Session sections' }).getByRole('link', { name: 'Activity', exact: true }).click();
     await expect(page.getByRole('region', { name: 'Session timeline', exact: true })).toHaveCount(1);
     await expect(page.getByRole('region', { name: 'Right timeline', exact: true })).toHaveCount(0);
   } finally { await app.close(); }
@@ -79,6 +81,8 @@ test('profile-bound native sessions and mixed setup inventories remain usable in
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.getByRole('button', { name: 'Compare selected sessions' }).click();
     await expect(page.getByRole('heading', { name: 'Imported native sessions' })).toBeVisible();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    for (const details of await page.locator('details.comparison-side-details > summary').all()) await details.click();
     await expect(page.getByText(/Import read context · Copilot managed · CLI · managed root · local/)).toBeVisible();
     await expect(page.getByText(/Private Claude list title/)).toHaveCount(0);
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');

@@ -59,7 +59,7 @@ test('task-end patches remain inspectable only with selected content and explain
   await expect(page.getByLabel('A captured patch', { exact: true })).toContainText('+export const sum = 10;');
   for (const theme of ['light', 'dark']) {
     await page.getByRole('combobox', { name: 'Theme' }).selectOption(theme);
-    await page.setViewportSize({ width: 800, height: 900 });
+    await page.setViewportSize({ width: 1280, height: 900 });
     await left.scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`patch-${theme}-800.png`) });

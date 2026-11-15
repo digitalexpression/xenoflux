@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { ArrowLeftRight } from 'lucide-react';
+import { ArrowLeftRight, Check, Circle, CircleAlert, CornerDownRight, Minus } from 'lucide-react';
 import { ApiError, apiGet, apiPost } from '@/api/client';
 import type { ReviewTaskDecision, RunAdvanced, RunOptions, RunProfileOption, RunPreview, RunRequest, RunView } from '@/api/types';
 import { ExecutionFields } from '@/components/ExecutionFields';
@@ -20,6 +20,18 @@ function loadDraft(): RunRequest | null {
   try { const value = sessionStorage.getItem(DRAFT); return value ? JSON.parse(value) as RunRequest : null; } catch { return null; }
 }
 function saveDraft(request: RunRequest) { try { sessionStorage.setItem(DRAFT, JSON.stringify(request)); } catch { /* the draft is a convenience only */ } }
+
+
+function RunStages({ review = false }: { review?: boolean }) {
+  return <nav className="run-stages" aria-label="Preparation stages"><ol>
+    {[
+      { label: 'Task and source', target: 'task-heading' },
+      { label: 'Two setups', target: 'profiles-heading' },
+      { label: 'Checks and limits', target: 'checks-heading' },
+    ].map((stage, index) => <li key={stage.target}><a href={`${review ? '/runs/new' : ''}#${stage.target}`}><span aria-hidden="true">{index + 1}</span>{stage.label}</a></li>)}
+    <li><span className="run-stage-review" aria-current={review ? 'step' : undefined}><span aria-hidden="true">4</span>Review and start</span></li>
+  </ol></nav>;
+}
 
 function NotInThisBuild() {
   return (
@@ -83,15 +95,16 @@ function RunForm() {
   return (
     <Page current="compare" title="Run a new task">
       <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare a task' }, { label: 'Run a new task' }]} title="Run a new task"
-        subtitle="The task runs on two sides, one after the other. Both sides can use the same profile. Nothing starts until you review it on the next step." />
+        subtitle="Prepare one task and two setups. Review the exact source and execution settings before starting either side." />
+      <RunStages />
       {data?.simulated ? <SimulatedNote>Runs are simulated; no model task starts and no files are copied.</SimulatedNote> : null}
       {options.error ? <LoadError error={options.error} onRetry={options.reload} /> : null}
       {options.loading && !data ? <Loading label="Checking profiles and projects…" /> : null}
       {data ? (
-        <form className="flex flex-wrap gap-6 items-start" onSubmit={submit} noValidate>
-          <div className="flex flex-col gap-6" style={{ flex: '999 1 600px', minWidth: 0 }}>
-            <section className="panel flex flex-col gap-3" aria-labelledby="task-heading">
-              <h2 id="task-heading" className="text-heading">Task</h2>
+        <form className="run-preparation" onSubmit={submit} noValidate>
+          <div className="run-preparation-fields">
+            <section className="run-preparation-section" aria-labelledby="task-heading">
+              <h2 id="task-heading" className="text-heading" tabIndex={-1}>Task and source</h2>
               <div>
                 <label htmlFor={ids.task} className="field-label">What should both profiles do?</label>
                 <textarea id={ids.task} className="input" rows={4} value={task} onChange={event => { setTask(event.target.value); setTaskError(false); }}
@@ -104,32 +117,9 @@ function RunForm() {
                 <input id={ids.files} className="input font-mono" value={files} onChange={event => setFiles(event.target.value)} aria-describedby={`${ids.files}-hint`} />
                 <p id={`${ids.files}-hint`} className="hint mt-1">Used to point out edits to other files. It doesn’t block them.</p>
               </div>
-            </section>
-            <section className="panel flex flex-col gap-3" aria-labelledby="profiles-heading">
-              <h2 id="profiles-heading" className="text-heading">Comparison sides</h2>
-              <div className="flex flex-wrap gap-4 items-end">
-                {(['a', 'b'] as const).flatMap(side => {
-                  const value = side === 'a' ? a : b;
-                  const set = side === 'a' ? setA : setB;
-                  const readiness = note(value);
-                  const slot = (
-                    <div key={side} className={cn('flex-1 min-w-[220px] rounded-control p-3 flex flex-col gap-1', side === 'a' ? 'edge-a' : 'edge-b')}>
-                      <label htmlFor={side === 'a' ? ids.a : ids.b} className="field-label"><SideText side={side}>{side === 'a' ? 'First' : 'Second'}</SideText> · {side === 'a' ? 'left' : 'right'} side of the report</label>
-                  <select id={side === 'a' ? ids.a : ids.b} className="input font-mono" value={value} onChange={event => { set(event.target.value); setExecution(current => ({ ...current, [side]: {} })); }}>
-                    <option value="">Choose a profile</option>
-                        {data.profiles.map(p => <option key={optionKey(p)} value={optionKey(p)}>{p.label ?? p.name}</option>)}
-                      </select>
-                      <ExecutionFields profile={readiness?.name ?? value} client={readiness?.client} workspace={repository} value={execution[side]} onChange={value => setExecution(old => ({ ...old, [side]: value }))} />
-                      {readiness ? <span className="text-ui" style={{ color: readiness.ready ? 'var(--color-text-muted)' : 'var(--color-warning)' }}>{[readiness.surface?.toUpperCase(), readiness.rootMode ? readiness.rootMode + ' root' : null, readiness.executionLocation, readiness.readiness].filter(Boolean).join(' · ')}</span> : null}
-                    </div>
-                  );
-                  return side === 'a' ? [slot, <Button key="swap" size="icon" aria-label="Swap the two sides" onClick={() => { setA(b); setB(a); setExecution({ a: execution.b, b: execution.a }); }}><ArrowLeftRight size={18} aria-hidden="true" /></Button>] : [slot];
-                })}
-              </div>
-              <p className="hint">They run one after the other, first then second. Each side uses its selected model and effort for this job. Blank fields inherit the profile settings.</p>
-            </section>
-            <section className="panel flex flex-col gap-3" aria-labelledby="project-heading">
-              <h2 id="project-heading" className="text-heading">Project</h2>
+
+            <div className="run-source" role="group" aria-labelledby="project-heading">
+              <h3 id="project-heading" className="text-body font-semibold">Source</h3>
               <div className="flex flex-wrap gap-4">
                 <div className="flex-1 min-w-[220px]">
                   <label htmlFor={ids.repo} className="field-label">Repository</label>
@@ -146,9 +136,33 @@ function RunForm() {
                 </div>
               </div>
               <p className="hint">Each profile starts in its own copy of this commit. Uncommitted edits and untracked or ignored files aren’t included.</p>
+            </div>
             </section>
-            <section className="panel flex flex-col gap-3" aria-labelledby="checks-heading">
-              <h2 id="checks-heading" className="text-heading">Verification <span className="hint font-normal">· optional</span></h2>
+            <section className="run-preparation-section" aria-labelledby="profiles-heading">
+              <div className="run-section-heading"><h2 id="profiles-heading" className="text-heading" tabIndex={-1}>Two setups</h2><span className="hint">Left runs first, then Right</span></div>
+              <div className="run-setup-pair">
+                {(['a', 'b'] as const).flatMap(side => {
+                  const value = side === 'a' ? a : b;
+                  const set = side === 'a' ? setA : setB;
+                  const readiness = note(value);
+                  const slot = (
+                    <div key={side} className="run-setup" data-side={side}>
+                      <label htmlFor={side === 'a' ? ids.a : ids.b} className="field-label"><SideText side={side}>{side === 'a' ? 'First' : 'Second'}</SideText> · {side === 'a' ? 'left' : 'right'} side of the report</label>
+                  <select id={side === 'a' ? ids.a : ids.b} className="input" value={value} onChange={event => { set(event.target.value); setExecution(current => ({ ...current, [side]: {} })); }}>
+                    <option value="">Choose a profile</option>
+                        {data.profiles.map(p => <option key={optionKey(p)} value={optionKey(p)}>{p.label ?? p.name}</option>)}
+                      </select>
+                      <ExecutionFields profile={readiness?.name ?? value} client={readiness?.client} workspace={repository} value={execution[side]} onChange={value => setExecution(old => ({ ...old, [side]: value }))} />
+                      {readiness ? <span className="text-ui" style={{ color: readiness.ready ? 'var(--color-text-muted)' : 'var(--color-warning)' }}>{[readiness.surface?.toUpperCase(), readiness.rootMode ? readiness.rootMode + ' root' : null, readiness.executionLocation, readiness.readiness].filter(Boolean).join(' · ')}</span> : null}
+                    </div>
+                  );
+                  return side === 'a' ? [slot, <Button key="swap" size="icon" aria-label="Swap the two sides" onClick={() => { setA(b); setB(a); setExecution({ a: execution.b, b: execution.a }); }}><ArrowLeftRight size={18} aria-hidden="true" /></Button>] : [slot];
+                })}
+              </div>
+              <p className="hint">They run one after the other, first then second. Each side uses its selected model and effort for this job. Blank fields inherit the profile settings.</p>
+            </section>
+            <section className="run-preparation-section" aria-labelledby="checks-heading">
+              <h2 id="checks-heading" className="text-heading" tabIndex={-1}>Checks and limits</h2>
               {checks.length === 0 ? <p className="text-ui"><span className="font-medium">No verification checks selected.</span> <span className="muted">Checks are optional and verify only their stated criteria.</span></p> : null}
               {checks.map((check, index) => (
                 <div key={index} className="flex flex-wrap gap-3 items-end">
@@ -161,9 +175,8 @@ function RunForm() {
               ))}
               {checks.length ? <p className="text-ui" style={{ color: 'var(--color-warning)' }}>Checks run in each profile’s copy after its task, as ordinary programs on this Mac, outside the Codex sandbox. Only add commands you trust.</p> : null}
               <div><Button className="border-dashed" onClick={() => setChecks(list => [...list, { name: '', command: '' }])}>Add a check command</Button></div>
-            </section>
-            <section className="panel flex flex-col gap-3" aria-labelledby="advanced-heading">
-              <h2 id="advanced-heading" className="text-body font-semibold">Advanced settings</h2>
+            <div className="run-limits" role="group" aria-labelledby="advanced-heading">
+              <h3 id="advanced-heading" className="text-body font-semibold">Limits and setup commands</h3>
               <button type="button" className="btn btn-link self-start text-left" aria-expanded={settingsOpen} aria-controls={ids.advanced} onClick={() => setSettingsOpen(value => !value)}>
                 {settingsOpen ? 'Hide advanced settings' : `${advanced?.timeMinutes ?? cap?.timeMinutes} min per run · ${advanced?.outputMiB ?? cap?.outputMiB ?? 8} MiB output · ${advanced?.setup.length ?? 0} setup commands`}
               </button>
@@ -195,12 +208,13 @@ function RunForm() {
                 <div><Button className="border-dashed" onClick={() => setAdvanced(old => ({ timeMinutes: old?.timeMinutes ?? cap?.timeMinutes ?? 15, outputMiB: old?.outputMiB ?? cap?.outputMiB ?? 8, program: old?.program ?? '', setup: [...(old?.setup ?? []), { name: '', command: '' }] }))}>Add setup command</Button></div>
                 <p className="hint">Overrides apply to this run only; saved profile settings stay as they are.</p>
               </div>
-            </section>
+            </div></section>
           </div>
-          <aside className="panel flex flex-col gap-3" style={{ flex: '1 1 320px' }} aria-labelledby="this-run">
+          <aside className="run-summary" aria-labelledby="this-run">
             <h2 id="this-run" className="text-heading">This run</h2>
-            <dl className="grid gap-x-4 gap-y-2 text-ui" style={{ gridTemplateColumns: 'auto 1fr' }}>
-              <dt className="muted">Profiles</dt><dd>{a ? <SideText side="a">{a}</SideText> : '–'} then {b ? <SideText side="b">{b}</SideText> : '–'}</dd>
+            <p className="hint">Preparation only · nothing has started</p>
+            <dl className="grid text-ui">
+              <dt className="muted">Profiles</dt><dd>{a ? <SideText side="a">{note(a)?.name ?? a}</SideText> : '–'} then {b ? <SideText side="b">{note(b)?.name ?? b}</SideText> : '–'}</dd>
               <dt className="muted">Model runs</dt><dd>2</dd>
               <dt className="muted">Time limit per profile</dt><dd>2 profiles · {advanced?.timeMinutes ?? cap?.timeMinutes ?? 15} min each</dd>
               <dt className="muted">Commands</dt><dd>{checks.filter(c => c.command.trim()).length} checks · {advanced?.setup.filter(item => item.command.trim()).length ?? 0} setup commands</dd>
@@ -238,8 +252,10 @@ export function RunReview() {
   }
   const startButton = data?.ready && data.previewToken ? <Button variant="primary" busy={busy} busyLabel="Starting…" onClick={() => void start()}>Start 2 model runs</Button> : null;
   return (
-    <Page current="compare" title="Review before starting" reading>
+    <Page current="compare" title="Review before starting">
+      <div className="run-review">
       <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Run a new task', to: '/runs/new' }, { label: 'Review' }]} title="Review before starting" />
+      <RunStages review />
       {data?.simulated ? <SimulatedNote>Starting is simulated; no model task starts.</SimulatedNote> : null}
       {preview.error ? <ErrorPanel title="Can’t review this run" actions={<><Button onClick={preview.reload}>Refresh preview</Button><Link className="btn" to="/runs/new">Back to edit</Link></>}>{preview.error.message}</ErrorPanel> : null}
       {preview.loading && !data ? <Loading label="Checking profiles, project and commit…" rows={2} /> : null}
@@ -252,25 +268,27 @@ export function RunReview() {
               <p className="mt-2"><Button disabled aria-describedby="start-reason">Start 2 model runs</Button> <span id="start-reason" className="hint">Unavailable until this is resolved.</span></p>
             </WarningAlert>
           ) : (
-            <section className="panel flex flex-col gap-3" style={{ borderTop: '3px solid var(--color-link-focus)' }} aria-labelledby="ready">
+            <section className="run-ready" aria-labelledby="ready">
               <p id="ready" className="flex flex-wrap gap-2 items-center"><StatusBadge status="success">Ready to start</StatusBadge><span className="hint">Profiles, project and commit checked · nothing has started</span></p>
               <p className="flex flex-wrap items-center gap-2"><ProfileChip side="a" name={data.runs[0]!.profile} /><span className="hint">then</span><ProfileChip side="b" name={data.runs[1]!.profile} /><span className="text-ui">{data.summary}</span></p>
               {data.checks.length ? <p className="text-ui"><span className="font-medium">{data.checks.length} check after each task:</span> {data.checks.join(', ')}. Its result is reported next to what the agent said.</p>
-                : <InfoNotice title="No verification checks selected." action={<Link className="btn" to="/runs/new">Add a check</Link>}>The report will say so. Finishing the task won’t show whether the change works.</InfoNotice>}
+                : <div className="run-verification-note"><p className="text-ui font-medium">No verification checks selected.</p><p className="hint">The report will say so. Finishing the task won’t show whether the change works.</p><Link to="/runs/new#checks-heading">Add a check</Link></div>}
               {error ? <ErrorPanel title="Start request failed" actions={<Button onClick={() => { setError(null); preview.reload(); }}>Refresh preview</Button>}>{error} The preview token is retained. Refresh it only after checking the error; a network failure may leave the start outcome uncertain.</ErrorPanel> : null}
               <div className="flex flex-wrap gap-2">{startButton}<Link className="btn" to="/runs/new">Back to edit</Link></div>
             </section>
           )}
-          <h2 className="text-heading">Details</h2>
-          <section className="flex flex-col gap-2" aria-labelledby="d-task"><h3 id="d-task" className="text-body font-semibold">Task <Link to="/runs/new" className="text-ui font-normal ml-2">Edit</Link></h3>
-            <blockquote className="panel text-ui m-0 whitespace-pre-wrap wrap-anywhere">{data.task}</blockquote>
+          <div className="run-review-details">
+          <h2 className="text-heading">Prepared inputs</h2>
+          <section className="flex flex-col gap-2" aria-labelledby="d-task"><h3 id="d-task" className="text-body font-semibold">Task <Link to="/runs/new#task-heading" className="text-ui font-normal ml-2">Edit</Link></h3>
+            <blockquote className="run-task-text text-ui m-0 whitespace-pre-wrap wrap-anywhere">{data.task}</blockquote>
             {data.files ? <p className="text-ui">May change <span className="font-mono">{data.files}</span> · the same text goes to both profiles</p> : null}</section>
           <section className="flex flex-col gap-2" aria-labelledby="d-runs"><h3 id="d-runs" className="text-body font-semibold">Runs, in order</h3>
-            <ol className="list-none p-0 flex flex-col gap-2">{data.runs.map((run, index) => (
-              <li key={run.side} className={cn('rounded-control px-4 py-3 flex flex-col gap-1', run.side === 'a' ? 'edge-a' : 'edge-b')}>
+            <ol className="run-review-sides">{data.runs.map((run, index) => (
+              <li key={run.side} className="run-review-side">
                 <SideText side={run.side}>{index + 1} · {run.profile}</SideText><span className="text-ui wrap-anywhere">{run.text}</span>{run.note ? <span className="hint wrap-anywhere">{run.note}</span> : null}
               </li>))}</ol></section>
           <DetailList id="d-where" title="Where each run starts" items={data.where} />
+          <Link to="/runs/new#profiles-heading">Edit the two setups</Link>
           <DetailList id="d-advanced" title="Run settings" items={request?.advanced ? [`Time limit: ${request.advanced.timeMinutes} minutes per run`, `Output cap: ${request.advanced.outputMiB} MiB`, `Codex program: ${request.advanced.program || 'profile default'}`, ...(request.advanced.setup.length ? request.advanced.setup.map(item => `Setup ${item.name || '(unnamed)'}: ${item.command}`) : ['No setup commands'])] : ['Profile defaults apply.']} />
           <DetailList id="d-checks" title="Verification" items={data.checks.length ? [...data.checks, 'Runs your command in each profile’s copy after its task, as an ordinary program on this Mac, outside the Codex sandbox.'] : ['None selected. See the note at the top.']} />
           <DetailList id="d-limits" title="Limits" items={data.limits} />
@@ -278,9 +296,11 @@ export function RunReview() {
             <DetailList id="d-will" title="Starting will" items={data.willDo} panel />
             <DetailList id="d-never" title="It never" items={data.never} panel />
           </div>
+          </div>
           <div className="flex flex-wrap gap-2 pt-4 border-t" style={{ borderColor: 'var(--color-divider)' }}>{startButton}<Link className="btn" to="/runs/new">Back to edit</Link></div>
         </>
       ) : null}
+      </div>
     </Page>
   );
 }
@@ -390,15 +410,15 @@ export function RunProgress() {
   }
   if (!info?.features.runs) return <NotInThisBuild />;
   return (
-    <Page current="compare" title="Run progress">
+    <Page current="activity" title="Run progress">
       {loadError && !data ? <LoadError error={loadError} onRetry={() => void readRun(id)} /> : null}
       {loading && !data ? <Loading label="Reading the run’s state…" /> : null}
       {data ? (
         <>
-          <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Run a new task' }, { label: 'Progress' }]} title={running ? `Running: ${data.task}` : data.task} subtitle={data.meta} />
+          <PageTitle breadcrumb={[{ label: 'Activity', to: '/activity' }, { label: 'Comparison progress' }]} title={running ? `Running: ${data.task}` : data.task} subtitle={data.meta} />
           {data.simulated ? <SimulatedNote>This run is simulated.</SimulatedNote> : null}
           <p className="sr-only" role="status" aria-live="polite">{announce}</p>
-          <section className="panel flex flex-col gap-4" aria-labelledby="run-state">
+          <section className="run-progress flex flex-col gap-4" aria-labelledby="run-state">
             <div className="flex flex-wrap items-center gap-3">
               <StatusBadge status={END_STATUS[data.state]}>{data.stateText}</StatusBadge>
               <h2 id="run-state" className="text-heading">{data.headline}</h2>
@@ -408,22 +428,23 @@ export function RunProgress() {
             {actionError ? <ErrorPanel title="Action failed" actions={<Button onClick={() => setActionError(null)}>Dismiss</Button>}>{actionError}</ErrorPanel> : null}
             {running && data.timeUsed !== null ? <div className="progress-track" role="progressbar" aria-label="Time used of the overall limit" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(data.timeUsed * 100)}>
               <div className="progress-fill" style={{ width: `${Math.round(data.timeUsed * 100)}%` }} /></div> : null}
-            <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))' }}>
+            <div className="run-progress-sides">
               {data.columns.map((column, index) => (
-                <div key={column.side} className="rounded-control p-4 flex flex-col gap-2" style={{ border: '1px solid var(--color-divider)', borderTop: `3px solid var(--color-side-${column.side})` }}>
-                  <div className="flex flex-wrap justify-between gap-2"><SideText side={column.side}>{index + 1} · {column.profile}</SideText><span className="badge">{column.state}</span></div>
+                <section key={column.side} className="run-progress-side" aria-label={`${column.side === 'a' ? 'Left' : 'Right'} · ${column.profile}`}>
+                  <div className="flex flex-wrap justify-between gap-2"><SideText side={column.side}>{index + 1} · {column.side === 'a' ? 'Left' : 'Right'} · {column.profile}</SideText><span className="flex flex-wrap items-center gap-2">{!running ? <span className="hint">Last recorded state</span> : null}<span className="badge">{column.state}</span></span></div>
                   {data.pendingRequests?.filter(request => request.side === column.side).map(request =>
                     <NativeReviewRequest key={request.requestId} request={request} busy={busy || data.pendingRequests?.[0]?.requestId !== request.requestId} onRespond={response => respond(request.requestId, response)} />)}
                   {column.failure ? <ErrorPanel live={false} title={column.failure.includes("rate limit") ? "Native usage limit reached" : "Model task did not start"}>{column.failure}</ErrorPanel> : null}
-                  <ol className="list-none p-0 flex flex-col gap-1 text-ui">
+                  {!running ? <p className="hint">Retained step history · these steps are no longer live</p> : null}
+                  <ol className="run-step-list text-ui">
                     {column.steps.map(step => (
                       <li key={step.text} className={cn((step.state === 'waiting' || step.state === 'skipped') && 'muted', step.state === 'active' && 'font-semibold')}>
-                        <span aria-hidden="true">{step.state === 'done' ? '✓ ' : step.state === 'active' ? '→ ' : step.state === 'failed' ? '✕ ' : step.state === 'skipped' ? '– ' : '· '}</span>
+                        <span className="run-step-icon" aria-hidden="true">{step.state === 'done' ? <Check size={16} /> : step.state === 'active' ? <CornerDownRight size={16} /> : step.state === 'failed' ? <CircleAlert size={16} /> : step.state === 'skipped' ? <Minus size={16} /> : <Circle size={12} />}</span>
                         {step.text}<span className="sr-only"> ({step.state})</span>
                       </li>
                     ))}
                   </ol>
-                </div>
+                </section>
               ))}
             </div>
             {data.sofar ? <p className="hint">{data.sofar}</p> : null}

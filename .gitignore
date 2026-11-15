@@ -17,6 +17,8 @@ node_modules
 /docs/developer/evidence/audit-*.json
 
 /private/
+# Generated design working briefs; DESIGN.md owns the public UI reference.
+/.impeccable/surfaces/
 # Legacy private paths stay ignored to prevent accidental reintroduction.
 /local/
 /test-results/

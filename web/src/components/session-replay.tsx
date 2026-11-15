@@ -196,7 +196,7 @@ export interface ReplayHandle {
   openSourceEvent: (side: Side, sessionId: string, eventId: string) => void;
 }
 
-export function SessionReplayView({ sides, ref }: { sides: [ReplaySide] | [ReplaySide, ReplaySide]; ref?: Ref<ReplayHandle> }) {
+export function SessionReplayView({ sides, ref, visible = true }: { sides: [ReplaySide] | [ReplaySide, ReplaySide]; ref?: Ref<ReplayHandle>; visible?: boolean }) {
   const single = sides.length === 1;
   const labelled = useId();
   const profileLabel = (side: Side, profile: string) => single ? <span className="font-semibold wrap-anywhere">{profile}</span> : <SideText side={side}>{profile}</SideText>;
@@ -289,6 +289,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide] | [Repla
     openEvent(side, evidence, trigger) {
       const row = all.find(row => row.side === side && row.session.id === evidence.sessionId && row.event.id === evidence.event.id);
       if (!row) return;
+      focusInspectorOnOpen.current = true;
       setReportOrigin(trigger);
       setAgentView(null);
       setAgentOrigin(null);
@@ -302,6 +303,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide] | [Repla
     openSourceEvent(side, sessionId, eventId) {
       const row = all.find(item => item.side === side && item.session.id === sessionId && item.event.id === eventId);
       if (!row) return;
+      focusInspectorOnOpen.current = true;
       setReportOrigin(null);
       setAgentView(null);
       setAgentOrigin(null);
@@ -408,7 +410,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide] | [Repla
   }
 
   return (
-    <section className="replay-workspace flex flex-col gap-4" data-inspecting={inspecting} aria-labelledby={`${labelled}-title`}
+    <section className="replay-workspace flex flex-col gap-4" data-inspecting={visible && inspecting} aria-labelledby={`${labelled}-title`}
       onKeyDown={event => {
         if (event.key !== 'F6') return;
         if (agentView) {
@@ -495,7 +497,7 @@ export function SessionReplayView({ sides, ref }: { sides: [ReplaySide] | [Repla
           </section>)}
         </div>
       </div> : null}
-      <Sheet modal={false} open={inspecting && Boolean(selected || agentView)} onOpenChange={setInspecting}>
+      <Sheet modal={false} open={visible && inspecting && Boolean(selected || agentView)} onOpenChange={setInspecting}>
         <SheetContent aria-labelledby={`${labelled}-inspector-title`} aria-describedby={`${labelled}-inspector-description`}
           onOpenAutoFocus={event => {
             event.preventDefault();

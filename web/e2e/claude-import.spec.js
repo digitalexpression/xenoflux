@@ -25,7 +25,7 @@ function transcript(sessionId, label) {
 const upload = (sessionId, label) => ({ name: `${sessionId}.jsonl`, mimeType: 'application/jsonl', buffer: Buffer.from(transcript(sessionId, label)) });
 async function openImport(page, app) {
   await page.goto(app.url);
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports' }).click();
   await expect(page.getByRole('heading', { name: 'Open saved report', exact: true })).toBeVisible();
   await page.getByText('Import Claude Code transcripts', { exact: true }).click();
 }
@@ -89,7 +89,7 @@ test('explicit Claude snapshot comparison stays private and survives source loss
   }
   await app.restartServer();
   await page.goto(app.url);
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports' }).click();
   await expect(page.getByRole('heading', { name: 'Open saved report', exact: true })).toBeVisible();
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedPath);
   await expect(page.getByRole('link', { name: 'View report', exact: true })).toBeVisible();

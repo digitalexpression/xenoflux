@@ -47,7 +47,7 @@ export function NativeSessions({ inspect = false }: { inspect?: boolean }) {
   }
 
   return <Page current={inspect ? 'sessions' : 'compare'} title={inspect ? 'Choose a session' : 'Choose native sessions'}>
-    <PageTitle breadcrumb={inspect ? [{ label: 'Browse sessions', to: '/sessions' }, { label: 'Choose by profile' }] : [{ label: 'Compare', to: '/' }, { label: 'Use existing sessions', to: '/compare/sessions' }, { label: 'Choose by profile' }]}
+    <PageTitle breadcrumb={inspect ? [{ label: 'Sessions', to: '/sessions' }, { label: 'Choose by profile' }] : [{ label: 'Compare', to: '/' }, { label: 'Use existing sessions', to: '/compare/sessions' }, { label: 'Choose by profile' }]}
       title={inspect ? 'Choose a session' : 'Choose native sessions'} subtitle="List recent sessions from the profile you select. History inspection does not resume a session or submit a model task." />
     {compareWith && base.data ? <InfoNotice title="Left session is retained">
       <p>{base.data.profile} · {base.data.title} · {base.data.mode}</p>

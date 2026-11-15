@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
 import { apiGet } from '@/api/client';
-import type { Report as View, SessionReplay, Side } from '@/api/types';
+import type { Report as View, SessionReplay, Side, ComparisonLabel } from '@/api/types';
 import { InspectSessionButton } from '@/components/inspect-session-button';
 import { SessionReplayView, type ReplayHandle } from '@/components/session-replay';
-import { StatusBadge, TagPill } from '@/components/badges';
+import { ComparisonBadge, StatusBadge, TagPill } from '@/components/badges';
 import { Disclosure } from '@/components/controls';
 import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
 import { ErrorPanel, InfoNotice, SimulatedNote } from '@/components/notices';
@@ -17,6 +17,7 @@ import { deriveAgentSummaries, type AgentEvidence } from '@/lib/replay-agent-sum
 import { WorkflowMeasurements } from '@/components/workflow-measurements';
 import { CheckAssessment } from '@/components/check-assessment';
 import { SessionControlsComparison } from '@/components/session-controls-comparison';
+import { ComparisonLines } from '@/components/comparison-lines';
 
 export function Report() {
   const { ref = '' } = useParams();
@@ -38,11 +39,12 @@ export function Report() {
   }, [data, searchParams]);
   return (
     <Page current="compare" title={data?.title ?? 'Comparison report'}>
+      <div className="comparison-report">
       {view.error ? <LoadError error={view.error} onRetry={view.reload} /> : null}
       {view.loading && !data ? <Loading label="Comparing sessions… reading recorded history only." rows={4} /> : null}
       {data ? <>
         <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: data.breadcrumb, to: data.progressHref ?? (data.retained ? '/sessions' : data.saved ? '/reports/open' : '/compare/sessions') }, { label: 'Report' }]}
-          title={data.title} actions={<><Link className="btn btn-primary" to={`${base}/reviews?new=1`}>Review</Link><Link className="btn btn-secondary" to={`${base}/export`}>Export report</Link></>} />
+          title={data.title} actions={<><Link className="btn btn-secondary" to={`${base}/reviews?new=1`}>Review</Link><Link className="btn btn-primary" to={`${base}/export`}>Export report</Link></>} />
         {data.attempt ? data.attempt.cells.every(cell => cell.state === 'completed') ? null : data.attempt.notStarted ? <InfoNotice title={data.attempt.title}>{data.attempt.text}</InfoNotice>
           : <div className="flex flex-col gap-1"><p className="text-body font-semibold">{data.attempt.title}</p><p className="hint">{data.attempt.text}</p></div>
           : data.verification.cells.some(cell => cell.executionFailures?.length) ? <ErrorPanel live={false} title="Native startup problem recorded">
@@ -57,11 +59,15 @@ export function Report() {
           {data.saved.notInReport.length ? <p>Not in this report: {data.saved.notInReport.join(', ')}.</p> : null}
         </InfoNotice> : null}
 
-        <div className="report-sides" role="group" aria-label="Compared profiles">
-          {[data.a, data.b].map((side, index) => <section aria-label={`${side.profile} task outcome`} key={side.side} className="panel flex flex-col gap-2" style={{ borderTop: `3px solid var(--color-side-${side.side})` }}>
-            <InspectSessionButton selection={{ report: ref, side: side.side }} />
-            <span className="meta">{index ? 'Right profile' : 'Left profile'}</span>
-            <div><ProfileChip side={side.side} name={side.profile} meta={side.client} /></div>
+        <div className="report-sides comparison-identities" role="group" aria-label="Compared profiles">
+          {[data.a, data.b].map((side, index) => <section aria-label={`${side.profile} task outcome`} key={side.side} className="comparison-identity">
+            <div className="comparison-identity-heading">
+            <div><ProfileChip side={side.side} name={`${index ? 'Right' : 'Left'} · ${side.profile}`} meta={side.client.replace(/^Run here · /, '')} /></div>
+            <InspectSessionButton selection={{ report: ref, side: side.side }} label="Inspect" ariaLabel="Inspect session" busyLabel="Reading…" />
+            <details className="comparison-side-details">
+            <summary className="btn btn-link" aria-label={`Recorded session details for ${side.profile}`}>Details</summary>
+            <div>
+            <p className="meta">Client · {side.client}</p>
             {side.provenance ? <p className="meta">{[
               side.provenance.basis, side.provenance.profileName, side.provenance.surface?.toUpperCase(),
               side.provenance.rootMode === 'implicit' ? 'stock root' : side.provenance.rootMode === 'explicit' ? 'managed root' : 'root mode unknown',
@@ -81,39 +87,58 @@ export function Report() {
               {data.replayRootContext?.[side.side].requestedEffort
                 ? <p className="meta">Requested reasoning effort: {data.replayRootContext?.[side.side].requestedEffort}</p> : null}
             </> : null}
-            {data.attempt?.cells[index] ? <><p className="text-body font-semibold">{data.attempt.cells[index].text}</p>
+            </div></details>
+            </div>
+            {data.attempt?.cells[index] ? <><p className="text-ui font-medium">{data.attempt.cells[index].text}</p>
               {data.attempt.cells[index].detail ? <p className="hint">{data.attempt.cells[index].detail}</p> : null}</> : null}
           </section>)}
         </div>
         <p className="text-body"><strong className="font-semibold">{associationLead(data.association.basis)}</strong> {data.association.text}</p>
 
-        <section className="flex flex-col gap-3" aria-labelledby="conditions">
+        <nav aria-label="Report sections" className="session-facets comparison-facets">
+          <a href="#report-overview">Overview</a><a href="#report-activity">Activity</a><a href="#report-harness">Harness and context</a><a href="#time">Usage</a><a href="#responses">Responses</a><a href="#outcome">Outcome</a><a href="#report-source">Source</a>
+        </nav>
+        <section id="report-overview" className="comparison-overview" aria-label="Comparison overview">
+          <div className="comparison-counts" role="group" aria-label="Recorded finding counts">
+            <div className="comparison-count comparison-count-primary"><strong>{data.counts.different}</strong><span>Different</span><span className="hint">Recorded findings</span></div>
+            <div className="comparison-count"><strong>{data.counts.same}</strong><span>Same</span><span className="hint">Recorded findings</span></div>
+            <div className="comparison-count"><strong>{data.counts.cannotCompare}</strong><span>Could not compare</span><span className="hint">Recorded findings</span></div>
+            <div className="comparison-count"><strong>{data.verification.none ? 0 : data.verification.rows?.length || 'Unknown'}</strong><span>Checks selected</span><span className="hint">Retained check recipes</span></div>
+          </div>
+          <p className="hint">{data.summaryLine}</p>
+          <ComparisonLines data={data} onOpen={(side, sessionId, event, trigger) => replayRef.current?.openEvent(side, { sessionId, event, text: event.body ?? '' }, trigger)} />
+        </section>
+
+        <section className="comparison-conditions panel flex flex-col" aria-labelledby="conditions">
           <h2 id="conditions" className="text-heading">Conditions</h2>
           <p className="hint">Recorded when each session ran.</p>
           {data.conditions.scopeNote ? <p className="hint">{data.conditions.scopeNote}</p> : null}
           {data.conditions.rows.length === 0 ? <p className="text-body">No recorded condition differs between the two sessions.</p> : null}
-          {data.conditions.rows.length ? <PairRows label="Differing conditions" names={[data.a.profile, data.b.profile]} rows={data.conditions.rows.map(row => ({ ...row,
-            note: row.intent === 'intended' ? <span className="badge badge-selected">You meant to vary this</span>
-              : row.intent === 'not-marked' ? <span className="badge badge-warning">Not marked as intended</span> : undefined,
-          }))} /> : null}
+          {(data.conditions.allRows ?? data.conditions.rows).length ? <PairRows classify label="Recorded conditions" names={[data.a.profile, data.b.profile]} rows={(data.conditions.allRows ?? data.conditions.rows).map(row => {
+            const intent = data.conditions.rows.find(item => item.name === row.name)?.intent;
+            return { ...row, note: intent === 'intended' ? <span className="badge badge-selected">You meant to vary this</span>
+              : intent === 'not-marked' ? <span className="badge">Not marked as intended</span> : undefined };
+          })} /> : null}
           <p className="hint">{data.conditions.footer}</p>
-          <Disclosure label="Show all recorded conditions" expandedLabel="Hide all recorded conditions">
-            {data.conditions.allRows ? <PairRows label="All recorded conditions" names={[data.a.profile, data.b.profile]} rows={data.conditions.allRows} /> : <dl className="grid gap-x-6 gap-y-1 text-ui" style={{ gridTemplateColumns: 'minmax(140px, auto) 1fr' }}>
+          {!data.conditions.allRows ? <Disclosure label="Show all recorded conditions" expandedLabel="Hide all recorded conditions">
+            <dl className="grid gap-x-6 gap-y-1 text-ui" style={{ gridTemplateColumns: 'minmax(140px, auto) 1fr' }}>
               {data.conditions.all.map(fact => <div key={fact.label} className="contents"><dt className="font-medium">{fact.label}</dt><dd className="wrap-anywhere">{fact.value}</dd></div>)}
-            </dl>}
-          </Disclosure>
+            </dl>
+          </Disclosure> : null}
           {data.conditions.setupHref ? <Link to={data.conditions.setupHref}>Today’s setup (a separate snapshot)</Link> : null}
         </section>
 
-        <InfoNotice as="section" title="What we could not see" headingLevel={2} className="scroll-mt-4">
+        <div id="report-source"><InfoNotice as="section" title="What we could not see" headingLevel={2} className="scroll-mt-4">
           <div>{data.attempt?.notStarted ? <><p>No model task started, so the missing actions, claims and token usage cannot be recovered from this attempt.</p>
             <Disclosure label="Show recorded coverage limits" expandedLabel="Hide recorded coverage limits"><ul className="list-disc pl-5">{data.limits.map(limit => <li key={limit}>{limit}</li>)}</ul></Disclosure></>
             : <ul className="list-disc pl-5 flex flex-col gap-1">{data.limits.length ? data.limits.map(limit => <li key={limit}>{limit}</li>) : <li>Nothing that this report depends on was missing.</li>}</ul>}</div>
-        </InfoNotice>
+        </InfoNotice></div>
 
+        <div id="report-harness">
         {data.sessionControls || data.sessionHarness ? <SessionControlsComparison controls={data.sessionControls} harness={data.sessionHarness}
           profiles={{ a: data.a.profile, b: data.b.profile }}
           onOpenCompaction={(side, sessionId, eventId) => replayRef.current?.openSourceEvent(side, sessionId, eventId)} /> : null}
+        </div>
 
         <section className="flex flex-col gap-3" aria-labelledby="responses">
           <h2 id="responses" className="text-heading">Last recorded response</h2>
@@ -131,10 +156,10 @@ export function Report() {
           <p className="text-ui"><span className="font-medium">Reviews:</span> {data.verification.reviews.href ? <Link to={data.verification.reviews.href}>{data.verification.reviews.text}</Link> : <StatusBadge status="neutral">{data.verification.reviews.text}</StatusBadge>}</p>
         </section>
 
-        {data.replay?.a || data.replay?.b ? <SessionReplayView ref={replayRef} sides={[
+        <div id="report-activity">{data.replay?.a || data.replay?.b ? <SessionReplayView ref={replayRef} sides={[
           { side: 'a', profile: data.a.profile, client: data.a.client, replay: data.replay?.a ?? null },
           { side: 'b', profile: data.b.profile, client: data.b.client, replay: data.replay?.b ?? null },
-        ]} /> : null}
+        ]} /> : null}</div>
 
         <section className="flex flex-col gap-3" aria-labelledby="time">
           <h2 id="time" className="text-heading">Time and tokens</h2>
@@ -192,6 +217,7 @@ export function Report() {
           <p className="hint">Export saves a readable Markdown file and its JSON companion together in one folder.</p>
         </footer>
       </> : null}
+      </div>
     </Page>
   );
 }
@@ -226,18 +252,20 @@ function ResponseUnavailable({ profile }: { profile: string }) {
   return <article className="panel flex flex-col gap-2"><span className="font-semibold">{profile}</span><p className="hint">No native replay was captured for this side.</p></article>;
 }
 
-function PairRows({ label, names, rows }: { label: string; names: [string, string]; rows: {
-  name: string; a: ReactNode; b: ReactNode; caveat?: string; note?: ReactNode; scope?: { a: string; b: string };
+function PairRows({ label, names, rows, classify = false }: { label: string; names: [string, string]; classify?: boolean; rows: {
+  name: string; a: ReactNode; b: ReactNode; label?: ComparisonLabel; caveat?: string; note?: ReactNode; scope?: { a: string; b: string };
 }[] }) {
-  return <div className="report-pairs" role="table" aria-label={`${label} comparison`}>
+  return <div className={`report-pairs${classify ? ' report-pairs-classified' : ''}`} role="table" aria-label={`${label} comparison`}>
     <div className="report-pair-heading" role="row"><span role="columnheader">Item</span>
-      {names.map((name, index) => <span role="columnheader" key={index}><SideText side={index ? 'b' : 'a'}>{name}</SideText></span>)}</div>
+      {names.map((name, index) => <span role="columnheader" key={index}><SideText side={index ? 'b' : 'a'}>{name}</SideText></span>)}
+      {classify ? <span role="columnheader">Recorded result</span> : null}</div>
     {rows.map(row => <Fragment key={row.name}><div className="report-pair-row" role="row">
       <div role="rowheader" className="report-pair-label"><span className="font-medium">{row.name}</span>{row.note}</div>
       {(['a', 'b'] as const).map((side, index) => <div role="cell" className={`report-pair-value report-pair-${side}`} key={side}>
-        <span className="report-mobile-label"><SideText side={side}>{names[index]}</SideText></span>{row[side]}{row.scope ? <p className="hint">{row.scope[side]}</p> : null}
+        <span className="report-mobile-label"><SideText side={side}>{names[index]}</SideText></span>{classify && row.label === 'different' ? <SideText side={side}>{row[side]}</SideText> : row[side]}{row.scope ? <p className="hint">{row.scope[side]}</p> : null}
       </div>)}
-    </div>{row.caveat ? <div role="row"><div role="cell" aria-colspan={3} className="report-pair-caveat hint">{row.caveat}</div></div> : null}</Fragment>)}
+      {classify ? <div role="cell" className="report-pair-result"><ComparisonBadge label={row.label ?? 'cannot-compare'} /></div> : null}
+    </div>{row.caveat ? <div role="row"><div role="cell" aria-colspan={classify ? 4 : 3} className="report-pair-caveat hint">{row.caveat}</div></div> : null}</Fragment>)}
   </div>;
 }
 

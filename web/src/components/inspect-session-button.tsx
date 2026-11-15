@@ -6,8 +6,8 @@ import { Button } from '@/components/ui/button';
 
 type Selection = { key: string } | { client: NativeClientId; token: string } | { report: string; side: Side };
 
-export function InspectSessionButton({ selection, label = 'Inspect session', disabled = false, compareWith }: {
-  selection: Selection; label?: string; disabled?: boolean; compareWith?: string;
+export function InspectSessionButton({ selection, label = 'Inspect session', ariaLabel, disabled = false, compareWith, busyLabel }: {
+  selection: Selection; label?: string; ariaLabel?: string; disabled?: boolean; compareWith?: string; busyLabel?: string;
 }) {
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
@@ -34,7 +34,7 @@ export function InspectSessionButton({ selection, label = 'Inspect session', dis
     finally { if (generation.current === owner) setBusy(false); }
   }
   return <div className="flex flex-col gap-2 min-w-0">
-    <Button disabled={disabled} busy={busy} busyLabel={compareWith ? 'Comparing sessions…' : 'Reading session…'} onClick={() => void inspect()}>{label}</Button>
+    <Button disabled={disabled} aria-label={busy ? undefined : ariaLabel} busy={busy} busyLabel={busyLabel ?? (compareWith ? 'Comparing sessions…' : 'Reading session…')} onClick={() => void inspect()}>{label}</Button>
     {error ? <p className="text-ui wrap-anywhere" role="alert">{error}</p> : null}
   </div>;
 }

@@ -43,7 +43,7 @@ test('unsupported registry rows stay visible without mutation controls', async (
   registry.profiles.push({ id: 'unsupported', name: 'Older unsupported setup', client: 'future-client', settings: 'SECRET_SETTINGS' });
   await writeFile(app.store.file, JSON.stringify(registry));
   const before = await readFile(app.store.file);
-  await page.getByRole('link', { name: 'Setup', exact: true }).click();
+  await page.getByRole('link', { name: 'Clients on this Mac', exact: true }).click();
   await expect(page.getByText('Older unsupported setup', { exact: true })).toBeVisible();
   await expect(page.getByText('Registry needs attention.', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Continue to profiles', exact: true })).toBeDisabled();
@@ -55,7 +55,7 @@ test('unsupported registry rows stay visible without mutation controls', async (
 });
 
 test('refresh retains previous observations, disables duplicates and labels failed freshness', async ({ page }) => {
-  await page.getByRole('link', { name: 'Setup', exact: true }).click();
+  await page.getByRole('link', { name: 'Clients on this Mac', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Discovery check complete.' })).toBeVisible();
   let finish;
   const response = new Promise(resolve => { finish = resolve; });
@@ -79,7 +79,7 @@ test('refresh retains previous observations, disables duplicates and labels fail
 
 test('initial discovery failure offers retry and keeps comparisons accessible', async ({ page }) => {
   await page.route('**/api/discovery*', route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { message: 'No snapshot available', code: 'fixture' } }) }));
-  await page.getByRole('link', { name: 'Setup', exact: true }).click();
+  await page.getByRole('link', { name: 'Clients on this Mac', exact: true }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Could not refresh discovery' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Check again', exact: true })).toBeEnabled();
   await expect(page.getByRole('link', { name: 'Continue to comparisons', exact: true })).toBeEnabled();
@@ -92,7 +92,7 @@ test('empty known locations still show all clients and keep profile and comparis
     await rm(path, { recursive: true, force: true });
   await writeFile(app.store.file, JSON.stringify({ schemaVersion: 1, profiles: [] }));
   const before = await readFile(app.store.file);
-  await page.getByRole('link', { name: 'Setup', exact: true }).click();
+  await page.getByRole('link', { name: 'Clients on this Mac', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Discovery check complete.' })).toBeVisible();
   for (const name of ['Codex CLI', 'Claude Code CLI', 'GitHub Copilot CLI'])
     await expect(page.getByText(name, { exact: true })).toBeVisible();

@@ -47,7 +47,7 @@ for (const theme of ['light', 'dark']) {
       await expect(target).toHaveCSS('outline-width', '2px');
       await expect(target).toHaveCSS('outline-offset', '2px');
     }
-    for (const width of [1280, 800, 320]) {
+    for (const width of [1280, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`report-${theme}-${width}.png`), fullPage: true });

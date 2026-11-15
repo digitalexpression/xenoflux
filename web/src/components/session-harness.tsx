@@ -29,19 +29,21 @@ function SkillReference({ reference }: { reference: SkillSourceReference }) {
   }
 }
 
-export function SessionHarness({ data, onOpenCompaction, headingLevel = 2, sectionId = 'session-harness', titleId = 'harness-title' }: {
+export function SessionHarness({ data, onOpenCompaction, headingLevel = 2, sectionId = 'session-harness', titleId = 'harness-title', section = 'all' }: {
   data: SessionHarnessEvidence;
   onOpenCompaction: (sessionId: string, eventId: string) => void;
   headingLevel?: 2 | 3;
   sectionId?: string;
   titleId?: string;
+  section?: 'all' | 'harness' | 'context';
 }) {
   const Heading = headingLevel === 2 ? 'h2' : 'h3';
   const Subheading = headingLevel === 2 ? 'h3' : 'h4';
   const observedSkills = data.skills.filter(skill => skill.observations.length > 0);
   const catalogOnlySkills = data.skills.filter(skill => skill.observations.length === 0);
   return <section id={sectionId} className="flex flex-col gap-3 scroll-mt-4" aria-labelledby={titleId}>
-        <Heading id={titleId} className={headingLevel === 2 ? 'text-heading' : 'text-body font-semibold'}>Harness and context</Heading>
+        <Heading id={titleId} className={headingLevel === 2 ? 'text-heading' : 'text-body font-semibold'}>{section === 'context' ? 'Context' : section === 'harness' ? 'Harness' : 'Harness and context'}</Heading>
+        {section !== 'context' ? <>
         <p className="hint">Requested, sent, confirmed and response-reported settings are separate observations. A skill advertised in a catalog is not proof it was used.</p>
         <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))' }}>
           {data.settings.map(row => <dl key={row.name} className="panel flex flex-col gap-1 text-ui min-w-0 wrap-anywhere">
@@ -66,10 +68,13 @@ export function SessionHarness({ data, onOpenCompaction, headingLevel = 2, secti
           <p className="hint">These entries have no retained skill observations. Catalog presence does not prove use.</p>
           <ul className="list-disc pl-5 text-ui">{catalogOnlySkills.map((skill, index) => <li key={index} className="wrap-anywhere">{skill.name}</li>)}</ul>
         </Disclosure> : null}
+        </> : null}
+        {section !== 'harness' ? <>
         <Subheading className="text-body font-semibold">Compaction and scope</Subheading>
         <p className="hint">A recorded summary is not the full effective context. Compare the opening goal with summaries and later activity to judge scope yourself.</p>
         {data.compactions.length ? <div className="flex flex-wrap gap-2">{data.compactions.map(event => <Button key={event.eventId} onClick={() => onOpenCompaction(event.sessionId, event.eventId)}>{event.label}</Button>)}</div>
           : <p className="text-ui">No compaction events are available in this replay. This does not prove the session never compacted.</p>}
-        {data.setupHref ? <Link to={data.setupHref}>Inspect today’s setup (a separate snapshot)</Link> : null}
+        </> : null}
+        {section !== 'context' && data.setupHref ? <Link to={data.setupHref}>Inspect today’s setup (a separate snapshot)</Link> : null}
       </section>;
 }
