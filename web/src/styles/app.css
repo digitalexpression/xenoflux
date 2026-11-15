@@ -65,7 +65,7 @@
     overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
   }
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
+    *, *::before, *::after { transition-duration: 0ms !important; animation: none !important; }
   }
 }
 
@@ -597,7 +597,8 @@
   .skill-file + .skill-file { border-top: 1px solid var(--color-divider); }
 
   /* Menus and dialogs */
-  .menu { min-width: 240px; background: var(--color-surface); border: 1px solid var(--color-divider); border-radius: var(--radius-control); padding: var(--space-4); box-shadow: 0 8px 24px rgb(10 13 22 / 0.18); animation: pop-in 160ms ease-out; z-index: 50; }
+  .menu { min-width: 240px; background: var(--color-surface); border: 1px solid var(--color-divider); border-radius: var(--radius-control); padding: var(--space-4); box-shadow: 0 8px 24px rgb(10 13 22 / 0.18); z-index: 50; }
+  .menu[data-state="open"] { animation: pop-in 160ms ease-out; }
   .menu-item { display: flex; flex-direction: column; padding: var(--space-8) var(--space-12); border-radius: 6px; font-size: var(--text-ui); cursor: pointer; outline: none; }
   .menu-item[data-highlighted] { background: var(--color-surface-raised); box-shadow: inset 0 0 0 2px var(--color-link-focus); }
   .menu-item[data-disabled] { color: var(--color-text-muted); cursor: not-allowed; }
