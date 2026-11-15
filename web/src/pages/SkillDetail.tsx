@@ -22,7 +22,7 @@ export function SkillDetail() {
   const back = `/compare/setups?${new URLSearchParams({ a, b, ...(repo ? { repo } : {}) })}`;
   return (
     <Page current="compare" title={`${skill} package`}>
-      <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare setups', to: back }, { label: 'Skills' }]}
+      <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: 'Compare setups', to: back }, { label: 'Skills' }]}
         title={<span className="inline-flex flex-wrap items-center gap-3"><span className="font-mono">{skill}</span>{data ? <ComparisonBadge label={data.label} /> : null}</span>} />
       {view.error ? <LoadError error={view.error} onRetry={view.reload} /> : null}
       {view.loading && !data ? <Loading label="Reading both packages…" /> : null}
@@ -47,9 +47,9 @@ export function SkillDetail() {
                 ))}
               </ul>
             </nav>
-            <div className="flex flex-col gap-4" style={{ flex: '999 1 520px', minWidth: 0 }}>
+            <div className="skill-files panel p-0" style={{ flex: '999 1 520px', minWidth: 0 }}>
               {data.files.map((file, index) => (
-                <article key={file.path} id={`file-${index}`} className="panel flex flex-col gap-3" aria-labelledby={`file-title-${index}`}>
+                <article key={file.path} id={`file-${index}`} className="skill-file flex flex-col gap-3" aria-labelledby={`file-title-${index}`}>
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 id={`file-title-${index}`} className="font-mono text-body font-semibold wrap-anywhere">{file.path}</h3>
                     <ComparisonBadge label={file.label} /><span className="hint">{file.exactText}</span>

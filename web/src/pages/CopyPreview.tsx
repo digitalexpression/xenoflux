@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
+import { Check } from 'lucide-react';
 import { ApiError, apiGet, apiPost } from '@/api/client';
 import type { CopyPlan, CopyResult, ProfilesView } from '@/api/types';
 import { Disclosure } from '@/components/controls';
@@ -27,24 +28,26 @@ export function CopyPreview({ mode }: { mode: 'copy' | 'create' }) {
       <Page current="profiles" title="Copy settings">
         <PageTitle breadcrumb={[{ label: 'Profiles', to: '/profiles' }, { label: target }, { label: 'Copy settings from another profile' }]}
           title={`Copy settings into ${target}`} subtitle={`Choose the profile to copy from. You’ll see exactly what changes in ${target} before anything is written.`} />
+        {profiles.error ? <LoadError error={profiles.error} onRetry={profiles.reload} /> : null}
         {profiles.loading && !profiles.data ? <Loading label="Reading profiles…" rows={1} /> : null}
         {profiles.data ? (
           <form className="panel flex flex-col gap-3 max-w-[520px]" onSubmit={event => { event.preventDefault(); const value = new FormData(event.currentTarget).get('from'); if (value) setParams({ from: String(value) }); }}>
             <label htmlFor={sourceId} className="field-label">Copy from</label>
             <select id={sourceId} name="from" className="input font-mono">{names.map(n => <option key={n}>{n}</option>)}</select>
-            <div><Button type="submit" variant="primary">Choose items</Button></div>
+            <div><Button type="submit" variant="primary" disabled={!names.length || Boolean(profiles.error)}>Choose items</Button></div>
+            {!names.length ? <p className="hint">No other compatible source profiles are available.</p> : null}
           </form>
         ) : null}
       </Page>
     );
   }
-  return <PlanView key={JSON.stringify([mode, target, from, item, newName, client])} mode={mode} client={client} target={target} from={from} item={item} skill={skill} newName={newName} />;
+  return <PlanView key={JSON.stringify([mode, target, from, item, skill, newName, client])} mode={mode} client={client} target={target} from={from} item={item} skill={skill} newName={newName} />;
 }
 
 function PlanView({ mode, target, from, item, skill, newName, client }: { mode: 'copy' | 'create'; client?: string; target: string; from: string; item?: string; skill?: string; newName: string }) {
   const plan = useResource(() => mode === 'copy'
     ? apiGet<CopyPlan>(`/api/profiles/${encodeURIComponent(target)}/copy`, { from, item, skill })
-    : apiGet<CopyPlan>('/api/profiles/new', { name: newName, from, client }), JSON.stringify([mode, target, from, item, newName, client]));
+    : apiGet<CopyPlan>('/api/profiles/new', { name: newName, from, client }), JSON.stringify([mode, target, from, item, skill, newName, client]));
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [manual, setManual] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
@@ -100,7 +103,7 @@ function PlanView({ mode, target, from, item, skill, newName, client }: { mode: 
           {error ? (error.refused ? <WarningAlert live title={error.title}>{error.text}</WarningAlert> : <ErrorPanel title={error.title}>{error.text}</ErrorPanel>) : null}
           {result ? (
             <section className={result.status === 'applied' ? 'alert-success flex flex-col gap-3' : 'panel flex flex-col gap-3'} role="status" aria-labelledby="result-title">
-              <h2 id="result-title" className="text-heading" style={{ color: result.status === 'applied' ? 'var(--color-success)' : undefined }}>{result.status === 'applied' ? '✓ ' : ''}{result.title}</h2>
+              <h2 id="result-title" className="text-heading flex items-center gap-2" style={{ color: result.status === 'applied' ? 'var(--color-success)' : undefined }}>{result.status === 'applied' ? <Check size={22} aria-hidden="true" /> : null}{result.title}</h2>
               {result.changes.length ? <ul className="text-ui list-disc pl-5" style={{ color: 'var(--color-text)' }}>{result.changes.map(change => <li key={change} className="wrap-anywhere">{change}</li>)}</ul> : null}
               <p className="text-ui" style={{ color: 'var(--color-text)' }}>{result.note}</p>
               {result.guidance?.map(entry => <div key={entry.id}><p className="font-semibold">{entry.label}</p>
@@ -118,19 +121,22 @@ function PlanView({ mode, target, from, item, skill, newName, client }: { mode: 
               {data.blocked ? (
                 <WarningAlert title={data.blocked.title} actions={<Button onClick={plan.reload}>Check again</Button>}>{data.blocked.body}</WarningAlert>
               ) : null}
+              <div className={empty ? 'copy-workspace copy-empty' : 'copy-workspace'}><div className="copy-plan">
               {!empty ? <section className="panel p-0 overflow-hidden" aria-labelledby="items-title">
                 <h2 id="items-title" className="panel-head text-body font-semibold" style={{ borderRadius: 0 }}>{mode === 'copy' ? `What will change in ${destination}` : `What ${destination} will get`}</h2>
                 {data.items.length ? (
                   <ul className="list-none p-0">
                     {data.items.map(entry => (
-                      <li key={entry.id}>
+                      <li key={entry.id} className="copy-item">
                         <label className="row-select" data-selected={Boolean(selected[entry.id])}>
-                          <input type="checkbox" className="mt-1" checked={Boolean(selected[entry.id])} onChange={() => setSelected(value => ({ ...value, [entry.id]: !value[entry.id] }))} />
+                          <input type="checkbox" className="mt-1" disabled={busy} checked={Boolean(selected[entry.id])} onChange={() => setSelected(value => ({ ...value, [entry.id]: !value[entry.id] }))} />
                           <span className="flex flex-col gap-1 min-w-0">
                             <span><span className="font-mono font-medium wrap-anywhere">{entry.name}</span> <span className="hint">{entry.kind}</span></span>
                             <span className="text-ui wrap-anywhere">{entry.change}</span>
                             {entry.note ? <span className="hint">{entry.note}</span> : null}
-                            {entry.details?.length ? <Disclosure label="Inspect file changes" expandedLabel="Hide file changes">
+                          </span>
+                        </label>
+                        <div className="copy-item-evidence">{entry.details?.length ? <Disclosure label="Inspect file changes" expandedLabel="Hide file changes">
                               <ul className="list-disc pl-5 flex flex-col gap-3">
                                 {entry.details.map((change, index) => {
                                   const beforeMode = modeText(change.beforeMode), afterMode = modeText(change.afterMode);
@@ -145,24 +151,30 @@ function PlanView({ mode, target, from, item, skill, newName, client }: { mode: 
                                   </li>;
                                 })}
                               </ul>
-                            </Disclosure> : null}
-                          </span>
-                        </label>
+                            </Disclosure> : null}</div>
                       </li>
                     ))}
                   </ul>
                 ) : <p className="p-4 text-ui">Nothing here can be copied: the two profiles already match for everything Xenoflux can copy.</p>}
               </section> : null}
-              {!empty ? <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))' }}>
-                <section className="panel flex flex-col gap-2" aria-labelledby="manual"><h2 id="manual" className="text-body font-semibold">Set up in {clientName} instead</h2>
+              {!empty ? <div className="copy-boundaries">
+                <section className="flex flex-col gap-2" aria-labelledby="manual"><h2 id="manual" className="text-body font-semibold">Set up in {clientName} instead</h2>
                   {data.manual.map(text => <p key={text} className="text-ui">{text}</p>)}
                   {data.manualOptions?.map(entry => <label key={entry.id} className="flex items-center gap-2 text-ui wrap-anywhere">
-                    <input type="checkbox" checked={Boolean(manual[entry.id])} onChange={() => setManual(value => ({ ...value, [entry.id]: !value[entry.id] }))} />
+                    <input type="checkbox" disabled={busy} checked={Boolean(manual[entry.id])} onChange={() => setManual(value => ({ ...value, [entry.id]: !value[entry.id] }))} />
                     Show setup guidance for {entry.label}
                   </label>)}
                 </section>
-                <section className="panel flex flex-col gap-2" aria-labelledby="never"><h2 id="never" className="text-body font-semibold">Never copied</h2>{data.never.map(text => <p key={text} className="text-ui">{text}</p>)}</section>
+                <section className="flex flex-col gap-2" aria-labelledby="never"><h2 id="never" className="text-body font-semibold">Never copied</h2>{data.never.map(text => <p key={text} className="text-ui">{text}</p>)}</section>
               </div> : null}
+              </div><section className="copy-selection panel flex flex-col gap-4" aria-labelledby="copy-selection-title">
+                <h2 id="copy-selection-title" className="text-body font-semibold">{empty ? 'New profile' : 'Selected changes'}</h2>
+                <dl className="copy-route text-ui">
+                  {data.source ? <div><dt className="muted">From</dt><dd className="font-medium wrap-anywhere">{data.source}</dd></div> : null}
+                  <div><dt className="muted">{mode === 'copy' ? 'Into' : 'Create'}</dt><dd className="font-medium wrap-anywhere">{destination} · {clientName}</dd></div>
+                </dl>
+                {!empty ? <><p className="text-ui" role="status">{n} of {data.items.length} items selected</p>
+                  {n ? <ul className="copy-chosen text-ui">{chosen.map(entry => <li key={entry.id} className="wrap-anywhere">{entry.name}</li>)}</ul> : <p className="hint">Select the settings or packages to include. Inspect file changes before applying.</p>}</> : null}
               <div className="flex flex-wrap items-center gap-3">
                 {data.blocked ? null : (
                   <Button variant="primary" disabled={mode === 'copy' && !n} busy={busy} busyLabel={mode === 'copy' ? 'Applying…' : 'Creating…'} onClick={() => void apply()}
@@ -174,6 +186,7 @@ function PlanView({ mode, target, from, item, skill, newName, client }: { mode: 
               <p className="hint">{mode === 'copy'
                 ? `Checked again just before applying. Close the selected client before copying.`
                 : `Creating doesn’t open ${clientName}. See the profile card for native setup afterwards.`}</p>
+              </section></div>
             </>
           )}
         </>

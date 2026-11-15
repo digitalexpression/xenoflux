@@ -1,10 +1,10 @@
 # Xenoflux design reference
 
-**Status:** adopted design direction. This reference owns composition, tokens and interaction presentation for the local web app. [Product intent](PRODUCT.md) owns purpose and priorities. The [user guide](docs/GUIDE.md) owns journeys and supported limits; [contracts](docs/CONTRACTS.md) owns invariants. These rules describe the design target, not verified implementation coverage.
+**Status:** built UI reference. This reference owns composition, tokens and interaction presentation for the local web app. [Product intent](PRODUCT.md) owns purpose and priorities. The [user guide](docs/GUIDE.md) owns journeys and supported limits; [contracts](docs/CONTRACTS.md) owns invariants. Verification covers the selected screens and states recorded with each change.
 
-Xenoflux combines Inter, compact rounded controls and opaque layered surfaces on a neutral ground. Actions, links, focus and selection are neutral: ink in the light theme, porcelain in the dark theme. Cobalt and orchid are the only saturated interface hues and belong to the two compared sides. Dark mode uses a near-black `#0b0d10` ground with raised charcoal surfaces. Content stays calm and readable.
+Xenoflux combines Inter, compact rounded controls and opaque layered surfaces on a neutral ground. Actions, links, focus and selection are neutral: ink in the light theme, porcelain in the dark theme. Cobalt and orchid identify the two compared sides. Status and measurement colors have separate semantic roles below. Dark mode uses a near-black `#0b0d10` ground with raised charcoal surfaces. Content stays calm and readable.
 
-Show the decision, its evidence and its important limitation first; reveal technical detail on demand. Generated mockups illustrate this direction, but the tokens below define the intended values. Show only supported actions and keep unavailable evidence explicit.
+Show the decision, its evidence and its important limitation first; reveal technical detail on demand. The tokens below define the shared values. Show only supported actions and keep unavailable evidence explicit.
 
 ## Composition priorities
 
@@ -17,7 +17,7 @@ Xenoflux is a working tool. Setup and selection screens help people act; reports
 - Reserve filled comparison badges, larger counts and stronger type for Different. Keep Same readable but quieter; keep Could not compare and its reason visible. Never style missing evidence as zero or an empty successful result. Do not imply an overall winner from a single comparison.
 - Put routine metadata after the finding. Disclose paths, identifiers and raw evidence on demand; keep source scope and consequential choices visible.
 
-Use 8px within a label/value or action group, 16px between related groups, and 32px between sections. A heading sits closer to its content than to the preceding section. The token tables below define the shared scale. Keep working views free of marketing heroes, permanent terminal decoration, nested cards and glowing outlines.
+Use 8px within a label/value or action group, 16px between related groups, and 24–32px between sections. A heading sits closer to its content than to the preceding section. The token tables below define the shared scale. Keep working views free of marketing heroes, permanent terminal decoration, nested cards and glowing outlines.
 
 ## Colors
 
@@ -189,6 +189,14 @@ Let content determine height. Dense tables may reduce padding, but retain readab
 
 ## Components
 
+### Comparison hub
+
+The app opens on Comparisons. Keep discovery as a separate introductory action,
+then give Compare a task and Compare setups equal panel weight. Within the task
+panel, use equal underlined links, descriptions and availability summaries for
+Use existing sessions and Run a new task. Separate these choices with ruled
+spacing rather than nested cards. Recent work follows as flat rows.
+
 ### Primary action button
 
 **Role:** The next meaningful step, such as Compare sessions or Export report.
@@ -219,7 +227,7 @@ Use surface fill, primary text, control boundary and 8px corners. Keep a persist
 
 Select exactly two sessions with checkboxes, without a select-all control or separate side slots. Keep deselection available at the limit and explain why another selection is unavailable. Show task title, profile, client, project, recorded date and state, with identifiers in details. Use one grouped list with separators, visible checkboxes, selected background/foreground tokens and a 3px link/focus-colored leading edge on selected rows. Preserve keyboard operation and selection across filters and responsive layouts. Inspection and selection never start or resume a session. Show the recorded, user-declared or unknown task-association basis; matching titles never precheck a declaration or establish recorded equivalence.
 
-Below the list, a selection summary names the comparison sides: **Left** and **Right**, each with its profile name and task title, plus a **Swap sides** button. The first ticked session fills Left and the second fills Right; unticking one frees that side for the next tick. The summary is the only place sides are assigned, so the report's column order is always visible before Compare.
+Below the list, a selection summary names the comparison sides: **Left** and **Right**, each with its profile name and task title, plus a **Swap sides** button. The first ticked session fills Left and the second fills Right; unticking one frees that side for the next tick. The summary reflects the same side assignments as the tray, so the report's column order is visible before Compare.
 
 ### Sessions library and comparison tray
 
@@ -283,6 +291,25 @@ and detailed reasons stay in disclosures. Stock Native apps controls live here,
 separate from profile-bound opening, with their existing-setup scope visible.
 Stack all inventory columns below 800px without hiding actions or evidence limits.
 
+### Setup inspection and selected copying
+
+Keep the selected setup and optional repository scope above the current read.
+Pair source search, category selection and reading coverage with one flat source
+inventory. Keep each category's limits visible and disclose values, files and
+source facts in place. Refresh is explicit; browsing source evidence does not
+reread or mutate the setup. Mixed-client inventories keep independent labels and
+coverage under aligned category headings, without equality counts or copy actions.
+
+Use compact count controls for same-client setup comparisons, followed by reading
+limits and the searchable list/detail workspace. Group related rows with dividers,
+keeping the selected result and its exact state visible.
+
+Selected copying pairs the file preview with a destination and selection summary.
+The summary names every checked item and the apply action names the destination.
+File-detail controls sit outside checkbox labels. Keep manual setup and never-copied
+boundaries below the preview; preserve the result, Undo explanation and drift
+refusal. On narrow windows, the summary follows the preview in reading order.
+
 ### Task preparation and Activity
 
 Organize preparation as Task and source, Two setups, Checks and limits, then
@@ -305,6 +332,27 @@ Cancellation and recovery remain explicit actions with their preserved-evidence
 consequences visible. After terminal states, label side states and steps as retained
 history so a recorded wait cannot look like a live unanswered request. Stack paired
 columns below 800px in both themes.
+
+### Reviews, export and saved reports
+
+Keep review preparation, external submissions and attached ratings as distinct,
+addressable sections. Pair ordinary review profile/workspace, execution fields and
+prompt with content and limit choices. Preview receives focus; Edit review returns
+to its trigger. Keep the frozen prompt, native effects and exact input files visible
+before Start. A retained response leads its task record; requested settings, reported
+settings, response capture and process shutdown remain separate observations.
+Ratings preserve attribution, citations, disagreement and earlier versions with
+neutral verdicts. Use flat topic sections and equal-width peer annotations.
+Label a review of the report subject “This comparison”; keep its exact scope
+identifier in a disclosure.
+
+Export pairs the retained evidence and opt-in content choices with a save summary.
+Name the destination, both files and current inclusion choices. Disable content
+changes while saving, focus the result and retain evidence-binding refusals.
+Saved reports leads with flat recent entries and a separate JSON opener. Opening
+focuses retained facts before secondary transcript import controls. Preserve both
+import paths and their effects. Keep previous entries labeled when list refresh
+fails, and clear the prior opened result before attempting another location.
 
 ### Evidence panel and disclosure
 
@@ -370,17 +418,33 @@ Use product evidence and diagrams only when they explain the current task. Avoid
 
 Use a sidebar for the destinations (Sessions, Comparisons, Profiles), running activity and the theme choice, and a toolbar above the page for back, forward and the breadcrumb. Sidebar and toolbar sit on the surface color; pages sit on the canvas. The current destination has the selected fill and 600 weight. Below 1100px the sidebar stacks above the content. Keep ordinary reading blocks around 65–75 characters wide; paired evidence and tables can use the wider available space.
 
-Use this navigation and report structure:
+The app opens on Comparisons. Breadcrumbs use Comparisons for that destination,
+matching its sidebar label. Secondary pages keep their owning destination selected;
+export keeps Sessions for a retained session and Comparisons for a comparison.
 
-- Open the app on Setup, with installed CLI and desktop findings before existing profiles and the next profile action. Keep discovery separate from native opening and creation controls. Use flat labeled rows, neutral discovery states and disclosures for paths and reasons. Keep unsupported profiles visible and label retained results as a previous check during refresh or refresh failure. Automatic checks stay quiet, preserve focus and form input, and announce observed changes rather than every check. Follow the [discovery and profile journey](docs/GUIDE.md#find-installed-clients-and-existing-profiles) for refresh and selection behavior.
-- Confirmation screens such as the pre-start review lead with a ready summary (a success badge naming what was checked, the two profiles, the run size) plus the primary action and any consequential choice, such as no verification checks, as an informational notice. Details follow below.
-- A single-profile inspector leads with qualified profile identity, repository scope and read time. Keep source values, files, provenance and reading limits inspectable. Carry the selected profile and scope into Compare with another profile. Single-profile observations use neutral source states rather than comparison badges.
-- Lead same-client setup comparisons with a summary strip of Different / Same / Could not compare counts, with Different largest. The counts filter the list. Show the compared profiles as one compact line of side-colored chips with Swap and Change once both are chosen. Put any reading limit in an informational notice right below the summary. Mixed-client comparisons align category sections with independent labeled source observations, preserve each side's limits and omit equivalence counts and copy controls. The [setup journey](docs/GUIDE.md#inspect-and-compare-setups) owns comparison scope and eligibility.
-- Filtering setup items selects the first matching result. A summary status filter names its scope beside the result count and leaves both list presets unselected. When list and detail stack, offer **View details** at the selected row and **Back to selected item** in the detail; selecting a row keeps keyboard focus there until the user follows a link.
-- Give **Compare a task** and **Compare setups** equal prominence. Equal choices use equal visual weight; do not make one a filled primary action and the other a faint link.
-- Within task comparison, give **Use existing sessions** and **Run a new task** equal prominence. Once a path is chosen, emphasize its next meaningful action.
-- Task comparison leads with conditions/coverage, closing responses and checks, then side-by-side timeline and compact conversations using shadcn/ui AI Elements. Keep expandable session/turn lineage, independent order and a persistent nonmodal event inspector. Preserve delegation, supported timing and missing evidence. Follow the [report journey](docs/GUIDE.md#read-and-export-a-report) and [evidence contract](docs/CONTRACTS.md#evidence-privacy-and-accounting) for replay behavior.
-- Keep Export report discoverable and technical inspection available on demand. Use profile names and task titles as primary labels; identifiers remain in details.
+| Destination | Pages and actions |
+| --- | --- |
+| Sessions | Session library, choose by profile and retained session inspection |
+| Comparisons | Comparison hub, session picker, setup comparison, new-task preparation, reports and reviews |
+| Saved reports | Secondary destination under Comparisons for recent locations, JSON reopening and transcript imports |
+| Profiles | Registry entries, setup inspection, profile creation and selected copying |
+| Clients on this Mac | Secondary destination under Profiles for installation observations, existing setups and stock Native apps |
+| Activity | Sidebar link for current jobs, recent records, progress and recovery |
+
+The component sections above own each page's composition. Keep the hub's peer
+choices equal in weight, lead reports with Counts lead, and keep verification,
+completion and reviewer judgment separate. Setup comparisons use compact count
+filters and a list/detail workspace; mixed-client inventories omit equivalence
+counts and copying. Skill packages keep one file navigation panel beside a single
+ruled file-content panel. Each file keeps its comparison state, exact text and
+whole-package copy consequences.
+
+Discovery stays separate from native opening and profile changes. Keep unsupported
+profiles visible and label retained findings during refresh or refresh failure.
+Automatic checks preserve focus and form input. Keep profile names and task titles
+as primary labels, with identifiers in details. The [guide](docs/GUIDE.md) owns
+supported journeys and limits; [contracts](docs/CONTRACTS.md) owns evidence and
+operation invariants.
 
 Use a fluid layout with a 1152px content maximum, 24px page gutters, and 16px gutters below 800px. Below 800px, stack landing choices, search/filter controls and paired observations; repeat profile labels. Wrap navigation and action groups without changing their reading order or hiding essential actions. Let content pressure trigger stacking earlier when needed.
 

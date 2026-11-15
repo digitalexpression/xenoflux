@@ -72,9 +72,11 @@ function when(seconds) {
 
 const CLIENT_TEXT = { cli: 'Codex CLI', desktop: 'Codex Desktop', unknown: 'client not recorded' };
 
-function replayCitationTopics(topics, subject, ref) {
+function replayCitationTopics(topics, subject, ref, subjectScope) {
   const rows = { a: subject?.left, b: subject?.right };
-  return topics.map(topic => ({ ...topic, reviews: topic.reviews.map(review => ({ ...review,
+  return topics.map(topic => ({ ...topic,
+    ...(topic.title === subjectScope ? { title: 'This comparison', scope: topic.title } : {}),
+    reviews: topic.reviews.map(review => ({ ...review,
     basedOn: review.basedOn.map(item => {
       if (!item.text.startsWith('replay:')) return item;
       try {
@@ -1218,13 +1220,14 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       const { subject, reviews } = subjectOf(value);
       const view = presentComparison(subject, { reviews });
       const presented = presentReviews(reviews, { a: view.a.profile, b: view.b.profile }, { a: subject.left?.id, b: subject.right?.id });
-      const topics = replayCitationTopics(presented.topics, subject, ref);
+      const packet = buildAuditReviewPacket(subject);
+      const topics = replayCitationTopics(presented.topics, subject, ref, packet.claimScopes[0]);
       return { ref, title: await titleFor(ref, selection, saved), canPrepare: subject?.kind === 'audit-comparison',
         canImport: subject?.kind === 'audit-comparison' && value?.kind === 'audit-evaluation-report' && Boolean(value.reviewPacket), topics: topics.length
         ? topics : [{ title: 'This comparison', meta: 'No reviews', disagreement: null, notReviewed: true, reviews: [] }],
         hasReviews: Boolean(reviews?.reviews?.length),
         reviewOptions: await reviewTasks.reviewTaskOptions(),
-        reviewTasks: (await reviewTasks.taskSummaries(comparisonFingerprint ?? buildAuditReviewPacket(subject).evidenceFingerprint)).tasks,
+        reviewTasks: (await reviewTasks.taskSummaries(comparisonFingerprint ?? packet.evidenceFingerprint)).tasks,
         consistency: 'Can’t be reviewed with one pair: consistency is unmeasured.', checksAfter: presented.checksAfter };
     },
 
@@ -1248,7 +1251,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       while (reviewDrafts.size > 12) reviewDrafts.delete(reviewDrafts.keys().next().value);
       return { token, title: await titleFor(ref, selection, saved) ?? 'Session comparison',
         evidenceFingerprint: prepared.packet.evidenceFingerprint, claimScopes: prepared.packet.claimScopes,
-        evidenceRefCount: prepared.packet.evidenceRefs.length, topics: replayCitationTopics(presented.topics, prepared.report.subject, ref),
+        evidenceRefCount: prepared.packet.evidenceRefs.length, topics: replayCitationTopics(presented.topics, prepared.report.subject, ref, prepared.packet.claimScopes[0]),
         disagreement: presented.topics.find(topic => topic.disagreement)?.disagreement ?? null,
         consistency: 'Can’t be reviewed with one pair: consistency is unmeasured.' };
     },

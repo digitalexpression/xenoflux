@@ -94,7 +94,7 @@ function RunForm() {
   const cap = data?.defaults;
   return (
     <Page current="compare" title="Run a new task">
-      <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare a task' }, { label: 'Run a new task' }]} title="Run a new task"
+      <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: 'Compare a task' }, { label: 'Run a new task' }]} title="Run a new task"
         subtitle="Prepare one task and two setups. Review the exact source and execution settings before starting either side." />
       <RunStages />
       {data?.simulated ? <SimulatedNote>Runs are simulated; no model task starts and no files are copied.</SimulatedNote> : null}
@@ -254,7 +254,7 @@ export function RunReview() {
   return (
     <Page current="compare" title="Review before starting">
       <div className="run-review">
-      <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Run a new task', to: '/runs/new' }, { label: 'Review' }]} title="Review before starting" />
+      <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: 'Run a new task', to: '/runs/new' }, { label: 'Review' }]} title="Review before starting" />
       <RunStages review />
       {data?.simulated ? <SimulatedNote>Starting is simulated; no model task starts.</SimulatedNote> : null}
       {preview.error ? <ErrorPanel title="Can’t review this run" actions={<><Button onClick={preview.reload}>Refresh preview</Button><Link className="btn" to="/runs/new">Back to edit</Link></>}>{preview.error.message}</ErrorPanel> : null}

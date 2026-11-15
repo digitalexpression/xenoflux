@@ -104,7 +104,7 @@ export function ChooseSessions() {
 
   return (
     <Page current="compare" title="Choose two sessions">
-      <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare a task' }, { label: 'Use existing sessions' }]} title="Choose two sessions"
+      <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: 'Compare a task' }, { label: 'Use existing sessions' }]} title="Choose two sessions"
         subtitle="Choose two recorded Codex sessions." />
       {info?.mode === 'demo' ? <SimulatedNote /> : <div><Link className="btn" to="/compare/sessions/native">Choose recent sessions by profile</Link></div>}
       {view.data?.partial ? (

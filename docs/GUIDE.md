@@ -6,12 +6,20 @@ requires that link to establish a browser session. Running `xfx ui` again reopen
 the app; Ctrl+C stops its server. `xfx ui --demo` uses marked synthetic data and
 simulated actions without reading/changing profiles or clients.
 
+The app opens **Comparisons**. Choose **Use existing sessions**, **Run a new task**
+or **Choose two profiles**. The sidebar also opens **Sessions** and **Profiles**,
+with **Saved reports** under Comparisons and **Clients on this Mac** under Profiles.
+**Activity** opens current jobs and recent comparison records. The toolbar keeps
+Back, Forward and the current page's breadcrumb available across these journeys.
+Use **Theme** for System, Light or Dark. The choice is remembered in this browser.
+
 ## Find installed clients and existing profiles
 
-The app opens **Setup** before profile creation. Review CLI and desktop findings
-for Codex, Claude Code and GitHub Copilot, then review existing profiles.
-Setup and Profiles recheck automatically every five seconds while visible and when
-you return to the window. Use **Check again** for an explicit fresh check.
+Open **Clients on this Mac** to find clients and profiles before creating another
+profile. Review CLI and desktop findings for Codex, Claude Code and GitHub Copilot,
+then review existing setups. Clients on this Mac and Profiles recheck automatically
+every five seconds while visible and when you return to the window. Use **Check again**
+for an explicit fresh check.
 
 Discovery checks the selected PATH, standard client folders, the profile registry
 and direct folders in Xenoflux's managed profile directory. It does not search
@@ -114,13 +122,15 @@ profile. A Copilot session link dispatch does not prove that the target session 
 
 ## Inspect and compare setups
 
-From Setup or Profiles, choose **Inspect setup** to read one profile's settings,
-instructions, agents, skills, hooks, plugins, MCP and memory settings. Inspect
+From **Clients on this Mac** or **Profiles**, choose **Inspect setup** to read one
+profile's settings, instructions, agents, skills, hooks, plugins, MCP and memory settings. Inspect
 values, file previews, source locations and reading limits. These are current
 local setup sources, not proof of effective precedence, native loading or session use.
 An absent CLI or sign-in does not prevent inspection of a safely readable profile.
 
 Optionally choose a repository to include its project instructions and settings.
+Search sources or choose a category to narrow the inventory. Expand a source for
+its values and file evidence without rereading the setup.
 Use **Refresh setup** to reread the selected scope. Invalid repository paths fail
 explicitly; they do not fall back to a comparison without project context.
 
@@ -128,6 +138,9 @@ Choose **Compare with…** to select another profile from the same or a differen
 vendor. Same-vendor comparisons retain **Same**, **Different**, **Could not compare**
 and **Not applicable** within the sources read. Different-vendor comparisons align
 categories for inspection while keeping each vendor's observations separate.
+Same-client count controls filter the result list. The selected filter is labeled
+**Selected**. Choose an item for its detail; when the columns stack, **View details**
+and **Back to selected item** move between the row and detail without changing it.
 Matching names or values do not establish equivalent behavior. Missing or unreadable
 evidence remains explicit, and copying between vendors is unavailable.
 Inspection and comparison read files without opening, signing in or activating clients.
@@ -235,6 +248,10 @@ rows or task quality. Hollow activity stops have no per-turn token total; dotted
 lines preserve recorded order where stop timestamps do not support a time scale.
 Choose a stop to open its retained event. Each session keeps its own clock.
 
+Use **Overview**, **Activity**, **Harness and context**, **Usage**, **Responses**,
+**Outcome** and **Source** to move within the report. **Review** and **Export report**
+remain above the evidence. Technical session details stay in each side's **Details**.
+
 **Session and harness comparison** separates requested variation from recorded
 differences. **Model-only request** means only the model differs among the listed
 recorded requests. It does not establish that the complete harness stayed fixed.
@@ -281,7 +298,9 @@ strict capture, historical metadata and comparison exit codes.
 
 Export writes Markdown and its `.md.audit.json` companion to a new folder under
 `~/Xenoflux reports/`; keep both together. **Open saved report** reads the JSON
-exactly as saved. Event/check/patch bodies are omitted unless **Include recorded
+exactly as saved. **Recently saved** lists earlier export locations. **Refresh list**
+updates that list; selecting an entry reads its saved report. Event/check/patch
+bodies are omitted unless **Include recorded
 messages and tool content** is selected. Known-secret redaction cannot remove all
 private prose/code; inspect both files before sharing. A review's bound evidence
 cannot be silently stripped while retaining that review.
@@ -294,6 +313,11 @@ inputs, executable, prompt and limits without starting a session. Editing invali
 preview. **Start review** submits one ordinary task through the selected client's
 CLI, using its sign-in, instructions, integrations and permissions. Prompting it to
 reason from the report is not enforced isolation; native history/runtime effects apply.
+
+**Review task**, **External review** and **Attached ratings** separate ordinary
+task work from imported ratings. Preview moves focus to the exact inputs;
+**Edit review** returns to the preparation action. A review of the report subject
+is labeled **This comparison**, with its exact identifier under **Show review scope**.
 
 Blank model/effort fields inherit defaults. Explicit choices are rechecked and
 reported as applied only when native evidence confirms them. Review duration is

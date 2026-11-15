@@ -43,7 +43,7 @@ export function Report() {
       {view.error ? <LoadError error={view.error} onRetry={view.reload} /> : null}
       {view.loading && !data ? <Loading label="Comparing sessions… reading recorded history only." rows={4} /> : null}
       {data ? <>
-        <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: data.breadcrumb, to: data.progressHref ?? (data.retained ? '/sessions' : data.saved ? '/reports/open' : '/compare/sessions') }, { label: 'Report' }]}
+        <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: data.breadcrumb, to: data.progressHref ?? (data.retained ? '/sessions' : data.saved ? '/reports/open' : '/compare/sessions') }, { label: 'Report' }]}
           title={data.title} actions={<><Link className="btn btn-secondary" to={`${base}/reviews?new=1`}>Review</Link><Link className="btn btn-primary" to={`${base}/export`}>Export report</Link></>} />
         {data.attempt ? data.attempt.cells.every(cell => cell.state === 'completed') ? null : data.attempt.notStarted ? <InfoNotice title={data.attempt.title}>{data.attempt.text}</InfoNotice>
           : <div className="flex flex-col gap-1"><p className="text-body font-semibold">{data.attempt.title}</p><p className="hint">{data.attempt.text}</p></div>

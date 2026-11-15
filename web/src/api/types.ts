@@ -370,7 +370,7 @@ export interface ReviewCard {
   date: string;
   earlier: { verdict: string; quote: string; date: string } | null;
 }
-export interface ReviewTopic { title: string; meta: string; disagreement: string | null; reviews: ReviewCard[]; notReviewed: boolean }
+export interface ReviewTopic { title: string; scope?: string; meta: string; disagreement: string | null; reviews: ReviewCard[]; notReviewed: boolean }
 export interface ReviewsView {
   ref: string;
   title: string;

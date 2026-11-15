@@ -43,7 +43,7 @@ function matches(item: SetupSourceItem, query: string) {
 
 function SourceEvidence({ item, headingLevel }: { item: SetupSourceItem; headingLevel: 3 | 4 }) {
   const Heading = headingLevel === 3 ? 'h3' : 'h4';
-  return <li className="py-4 border-t flex flex-col gap-2 min-w-0 wrap-anywhere" style={{ borderColor: 'var(--color-divider)' }}>
+  return <li className="setup-source py-4 border-t flex flex-col gap-2 min-w-0 wrap-anywhere" style={{ borderColor: 'var(--color-divider)' }}>
     <div className="flex flex-wrap gap-x-4 gap-y-1 justify-between"><Heading className="text-body font-semibold">{item.name}</Heading><span className="text-ui">{item.status}</span></div>
     <p className="hint">{[item.category, item.scope, item.origin].filter(Boolean).join(' · ')}</p>
     {item.sources.map((source, index) => <p className="hint font-mono wrap-anywhere" key={index}>{source.where}</p>)}
@@ -84,11 +84,10 @@ export function SetupInventoryBrowser({ inventory }: { inventory: SetupInventory
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('');
   const searchId = useId(), categoryId = useId();
-  return <section className="flex flex-col gap-4" aria-label="Setup source inventory">
-    <InventoryCoverage inventory={inventory} />
-    <InventoryFilters searchId={searchId} categoryId={categoryId} query={query} setQuery={setQuery} category={category} setCategory={setCategory} groups={inventory.groups} />
-    {inventory.groups.filter(group => !category || group.id === category).map(group => <section className="panel min-w-0" key={group.id} aria-label={group.label}><h2 className="text-heading mb-2">{group.label}</h2><SourceGroup group={group} query={query.trim().toLowerCase()} /></section>)}
-    {!inventory.groups.length ? <InfoNotice title="No source inventory returned"><p>Read the coverage and warnings above. An empty inventory does not establish an empty setup.</p></InfoNotice> : null}
+  return <section className="setup-inventory" aria-label="Setup source inventory">
+    <div className="setup-inventory-tools"><InventoryFilters searchId={searchId} categoryId={categoryId} query={query} setQuery={setQuery} category={category} setCategory={setCategory} groups={inventory.groups} /><InventoryCoverage inventory={inventory} /></div>
+    <div className="setup-source-groups">{inventory.groups.filter(group => !category || group.id === category).map(group => <section className="setup-source-group min-w-0" key={group.id} aria-label={group.label}><h2 className="text-heading mb-2">{group.label}</h2><SourceGroup group={group} query={query.trim().toLowerCase()} /></section>)}
+    {!inventory.groups.length ? <InfoNotice title="No source inventory returned"><p>Read the coverage and warnings above. An empty inventory does not establish an empty setup.</p></InfoNotice> : null}</div>
   </section>;
 }
 
@@ -109,7 +108,7 @@ export function SeparateSetupInventories({ a, b, aLabel, bLabel }: { a: SetupInv
   return <section className="flex flex-col gap-5" aria-label="Separate setup inventories">
     <div className="grid min-[800px]:grid-cols-2 gap-6">{[{ label: aLabel, inventory: a }, { label: bLabel, inventory: b }].map((side, index) => <section key={index} className="min-w-0" aria-label={`${side.label} coverage`}><h2 className="text-body font-semibold wrap-anywhere mb-2">{side.label}</h2><InventoryCoverage inventory={side.inventory} /></section>)}</div>
     <InventoryFilters searchId={searchId} categoryId={categoryId} query={query} setQuery={setQuery} category={category} setCategory={setCategory} groups={categories} />
-    {categories.filter(group => !category || group.id === category).map(group => <section className="panel min-w-0" key={group.id} aria-label={group.label}>
+    {categories.filter(group => !category || group.id === category).map(group => <section className="setup-source-group min-w-0" key={group.id} aria-label={group.label}>
       <h2 className="text-heading mb-4">{group.label}</h2>
       <div className="grid min-[800px]:grid-cols-2 gap-6">{[{ label: aLabel, inventory: a }, { label: bLabel, inventory: b }].map((side, index) => <section key={index} className="min-w-0" aria-label={`${side.label} ${group.label}`}><h3 className="text-body font-semibold wrap-anywhere mb-2">{side.label}</h3><SourceGroup group={side.inventory.groups.find(candidate => candidate.id === group.id)} query={query.trim().toLowerCase()} headingLevel={4} /></section>)}</div>
     </section>)}
