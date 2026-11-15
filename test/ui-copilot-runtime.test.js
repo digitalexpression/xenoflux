@@ -73,7 +73,9 @@ async function setup(t, { wrongCwd = false, escapedDescendant = false, defaultRu
       const lock = join(options.profile.reservationRoot, '.run-lock', 'owner.json');
       reservations.push(JSON.parse(await readFile(lock, 'utf8')));
       return runtime.capture(options);
-    } } } : undefined;
+    } } } : escapedDescendant ? { copilot: createCopilotRuntime({
+      acquireAccount: async () => ({ run: action => action(), release: async () => {} }),
+    }) } : undefined;
   const accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
   const fixtureResolvers = productRouting ? {} : { profileResolvers };
   const fixtureAccounts = new Map();

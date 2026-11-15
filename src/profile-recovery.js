@@ -8,6 +8,8 @@ import { createDesktopRuntime } from './desktop-runtime.js';
 import { acquire, exists, globalLock, privateDirectory, readJSON, release } from './metadata.js';
 import { find, strictDescendant } from './profiles.js';
 import { createManagedDesktop } from './managed-desktop.js';
+import { observeAuditProcess } from './audit-process.js';
+import { recoverCopilotAccountClaim } from './copilot-account-lock.js';
 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -16,7 +18,7 @@ const alive = pid => {
   catch (error) { return error?.code !== 'ESRCH'; }
 };
 
-async function candidate(store, name, { isAlive }) {
+async function candidate(store, name, { isAlive, observeProcess }) {
   const profile = find(await store.read(), name);
   if (!profile.native) throw new Error('Profile has no registered native home');
   const codex = !profile.client || profile.client === 'codex';
@@ -47,6 +49,18 @@ async function candidate(store, name, { isAlive }) {
       throw new Error('Native login lock owner fields are invalid; preserving it');
     kind = 'native-home-login';
     signInMarker = await reconcileInterruptedSignIn({ root: native.root, profileId: profile.id });
+  } else if (!codex && owner.kind === 'native-signin') {
+    if (owner.storePath !== store.directory || owner.profileId !== profile.id
+      || owner.configRoot !== environment.home || !equal(owner.roots, [rootIdentity[1], rootIdentity[0]])
+      || typeof owner.executable !== 'string' || !isAbsolute(owner.executable)
+      || resolve(owner.executable) !== owner.executable || /[\x00-\x1f\x7f]/.test(owner.executable)
+      || typeof owner.executableIdentity !== 'string' || !owner.executableIdentity
+      || typeof owner.userHome !== 'string' || !isAbsolute(owner.userHome) || await realpath(owner.userHome) !== owner.userHome
+      || profile.client === 'copilot' && !owner.accountClaim
+      || !owner.processIdentity || (await observeProcess(owner.processIdentity)).status !== 'stopped')
+      throw new Error('Sign-in ownership or stopped process could not be verified; preserving its reservation');
+    kind = 'native-signin';
+    environment.executable = owner.executable;
   } else if (owner.kind === 'interactive-cli') {
     if (!equal(Object.keys(owner).sort(), ['host', 'kind', 'pid', 'runId']))
       throw new Error('CLI lock owner fields are invalid; preserving it');
@@ -79,9 +93,10 @@ async function candidate(store, name, { isAlive }) {
 export async function recoverProfileRun(store, name, {
   apply = false, runtime = createDesktopRuntime(), lockPath = globalLock(),
   isAlive: isAliveProcess = alive,
+  observeProcess = observeAuditProcess,
   managedDesktop,
 } = {}) {
-  if (typeof apply !== 'boolean' || typeof isAliveProcess !== 'function') throw new Error('Invalid profile recovery options');
+  if (typeof apply !== 'boolean' || typeof isAliveProcess !== 'function' || typeof observeProcess !== 'function') throw new Error('Invalid profile recovery options');
   const selected = find(await store.read(), name);
   if (['copilot', 'claude-code'].includes(selected.client) && selected.native) {
     const lock = join(selected.native.root, '.run-lock');
@@ -92,7 +107,7 @@ export async function recoverProfileRun(store, name, {
         return (managedDesktop ?? createManagedDesktop(store, { lockOptions: { lockPath } })).recover(name, { apply });
     }
   }
-  const preview = await candidate(store, name, { isAlive: isAliveProcess });
+  const preview = await candidate(store, name, { isAlive: isAliveProcess, observeProcess });
   const result = { status: 'preview', applyChecks: 'pending', profile: { id: preview.profile.id, name: preview.profile.name },
     root: preview.native.root, runId: preview.owner.runId, kind: preview.kind,
     marker: preview.kind === 'native-home-login' && preview.signInMarker.phase === 'login-running'
@@ -110,7 +125,7 @@ export async function recoverProfileRun(store, name, {
     return await store.withLock(async data => {
       const current = find(data, preview.profile.id);
       if (!equal(current.native, preview.profile.native)) throw new Error('Profile native-home binding changed; preserving the run lock');
-      const fresh = await candidate(store, current.id, { isAlive: isAliveProcess });
+      const fresh = await candidate(store, current.id, { isAlive: isAliveProcess, observeProcess });
       if (!equal(fresh.owner, preview.owner) || fresh.kind !== preview.kind)
         throw new Error('Native run lock owner changed; preserving it');
       const home = fresh.environment.home;
@@ -120,7 +135,7 @@ export async function recoverProfileRun(store, name, {
           join(home, 'state_5.sqlite-wal'), join(home, 'state_5.sqlite-shm')] : [join(home, 'settings.json')]),
       ].filter(Boolean) });
       if (current.client && current.client !== 'codex') {
-        const checked = await candidate(store, current.id, { isAlive: isAliveProcess });
+        const checked = await candidate(store, current.id, { isAlive: isAliveProcess, observeProcess });
         if (!equal(checked.owner, fresh.owner) || !equal(checked.environment, fresh.environment)) throw new Error('Native run changed; preserving its lock');
       }
       const ownerBeforeMutation = await readJSON(join(fresh.lock, 'owner.json'));
@@ -130,6 +145,8 @@ export async function recoverProfileRun(store, name, {
         ? await reconcileInterruptedSignIn({ root: fresh.native.root, profileId: current.id, apply: true }) : null;
       const latestOwner = await readJSON(join(fresh.lock, 'owner.json'));
       if (!equal(latestOwner, fresh.owner)) throw new Error('Native run lock owner changed; preserving it');
+      if (fresh.kind === 'native-signin' && current.client === 'copilot')
+        await recoverCopilotAccountClaim(fresh.owner.accountClaim, { userHome: fresh.owner.userHome });
       await release(fresh.lock, fresh.owner);
       return { ...result, status: 'recovered', applyChecks: 'passed',
         marker: reconciled?.changed ? 'login-running -> login-cancelled' : 'unchanged',

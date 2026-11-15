@@ -195,5 +195,5 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
     for (const work of active.values()) work.controller.abort();
     await Promise.allSettled([...attempts.values()].map(value => value.promise));
   }
-  return { get, refresh, cancel, validate, close };
+  return { get, refresh, cancel, validate, close, invalidate: client => cache.invalidateClient(client) };
 }

@@ -125,7 +125,8 @@ async function runCapture(t, settings = {}) {
   const requests = [], turns = [], checkpoints = [], taskEnds = [];
   let resolveQueued;
   const queued = new Promise(resolve => { resolveQueued = resolve; });
-  const runtime = createClientRuntime({ runtimes: { copilot: createCopilotRuntime() } });
+  const runtime = createClientRuntime({ runtimes: { copilot: createCopilotRuntime(settings.escapedDescendant
+    ? { acquireAccount: async () => ({ run: action => action(), release: async () => {} }) } : {}) } });
   const result = runtime.capture({ jobId: 'fixture-job', executionMode: 'profile', profile, workspace,
     execution: { model: 'auto', permissionMode: 'manual' }, task: 'Exact fixture task.',
     processOptions: { ...paths, env: profile.env, timeoutMs: 4000, signal: controller.signal },
@@ -262,9 +263,10 @@ test('final capture retains false shutdown facts without inventing missing worke
   const { workspace, profileFor, evidence } = await setup(t);
   const profile = await profileFor('Missing shutdown facts');
   const shutdown = { groupTerminated: false, sdkStopJoined: false, childClosed: false };
-  const runtime = createCopilotRuntime({ launch: () => ({ result: Promise.resolve({
-    failure: 'Fixture stopped before session', shutdown, output: {},
-  }) }) });
+  const runtime = createCopilotRuntime({ acquireAccount: async () => ({ run: action => action(), release: async () => {} }),
+    launch: () => ({ result: Promise.resolve({
+      failure: 'Fixture stopped before session', shutdown, output: {},
+    }) }) });
   const result = await runtime.capture({ executionMode: 'profile', profile, workspace,
     execution: { model: 'auto', permissionMode: 'manual' }, task: 'Fixture task.',
     processOptions: { ...await evidence('missing-facts'), env: profile.env }, onSession: async () => {} });
@@ -274,6 +276,16 @@ test('final capture retains false shutdown facts without inventing missing worke
   assert.equal(result.capture.shutdown.childClosed, false);
   for (const key of ['abortAcknowledged', 'trackedProcesses', 'ancestryCoverage', 'ancestryUncertain'])
     assert.equal(Object.hasOwn(result.capture.shutdown, key), false);
+});
+
+test('a worker constructor failure releases its shared account reader before any native process exists', async t => {
+  const { workspace, profileFor, evidence } = await setup(t);
+  const profile = await profileFor('No worker');
+  let released = 0;
+  const runtime = createCopilotRuntime({ acquireAccount: async () => ({ run: action => action(), release: async () => { released++; } }),
+    launch: () => { throw new Error('Fixture constructor failure'); } });
+  await assert.rejects(runtime.discover({ ...await evidence('constructor'), profile, workspace }), /Fixture constructor failure/);
+  assert.equal(released, 1);
 });
 
 test('a different current auth route stops before Copilot discovery or submission', async t => {

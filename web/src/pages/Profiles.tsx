@@ -1,9 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { ApiError, apiGet, apiPost } from '@/api/client';
-import type { ClientAction, ClientActionResult, MenuAction, NativeAppEntry, NativeAppOpenResult, NativeAppsView, ProfileCard, ProfileClient, ProfilesView, StatusKind } from '@/api/types';
+import type { ClientAction, ClientActionResult, MenuAction, NativeAppEntry, NativeAppOpenResult, NativeAppsView, NativeSigninAttempt, ProfileCard, ProfileClient, ProfilesView, StatusKind } from '@/api/types';
 import { setupInspectHref, setupParams } from '@/components/setup-inventory';
-import { Disclosure } from '@/components/controls';
 import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
 import { ErrorPanel, SimulatedNote, WarningAlert } from '@/components/notices';
 import { StatusBadge } from '@/components/badges';
@@ -24,7 +23,8 @@ type DialogState =
 export function Profiles() {
   const info = useInfo();
   const [params, setParams] = useSearchParams();
-  const view = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles', { live: true });
+  const [signInProfile, setSignInProfile] = useState<ProfileCard | null>(null);
+  const view = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles', { live: true, paused: signInProfile !== null });
   const [dialog, setDialog] = useState<DialogState>(null);
   const [message, setMessage] = useState<{ status: StatusKind; text: string } | null>(null);
   const pendingClients = useRef(new Set<string>());
@@ -37,6 +37,7 @@ export function Profiles() {
   const close = () => { setDialog(null); if (params.size) setParams({}, { replace: true }); };
 
   async function runClientAction(profile: ProfileCard, action: ClientAction) {
+    if (action.id === 'signin' && profile.client && profile.client !== 'codex') { setSignInProfile(profile); return; }
     if (action.conflict) { setDialog({ kind: 'conflict', profile: profile.name, action }); return; }
     if (pendingClients.current.has(profile.name)) return;
     pendingClients.current.add(profile.name);
@@ -90,6 +91,7 @@ export function Profiles() {
       {view.data?.notes.length ? <ul className="hint list-disc pl-5">{view.data.notes.map(note => <li key={note}>{note}</li>)}</ul> : null}
 
       <NativeApps />
+      {signInProfile ? <SigninDialog profile={signInProfile} onClose={() => setSignInProfile(null)} onRefresh={view.reload} /> : null}
 
       <ConflictDialog state={dialog?.kind === 'conflict' ? dialog : null} onClose={close}
         onCheck={async name => { await apiPost(`/api/profiles/${encodeURIComponent(name)}/clients`, { action: 'check' }); view.reload(); close(); }} />
@@ -99,6 +101,97 @@ export function Profiles() {
         onClose={close} onDone={(text, status) => { setMessage({ status, text }); view.reload(); close(); }} />
     </Page>
   );
+}
+
+const activeSigninStates = new Set<NativeSigninAttempt['state']>(['starting', 'waiting-for-browser', 'verifying']);
+const signinLabels: Record<NativeSigninAttempt['state'], string> = {
+  starting: 'Starting sign-in…', 'waiting-for-browser': 'Continue in your browser', verifying: 'Verifying sign-in…',
+  completed: 'Sign-in verified', failed: 'Sign-in failed', cancelled: 'Sign-in cancelled',
+  'timed-out': 'Sign-in timed out', uncertain: 'Sign-in could not be verified',
+};
+
+function SigninDialog({ profile, onClose, onRefresh }: { profile: ProfileCard; onClose: () => void; onRefresh: () => void }) {
+  const [attempt, setAttempt] = useState<NativeSigninAttempt | null>(null);
+  const [busy, setBusy] = useState<'starting' | 'cancelling' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pending = useRef(false);
+  const started = useRef(false);
+  const checking = useRef(false);
+  const checkGeneration = useRef(0);
+  const active = attempt !== null && activeSigninStates.has(attempt.state);
+  const clientLabel = clientLabels[profile.client ?? 'codex'];
+
+  function receive(next: NativeSigninAttempt) {
+    setAttempt(next); setError(null);
+    if (!activeSigninStates.has(next.state)) onRefresh();
+  }
+
+  async function check() {
+    if (!attempt || pending.current || checking.current) return;
+    checking.current = true;
+    const generation = checkGeneration.current;
+    try {
+      const next = await apiGet<NativeSigninAttempt>(`/api/sign-ins/${encodeURIComponent(attempt.id)}`);
+      if (!pending.current && generation === checkGeneration.current) receive(next);
+    } catch (failure) { if (!pending.current && generation === checkGeneration.current) setError(failure instanceof Error ? failure.message : 'Could not check sign-in.'); }
+    finally { checking.current = false; }
+  }
+
+  useEffect(() => {
+    if (!active || error) return;
+    const timer = window.setInterval(() => { void check(); }, 750);
+    return () => window.clearInterval(timer);
+  });
+
+  async function start() {
+    if (pending.current) return;
+    pending.current = true; setBusy('starting'); setError(null);
+    try { receive(await apiPost<NativeSigninAttempt>(`/api/profiles/${encodeURIComponent(profile.name)}/sign-in`)); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : 'Could not start sign-in.'); }
+    finally { pending.current = false; setBusy(null); }
+  }
+
+  useEffect(() => {
+    if (started.current) return;
+    started.current = true;
+    void start();
+  }, []);
+
+  async function dismiss() {
+    if (busy) return;
+    if (!active || !attempt) { onClose(); return; }
+    if (pending.current) return;
+    pending.current = true; setBusy('cancelling'); checkGeneration.current++;
+    try {
+      const next = await apiPost<NativeSigninAttempt>(`/api/sign-ins/${encodeURIComponent(attempt.id)}/cancel`);
+      receive(next);
+      if (next.state === 'cancelled' || next.state === 'completed') onClose();
+      else if (!activeSigninStates.has(next.state)) setError(next.message);
+    } catch (failure) { setError(`${failure instanceof Error ? failure.message : 'Could not cancel sign-in.'} Sign-in is still tracked here. Retry the check or cancel again.`); }
+    finally { pending.current = false; setBusy(null); }
+  }
+
+  return <Dialog open onOpenChange={open => { if (!open) void dismiss(); }}>
+    <DialogContent title={`Sign in to ${clientLabel}`} description={`Profile ${profile.name}`}>
+      <p className="text-ui">{profile.client === 'copilot'
+        ? 'This changes the shared GitHub CLI account for all qualified Copilot profiles and other tools using GitHub CLI.'
+        : 'Sign in with your Claude account in your browser. This sign-in belongs to this profile.'}</p>
+      <p className="hint">Xenoflux checks sign-in automatically when browser authorization finishes. Never paste passwords, tokens or authorization codes here.</p>
+      {busy === 'starting' ? <p role="status">Starting sign-in…</p> : null}
+      {attempt ? <div className="flex min-w-0 flex-col gap-3" role="status" aria-live="polite">
+        <p className="font-medium">{signinLabels[attempt.state]}</p>
+        <p className="text-ui">{attempt.message}</p>
+        {active && attempt.deviceCode ? <div><p className="field-label">Enter this code on the vendor’s page</p><code className="font-mono text-body select-all">{attempt.deviceCode}</code></div> : null}
+        {active && attempt.browserUrl ? <a className="wrap-anywhere" href={attempt.browserUrl} target="_blank" rel="noreferrer">Open sign-in page in browser</a> : null}
+      </div> : null}
+      {error ? <p role="alert" className="alert-error">{error}</p> : null}
+      <div className="flex flex-wrap gap-2">
+        {!attempt && error ? <Button variant="primary" onClick={() => void start()} disabled={busy !== null} busy={busy === 'starting'} busyLabel="Starting sign-in…">Start sign in</Button> : null}
+        {attempt && error ? <Button onClick={() => void check()} disabled={busy !== null}>Retry sign-in check</Button> : null}
+        <Button onClick={() => void dismiss()} disabled={busy !== null} busy={busy === 'cancelling'} busyLabel="Cancelling sign-in…">{active ? 'Cancel sign-in' : 'Close'}</Button>
+      </div>
+    </DialogContent>
+  </Dialog>;
 }
 
 function NativeApps() {
@@ -181,18 +274,10 @@ function ProfileCardView({ profile, busyAction, onClient, onMenu }:
           <dt className="muted">{cliLabel}</dt><dd>{profile.cli.text}</dd>
           <dt className="muted">Desktop app</dt><dd>{profile.desktop.text}</dd>
         </dl>
-        <p>{profile.accountScope === 'per-root' ? 'CLI sign-in is per root. Sign in to this profile in Claude Code; Desktop sign-in is separate and unverified.'
-          : profile.accountScope === 'shared' ? 'CLI account shared via GitHub CLI (gh-cli). Qualified CLI profiles use this login.'
-          : 'CLI account route: check sign-in to verify the shared GitHub CLI binding before running tasks.'}</p>
+        <p>{profile.client === 'copilot' ? 'Signing in changes the shared GitHub CLI account for all qualified Copilot profiles and other tools using GitHub CLI.'
+          : profile.accountScope === 'per-root' ? 'CLI sign-in belongs to this profile. Continue in your browser; Desktop sign-in is separate and unverified.'
+          : 'Check sign-in to verify the shared GitHub CLI account before running tasks.'}</p>
         <p className="muted">Account independence: {profile.accountIndependence}.</p>
-        {profile.setup ? <Disclosure label="Native setup and sign-in" expandedLabel="Hide native setup">
-          <div className="flex flex-col gap-2">
-            <p>{profile.client === 'claude-code' ? 'Run this command in Terminal to sign in with your Claude subscription.'
-              : 'Sign in to GitHub CLI separately with gh auth login if needed. Run this command to open this profile. A shared login change affects other profiles.'}</p>
-            <code className="block font-mono text-ui wrap-anywhere whitespace-pre-wrap">{profile.setup.command}</code>
-            <p className="hint">This command uses the currently installed {cliLabel}. Return here and check sign-in when ready.</p>
-          </div>
-        </Disclosure> : null}
       </div>}
       <div className="flex flex-wrap gap-2">
         <Link className="btn" to={setupInspectHref({ name: profile.name, client: profile.client ?? 'codex' })}>Inspect setup</Link>
@@ -214,7 +299,7 @@ function ProfileCardView({ profile, busyAction, onClient, onMenu }:
         <div className="flex flex-wrap gap-2 pt-3 border-t" style={{ borderColor: 'var(--color-divider)' }}>
           {profile.clientActions.map(action => (
             <Button key={action.id} onClick={() => onClient(action)} disabled={Boolean(busyAction)} busy={busyAction === action.id}
-              busyLabel={action.id === 'open-desktop' ? 'Opening Desktop…' : action.id === 'open-terminal' || action.id === 'signin' ? 'Opening Terminal…' : action.id === 'recover-desktop' ? 'Releasing reservation…' : 'Checking…'}
+              busyLabel={action.id === 'open-desktop' ? 'Opening Desktop…' : action.id === 'signin' && profile.client && profile.client !== 'codex' ? 'Starting sign-in…' : action.id === 'open-terminal' || action.id === 'signin' ? 'Opening Terminal…' : action.id === 'recover-desktop' ? 'Releasing reservation…' : 'Checking…'}
               aria-label={`${action.label.replace(/…$/, '')} for ${profile.name}`}>{action.label}</Button>
           ))}
         </div>

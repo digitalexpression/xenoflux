@@ -1,10 +1,11 @@
-// Native profile preparation and account metadata. The user runs login directly.
 import { randomUUID } from 'node:crypto';
+import { acquireCopilotAccount } from './copilot-account-lock.js';
+import { runSigninProcess } from './signin-process.js';
 import { lstat, mkdir, mkdtemp, realpath, rm, rmdir } from 'node:fs/promises';
 import { homedir, hostname, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { create, find, strictDescendant } from './profiles.js';
-import { acquire, privateDirectory, release } from './metadata.js';
+import { acquire, privateDirectory, record, release } from './metadata.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { canonicalClaudeDirectory, claudeEnvironment, discoverClaudeExecutable, resolveClaudeProfile } from './claude-profile.js';
@@ -26,7 +27,8 @@ function copilotEnv(ambient) {
 
 export function managedNativeProfiles({ store, profilesBase, defaultUserHome = homedir(),
   terminalEnvironment = process.env, copilotRuntime, lockOptions,
-  readCopilotAccount = options => copilotRuntime.accountStatus(options), resolveStockCopilot }) {
+  readCopilotAccount = options => copilotRuntime.accountStatus(options), resolveStockCopilot,
+  signinProcess = runSigninProcess, signinTimeoutMs = 300000, acquireAccount = acquireCopilotAccount }) {
   const observations = new Map();
 
   async function binary(client) {
@@ -88,11 +90,14 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
     return Promise.all([profile.home, profile.reservationRoot].map(stamp));
   }
 
-  async function observed(profile) {
+  async function observed(profile, { forDisplay = false } = {}) {
     const key = profile.environmentId ?? profile.profileId;
     const value = observations.get(key);
-    if (value?.expiresAt > Date.now() && same(value.binary, [profile.executable, profile.executableIdentity])
-      && same(value.roots, await routeIdentity(profile))) return value;
+    if (value && same(value.binary, [profile.executable, profile.executableIdentity])
+      && same(value.roots, await routeIdentity(profile))) {
+      if (value.expiresAt > Date.now()) return value;
+      if (forDisplay) return { ...value, qualification: null, stale: true };
+    }
     return null;
   }
 
@@ -121,7 +126,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
       rootMode: profile.rootMode, version: (await observed(profile))?.runtimeVersion ?? profile.version ?? 'not observed' };
   }
 
-  async function check(name, client) {
+  async function check(name, client, { alreadyReserved = false, signal } = {}) {
     const isDefault = name === 'Default';
     const selected = isDefault ? null : find(await store.read(), name);
     if (selected && selected.client !== client) throw new Error('The selected profile belongs to another client.');
@@ -141,8 +146,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
         profile = await resolveProfile(client, fresh, client === 'copilot' ? { workspace: scratch } : {});
         lock = join(profile.reservationRoot, '.run-lock');
         await assertNoLegacyAuditLease(store.directory, profile.home);
-        await acquire(lock, owner, true);
-        held = true;
+        if (!alreadyReserved) { await acquire(lock, owner, true); held = true; }
       });
       else profile = await resolveProfile(client, null, client === 'copilot' ? { workspace: scratch } : {});
       const roots = await routeIdentity(profile);
@@ -150,11 +154,11 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
       if (client === 'claude-code') {
         const cwd = selected ? join(profile.reservationRoot, 'workspace') : scratch;
         await privateDirectory(cwd);
-        status = await probeClaudeAccount({ executable: profile.executable, cwd, env: profile.env });
+        status = await probeClaudeAccount({ executable: profile.executable, cwd, env: profile.env, signal });
       } else {
         const read = async (profile, label) => {
           attempted = true;
-          const result = await readCopilotAccount({ profile, workspace: scratch,
+          const result = await readCopilotAccount({ profile, workspace: scratch, signal,
             stdoutPath: join(scratch, label + '.out'), stderrPath: join(scratch, label + '.err') });
           attempted = false;
           return result;
@@ -180,7 +184,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
       const current = await binary(client);
       if (profile.executable !== current.executable || profile.executableIdentity !== current.executableIdentity
         || !same(roots, await routeIdentity(profile))) throw new Error('The native account binding changed during the check.');
-      observations.set(key, { ...status, qualification, runtimeVersion, roots, binary: [profile.executable, profile.executableIdentity],
+      observations.set(key, { client, ...status, qualification, runtimeVersion, roots, binary: [profile.executable, profile.executableIdentity],
         expiresAt: qualification?.expiresAt ?? Date.now() + freshnessMs });
       return { ...status, accountScope: client === 'claude-code' ? 'per-root' : qualification ? 'shared' : 'unverified',
         accountIndependence: 'not verified' };
@@ -193,11 +197,99 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
     }
   }
 
+  function invalidate(client) {
+    for (const [key, observation] of observations) if (observation.client === client) observations.delete(key);
+  }
+
+  async function githubBinary(env) {
+    for (const directory of env.PATH.split(':')) {
+      try { return await inspectCopilotExecutable(join(directory, 'gh')); }
+      catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error; }
+    }
+    throw new Error('GitHub CLI is unavailable. Install GitHub CLI before signing in to Copilot.');
+  }
+
+  async function signin(name, client, { signal, onProgress = () => {}, onSpawn } = {}) {
+    const selected = find(await store.read(), name);
+    if (selected.client !== client || !selected.native) throw new Error('The selected profile has no matching native binding.');
+    const owner = { kind: 'native-signin', runId: randomUUID(), host: hostname(), pid: process.pid,
+      storePath: store.directory, profileId: selected.id };
+    const guard = action => withProfileOperation(store, selected.id, { waitMs: 5000, ...lockOptions }, action);
+    const cwd = join(selected.native.root, 'workspace');
+    let profile, lock, held = false, preserve = false, account;
+    try {
+      if (client === 'copilot') account = await acquireAccount(defaultUserHome, { exclusive: true });
+      await guard(async () => {
+        const fresh = find(await store.read(), selected.id);
+        if (!same(selected.native, fresh.native)) throw new Error('The native profile changed.');
+        profile = await resolveProfile(client, fresh, client === 'copilot' ? { workspace: cwd } : {});
+        await privateDirectory(cwd);
+        await assertNoLegacyAuditLease(store.directory, profile.home);
+        lock = join(profile.reservationRoot, '.run-lock');
+        await acquire(lock, owner, true); held = true;
+      });
+      const roots = await routeIdentity(profile);
+      const env = client === 'claude-code' ? profile.env : copilotEnv(terminalEnvironment);
+      const binary = client === 'claude-code' ? { executable: profile.executable, executableIdentity: profile.executableIdentity } : await githubBinary(env);
+      const revalidate = async () => {
+        const fresh = find(await store.read(), selected.id);
+        const native = await resolveProfile(client, fresh, client === 'copilot' ? { workspace: cwd } : {});
+        const login = client === 'claude-code' ? native : await githubBinary(env);
+        if (!same(selected.native, fresh.native) || !same(roots, await routeIdentity(native))
+          || native.executable !== profile.executable || native.executableIdentity !== profile.executableIdentity
+          || login.executable !== binary.executable || login.executableIdentity !== binary.executableIdentity)
+          throw new Error('The native sign-in binding changed. Check the profile and try again.');
+      };
+      await revalidate();
+      Object.assign(owner, { executable: binary.executable, executableIdentity: binary.executableIdentity, roots, configRoot: profile.home, userHome: profile.userHome });
+      if (account) { await account.checkpoint({ spawnIntent: true }); owner.accountClaim = account.reference; }
+      await record(join(lock, 'owner.json'), owner);
+      invalidate(client);
+      const execute = async () => {
+        signal?.throwIfAborted();
+        const result = await signinProcess({ ...binary, args: client === 'claude-code' ? ['auth', 'login', '--claudeai']
+          : ['auth', 'login', '--web', '--hostname', 'github.com', '--skip-ssh-key'], cwd, env, client, signal,
+          timeoutMs: signinTimeoutMs, onProgress, async onSpawn(identity) {
+            owner.processIdentity = identity ?? null;
+            if (account) { await account.checkpoint({ processIdentity: identity ?? null }); owner.accountClaim = account.reference; }
+            await record(join(lock, 'owner.json'), owner);
+            await onSpawn?.(identity);
+          } });
+        owner.shutdown = result.shutdown;
+        if (account) { await account.checkpoint({ shutdown: result.shutdown }); owner.accountClaim = account.reference; }
+        await record(join(lock, 'owner.json'), owner);
+        if (result.shutdown?.groupTerminated !== true) {
+          preserve = true;
+          throw Object.assign(new Error('Sign-in shutdown could not be confirmed. Its reservation was preserved.'), { code: 'SHUTDOWN_FAILED' });
+        }
+        if (signal?.aborted || result.status === 'cancelled') throw Object.assign(new Error('Sign-in cancelled.'), { code: 'SIGNIN_CANCELLED' });
+        if (result.status === 'timeout') throw Object.assign(new Error('The browser sign-in did not finish in time. Try again and complete authorization in the browser.'), { code: 'SIGNIN_TIMEOUT' });
+        if (result.status !== 'exited' || result.exitCode !== 0) throw new Error('The native sign-in did not complete. Try signing in again in the browser.');
+        await revalidate();
+        onProgress({ state: 'verifying' });
+        const status = await check(name, client, { alreadyReserved: true, signal });
+        await revalidate();
+        signal?.throwIfAborted();
+        if (status.state !== 'signed-in' || client === 'copilot' && status.accountScope !== 'shared')
+          throw new Error('Browser sign-in finished, but this profile could not be verified. Try again or check the selected client account.');
+        return status;
+      };
+      return await (account ? account.run(execute) : execute());
+    } catch (error) {
+      if (account && held) { owner.accountClaim = account.reference; await record(join(lock, 'owner.json'), owner); }
+      preserve ||= error.code === 'SHUTDOWN_FAILED' || Boolean(error.process && error.process.shutdown?.groupTerminated !== true);
+      throw error;
+    } finally {
+      if (held && !preserve) await guard(() => release(lock, owner));
+      if (account && !preserve) await account.release();
+    }
+  }
+
   async function hasStock(client) {
     const path = join(defaultUserHome, STOCK_DIR[client]);
     try { return (await lstat(path)).isDirectory() && await realpath(path) === path; }
     catch { return false; }
   }
 
-  return { binary, createProfile, resolveProfile, qualifiedCopilot, setup, check, observed, hasStock };
+  return { binary, createProfile, resolveProfile, qualifiedCopilot, setup, check, observed, hasStock, signin, invalidate };
 }

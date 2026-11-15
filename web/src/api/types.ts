@@ -64,6 +64,16 @@ export interface NativeAppEntry {
 export interface NativeAppsView { apps: NativeAppEntry[] }
 export interface NativeAppOpenResult { status: 'opened' | 'link-opened'; message: string }
 export interface ProfilesView { profiles: ProfileCard[]; copySources?: Record<ProfileClient, string[]>; notes: string[]; simulated: boolean }
+export interface NativeSigninAttempt {
+  id: string;
+  client: 'claude-code' | 'copilot';
+  profileName: string;
+  accountScope: 'per-root' | 'shared';
+  state: 'starting' | 'waiting-for-browser' | 'verifying' | 'completed' | 'failed' | 'cancelled' | 'timed-out' | 'uncertain';
+  browserUrl?: string;
+  deviceCode?: string;
+  message: string;
+}
 export interface ClientActionResult { status: StatusKind; message: string; profile?: ProfileCard }
 
 /* Setup comparison */

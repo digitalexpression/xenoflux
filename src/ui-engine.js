@@ -18,6 +18,7 @@ import { evaluateAuditEvidence, previewAuditEvidence } from './audit-review-comm
 import { ASSOCIATION, presentComparison, presentEvidence, presentReviews, presentRunExecution, presentSetupComparison, presentSetupInventory, presentSkillPackage } from './audit-presentation.js';
 import { inspectCopyProfile } from './copy-client.js';
 import { managedNativeProfiles, PROFILE_CLIENT_NAMES } from './managed-native-profile.js';
+import { createUiSignins } from './ui-signins.js';
 import { inspectSetupGuidance } from './setup-guidance.js';
 import { DESKTOP_APP } from './desktop-runtime.js';
 import { createHome, planHomeCreation } from './home-create.js';
@@ -252,6 +253,20 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     release(id) { admitted.delete(id); },
   };
   const catalogs = createUiCatalog({ store, defaultUserHome, context: { lockOptions, ...catalogContext } });
+  const signins = createUiSignins({ nativeProfiles,
+    browser: accountContext.openBrowser,
+    invalidate: client => catalogs.invalidate(client),
+    select: async name => {
+      if (!plain(name)) throw new UiError(400, 'Choose a profile to sign in.', 'invalid-selection');
+      const selected = (await store.read()).profiles.find(profile => profile.name === name);
+      if (!selected || !['claude-code', 'copilot'].includes(selected.client) || !selected.native)
+        throw new UiError(400, 'Choose a managed Claude Code or Copilot profile.', 'invalid-selection');
+      const desktop = await managedDesktop.status(selected.id);
+      if (!['available', 'unavailable'].includes(desktop.state))
+        throw new UiError(409, 'Close the Desktop app and release its reservation before signing in.', 'profile-busy');
+      return selected;
+    },
+  });
   const validateSelection = (input, execution) => catalogs.validate(input, execution);
   async function nativeExecutionOptions() {
     const data = await store.read();
@@ -648,6 +663,9 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       try { return await stockApps.open(input); }
       catch (error) { throw new UiError(409, error.message, 'stock-app-unavailable'); }
     },
+    startSignin: signins.start,
+    signin: signins.get,
+    cancelSignin: signins.cancel,
     catalog: catalogs.get,
     refreshCatalog: catalogs.refresh,
     cancelCatalog: catalogs.cancel,
@@ -665,7 +683,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     respondReviewTask: reviewTasks.respondReviewTask,
     async close() {
       closing = true;
-      const results = await Promise.allSettled([runs.close(), reviewTasks.close(), catalogs.close(), Promise.allSettled([...activeImports])]);
+      const results = await Promise.allSettled([runs.close(), reviewTasks.close(), catalogs.close(), signins.close(), Promise.allSettled([...activeImports])]);
       const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
       if (failures.length) throw new AggregateError(failures, failures.map(error => error.message).join('\n'));
     },
@@ -736,7 +754,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         try {
           profile = await nativeProfiles.resolveProfile(client, selected);
           setup = await nativeProfiles.setup(profile);
-          observation = await nativeProfiles.observed(profile);
+          observation = await nativeProfiles.observed(profile, { forDisplay: true });
         } catch { /* Show the unavailable binding without offering native actions. */ }
         const ready = Boolean(setup);
         const desktopName = client === 'claude-code' ? 'Claude' : 'GitHub Copilot';
@@ -752,7 +770,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           : desktopStatus?.state === 'recoverable-stopped' ? [{ id: 'recover-desktop', label: 'Release closed Desktop reservation' }] : [];
         const desktopClaimed = desktopStatus && !['available', 'unavailable'].includes(desktopStatus.state);
         const accountScope = client === 'claude-code' ? 'per-root' : observation?.qualification ? 'shared' : 'unverified';
-        const signIn = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state] ?? 'Sign-in not checked';
+        const accountState = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state];
+        const signIn = accountState ? accountState + (observation.stale ? ' (last checked)' : '') : 'Sign-in not checked';
         const repositories = selected.repositories;
         cards.push({ name: selected.name, client, isDefault: false, state: ready || desktopReady ? 'ready' : 'unavailable',
           reason: ready || desktopReady ? null : 'The native root or executable no longer matches this binding.',
@@ -761,7 +780,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           summary: selected.description || `${PROFILE_CLIENT_NAMES[client]} folder ${tilde(selected.native?.configRoot ?? '')}`,
           cli: { state: ready ? 'unknown' : 'unavailable', text: ready ? 'Open in Terminal with this profile. Process state not checked.' : 'CLI or profile root unavailable' },
           desktop,
-          clientActions: [...(ready && !desktopClaimed ? [{ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` }, { id: 'check', label: 'Check sign-in' }] : []), ...desktopActions],
+          clientActions: [...(ready && !desktopClaimed ? [{ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` }, { id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' }, { id: 'check', label: 'Check sign-in' }] : []), ...desktopActions],
           moreMenu: [
             ...(ready ? [{ id: 'copy', label: 'Copy settings from another profile…' }] : []),
             { id: 'binding', label: 'Change project binding…' },
@@ -1096,7 +1115,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       }
       return { status: 'applied', title: `${name} created`, changes, guidance, undo,
         note: selectedClient === 'codex' ? 'It has its own settings and no sign-in yet. Open Terminal or Codex Desktop from its Profiles card to sign in.'
-          : 'Use Open in Terminal or an available Desktop action on its Profiles card. The sign-in check uses the CLI; Desktop sign-in and task execution are unverified.' };
+          : 'Choose Sign in on its Profiles card and complete authorization in your browser. Xenoflux verifies CLI sign-in automatically. Desktop sign-in remains separate.' };
     },
 
     async profileAccount({ name, client }) {

@@ -145,6 +145,28 @@ test('cache reads never discover, expire after five minutes and invalidate accou
   cache.invalidate(c); assert.equal(cache.get(c), null);
 });
 
+test('shared sign-in invalidates every Copilot catalog and fences pending publication without clearing other clients', async () => {
+  const codex = context('/codex'), first = context('/copilot-one'), second = context('/copilot-two');
+  for (const c of [first, second]) c.profile.environmentBinding.client = 'copilot';
+  const pending = deferred();
+  let delayCopilot = false;
+  const cache = createClientCatalog({ discover: async c => {
+    if (delayCopilot && c.profile.environmentBinding.client === 'copilot') await pending.promise;
+    return ready(c);
+  } });
+  for (const c of [codex, first, second]) await cache.refresh(c);
+  delayCopilot = true;
+  const late = cache.refresh(first);
+  await Promise.resolve(); await Promise.resolve();
+  cache.invalidateClient('copilot');
+  assert.equal(cache.get(first), null);
+  assert.equal(cache.get(second), null);
+  assert.equal(cache.get(codex).status, 'ready');
+  pending.resolve();
+  assert.equal((await late).reason, 'catalog-superseded');
+  assert.equal(cache.get(first), null);
+});
+
 test('superseded refresh and changes during awaited reconciliation cannot publish late results', async () => {
   const c = context(), pending = [];
   const cache = createClientCatalog({ discover: async () => { const d = deferred(); pending.push(d); return d.promise; } });

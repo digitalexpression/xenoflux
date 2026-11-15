@@ -2,6 +2,8 @@ import { join } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Worker } from 'node:worker_threads';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { acquireCopilotAccount } from './copilot-account-lock.js';
 import { normalizeSessionReplay, REPLAY_LIMITS } from './audit-session-replay.js';
 import { assertEnvironmentBinding, createNativeReference, createSettingsEvidence } from './client-contracts.js';
 import { assertCopilotEnvironment, copilotBinding, copilotId, isCopilotNativeAuthType, qualifiedCopilotRoute, COPILOT_SDK_VERSION, COPILOT_SESSION_ID } from './copilot-profile.js';
@@ -65,7 +67,36 @@ export function assertCopilotSessionSelection(selection, profile) {
   return binding;
 }
 
-export function createCopilotRuntime({ launch = startWorker } = {}) {
+export function createCopilotRuntime({ launch: launchWorker = startWorker, acquireAccount = acquireCopilotAccount } = {}) {
+  const accountOperation = new AsyncLocalStorage();
+  const launch = (...args) => {
+    const operation = accountOperation.getStore();
+    const [data, receive] = args;
+    const worker = launchWorker(data, (message, ...reply) => {
+      if (operation && message.type === 'process') {
+        Promise.resolve(operation.lease.checkpoint?.({ processIdentity: message.value.processIdentity })).then(
+          () => receive(message, ...reply), () => reply[0]?.({ id: message.id, error: true }));
+      } else receive(message, ...reply);
+    });
+    if (operation) operation.started = true;
+    if (operation) operation.checkpoint = worker.result.then(async result => {
+      await operation.lease.checkpoint?.({ shutdown: result.shutdown });
+      operation.stopped = result.shutdown?.groupTerminated === true;
+    }, () => {});
+    return worker;
+  };
+  const accountUse = method => async options => {
+    if (!options?.profile?.userHome) return method(options);
+    let lease;
+    try { lease = await acquireAccount(options.profile.userHome); }
+    catch (error) { throw Object.assign(error, { process: { status: 'spawn-failed', shutdown: { groupTerminated: true } } }); }
+    const operation = { started: false, stopped: false, lease };
+    try {
+      await lease.checkpoint?.({ spawnIntent: true, processIdentity: null, shutdown: null });
+      return await lease.run(() => accountOperation.run(operation, () => method(options)));
+    }
+    finally { await operation.checkpoint; if (!operation.started || operation.stopped) await lease.release(); }
+  };
   async function read(operation, options) {
     const { signal, timeoutMs = 25000 } = options;
     const startedAt = Date.now();
@@ -311,7 +342,8 @@ export function createCopilotRuntime({ launch = startWorker } = {}) {
     return { run, capture, process, response, capabilities: capture.capabilities };
   }
 
-  return { capture, discover, listSessions, readJournal, accountStatus };
+  return { capture: accountUse(capture), discover: accountUse(discover), listSessions: accountUse(listSessions),
+    readJournal: accountUse(readJournal), accountStatus: accountUse(accountStatus) };
 }
 
 export async function discoverCopilotModels(options) {

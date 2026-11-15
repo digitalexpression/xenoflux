@@ -43,8 +43,27 @@ are never copied. Profiles subsequently evolve independently.
 | Profile client | CLI | Desktop with the selected profile |
 | --- | --- | --- |
 | Codex | Open in Terminal | Open Codex Desktop, including to sign in |
-| Claude Code | Open in Terminal; native sign-in guidance on the card | Separate Desktop startup and storage; authenticated session/model use unverified |
-| GitHub Copilot | Open in Terminal; shared account scope remains explicit | Profile-bound local startup and storage; authenticated session/model use unverified |
+| Claude Code | Sign in through the browser; Open in Terminal for interactive work | Separate Desktop startup and storage; authenticated session/model use unverified |
+| GitHub Copilot | Sign in through the browser with the shared GitHub CLI account; Open in Terminal for interactive work | Profile-bound local startup and storage; authenticated session/model use unverified |
+
+For Claude Code or Copilot, choose **Sign in** on the profile card. Complete
+authorization in your browser. Xenoflux checks sign-in automatically and updates
+the profile when verification finishes. You do not need to run a command or return
+to **Check sign-in**. GitHub may ask you to enter the device code shown in Xenoflux.
+After five minutes, a previous result is labelled **last checked**. It remains
+visible until another check or a change to its native binding invalidates it.
+This display does not renew account qualification for running tasks.
+
+Claude signs in to the selected configuration root. Copilot signs in through
+GitHub CLI and shares that account across qualified Copilot profiles and other
+tools using GitHub CLI. Review that shared scope before continuing. Separate
+Copilot settings do not create separate accounts.
+
+You can cancel a pending sign-in. Cancellation stops Xenoflux's login process;
+it does not undo authorization already completed in your browser. Closing the
+Xenoflux server cancels pending sign-ins. If browser authorization cannot finish,
+retry from Xenoflux. Xenoflux never asks you to paste a credential or Claude
+authorization code. CLI sign-in does not verify Desktop sign-in.
 
 **Open in Terminal** launches the current selected CLI through Xenoflux with the
 profile's configuration root and an exclusive reservation. A bound project is
@@ -284,7 +303,8 @@ Claude's observed account route is per-root/same-account; Copilot's qualified
 `gh-cli` route is shared. Separate roots do not prove separate accounts.
 
 Credential refresh, distinct-account independence and shared sign-out isolation
-are unverified. Some native pair/mode combinations, repeated overlap stress,
+are unverified. An interrupted shared-account metadata operation keeps its
+reservation for maintainer recovery. Some native pair/mode combinations, repeated overlap stress,
 controller-kill reviews and copied-setup loading remain deferred. Real Codex
 stale-callback recovery is unobserved; synthetic Desktop fixtures do not establish
 real sign-in, Dock behavior or account isolation. Unreported effort/usage stays
