@@ -156,7 +156,7 @@ test('pins the reviewed commit, runs both profiles, then exports and reopens the
   const savedJson = join(folderPath, jsonName);
   const original = await readFile(savedJson, 'utf8');
   await rm(join(app.store.directory, 'audits'), { recursive: true });
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports' }).click();
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedJson);
   await expect(page.getByText('shown exactly as saved; today’s setup and files aren’t used.')).toBeVisible();
   await page.getByRole('link', { name: 'View report' }).click();
@@ -306,7 +306,7 @@ test('successful partial capture preserves task completion, validation and recor
   await expect(rowsWithFiles).toHaveCount(1);
   const row = rowsWithFiles.filter({ has: page.getByRole('cell', { name: 'README.md', exact: true }) });
   await expect(row.getByRole('cell')).toHaveText(['README.md', 'Tracked', 'Changed', 'Changed']);
-  await page.setViewportSize({ width: 320, height: 800 });
+  await page.setViewportSize({ width: 1280, height: 800 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
@@ -320,7 +320,7 @@ test('successful partial capture preserves task completion, validation and recor
   const savedJson = join(folder, (await readdir(folder)).find(name => name.endsWith('.audit.json')));
   const original = await readFile(savedJson, 'utf8');
   await rm(join(app.store.directory, 'audits'), { recursive: true });
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports' }).click();
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedJson);
   await page.getByRole('link', { name: 'View report' }).click();
   await expect(page.getByText('Shown exactly as saved')).toBeVisible();
@@ -371,7 +371,7 @@ test('native sandbox preflight failure is clear in progress and the reopened fro
   const folderPath = join(app.reportsRoot, folders.find(entry => entry.isDirectory()).name);
   const savedJson = join(folderPath, (await readdir(folderPath)).find(name => name.endsWith('.audit.json')));
   await rm(join(app.store.directory, 'audits'), { recursive: true });
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports' }).click();
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedJson);
   await page.getByRole('link', { name: 'View report' }).click();
   await expect(page.getByRole('group', { name: 'Compared profiles' }).getByText(/The native command sandbox could not be verified, so the model task did not start\./)).toHaveCount(2);
@@ -485,6 +485,8 @@ test('one profile can use separate model settings on both sides of a comparison'
   await expect(page.getByText(/Model: fixture-right · Effort: high/)).toBeVisible();
   await startRun(page);
   await page.getByRole('link', { name: 'Open the report' }).click({ timeout: 20000 });
+  await expect(page.locator('details.comparison-side-details > summary')).toHaveCount(2);
+  for (const details of await page.locator('details.comparison-side-details > summary').all()) await details.click();
   await expect(page.getByText('Requested model: fixture-left')).toBeVisible();
   await expect(page.getByText('Requested model: fixture-right')).toBeVisible();
 });

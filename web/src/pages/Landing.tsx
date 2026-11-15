@@ -13,7 +13,7 @@ export function Landing() {
   const overview = useResource(() => apiGet<Overview>('/api/overview'), 'overview');
   const data = overview.data;
   return (
-    <Page current="compare" title="Compare">
+    <Page current="compare" title="Comparisons">
       <PageTitle title="What do you want to compare?" />
       {overview.error ? <LoadError error={overview.error} onRetry={overview.reload} /> : null}
       <section className="flex flex-col gap-2" aria-labelledby="discovery-entry">
@@ -27,7 +27,7 @@ export function Landing() {
               <h2 id="compare-task" className="text-heading">Compare a task</h2>
               <p className="muted">See what two profiles did on the same task, what they produced, and what couldn’t be seen.</p>
             </div>
-            <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))' }}>
+            <div className="landing-paths">
               <EntryTile to="/compare/sessions" title="Use existing sessions" text="Work you already did in Codex CLI or Desktop. Reads history only."
                 status={data ? data.sessions.text : 'Reading sessions…'} />
               {info?.features.runs ? (
@@ -69,16 +69,10 @@ export function Landing() {
   );
 }
 
-function EntryTile({ to, title, text, status, disabledReason }: { to: string; title: string; text: string; status: string; disabledReason?: string }) {
-  const body = (
-    <>
-      <span className="font-semibold" style={{ color: disabledReason ? 'var(--color-text-muted)' : 'var(--color-on-selected)' }}>{title}</span>
-      <span className="hint">{disabledReason ?? text}</span>
-      <span className="text-meta font-medium mt-auto">{status}</span>
-    </>
-  );
-  const className = 'flex flex-col gap-1.5 rounded-control px-4 py-3.5 no-underline min-h-[132px]';
-  const style = { border: '1px solid var(--color-action-border)', background: 'var(--color-surface-raised)', color: 'var(--color-text)' };
-  if (disabledReason) return <div className={className} style={{ ...style, borderColor: 'var(--color-divider)' }} aria-disabled="true">{body}</div>;
-  return <Link to={to} className={className} style={style}>{body}</Link>;
+function EntryTile({ to, title, text, status }: { to: string; title: string; text: string; status: string }) {
+  return <div className="landing-path flex flex-col gap-2">
+    <Link to={to} className="text-ui font-semibold">{title}</Link>
+    <p className="hint">{text}</p>
+    <p className="meta">{status}</p>
+  </div>;
 }

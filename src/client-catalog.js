@@ -210,6 +210,12 @@ export function createClientCatalog({ discover = discoverCodexModels, resolveCon
     invalidate(context) {
       const key = keyOf(context); entries.delete(key); generations.set(key, (generations.get(key) ?? 0) + 1);
     },
+    invalidateClient(client) {
+      for (const key of new Set([...entries.keys(), ...generations.keys()])) {
+        if (JSON.parse(key)[0].environmentBinding.client !== client) continue;
+        entries.delete(key); generations.set(key, (generations.get(key) ?? 0) + 1);
+      }
+    },
     async refresh(context, options = {}) {
       const frozen = structuredClone(context), scope = contextScope(frozen), key = keyOf(frozen);
       const generation = (generations.get(key) ?? 0) + 1; generations.set(key, generation);

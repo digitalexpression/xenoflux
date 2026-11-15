@@ -395,7 +395,7 @@ export async function runAcceptance({ manifest, repo, testFixture = null }) {
     await page.getByLabel('Copy from').selectOption({ label: 'XFX UI Copy Source' });
     await page.getByRole('button', { name: 'Choose items' }).click();
     await page.locator('label.row-select').filter({ hasText: 'model_verbosity' }).getByRole('checkbox').check();
-    const skillRow = page.locator('label.row-select').filter({ hasText: 'xfx-copy-fixture' });
+    const skillRow = page.locator('.copy-item').filter({ hasText: 'xfx-copy-fixture' });
     await expect(skillRow).toContainText('exact replacement');
     await skillRow.getByRole('button', { name: 'Inspect file changes' }).click();
     await expect(skillRow).toContainText('destination-only.txt');

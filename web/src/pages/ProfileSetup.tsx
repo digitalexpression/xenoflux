@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { apiGet } from '@/api/client';
 import type { SetupInspection, SetupOptions } from '@/api/types';
 import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
-import { InfoNotice, SimulatedNote, WarningAlert } from '@/components/notices';
+import { SimulatedNote, WarningAlert } from '@/components/notices';
 import { SetupInventoryBrowser, setupChoiceKey, setupChoices, setupInspectHref, setupLabel, setupParams, setupSelection, type SetupSelection } from '@/components/setup-inventory';
 import { Button } from '@/components/ui/button';
 import { useResource } from '@/lib/useResource';
@@ -32,7 +32,7 @@ function Inspection({ selection, repo }: { selection: SetupSelection; repo: stri
     <PageTitle breadcrumb={[{ label: 'Profiles', to: '/profiles' }, { label: 'Inspect setup' }]} title={`Inspect setup · ${setupLabel(selection)}`}
       subtitle="Read current local source settings, instructions, skills and integrations before choosing another setup to compare." />
     {info?.mode === 'demo' ? <SimulatedNote /> : null}
-    <form className="panel flex flex-col gap-4" onSubmit={event => { event.preventDefault(); if (current?.available) navigate(setupInspectHref(draft, repository.trim())); }}>
+    <form className="setup-scope flex flex-col gap-3" onSubmit={event => { event.preventDefault(); if (current?.available) navigate(setupInspectHref(draft, repository.trim())); }}>
       <div className="flex flex-wrap gap-4">
         <div className="flex-1 min-w-0 basis-[240px]"><label className="field-label" htmlFor={profileId}>Profile and client</label>
           <select id={profileId} className="input" value={setupChoiceKey(choices, draft)} onChange={event => { const choice = choices.find(candidate => candidate.key === event.target.value); if (choice) setDraft(choice); }}>
@@ -47,7 +47,7 @@ function Inspection({ selection, repo }: { selection: SetupSelection; repo: stri
       {current && !current.available ? <p className="text-ui">{current.reason}</p> : null}
       {options.data?.warnings.map((warning, index) => <p className="text-ui" key={index}>{warning}</p>)}
       {options.error ? <LoadError error={options.error} onRetry={options.reload} /> : null}
-      <div className="flex flex-wrap gap-2"><Button type="submit" disabled={!current?.available || options.loading || Boolean(options.error)}>Inspect setup</Button><Button onClick={inspection.reload} busy={inspection.loading} busyLabel="Reading setup…">Refresh setup</Button></div>
+      <div className="flex flex-wrap gap-2"><Button type="submit" variant="primary" disabled={!current?.available || options.loading || Boolean(options.error)}>Inspect setup</Button><Button onClick={inspection.reload} busy={inspection.loading} busyLabel="Reading setup…">Refresh setup</Button></div>
     </form>
     <div className="flex flex-wrap items-center gap-3 text-ui wrap-anywhere">
       <p><strong>{setupLabel(selection)}</strong></p>
@@ -55,7 +55,7 @@ function Inspection({ selection, repo }: { selection: SetupSelection; repo: stri
       {data ? <p>Read {data.readAt}</p> : null}
       <Link className="btn ml-auto" to={`/compare/setups?${new URLSearchParams(setupParams(selection, undefined, repo))}`}>Compare with…</Link>
     </div>
-    <InfoNotice title="Current source evidence"><p>This read shows bounded local sources. Effective precedence, native loading and use in a session are unknown. This is not a historical setup snapshot.</p><p>Refresh setup reads the sources again. File content stays in place while you inspect it.</p></InfoNotice>
+    <section className="setup-reading-note" aria-labelledby="source-evidence-title"><h2 id="source-evidence-title" className="text-ui font-semibold">Current source evidence</h2><p className="hint">This read shows bounded local sources. Effective precedence, native loading and use in a session are unknown. This is not a historical setup snapshot.</p><p className="hint">Refresh setup reads the sources again. File content stays in place while you inspect it.</p></section>
     {inspection.error ? <>{data ? <p className="hint">Previous read shown. Refresh failed; these observations have not been updated.</p> : null}<LoadError error={inspection.error} onRetry={inspection.reload} /></> : null}
     {inspection.loading && !data ? <Loading label="Reading setup sources…" /> : null}
     {data ? <SetupInventoryBrowser inventory={data.inventory} /> : null}

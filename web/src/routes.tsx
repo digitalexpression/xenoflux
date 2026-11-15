@@ -1,4 +1,4 @@
-import { Link, type RouteObject } from 'react-router';
+import { Link, Navigate, type RouteObject } from 'react-router';
 import { Page, PageTitle } from './components/layout';
 import { Session } from './pages/Session';
 import { BrowseSessions } from './pages/BrowseSessions';
@@ -13,6 +13,7 @@ import { Profiles } from './pages/Profiles';
 import { Report } from './pages/Report';
 import { Reviews } from './pages/Reviews';
 import { RunNew, RunProgress, RunReview } from './pages/Runs';
+import { Activity } from './pages/Activity';
 import { ProfileSetup } from './pages/ProfileSetup';
 import { SetupComparison } from './pages/SetupComparison';
 import { SkillDetail } from './pages/SkillDetail';
@@ -21,14 +22,16 @@ function NotFound() {
   return (
     <Page current={null} title="Not found">
       <PageTitle title="This page doesn’t exist" subtitle="The link may be from an older version of Xenoflux." />
-      <div><Link className="btn" to="/">Go to Compare</Link></div>
+      <div><Link className="btn" to="/comparisons">Go to Comparisons</Link></div>
     </Page>
   );
 }
 
 // Expose the local product screens and keep Recent links on these routes.
 export const routes: RouteObject[] = [
-  { path: '/', element: <Landing /> },
+  // The hub lives at /comparisons; the bare origin and older links land there.
+  { path: '/', element: <Navigate to="/comparisons" replace /> },
+  { path: '/comparisons', element: <Landing /> },
   { path: '/setup', element: <Discovery /> },
   { path: '/profiles', element: <Profiles /> },
   { path: '/profiles/new', element: <CopyPreview mode="create" /> },
@@ -46,6 +49,7 @@ export const routes: RouteObject[] = [
   { path: '/reports/:ref/export', element: <Export /> },
   { path: '/reports/:ref/reviews', element: <Reviews /> },
   { path: '/runs/new', element: <RunNew /> },
+  { path: '/activity', element: <Activity /> },
   { path: '/runs/new/review', element: <RunReview /> },
   { path: '/runs/:id', element: <RunProgress /> },
   { path: '*', element: <NotFound /> },

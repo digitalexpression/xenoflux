@@ -13,6 +13,10 @@ export function Export() {
   const { ref = '' } = useParams();
   const [searchParams] = useSearchParams();
   const prepareReview = searchParams.get('review') === '1';
+  return <ExportView key={JSON.stringify([ref, prepareReview])} reportRef={ref} prepareReview={prepareReview} />;
+}
+
+function ExportView({ reportRef: ref, prepareReview }: { reportRef: string; prepareReview: boolean }) {
   const info = useInfo();
   const plan = useResource(() => apiGet<ExportPlan>(`/api/reports/${encodeURIComponent(ref)}/export`), ref);
   const [includeContent, setIncludeContent] = useState(false);
@@ -33,7 +37,7 @@ export function Export() {
   }
 
   return (
-    <Page current={null} title="Export this report">
+    <Page current={data?.href?.startsWith('/sessions/') ? 'sessions' : 'compare'} title="Export this report">
       {plan.error ? <LoadError error={plan.error} onRetry={plan.reload} /> : null}
       {plan.loading && !data ? <Loading label="Preparing the export…" rows={2} /> : null}
       {data ? (
@@ -42,22 +46,22 @@ export function Export() {
             subtitle={prepareReview ? 'Creates a portable review packet bound to the exported evidence. It saves a Markdown report and JSON sidecar for an external reviewer, without starting an AI review.'
               : 'Saves two files together in one folder: a Markdown report you can read in any text editor, and the JSON file Xenoflux uses to reopen it later, even after the original sessions are gone.'} />
           {info?.mode === 'demo' ? <SimulatedNote>Exporting is simulated; no files are written.</SimulatedNote> : null}
-          <div className="flex flex-wrap gap-6 items-start">
-            <div className="flex flex-col gap-4" style={{ flex: '999 1 480px' }}>
-              <section className="panel flex flex-col gap-2" aria-labelledby="included">
+          <div className="export-workspace">
+            <div className="export-evidence panel">
+              <section className="export-section flex flex-col gap-2" aria-labelledby="included">
                 <h2 id="included" className="text-body font-semibold">Included</h2>
                 <ul className="text-ui list-disc pl-5">{data.included.map(item => <li key={item}>{item}</li>)}</ul>
               </section>
-              <section className="panel flex flex-col gap-2" aria-labelledby="never">
+              <section className="export-section flex flex-col gap-2" aria-labelledby="never">
                 <h2 id="never" className="text-body font-semibold">Never included</h2>
                 <ul className="text-ui list-disc pl-5">{data.neverIncluded.map(item => <li key={item}>{item}</li>)}</ul>
               </section>
-              <section className="panel flex flex-col gap-3" aria-labelledby="optional">
+              <section className="export-section flex flex-col gap-3" aria-labelledby="optional">
                 <h2 id="optional" className="text-body font-semibold">Off unless you choose it</h2>
                 {data.contentFiles.length ? (
                   <>
                     <label className="flex gap-3 items-start text-ui">
-                      <input type="checkbox" checked={includeContent} onChange={event => setIncludeContent(event.target.checked)} aria-describedby={contentId} disabled={Boolean(result)} />
+                      <input type="checkbox" checked={includeContent} onChange={event => setIncludeContent(event.target.checked)} aria-describedby={contentId} disabled={busy || Boolean(result)} />
                       <span><span className="font-medium">Include setup file text</span><br /><span id={contentId} className="muted">Adds the text of changed instructions and skills. Both files follow this choice.</span></span>
                     </label>
                     {includeContent ? (
@@ -69,10 +73,10 @@ export function Export() {
                   </>
                 ) : <p className="hint">This report has no setup file text to add.</p>}
               </section>
-              {data.replayAvailable ? <section className="panel flex flex-col gap-3" aria-labelledby="replay-content">
+              {data.replayAvailable ? <section className="export-section flex flex-col gap-3" aria-labelledby="replay-content">
                 <h2 id="replay-content" className="text-body font-semibold">Recorded content</h2>
                 <label className="flex gap-3 items-start text-ui">
-                  <input type="checkbox" checked={includeReplayContent} onChange={event => setIncludeReplayContent(event.target.checked)} disabled={Boolean(result)} aria-describedby={`${contentId}-replay`} />
+                  <input type="checkbox" checked={includeReplayContent} onChange={event => setIncludeReplayContent(event.target.checked)} disabled={busy || Boolean(result)} aria-describedby={`${contentId}-replay`} />
                   <span><span className="font-medium">Include recorded messages and tool content</span><br /><span id={`${contentId}-replay`} className="muted">Off by default. Includes captured message bodies, tool inputs and results, retained check commands and output, and captured task-end patch text.</span></span>
                 </label>
                 {includeReplayContent ? <WarningAlert title="Review replay content before sharing">
@@ -83,19 +87,23 @@ export function Export() {
               {prepareReview ? <InfoNotice title="Choose what the reviewer can inspect">
                 <p>Event references and evidence metadata remain in the packet. Recorded message and tool content is off by default. Include it only if the reviewer needs those details, then inspect the saved files before sharing.</p>
               </InfoNotice> : null}
-              {prepareReview && data.reviewedEvidence ? <InfoNotice title="Existing reviews are bound to their evidence">
+              {data.reviewedEvidence ? <InfoNotice title="Existing reviews are bound to their evidence">
                 <p>Keep the evidence already reviewed. If this content choice changes it, Xenoflux will refuse the export; prepare a separate packet from the original unreviewed comparison for a different disclosure.</p>
               </InfoNotice> : null}
               <p className="hint">{data.privacy}</p>
             </div>
-            <aside className="panel flex flex-col gap-3" style={{ flex: '1 1 320px' }} aria-labelledby="save-to">
+            <aside className="export-save panel flex flex-col gap-4" aria-labelledby="save-to">
               <h2 id="save-to" className="text-body font-semibold">Save to</h2>
               <p className="font-mono text-ui wrap-anywhere">{result?.folder ?? data.folder}</p>
               <ul className="font-mono text-ui list-none p-0">{(result?.files ?? data.files).map(file => <li key={file} className="wrap-anywhere">{file}</li>)}</ul>
+              {!result ? <dl className="export-inclusion text-ui" aria-label="Export content choice">
+                <div><dt>Setup file text</dt><dd className="font-medium">{data.contentFiles.length ? includeContent ? 'Included' : 'Not included' : 'None available'}</dd></div>
+                <div><dt>Recorded messages and tool content</dt><dd className="font-medium">{data.replayAvailable ? includeReplayContent ? 'Included' : 'Not included' : 'None available'}</dd></div>
+              </dl> : null}
               <p className="hint">Keep both files together. The Markdown file starts with the same note.</p>
               {error ? <ErrorPanel title="Not saved">{error}</ErrorPanel> : null}
               {result ? (
-                <div ref={saved} tabIndex={-1} className="alert-success flex flex-col gap-2" role="status" aria-label="Report saved">
+                <div ref={saved} tabIndex={-1} className="export-saved flex flex-col gap-3" role="status" aria-label="Report saved">
                   <StatusBadge status="success">Saved</StatusBadge>
                   <p className="text-ui" style={{ color: 'var(--color-text)' }}>Both files are in the folder above. Setup file text: {result.contentIncluded}. Replay content: {result.replayContentIncluded ?? 'not included'}.</p>
                   {result.warning ? <WarningAlert title="Recent could not be updated"><p>{result.warning}</p></WarningAlert> : null}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { ApiError, apiGet, apiPost } from '@/api/client';
 import type { ReviewPreviewView, ReviewsView, SavedReviewView } from '@/api/types';
@@ -26,6 +26,7 @@ export function Reviews() {
   const [error, setError] = useState<string | null>(null);
   const [importRef, setImportRef] = useState(ref);
   const fileReadGeneration = useRef(0);
+  const topicId = useId();
   const importStateCurrent = importRef === ref;
   const activeSubmission = importStateCurrent ? submission : null;
   const activeFileName = importStateCurrent ? fileName : '';
@@ -90,26 +91,32 @@ export function Reviews() {
   }
 
   return (
-    <Page current="compare" title="Reviews" reading>
+    <Page current="compare" title="Reviews">
       {view.error ? <LoadError error={view.error} onRetry={view.reload} /> : null}
       {view.loading && !data ? <Loading label="Reading reviews…" /> : null}
-      {taskId ? <PageTitle breadcrumb={data ? [{ label: 'Compare', to: '/' }, { label: data.title, to: `/reports/${encodeURIComponent(ref)}` }, { label: 'Reviews' }] : undefined}
-        title="Reviews" subtitle="Reconnect to the saved review task and its frozen comparison." /> : data ? <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: data.title, to: base }, { label: 'Reviews' }]} title="Reviews"
-          actions={<Link className="btn btn-primary" to={`${base}/export`}>Export report</Link>}
+      {taskId ? <PageTitle breadcrumb={data ? [{ label: 'Comparisons', to: '/comparisons' }, { label: data.title, to: `/reports/${encodeURIComponent(ref)}` }, { label: 'Reviews' }] : undefined}
+        title="Reviews" subtitle="Reconnect to the saved review task and its frozen comparison." /> : data ? <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: data.title, to: base }, { label: 'Reviews' }]} title="Reviews"
+          actions={<Link className="btn" to={`${base}/export`}>Export report</Link>}
           subtitle="Reviews are attributed annotations tied to this report’s frozen evidence. Xenoflux never judges results itself or fills in ratings." /> : null}
+      {data && !taskId ? <nav className="session-facets" aria-label="Review sections">
+        {data.reviewOptions ? <a href="#start-review">Review task</a> : null}
+        {(data.canPrepare || data.canImport) && info?.mode !== 'demo' ? <a href="#external-reviews">External review</a> : null}
+        <a href="#attached-reviews">Attached ratings</a>
+      </nav> : null}
       {data?.reviewOptions || taskId ? <ReviewTaskPanel key={ref} refId={ref} title={data?.title ?? 'Review task'}
         options={data?.reviewOptions ?? { profiles: [], workspaces: [], prompt: '', includeRecordedContent: false, defaults: { timeoutMs: null } }}
         tasks={data?.reviewTasks ?? []} demo={info?.mode === 'demo'} /> : null}
       {data && !taskId ? (
         <>
-          {data.canPrepare && info?.mode !== 'demo' ? <section className="panel flex flex-col gap-3" aria-labelledby="prepare-review">
-            <h2 id="prepare-review" className="text-heading">Prepare an external review</h2>
+          {(data.canPrepare || data.canImport) && info?.mode !== 'demo' ? <section id="external-reviews" tabIndex={-1} className="review-external" aria-labelledby="external-review-title"><h2 id="external-review-title" className="text-heading">External review</h2>
+          {data.canPrepare ? <section className="review-section flex flex-col gap-3" aria-labelledby="prepare-review">
+            <h3 id="prepare-review" className="text-body font-semibold">Prepare an external review</h3>
             <p className="text-ui">Choose the exact report content to share. The packet’s evidence fingerprint is calculated after that choice, so an imported review stays bound to what the reviewer received.</p>
             <div><Link className="btn btn-secondary" to={`${base}/export?review=1`}>Prepare packet for external review</Link></div>
           </section> : null}
-          {data.canImport && info?.mode !== 'demo' ? (
-            <section className="panel flex flex-col gap-3" aria-labelledby="attach-review">
-              <h2 id="attach-review" className="text-heading">Attach a review</h2>
+          {data.canImport ? (
+            <section className="review-section flex flex-col gap-3" aria-labelledby="attach-review">
+              <h3 id="attach-review" className="text-body font-semibold">Attach a review</h3>
               <p className="text-ui">Import a review submission prepared by a person or an external AI reviewer. This import path does not send evidence to an AI service. The file is checked against this report’s evidence and saved as a new immutable evaluation. Review the exported packet before sharing it; recorded content may contain private information.</p>
               {data.hasReviews ? <InfoNotice title="Keep earlier review evidence intact">
                 <p>Reviews remain bound to the content the reviewers received. If a different recorded-content disclosure is required, prepare a separate packet from the original unreviewed comparison; Xenoflux preserves this review history and will refuse an export that changes its evidence.</p>
@@ -123,13 +130,14 @@ export function Reviews() {
               {activeSubmission && !activePreview ? <Button busy={activeLoading} busyLabel="Checking…" onClick={() => void prepare()}>Preview imported review</Button> : null}
               {activePreview ? <div className="flex flex-col gap-3" role="region" aria-label="Review preview">
                 <InfoNotice title="Bound to this report">
-                  <p>Evidence fingerprint: <span className="font-mono">{activePreview.evidenceFingerprint}</span></p>
+                  <p>Evidence fingerprint: <span className="font-mono wrap-anywhere">{activePreview.evidenceFingerprint}</span></p>
                   <p>Allowed scope: {activePreview.claimScopes.join(' · ')}</p>
                   <p>{activePreview.evidenceRefCount} frozen evidence references are available. Consistency: {activePreview.consistency}</p>
                 </InfoNotice>
                 {activePreview.topics.map(topic => (
-                  <section className="rounded-control p-4 flex flex-col gap-2" style={{ border: '1px solid var(--color-divider)' }} key={topic.title}>
+                  <section className="review-topic flex flex-col gap-3" key={topic.title}>
                     <h3 className="text-body font-semibold">{topic.title}</h3>
+                    {topic.scope ? <Disclosure label="Show review scope" expandedLabel="Hide review scope"><p className="font-mono wrap-anywhere">{topic.scope}</p></Disclosure> : null}
                     {topic.disagreement ? <InfoNotice>{topic.disagreement}</InfoNotice> : null}
                     {topic.reviews.map((review, index) => <article className="flex flex-col gap-2" key={`${review.reviewer}-${index}`}>
                       <div className="flex flex-wrap items-center gap-2"><TagPill>{review.kind === 'human' ? 'Person' : 'AI agent'}</TagPill><span className="font-medium wrap-anywhere">{review.reviewer}</span></div>
@@ -144,16 +152,20 @@ export function Reviews() {
               </div> : null}
             </section>
           ) : null}
-          {data.topics.map(topic => (
-            <section key={topic.title} className="panel flex flex-col gap-3" aria-labelledby={`topic-${topic.title}`}>
+          </section> : null}
+          <section id="attached-reviews" tabIndex={-1} className="review-ratings" aria-labelledby="attached-review-title"><h2 id="attached-review-title" className="text-heading">Attached ratings</h2>
+          <p className="hint">Attributed ratings are separate from ordinary review task responses. They stay bound to the evidence each reviewer received.</p>
+          {data.topics.map((topic, index) => (
+            <section key={topic.title} className="review-topic flex flex-col gap-3" aria-labelledby={`${topicId}-${index}`}>
               <div className="flex flex-wrap items-baseline justify-between gap-2">
-                <h2 id={`topic-${topic.title}`} className="text-heading">{topic.title}</h2>
+                <h3 id={`${topicId}-${index}`} className="text-body font-semibold">{topic.title}</h3>
                 {topic.notReviewed ? <StatusBadge status="neutral">Not reviewed</StatusBadge> : <span className="meta">{topic.meta}</span>}
               </div>
+              {topic.scope ? <Disclosure label="Show review scope" expandedLabel="Hide review scope"><p className="font-mono wrap-anywhere">{topic.scope}</p></Disclosure> : null}
               {topic.disagreement ? <InfoNotice>{topic.disagreement}</InfoNotice> : null}
-              <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(300px, 100%), 1fr))' }}>
+              <div className="review-annotations">
                 {topic.reviews.map((review, index) => (
-                  <article key={index} className="rounded-control p-4 flex flex-col gap-2" style={{ border: '1px solid var(--color-divider)' }}>
+                  <article key={index} className="review-annotation flex flex-col gap-2">
                     <div className="flex flex-wrap items-center gap-2"><TagPill>{review.kind === 'human' ? 'Person' : 'AI agent'}</TagPill><span className="font-medium wrap-anywhere">{review.reviewer}</span></div>
                     <div className="flex flex-wrap items-center gap-2"><VerdictBadge verdict={review.verdict} /><span className="text-ui">prefers {review.prefers}</span></div>
                     <blockquote className="text-ui m-0">“{review.quote}”</blockquote>
@@ -172,12 +184,13 @@ export function Reviews() {
               </div>
             </section>
           ))}
-          <section className="panel flex flex-col gap-2" aria-labelledby="repeat">
+          </section>
+          <section className="review-section flex flex-col gap-2" aria-labelledby="repeat">
             <h2 id="repeat" className="text-heading">Whether differences repeat</h2>
             <p className="text-ui">{data.consistency}</p>
           </section>
           {data.checksAfter.length ? (
-            <section className="panel flex flex-col gap-2" aria-labelledby="checks-after">
+            <section className="review-section flex flex-col gap-2" aria-labelledby="checks-after">
               <h2 id="checks-after" className="text-heading">Checks run afterwards</h2>
               <p className="hint">Kept separate from checks run during the task.</p>
               {data.checksAfter.map(check => <p key={check.text} className="text-ui flex flex-wrap gap-2 items-center"><StatusBadge status={check.status}>{check.text}</StatusBadge><span className="hint">{check.by}</span></p>)}

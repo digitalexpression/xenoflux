@@ -60,19 +60,19 @@ const test = base.extend({
   },
 });
 
-async function openProfiles(page, app) {
+async function openClients(page, app) {
   await page.goto(app.url);
-  await page.getByRole('link', { name: 'Profiles', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Profiles', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Clients on this Mac', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Find clients and profiles', exact: true })).toBeVisible();
   await expect.poll(() => app.listCalls).toBeGreaterThan(0);
 }
 
 test('app discovery is read-only; explicit stock opening uses its exact app identity and prevents duplicate launch', async ({ page, app }, testInfo) => {
-  await openProfiles(page, app);
+  await openClients(page, app);
   const section = page.getByRole('region', { name: 'Native apps' });
   await expect(section).toBeVisible();
   await expect(section.getByText(/app with its existing setup/)).toBeVisible();
-  await expect(section.getByText(/Use a profile card for separate Desktop storage/)).toBeVisible();
+  await expect(section.getByText(/Use Profiles for separate Desktop storage/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Open GitHub Copilot', exact: true })).toHaveCount(0);
   await expect(section.getByLabel('Copilot app-local session ID', { exact: true })).toHaveCount(0);
   expect(app.openCalls).toEqual([]);
@@ -96,7 +96,7 @@ test('app discovery is read-only; explicit stock opening uses its exact app iden
 });
 
 test('changed app identity reports failure and refreshes discovery before retrying', async ({ page, app }) => {
-  await openProfiles(page, app);
+  await openClients(page, app);
   const section = page.getByRole('region', { name: 'Native apps' });
   await expect(section.getByRole('button', { name: 'Open Claude', exact: true })).toBeVisible();
   app.changeIdentity();
@@ -114,7 +114,7 @@ test('changed app identity reports failure and refreshes discovery before retryi
 
 test('unavailable apps remain hidden without opening any app', async ({ page, app }) => {
   app.hide();
-  await openProfiles(page, app);
+  await openClients(page, app);
   await expect(page.getByRole('heading', { name: 'Native apps', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Open Claude', exact: true })).toHaveCount(0);
   expect(app.openCalls).toEqual([]);
@@ -125,7 +125,7 @@ test.describe('Copilot existing session links', () => {
   test.use({ copilotSessions: true });
 
   test('only explicit session-link submission sends the exact app-local ID and locks duplicate actions', async ({ page, app }, testInfo) => {
-    await openProfiles(page, app);
+    await openClients(page, app);
     const section = page.getByRole('region', { name: 'Native apps' });
     const input = section.getByLabel('Copilot app-local session ID', { exact: true });
     await expect(input).not.toBeVisible();
@@ -155,7 +155,7 @@ test.describe('Copilot existing session links', () => {
   });
 
   test('URLs, paths, query strings and malformed session IDs are blocked without dispatch', async ({ page, app }) => {
-    await openProfiles(page, app);
+    await openClients(page, app);
     const section = page.getByRole('region', { name: 'Native apps' });
     await section.getByText('Open an existing Copilot session', { exact: true }).click();
     const input = section.getByLabel('Copilot app-local session ID', { exact: true });
@@ -168,7 +168,7 @@ test.describe('Copilot existing session links', () => {
   });
 
   test('a changed app requires a fresh identity and another explicit submission, including after refresh', async ({ page, app }) => {
-    await openProfiles(page, app);
+    await openClients(page, app);
     const section = page.getByRole('region', { name: 'Native apps' });
     await section.getByText('Open an existing Copilot session', { exact: true }).click();
     const input = section.getByLabel('Copilot app-local session ID', { exact: true });
@@ -187,7 +187,7 @@ test.describe('Copilot existing session links', () => {
     await expect(section.getByRole('status')).toContainText('no task was requested');
     expect(app.openCalls.at(-1)).toEqual({ client: 'copilot', appKey: 'b'.repeat(64), sessionId: 'session_123' });
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Profiles', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Find clients and profiles', exact: true })).toBeVisible();
     expect(app.openCalls).toHaveLength(2);
   });
 });
@@ -195,7 +195,7 @@ test.describe('Copilot existing session links', () => {
 
 test('automatic app checks show updates and removals, preserve focused input and recover safely after transport failures', async ({ page, app }) => {
   await page.clock.install({ time: 0 });
-  await openProfiles(page, app);
+  await openClients(page, app);
   await page.clock.pauseAt(1000);
   const section = page.getByRole('region', { name: 'Native apps' });
   const check = section.getByRole('button', { name: 'Check apps again', exact: true });

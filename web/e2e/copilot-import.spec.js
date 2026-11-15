@@ -40,7 +40,7 @@ const second = page => page.getByLabel('Second Copilot session ID', { exact: tru
 const compare = page => page.getByRole('button', { name: 'Compare Copilot conversations', exact: true });
 async function openImport(page, app) {
   await page.goto(app.url);
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports', exact: true }).click();
   await page.getByText('Import Copilot conversations', { exact: true }).click();
 }
 
@@ -83,7 +83,7 @@ test('explicit Copilot import guards duplicate reads and freezes private-safe ev
   for (const run of [JSON.parse(frozen).left, JSON.parse(frozen).right]) expect(run.source.kind).toBe('copilot-sdk-persisted-import');
   for (const directory of app.copilotDirectories) await rm(directory, { recursive: true, force: true });
   await app.restartServer(); await page.goto(app.url);
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report', exact: true }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports', exact: true }).click();
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(path);
   await page.getByRole('link', { name: 'View report', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Session replay', exact: true })).toBeVisible();

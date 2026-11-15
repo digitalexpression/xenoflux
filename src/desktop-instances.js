@@ -144,13 +144,14 @@ async function observation(state, runtime) {
     const baseline = new Set(state.baselineMains.map(processIdentity));
     const unknown = (await runtime.snapshot()).filter(row => [applicationOf(state).executable, state.launcherPaths?.bootstrapExecutable].includes(row.executable)
       && !baseline.has(processIdentity(row)));
-    if (unknown.length) return { status: 'unknown-launch', processes: unknown };
+    if (unknown.length) return { status: 'unknown-launch', processes: unknown,
+      reason: `An earlier Desktop launch has no verified process identity; ownership is uncertain. Observed Codex instances: ${unknown.map(row => `PID ${row.pid} (started ${row.startedAt})`).join(', ')}. Close these Codex instances normally, then retry opening this profile. The stopped launch will be recovered using the current vendor installation; its reservation is preserved until then.` };
   }
   return { status: 'stopped', processes: [] };
 }
 async function finishStopped(store, state, runtime, options) {
   const observed = await observation(state, runtime);
-  if (observed.status !== 'stopped') throw new Error('Desktop instance still runs or its ownership is uncertain; preserving its reservation');
+  if (observed.status !== 'stopped') throw new Error(observed.reason ?? 'Desktop instance still runs or its ownership is uncertain; preserving its reservation');
   const reserved = await ownedReservation(state);
   const reviews = await exists(join(state.plan.nativeRoot, '.run-lock'))
     ? (await readProfileOwners(state.plan.nativeRoot)).filter(owner => owner.kind === 'review-task') : [];
@@ -335,7 +336,7 @@ export async function openDesktopInstance(store, name, {
         if (caller) await onBootstrapReady({ kind: 'xfx-profile-bootstrap', status: 'already-running', profileId: id, pid: caller.pid });
         return result(state, 'focused');
       }
-      if (observed.status !== 'stopped') throw new Error('Desktop launch is incomplete or still running; use desktop recover PROFILE after it stops');
+      if (observed.status !== 'stopped') throw new Error(observed.reason ?? 'Desktop launch is incomplete or still running; use desktop recover PROFILE after it stops');
       await finishStopped(store, state, runtime, options);
     }
     const plan = await desktopInstancePlan(store, id, { runtime });

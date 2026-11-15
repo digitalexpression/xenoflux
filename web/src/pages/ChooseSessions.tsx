@@ -10,6 +10,7 @@ import { SideText } from '@/components/profile';
 import { Button } from '@/components/ui/button';
 import { useResource } from '@/lib/useResource';
 import { cn } from '@/lib/cn';
+import { clearTray, swapTray, toggleTray, trayFull, traySide, useTray } from '@/lib/tray';
 
 type Client = '' | 'cli' | 'desktop';
 
@@ -22,9 +23,9 @@ export function ChooseSessions() {
   const [debounced, setDebounced] = useState('');
   const [profile, setProfile] = useState('');
   const [client, setClient] = useState<Client>('');
-  // Rows chosen so far, remembered across filters; left is side A.
-  const [left, setLeft] = useState<SessionRow | null>(null);
-  const [right, setRight] = useState<SessionRow | null>(null);
+  // The pair lives in the comparison tray, so sessions picked in the library arrive here; left is side A.
+  const tray = useTray();
+  const { left, right } = tray;
   const [declared, setDeclared] = useState(false);
   const [taskName, setTaskName] = useState('');
   const [variables, setVariables] = useState<Record<string, boolean>>({});
@@ -45,11 +46,11 @@ export function ChooseSessions() {
     const row = presetRow?.key === preset ? presetRow : view.data.sessions.find(s => s.key === preset);
     if (row) {
       appliedPreset.current = navigationPreset;
-      setLeft(current => current ?? row);
+      if (!left && right?.key !== row.key) toggleTray(row);
     }
   }, [preset, presetRow, location.key, view.data]);
 
-  const full = Boolean(left && right);
+  const full = trayFull(tray);
   const pairKey = left && right ? `${left.key}|${right.key}` : '';
   const [association, setAssociation] = useState<{ key: string; data: AssociationView | null; error: Error | null; loading: boolean }>({ key: '', data: null, error: null, loading: false });
   const currentAssociation = association.key === pairKey ? association : null;
@@ -68,19 +69,18 @@ export function ChooseSessions() {
     setVariables(Object.fromEntries(suggested.map(name => [name, false])));
   }, [currentAssociation?.data]);
 
-  function resetPairChoices() {
+  // A statement about one pair never carries over to another pair or order.
+  const choiceKey = `${left?.key ?? ''}|${right?.key ?? ''}`;
+  // Reset while rendering the new pair, so a statement made right after a swap is never cleared late.
+  const [choicesFor, setChoicesFor] = useState(choiceKey);
+  if (choicesFor !== choiceKey) {
+    setChoicesFor(choiceKey);
     setDeclared(false);
     setTaskName('');
     setVariables({});
   }
-
-  function toggle(row: SessionRow) {
-    if (left?.key === row.key) { resetPairChoices(); setLeft(null); return; }
-    if (right?.key === row.key) { resetPairChoices(); setRight(null); return; }
-    if (!left) { resetPairChoices(); setLeft(row); }
-    else if (!right) { resetPairChoices(); setRight(row); }
-  }
-  const sideOf = (key: string): Side | null => left?.key === key ? 'a' : right?.key === key ? 'b' : null;
+  const toggle = toggleTray;
+  const sideOf = (key: string): Side | null => traySide(tray, key);
 
   async function compare() {
     if (!left || !right) return;
@@ -92,6 +92,7 @@ export function ChooseSessions() {
         variables: Object.entries(variables).filter(([, on]) => on).map(([name]) => name),
       });
       navigate(`/reports/${encodeURIComponent(result.ref)}`);
+      clearTray();
     } catch (reason) { setError(reason instanceof ApiError ? reason.message : String(reason)); setBusy(false); }
   }
 
@@ -103,7 +104,7 @@ export function ChooseSessions() {
 
   return (
     <Page current="compare" title="Choose two sessions">
-      <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare a task' }, { label: 'Use existing sessions' }]} title="Choose two sessions"
+      <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: 'Compare a task' }, { label: 'Use existing sessions' }]} title="Choose two sessions"
         subtitle="Choose two recorded Codex sessions." />
       {info?.mode === 'demo' ? <SimulatedNote /> : <div><Link className="btn" to="/compare/sessions/native">Choose recent sessions by profile</Link></div>}
       {view.data?.partial ? (
@@ -179,7 +180,7 @@ export function ChooseSessions() {
       <section className="panel flex flex-col gap-4" aria-labelledby="your-comparison">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 id="your-comparison" className="text-heading">Your comparison</h2>
-          <Button disabled={!full} onClick={() => { resetPairChoices(); setLeft(right); setRight(left); }}>Swap sides</Button>
+          <Button disabled={!full} onClick={swapTray}>Swap sides</Button>
         </div>
         <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(260px, 100%), 1fr))' }}>
           {(['a', 'b'] as const).map(side => {

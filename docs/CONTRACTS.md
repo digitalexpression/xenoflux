@@ -44,6 +44,19 @@ the supported boundary. Claude and Copilot Desktop admission covers local select
 startup/storage only; authenticated sessions, model operation and account
 independence are not qualified by that admission.
 
+An explicit UI sign-in starts only the selected native login command. The server
+owns its bounded process lifetime across browser navigation, cancellation and
+shutdown. Expose only recognized vendor authorization URLs and device user codes;
+never expose raw login output or accept credentials or OAuth callback codes.
+Native exit success alone does not establish sign-in. Revalidate the selected
+installation and roots, then verify through the existing native account check
+before reporting success. Preserve reservations when process shutdown is uncertain.
+Shared GitHub CLI sign-in excludes concurrent Xenoflux Copilot account use across controllers
+and invalidates observations for the shared account scope.
+Profile cards may retain an expired account observation as **last checked** while
+its executable and roots still match. Displaying that observation never renews
+account qualification or permits task admission.
+
 ## Profile creation, copying and Undo
 
 Empty creation copies no setup beyond required management files. Selected-parts

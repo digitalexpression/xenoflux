@@ -59,7 +59,9 @@ source-bound native evidence under current authorization. Use disposable profile
 record installation identities and test preservation/failure paths. Fixture counts
 alone do not prove the native journey. Verification excludes 200% browser zoom,
 VoiceOver and uncoached participant studies; their absence is not outstanding work.
-Keyboard behavior, narrow layouts and both themes remain required.
+Keyboard behavior and both themes remain required. Comparison reports target
+desktop windows at least 1280 CSS pixels wide; their verification uses desktop
+widths. Other existing journeys retain their narrow-layout checks.
 
 ## Find the implementation
 

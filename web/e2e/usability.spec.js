@@ -29,7 +29,7 @@ test('keep keyboard focus through session replay, export, and saved reopen', asy
   await page.keyboard.press('Enter');
   await expect(page.getByRole('button', { name: 'Hide where it’s set' })).toBeFocused();
   await expect(page.locator('aside')).toContainText('Not known');
-  await tabTo(page, page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Compare', exact: true }));
+  await tabTo(page, page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Comparisons', exact: true }));
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { level: 1 })).toBeFocused();
   const existing = page.getByRole('link', { name: /^Use existing sessions/ });
@@ -86,7 +86,7 @@ test('keep keyboard focus through session replay, export, and saved reopen', asy
   await page.keyboard.press('Tab');
   await expect(page.getByRole('button', { name: 'Copy folder location' })).toBeFocused();
 
-  await tabTo(page, page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report' }));
+  await tabTo(page, page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports' }));
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'Open saved report', level: 1 })).toBeFocused();
   const recent = page.getByRole('region', { name: 'Recently saved' }).getByRole('button')
@@ -114,7 +114,7 @@ test('saved report summary stays within viewport at narrow and enlarged text siz
   await page.getByRole('link', { name: 'Export report', exact: true }).first().click();
   await page.getByRole('button', { name: 'Export', exact: true }).click();
   await expect(page.getByRole('status', { name: 'Report saved' })).toBeVisible();
-  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Open saved report' }).click();
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports' }).click();
   await page.getByRole('region', { name: 'Recently saved' }).getByRole('button')
     .filter({ has: page.getByText('Fix the date test', { exact: true }) }).click();
   const facts = page.locator('section[aria-labelledby="saved-summary"] dl');

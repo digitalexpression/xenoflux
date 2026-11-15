@@ -4,7 +4,7 @@ import { ArrowLeftRight } from 'lucide-react';
 import { apiGet } from '@/api/client';
 import type { SetupChoice, SetupOptions, SetupComparison as View, SetupGroup, SetupItem } from '@/api/types';
 import { ComparisonBadge } from '@/components/badges';
-import { Disclosure, SegmentedControl, SummaryTiles, type TileKey } from '@/components/controls';
+import { Disclosure, SegmentedControl, type TileKey } from '@/components/controls';
 import { DiffBlock } from '@/components/diff';
 import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
 import { InfoNotice, SimulatedNote, WarningAlert } from '@/components/notices';
@@ -37,7 +37,7 @@ function ChooseProfiles({ first, repo }: { first: SetupSelection | null; repo: s
     : managed[1] ?? available.find(choice => choice.name !== initialA?.name || choice.client !== initialA.client) ?? null;
   return (
     <Page current="compare" title="Compare setups">
-      <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare setups' }]} title="Compare setups"
+      <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: 'Compare setups' }]} title="Compare setups"
         subtitle="Choose two profiles from the same or different clients. This reads current local sources; nothing is copied, activated, signed in or opened." />
       {options.error ? <LoadError error={options.error} onRetry={options.reload} /> : null}
       {options.loading && !options.data ? <Loading label="Reading setup choices…" rows={1} /> : null}
@@ -110,7 +110,7 @@ function ComparisonView({ first, second, repo, onChange }: { first: SetupSelecti
 
   return (
     <Page current="compare" title="Compare setups">
-      <PageTitle breadcrumb={[{ label: 'Compare', to: '/' }, { label: 'Compare setups' }]} title="Compare setups"
+      <PageTitle breadcrumb={[{ label: 'Comparisons', to: '/comparisons' }, { label: 'Compare setups' }]} title="Compare setups"
         subtitle={data ? `${data.readAt} · read-only: nothing is copied, activated, signed in or opened. Past sessions keep the setup recorded when they ran.` : undefined} />
       {info?.mode === 'demo' ? <SimulatedNote /> : null}
       {data?.blocked ? <WarningAlert title={data.blocked} live /> : null}
@@ -128,12 +128,14 @@ function ComparisonView({ first, second, repo, onChange }: { first: SetupSelecti
       {data?.separate ? <>
         <InfoNotice title="Separate setup inventories"><p>{data.separate.reason}</p></InfoNotice>
         <SeparateSetupInventories a={data.separate.a} b={data.separate.b} aLabel={setupLabel(first)} bLabel={setupLabel(second)} />
-      </> : <SummaryTiles counts={data?.counts ?? null} loading={view.loading && !data} active={only}
-        onFilter={key => { setOnly(key); setSelected(null); }}
-        captions={{ different: 'Where the two setups differ. Start here.' }} />}
+      </> : <div className="setup-counts" role="group" aria-label="Summary">
+        {([{ key: 'different', label: 'Different' }, { key: 'same', label: 'Same' }, { key: 'cannotCompare', label: 'Could not compare' }] satisfies { key: TileKey; label: string }[]).map(({ key, label }) => <button key={key} type="button" disabled={!data} aria-pressed={only === key} className="setup-count" data-emphasis={key === 'different'} onClick={() => { setOnly(only === key ? null : key); setSelected(null); }}>
+          <span className="setup-count-value">{data ? data.counts[key] : '—'}</span><span>{label}{only === key ? <span aria-hidden="true"> · Selected</span> : null}</span>
+        </button>)}
+      </div>}
       {data?.limits && !data.separate ? (
-        <InfoNotice title="Reading limits">
-          <p>{data.limits.text}</p>
+        <section className="setup-reading-note" aria-labelledby="reading-limits-title"><h2 id="reading-limits-title" className="text-ui font-semibold">Reading limits</h2>
+          <p className="text-ui">{data.limits.text}</p>
           <Disclosure label="Show sources" expandedLabel="Hide sources">
             <div className="overflow-x-auto">
               <table className="text-ui w-full border-collapse">
@@ -142,7 +144,7 @@ function ComparisonView({ first, second, repo, onChange }: { first: SetupSelecti
               </table>
             </div>
           </Disclosure>
-        </InfoNotice>
+        </section>
       ) : null}
       {view.loading && !data ? <Loading label="Reading both setups… Results appear as each part finishes. No client is opened." /> : null}
       {data && !data.blocked && !data.separate ? (
@@ -164,7 +166,7 @@ function ComparisonView({ first, second, repo, onChange }: { first: SetupSelecti
             </div>
           ) : (
             <div className="@container flex flex-wrap gap-6 items-start">
-              <div className="flex flex-col gap-4" style={{ flex: '999 1 540px', minWidth: 0 }}>
+              <div className="setup-comparison-list flex flex-col" style={{ flex: '999 1 540px', minWidth: 0 }}>
                 {visible.filter(group => group.items.length || (!query.trim() && effectivePreset === 'attention' && !only && group.counts.same)).map(group => (
                   <GroupPanel key={group.id} group={group} full={data.groups.find(g => g.id === group.id)!} selectedId={current?.id ?? null}
                     onSelect={setSelected} showingSame={Boolean(showSame[group.id]) || effectivePreset === 'all'} canShowSame={!only && effectivePreset === 'attention'}
@@ -198,7 +200,7 @@ function GroupPanel({ group, full, selectedId, onSelect, showingSame, canShowSam
   const unknown = group.items.filter(item => item.label === 'cannot-compare');
   const shownItems = allUnknown || unknown.length <= 5 ? group.items : group.items.filter(item => item.label !== 'cannot-compare' || unknown.indexOf(item) < 5 || item.id === selectedId);
   return (
-    <section className="panel p-0 overflow-hidden" aria-labelledby={`group-${group.id}`}>
+    <section className="setup-comparison-group overflow-hidden" aria-labelledby={`group-${group.id}`}>
       <div className="panel-head flex flex-wrap justify-between gap-2" style={{ borderRadius: 0 }}>
         <h2 id={`group-${group.id}`} className="text-body font-semibold">{group.label}</h2>
         <span className="meta">{group.meta}</span>
@@ -245,7 +247,7 @@ function ItemRow({ item, selected, onSelect }: { item: SetupItem; selected: bool
 
 function DetailPanel({ item, a, b }: { item: SetupItem; a: string; b: string }) {
   return (
-    <aside aria-labelledby="detail-title" className="panel flex flex-col gap-4" style={{ flex: '1 1 380px', borderTop: '3px solid var(--color-link-focus)', minWidth: 0 }}>
+    <aside aria-labelledby="detail-title" className="panel flex flex-col gap-4" style={{ flex: '1 1 380px', minWidth: 0 }}>
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap gap-2 items-center"><ComparisonBadge label={item.label} exactState={item.exactState} /><span className="text-ui font-medium">{item.exactText}</span></div>
         <h2 id="detail-title" tabIndex={-1} className="font-mono text-body font-semibold wrap-anywhere scroll-mt-4">{item.name}</h2>

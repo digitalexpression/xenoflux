@@ -337,8 +337,14 @@ async function profileApp(store, plan, allowRebuild, {
     previousAppPath = existing.appPath;
   }
   const entries = await readdir(profileDir);
-  if (entries.some(entry => entry !== markerName && (!previousAppPath || join(profileDir, entry) !== previousAppPath)))
+  for (const entry of entries) {
+    if (entry === markerName || (previousAppPath && join(profileDir, entry) === previousAppPath)) continue;
+    if (previousAppPath && entry === '.DS_Store') {
+      const info = await lstat(join(profileDir, entry));
+      if (!info.isSymbolicLink() && info.isFile() && info.uid === currentUid() && info.nlink === 1 && !(info.mode & 0o022)) continue;
+    }
     fail('PROFILE_APP_OWNERSHIP_MISMATCH');
+  }
   try {
     await scanLinks(sourceAppPath, sourceAppPath, { lstat, readdir, readlink, realpath });
     const tempContents = join(tempApp, 'Contents'), infoPath = join(tempContents, 'Info.plist');

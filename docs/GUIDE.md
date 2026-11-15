@@ -6,12 +6,20 @@ requires that link to establish a browser session. Running `xfx ui` again reopen
 the app; Ctrl+C stops its server. `xfx ui --demo` uses marked synthetic data and
 simulated actions without reading/changing profiles or clients.
 
+The app opens **Comparisons**. Choose **Use existing sessions**, **Run a new task**
+or **Choose two profiles**. The sidebar also opens **Sessions** and **Profiles**,
+with **Saved reports** under Comparisons and **Clients on this Mac** under Profiles.
+**Activity** opens current jobs and recent comparison records. The toolbar keeps
+Back, Forward and the current page's breadcrumb available across these journeys.
+Use **Theme** for System, Light or Dark. The choice is remembered in this browser.
+
 ## Find installed clients and existing profiles
 
-The app opens **Setup** before profile creation. Review CLI and desktop findings
-for Codex, Claude Code and GitHub Copilot, then review existing profiles.
-Setup and Profiles recheck automatically every five seconds while visible and when
-you return to the window. Use **Check again** for an explicit fresh check.
+Open **Clients on this Mac** to find clients and profiles before creating another
+profile. Review CLI and desktop findings for Codex, Claude Code and GitHub Copilot,
+then review existing setups. Clients on this Mac and Profiles recheck automatically
+every five seconds while visible and when you return to the window. Use **Check again**
+for an explicit fresh check.
 
 Discovery checks the selected PATH, standard client folders, the profile registry
 and direct folders in Xenoflux's managed profile directory. It does not search
@@ -43,8 +51,31 @@ are never copied. Profiles subsequently evolve independently.
 | Profile client | CLI | Desktop with the selected profile |
 | --- | --- | --- |
 | Codex | Open in Terminal | Open Codex Desktop, including to sign in |
-| Claude Code | Open in Terminal; native sign-in guidance on the card | Separate Desktop startup and storage; authenticated session/model use unverified |
-| GitHub Copilot | Open in Terminal; shared account scope remains explicit | Profile-bound local startup and storage; authenticated session/model use unverified |
+| Claude Code | Sign in through the browser; Open in Terminal for interactive work | Separate Desktop startup and storage; authenticated session/model use unverified |
+| GitHub Copilot | Sign in through the browser with the shared GitHub CLI account; Open in Terminal for interactive work | Profile-bound local startup and storage; authenticated session/model use unverified |
+
+Profiles groups entries by client. Each entry keeps inspection links separate
+from sign-in and opening actions. **More** contains the available registry edits
+and selected-copy actions.
+
+For Claude Code or Copilot, choose **Sign in** on the profile entry. Complete
+authorization in your browser. Xenoflux checks sign-in automatically and updates
+the profile when verification finishes. You do not need to run a command or return
+to **Check sign-in**. GitHub may ask you to enter the device code shown in Xenoflux.
+After five minutes, a previous result is labelled **last checked**. It remains
+visible until another check or a change to its native binding invalidates it.
+This display does not renew account qualification for running tasks.
+
+Claude signs in to the selected configuration root. Copilot signs in through
+GitHub CLI and shares that account across qualified Copilot profiles and other
+tools using GitHub CLI. Review that shared scope before continuing. Separate
+Copilot settings do not create separate accounts.
+
+You can cancel a pending sign-in. Cancellation stops Xenoflux's login process;
+it does not undo authorization already completed in your browser. Closing the
+Xenoflux server cancels pending sign-ins. If browser authorization cannot finish,
+retry from Xenoflux. Xenoflux never asks you to paste a credential or Claude
+authorization code. CLI sign-in does not verify Desktop sign-in.
 
 **Open in Terminal** launches the current selected CLI through Xenoflux with the
 profile's configuration root and an exclusive reservation. A bound project is
@@ -53,13 +84,13 @@ a CLI starts no task automatically. Close its Terminal session before changing
 or copying that profile. A native startup can still write its own state or run
 configured hooks.
 
-For Copilot, choose **Open GitHub Copilot Desktop** on the profile card. The
+For Copilot, choose **Open GitHub Copilot Desktop** on the profile entry. The
 signed installed app opens with that profile's storage. Xenoflux refuses an
 already-running Copilot app or a profile reserved by other work; it never closes
 those clients for you. Desktop sign-in remains inside the vendor app, separate
 from the CLI's shared-account check.
 
-For Claude, choose **Open Claude Desktop** on the profile card. Each profile has
+For Claude, choose **Open Claude Desktop** on the profile entry. Each profile has
 its own Desktop data folder alongside its Claude Code configuration folder.
 Other Claude Desktop instances can stay open. Xenoflux starts a new instance
 and verifies its selected storage without focusing, closing or changing the
@@ -85,19 +116,21 @@ for active reservations and file holders and never closes their clients.
 See [terminal copying and recovery](CLI.md#profiles-copy-and-recovery).
 
 Rename, repository binding and removal affect registry metadata; removing a profile
-leaves its files on disk. Native Open controls submit no task. The separate **Native apps** controls open
-stock Claude/Copilot with the app's existing setup; they do not select a managed
+leaves its files on disk. Native Open controls submit no task. The separate **Native apps** controls
+under **Clients on this Mac** open stock Claude/Copilot with the app's existing setup; they do not select a managed
 profile. A Copilot session link dispatch does not prove that the target session exists.
 
 ## Inspect and compare setups
 
-From Setup or Profiles, choose **Inspect setup** to read one profile's settings,
-instructions, agents, skills, hooks, plugins, MCP and memory settings. Inspect
+From **Clients on this Mac** or **Profiles**, choose **Inspect setup** to read one
+profile's settings, instructions, agents, skills, hooks, plugins, MCP and memory settings. Inspect
 values, file previews, source locations and reading limits. These are current
 local setup sources, not proof of effective precedence, native loading or session use.
 An absent CLI or sign-in does not prevent inspection of a safely readable profile.
 
 Optionally choose a repository to include its project instructions and settings.
+Search sources or choose a category to narrow the inventory. Expand a source for
+its values and file evidence without rereading the setup.
 Use **Refresh setup** to reread the selected scope. Invalid repository paths fail
 explicitly; they do not fall back to a comparison without project context.
 
@@ -105,6 +138,9 @@ Choose **Compare with…** to select another profile from the same or a differen
 vendor. Same-vendor comparisons retain **Same**, **Different**, **Could not compare**
 and **Not applicable** within the sources read. Different-vendor comparisons align
 categories for inspection while keeping each vendor's observations separate.
+Same-client count controls filter the result list. The selected filter is labeled
+**Selected**. Choose an item for its detail; when the columns stack, **View details**
+and **Back to selected item** move between the row and detail without changing it.
 Matching names or values do not establish equivalent behavior. Missing or unreadable
 evidence remains explicit, and copying between vendors is unavailable.
 Inspection and comparison read files without opening, signing in or activating clients.
@@ -116,6 +152,11 @@ sides may use the same profile or different supported clients. Review the pinned
 commit, model/effort, permissions, limits and any setup/check commands before
 **Start 2 model runs**. Sides run sequentially in separate copies of committed
 source; dirty, untracked and ignored files are excluded.
+
+Preparation groups **Task and source**, **Two setups**, and **Checks and limits**
+on one page. Use the stage links to move between them without losing entered
+values. **Review before starting** checks the preparation; edit links return to
+the relevant section before requesting a fresh preview.
 
 No checks are selected automatically. Setup/check programs run outside the Codex
 sandbox and can affect external files/services; select trusted commands. Codex
@@ -135,9 +176,14 @@ not overlap. Profile mutations and new Desktop startup are blocked by execution
 reservations. The controller's default capacity is eight jobs. Shared activity
 limits timing comparisons.
 
+Open **Activity** in the sidebar for current comparisons and reviews and recent
+comparison records. Open a job to see its current state, answer its native requests
+or cancel that job. The list updates automatically; **Refresh activity** rereads
+the list and recent records. Opening a record never resumes or retries model work.
+
 ## Inspect a session
 
-From **Browse sessions**, choose **Inspect** beside a Codex session, or choose
+From **Sessions**, choose **Inspect** beside a Codex session, or choose
 **Choose a session by profile** for Codex, Claude Code or GitHub Copilot.
 Profiles also offers **Inspect sessions** with that profile selected. Listing
 Copilot history uses its CLI and existing sign-in; managed profiles need a bound
@@ -148,6 +194,13 @@ observations, turn settings, skills, time, tokens and recorded activity. Open an
 event for its retained content and source reference. Available compaction markers
 and summaries link to their events; absent summaries do not prove scope loss.
 Today's setup is a separate snapshot, never a substitute for historical context.
+
+Use **Overview**, **Activity**, **Harness**, **Context**, **Usage**, **Outcome**
+and **Source** to read one kind of evidence at a time. The selected section stays
+in the address for reload and Back. Activity keeps its event selection and search
+when you switch sections. Source holds the detailed coverage, identity and limits.
+Overview and Context show the first retained user message where available; earlier
+messages may be missing. Its source link opens the recorded event in Activity.
 
 On a comparison report, choose **Inspect session** on either side to inspect its
 retained capture. Owned captures and historical imports keep their own coverage
@@ -170,7 +223,9 @@ cannot fill both sides.
 
 ## Compare existing sessions
 
-Select two sessions; the first is the left side and **Swap sides** reverses them.
+On **Sessions**, choose **Compare** beside two sessions. The sidebar keeps the pair
+while you search or open other pages; **Compare…** continues to the picker, where
+you can also select both. The first is the left side and **Swap sides** reverses them.
 For different profiles/clients, use **Choose recent sessions by profile**, select
 each profile and **List recent sessions**. Changed context needs a fresh selection.
 Managed Copilot listing uses its first bound repository; bind one before listing.
@@ -185,6 +240,17 @@ surface/location, completion and usage remain unknown. Export freezes the projec
 so native histories are no longer needed. Raw transcripts remain private.
 
 ## Read and export a report
+
+Comparison reports are designed for desktop windows at least 1280 CSS pixels wide.
+Their Overview leads with recorded finding counts, paired activity lines and
+conditions. Different, Same and Could not compare count findings, not condition
+rows or task quality. Hollow activity stops have no per-turn token total; dotted
+lines preserve recorded order where stop timestamps do not support a time scale.
+Choose a stop to open its retained event. Each session keeps its own clock.
+
+Use **Overview**, **Activity**, **Harness and context**, **Usage**, **Responses**,
+**Outcome** and **Source** to move within the report. **Review** and **Export report**
+remain above the evidence. Technical session details stay in each side's **Details**.
 
 **Session and harness comparison** separates requested variation from recorded
 differences. **Model-only request** means only the model differs among the listed
@@ -232,7 +298,9 @@ strict capture, historical metadata and comparison exit codes.
 
 Export writes Markdown and its `.md.audit.json` companion to a new folder under
 `~/Xenoflux reports/`; keep both together. **Open saved report** reads the JSON
-exactly as saved. Event/check/patch bodies are omitted unless **Include recorded
+exactly as saved. **Recently saved** lists earlier export locations. **Refresh list**
+updates that list; selecting an entry reads its saved report. Event/check/patch
+bodies are omitted unless **Include recorded
 messages and tool content** is selected. Known-secret redaction cannot remove all
 private prose/code; inspect both files before sharing. A review's bound evidence
 cannot be silently stripped while retaining that review.
@@ -245,6 +313,11 @@ inputs, executable, prompt and limits without starting a session. Editing invali
 preview. **Start review** submits one ordinary task through the selected client's
 CLI, using its sign-in, instructions, integrations and permissions. Prompting it to
 reason from the report is not enforced isolation; native history/runtime effects apply.
+
+**Review task**, **External review** and **Attached ratings** separate ordinary
+task work from imported ratings. Preview moves focus to the exact inputs;
+**Edit review** returns to the preparation action. A review of the report subject
+is labeled **This comparison**, with its exact identifier under **Show review scope**.
 
 Blank model/effort fields inherit defaults. Explicit choices are rechecked and
 reported as applied only when native evidence confirms them. Review duration is
@@ -284,7 +357,8 @@ Claude's observed account route is per-root/same-account; Copilot's qualified
 `gh-cli` route is shared. Separate roots do not prove separate accounts.
 
 Credential refresh, distinct-account independence and shared sign-out isolation
-are unverified. Some native pair/mode combinations, repeated overlap stress,
+are unverified. An interrupted shared-account metadata operation keeps its
+reservation for maintainer recovery. Some native pair/mode combinations, repeated overlap stress,
 controller-kill reviews and copied-setup loading remain deferred. Real Codex
 stale-callback recovery is unobserved; synthetic Desktop fixtures do not establish
 real sign-in, Dock behavior or account isolation. Unreported effort/usage stays

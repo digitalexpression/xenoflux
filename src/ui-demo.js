@@ -124,6 +124,25 @@ function basis(left, right) {
   return 'unknown';
 }
 
+function comparisonReplay(side) {
+  const root = `demo-${side}-main`, child = `demo-${side}-delegate`;
+  const message = (id, sessionId, turnId, role, timestamp, body) => ({ id, sessionId, turnId, kind: 'message', role,
+    label: role === 'user' ? 'User message' : 'Assistant message', timestamp, sourceLine: null, body, bodyStatus: 'included' });
+  const events = [
+    message('opening', root, 'first', 'user', '2026-11-13T10:00:00Z', 'Fix the flaky date-parsing test.'),
+    message('first-response', root, 'first', 'assistant', '2026-11-13T10:01:00Z', 'I inspected the test and the date parser.'),
+    message('continued-response', root, 'second', 'assistant', side === 'a' ? null : '2026-11-13T10:02:00Z', 'I checked the retained changes and recorded the remaining uncertainty.'),
+    message('closing', root, 'second', 'assistant', '2026-11-13T10:03:00Z', 'The date parsing change is recorded. Independent verification is not included in this synthetic session.'),
+  ];
+  return { schemaVersion: 1, kind: 'session-replay', sessions: [
+    { id: root, parentId: null, status: 'partial', source: { fingerprint: null }, events },
+    ...(side === 'b' ? [{ id: child, parentId: root, status: 'partial', source: { fingerprint: null }, events: [
+      message('delegated', child, 'child-turn', 'user', '2026-11-13T10:01:30Z', 'Inspect the synthetic date test.'),
+      message('delegated-response', child, 'child-turn', 'assistant', '2026-11-13T10:02:30Z', 'A delegated response was retained; this is not an independent verification check.'),
+    ] }] : []),
+  ] };
+}
+
 function report(ref, selection) {
   const sessions = Object.fromEntries(sessionRows().map(row => [row.key, row]));
   const left = sessions[selection.left] ?? sessions.s2, right = sessions[selection.right] ?? sessions.s1;
@@ -173,6 +192,7 @@ function report(ref, selection) {
   const assoc = ASSOCIATION[association];
   return {
     ref, title: selection.sameTask || left.title, breadcrumb: 'Choose sessions',
+    replay: { a: comparisonReplay('a'), b: comparisonReplay('b') },
     saved: ref === 'demo-saved' ? { recordedAt: '21 Oct', savedAt: '21 Oct', notInReport: ['Side-by-side code'] } : null,
     a: { side: 'a', profile: a, client: left.clientText, time: left.recordedAt, session: `[SESSION ID ${left.key}]` },
     b: { side: 'b', profile: b, client: right.clientText, time: right.recordedAt, session: `[SESSION ID ${right.key}]` },
@@ -337,6 +357,7 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       return { mode: 'demo', version, features: { runs: true, copy: true, create: true, clientControls: true, profileEdits: true },
         activeRun: active ? { id: active.id, task: active.task, profiles: [active.a, active.b], href: `/runs/${active.id}` } : null };
     },
+    async apps() { return { apps: [] }; },
     async discovery() {
       return { checkedAt: new Date().toISOString(), scope: ['Synthetic demo locations only'],
         registry: { kind: 'readable', reason: null }, attention: [], limits: [], simulated: true,

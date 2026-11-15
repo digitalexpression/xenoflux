@@ -95,7 +95,7 @@ test('create from selected instructions only and verify files and credentials bo
   await expect(agents).toHaveCount(1);
   await agents.getByRole('checkbox').check();
   await page.getByRole('button', { name: 'Create browser-parts with 1 item' }).click();
-  await expect(page.getByRole('heading', { name: '✓ browser-parts created', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'browser-parts created', exact: true })).toBeVisible();
 
   const profile = (await app.store.read()).profiles.find(item => item.name === 'browser-parts');
   expect(profile?.native?.root).toBeTruthy();
@@ -122,7 +122,7 @@ test('apply one settings item, preserve the unchecked setup, then undo to origin
   await expect(agents).toHaveCount(1);
   await agents.getByRole('checkbox').check();
   await page.getByRole('button', { name: 'Apply 1 change to strict-review' }).click();
-  await expect(page.getByRole('heading', { name: '✓ Copied into strict-review', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Copied into strict-review', exact: true })).toBeVisible();
   expect(await readFile(app.instructions.strict, 'utf8')).toBe(source);
   expect(await readFile(config, 'utf8')).toBe(configBefore);
 
@@ -137,7 +137,7 @@ test('apply one settings item, preserve the unchecked setup, then undo to origin
   await page.getByRole('button', { name: 'Choose items' }).click();
   await page.locator('label.row-select').filter({ hasText: 'AGENTS.md' }).getByRole('checkbox').check();
   await page.getByRole('button', { name: 'Apply 1 change to strict-review' }).click();
-  await expect(page.getByRole('heading', { name: '✓ Copied into strict-review', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Copied into strict-review', exact: true })).toBeVisible();
 
   const laterEdit = 'Edited after the copy was applied.\n';
   await writeFile(app.instructions.strict, laterEdit);
@@ -169,9 +169,12 @@ test('replace one skill package from the UI, preserve other setup, and undo its 
   await page.getByRole('menuitem', { name: /Copy settings from another profile/ }).click();
   await page.getByLabel('Copy from').selectOption({ label: 'baseline' });
   await page.getByRole('button', { name: 'Choose items' }).click();
-  const skillRow = page.locator('label.row-select').filter({ hasText: 'review-helper' });
+  const skillRow = page.locator('.copy-item').filter({ hasText: 'review-helper' });
   await expect(skillRow).toContainText('exact replacement');
-  await skillRow.getByRole('button', { name: 'Inspect file changes' }).click();
+  await skillRow.getByRole('button', { name: 'Inspect file changes' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(skillRow.getByRole('checkbox')).not.toBeChecked();
+  await expect(skillRow.getByRole('button', { name: 'Hide file changes' })).toBeFocused();
   await expect(skillRow).toContainText('extra.txt');
   await expect(skillRow).toContainText('remove');
   await expect(skillRow.getByText('skills/review-helper/extra.txt', { exact: true })).toBeVisible();
@@ -181,7 +184,7 @@ test('replace one skill package from the UI, preserve other setup, and undo its 
   await expect(skillRow.getByText('0600 → —', { exact: false })).toBeVisible();
   await skillRow.getByRole('checkbox').check();
   await page.getByRole('button', { name: 'Apply 1 change to strict-review' }).click();
-  await expect(page.getByRole('heading', { name: '✓ Copied into strict-review', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Copied into strict-review', exact: true })).toBeVisible();
 
   expect(await readFile(join(sourceSkill, 'SKILL.md'))).toEqual(sourceBody);
   expect(await readFile(join(targetSkill, 'SKILL.md'))).toEqual(sourceBody);
@@ -279,7 +282,7 @@ test('Claude creation previews and cancels without launching; selected copy and 
   const instructions = page.locator('label.row-select').filter({ hasText: 'CLAUDE.md' });
   await instructions.getByRole('checkbox').check();
   await page.getByRole('button', { name: 'Create claude-parts with 1 item' }).click();
-  await expect(page.getByRole('heading', { name: '✓ claude-parts created' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'claude-parts created' })).toBeVisible();
   const profile = (await app.store.read()).profiles.find(p => p.name === 'claude-parts');
   expect(profile.client).toBe('claude-code');
   expect(await readFile(join(profile.native.configRoot, 'CLAUDE.md'), 'utf8')).toBe('Claude fixture instructions.\n');
@@ -290,9 +293,8 @@ test('Claude creation previews and cancels without launching; selected copy and 
   const card = page.getByRole('article', { name: 'claude-parts' });
   await expect(card.getByText('Account independence: not verified.')).toBeVisible();
   await expect(card.getByRole('button', { name: 'Open Claude Desktop for claude-parts', exact: true })).toHaveCount(0);
-  await card.getByRole('button', { name: 'Native setup and sign-in' }).click();
-  await expect(card.getByText(/CLAUDE_CONFIG_DIR=.*auth login/)).toBeVisible();
-  await expect(card.getByText('This command uses the currently installed Claude Code.', { exact: false })).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Sign in for claude-parts', exact: true })).toBeVisible();
+  await expect(card.getByText(/Continue in your browser/)).toBeVisible();
   await card.getByRole('button', { name: 'Check sign-in for claude-parts' }).click();
   await expect(card.getByText(/Claude Code · CLI: Signed out/)).toBeVisible();
   expect(await readFile(app.nativeProfileLog, 'utf8')).toBe('--version\nauth status\n');

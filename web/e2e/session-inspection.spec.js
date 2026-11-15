@@ -1,30 +1,65 @@
 import { test, expect } from '@playwright/test';
-import { readFile, rm } from 'node:fs/promises';
+import { appendFile, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createUiBrowserFixture } from '../../test-support/ui-browser-fixture.js';
 import { createMixedClientFixture } from '../../test-support/ui-mixed-client-fixture.js';
 
 for (const theme of ['light', 'dark']) {
-  test(`one Codex session is inspectable without a second selection in ${theme}`, async ({ page }) => {
+  test(`one Codex session is inspectable without a second selection in ${theme}`, async ({ page }, testInfo) => {
     const app = await createUiBrowserFixture();
     try {
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await appendFile(app.rollouts[0], JSON.stringify({ timestamp: '2026-10-15T08:00:01.200Z', type: 'response_item',
+        payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Inspect this retained task.' }] } }) + '\n');
       await page.setViewportSize({ width: theme === 'dark' ? 320 : 1280, height: 900 });
       await page.addInitScript(value => localStorage.setItem('xenoflux-theme', value), theme);
       await page.goto(app.url);
-      await page.getByRole('link', { name: 'Browse sessions', exact: true }).click();
+      await page.getByRole('link', { name: 'Sessions', exact: true }).click();
       await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Fix the date test');
       await page.getByRole('button', { name: 'Inspect Fix the date test', exact: true }).last().click();
-      await expect(page.getByRole('heading', { name: 'Harness and context' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
+      const sections = page.getByRole('navigation', { name: 'Session sections' });
+      await page.screenshot({ path: testInfo.outputPath(`inspector-overview-${theme}.png`), fullPage: true, animations: 'disabled' });
+      await page.getByRole('button', { name: 'Read user message in Activity', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Event inspector', exact: true })).toBeFocused();
+      await expect(sections.getByRole('link', { name: 'Activity', exact: true })).toHaveAttribute('aria-current', 'page');
+      if (page.viewportSize().width >= 800) {
+        await sections.getByRole('link', { name: 'Usage', exact: true }).click();
+        await expect(page.getByRole('heading', { name: 'Event inspector', exact: true })).toHaveCount(0);
+        await sections.getByRole('link', { name: 'Activity', exact: true }).click();
+        await expect(page.getByRole('heading', { name: 'Event inspector', exact: true })).toBeVisible();
+        await page.getByRole('heading', { name: 'Event inspector', exact: true }).focus();
+      }
+      await page.keyboard.press('Escape');
+      await sections.getByRole('link', { name: 'Harness', exact: true }).focus();
+      await page.keyboard.press('Enter');
+      await expect(page.getByRole('heading', { name: 'Harness', exact: true })).toBeVisible();
       await expect(page.getByText(/Historical import/, { exact: false }).first()).toBeVisible();
-      await expect(page.getByRole('region', { name: 'Session timeline', exact: true })).toHaveCount(1);
-      await expect(page.getByRole('region', { name: 'Right timeline', exact: true })).toHaveCount(0);
       await page.getByRole('button', { name: 'Turn setting observations (1)' }).click();
       await expect(page.getByText('Model: fixture-model · Effort: medium')).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath(`inspector-harness-${theme}.png`), fullPage: true, animations: 'disabled' });
+      await sections.getByRole('link', { name: 'Activity', exact: true }).click();
+      await expect(page.getByRole('region', { name: 'Session timeline', exact: true })).toHaveCount(1);
+      await expect(page.getByRole('region', { name: 'Right timeline', exact: true })).toHaveCount(0);
       const inspect = page.getByRole('button', { name: 'Inspect selected event', exact: true });
       await inspect.focus(); await page.keyboard.press('Enter');
       await expect(page.getByRole('heading', { name: 'Event inspector', exact: true })).toBeFocused();
       await page.keyboard.press('Escape');
       await expect(page.getByRole('dialog', { name: 'Event inspector' })).toHaveCount(0);
+      const search = page.getByRole('searchbox', { name: 'Search recorded events' });
+      await search.fill('fixture');
+      await sections.getByRole('link', { name: 'Usage', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Time and tokens', exact: true })).toBeVisible();
+      await page.goBack();
+      await expect(search).toHaveValue('fixture');
+      await sections.getByRole('link', { name: 'Context', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Compaction and scope', exact: true })).toBeVisible();
+      await sections.getByRole('link', { name: 'Source', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'What we could not see', exact: true })).toBeVisible();
+      await page.reload();
+      await expect(sections.getByRole('link', { name: 'Source', exact: true })).toHaveAttribute('aria-current', 'page');
+      await sections.getByRole('link', { name: 'Outcome', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Last recorded response', exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const sessionHref = new URL(page.url()).pathname;
       await page.getByRole('link', { name: 'Export session', exact: true }).click();
@@ -37,7 +72,7 @@ for (const theme of ['light', 'dark']) {
       await expect(back).toHaveAttribute('href', sessionHref);
       await back.click();
       await expect(page).toHaveURL(new RegExp(`${sessionHref}$`));
-      await expect(page.getByRole('heading', { name: 'Harness and context', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
     } finally { await app.close(); }
   });
 }
@@ -60,9 +95,12 @@ for (const [client, profile, title, response] of [
       const lastResponse = page.getByRole('article', { name: `${profile} last recorded response` });
       await expect(lastResponse.getByText(response, { exact: true })).toBeVisible();
       await expect(lastResponse.getByText(/Completion and final-answer status are unknown/)).toBeVisible();
+      const sections = page.getByRole('navigation', { name: 'Session sections' });
+      await sections.getByRole('link', { name: 'Harness', exact: true }).click();
       await expect(page.getByText('Historical turn settings are unavailable from this source.')).toHaveCount(0);
       await page.getByRole('button', { name: 'Turn setting observations (0)' }).click();
       await expect(page.getByText('Historical turn settings are unavailable from this source.')).toBeVisible();
+      await sections.getByRole('link', { name: 'Activity', exact: true }).click();
       await expect(page.getByRole('region', { name: 'Session timeline', exact: true })).toHaveCount(1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const ref = decodeURIComponent(new URL(page.url()).pathname.split('/').at(-1));
@@ -72,11 +110,13 @@ for (const [client, profile, title, response] of [
       expect(JSON.parse(text).kind).toBe('audit-run');
       expect(text).toContain(response);
       await rm(client === 'claude-code' ? app.transcript : app.copilotConfig);
-      await page.getByRole('link', { name: 'Open saved report', exact: true }).click();
+      await page.getByRole('link', { name: 'Saved reports', exact: true }).click();
       await page.getByLabel('Choose the report’s JSON file').setInputFiles(resolve(file));
       await page.getByRole('link', { name: 'View report', exact: true }).click();
-      await expect(page.getByRole('heading', { name: 'Harness and context' })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Overview', exact: true })).toBeVisible();
+      await sections.getByRole('link', { name: 'Source', exact: true }).click();
       await expect(page.getByText(/Shown from the frozen report/)).toBeVisible();
+      await sections.getByRole('link', { name: 'Overview', exact: true }).click();
       await expect(page.getByText(response, { exact: true }).first()).toBeVisible();
     } finally { await app.close(); }
   });
@@ -88,7 +128,7 @@ test('leaving a pending inspection keeps the newer page when its response arrive
   const gate = new Promise(resolve => { release = resolve; });
   try {
     await page.goto(app.url);
-    await page.getByRole('link', { name: 'Browse sessions', exact: true }).click();
+    await page.getByRole('link', { name: 'Sessions', exact: true }).click();
     await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Rare older task');
     await page.route('**/api/sessions/inspect', async route => {
       await gate;

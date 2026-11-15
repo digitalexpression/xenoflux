@@ -11,6 +11,8 @@ import { probeVersion, probeNativeProfileVersion } from './version-probe.js';
 import { runInteractive } from './interactive-process.js';
 import { createLogStorage } from './log-storage.js';
 import { nativePath } from './node-runtime.js';
+import { getAuditProcessIdentity } from './audit-process.js';
+import { acquireCopilotAccount } from './copilot-account-lock.js';
 
 const knownErrors = new Set(['CANCELLED', 'SPAWN_FAILED', 'SHUTDOWN_FAILED', 'VERSION_MISMATCH', 'EXECUTABLE_CHANGED', 'HOME_CHANGED', 'OUTPUT_LIMIT', 'RPC_TIMEOUT', 'RAM_LOGS_UNAVAILABLE']);
 async function privateDirectory(path) {
@@ -120,9 +122,10 @@ export async function discoverCodexExecutable(environment = process.env) {
 export async function launchHome(store, name, { signal, terminalEnvironment, onStart = () => {},
   repository, resumeId, defaultUserHome, run = runInteractive, probe, ramLogs = createLogStorage() } = {}) {
   let plan = await launchPlan(store, name, terminalEnvironment, { repository, resumeId, defaultUserHome });
+  const account = plan.client === 'copilot' ? await acquireCopilotAccount(plan.env.HOME) : null;
   const lock = join(plan.nativeRoot, '.run-lock'), runId = randomUUID();
   try { await mkdir(lock, { mode: 0o700 }); }
-  catch { throw new Error('This native home is in use or an earlier run needs recovery'); }
+  catch { await account?.release(); throw new Error('This native home is in use or an earlier run needs recovery'); }
   let reportPath, preserveLock = false;
   const report = { schemaVersion: 1, kind: 'interactive-cli', client: plan.client, runId, profileId: plan.profileId,
     environmentId: plan.environmentId, home: plan.home, cwd: plan.cwd, operation: plan.operation,
@@ -149,8 +152,9 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     if (plan.client === 'codex') await ramLogs.prepareHome({ home: plan.home, key: plan.environmentId, signal });
     await onStart(plan);
     if (signal?.aborted) throw Object.assign(new Error('Launch cancelled'), { code: 'CANCELLED' });
+    await account?.checkpoint({ spawnIntent: true });
     const result = await run({ executable: plan.executable, args: plan.args, cwd: plan.cwd, env: plan.env, signal,
-      async onSpawn(pid) { report.pid = pid; report.status = 'running'; await record(reportPath, report); } });
+      async onSpawn(pid) { if (account) await account.checkpoint({ processIdentity: await getAuditProcessIdentity(pid) }); report.pid = pid; report.status = 'running'; await record(reportPath, report); } });
     Object.assign(report, result);
     report.status = result.exitCode === 0 ? 'exited' : 'failed';
   } catch (error) {
@@ -188,6 +192,7 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     if (!preserveLock) {
       await unlink(join(lock, 'owner.json')).catch(e => { if (e.code !== 'ENOENT') throw e; });
       await rmdir(lock);
+      await account?.release();
     }
   }
   return { ...report, reportPath };

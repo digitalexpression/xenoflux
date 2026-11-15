@@ -69,7 +69,7 @@ function ownedControlsPair() {
   });
 }
 
-for (const [theme, width] of [['light', 1280], ['dark', 320]]) {
+for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
   test(`owned comparison preserves available evidence and explains remaining coverage in ${theme}`, async ({ page }, testInfo) => {
     const app = await createUiBrowserFixture();
     try {
@@ -124,7 +124,7 @@ for (const [theme, width] of [['light', 1280], ['dark', 320]]) {
   });
 }
 
-for (const [theme, width, effortChanged] of [['light', 1280, false], ['dark', 320, true]]) {
+for (const [theme, width, effortChanged] of [['light', 1280, false], ['dark', 1440, true]]) {
   test(`paired harness controls distinguish requested model-only from observed changes in ${theme}`, async ({ page }, testInfo) => {
     const app = await createUiBrowserFixture();
     try {

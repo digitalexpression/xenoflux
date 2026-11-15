@@ -14,7 +14,7 @@ async function tick(page, endpoint) {
 }
 async function setup(page) {
   await freeze(page);
-  await page.getByRole('link', { name: 'Setup', exact: true }).click();
+  await page.getByRole('link', { name: 'Clients on this Mac', exact: true }).click();
   await expect(page.getByRole('status').filter({ hasText: 'Discovery check complete.' })).toBeVisible();
 }
 

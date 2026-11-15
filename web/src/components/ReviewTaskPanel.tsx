@@ -60,6 +60,8 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
   const formInitialized = useRef(options.profiles.length > 0);
   const startOutcomeUnknown = useRef(false);
   const formError = useRef<HTMLDivElement>(null);
+  const previewPanel = useRef<HTMLElement>(null);
+  const previewTrigger = useRef<HTMLButtonElement>(null);
   const actionErrorSummary = useRef<HTMLDivElement>(null);
   const base = `/api/reports/${encodeURIComponent(refId)}/review-tasks`;
   const setBusyNow = (value: boolean) => { busyRef.current = value; setBusy(value); };
@@ -67,6 +69,9 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { if (error) formError.current?.focus(); }, [error]);
+  useEffect(() => {
+    if (preview) { previewPanel.current?.focus({ preventScroll: true }); previewPanel.current?.scrollIntoView({ block: 'start' }); }
+  }, [preview]);
   useEffect(() => { if (actionError) actionErrorSummary.current?.focus(); }, [actionError]);
   useEffect(() => {
     // Direct task links can load their record before the report's form defaults.
@@ -185,7 +190,7 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
     } finally { if (taskIdRef.current === taskId && taskEpoch.current === epoch) { setBusyNow(false); setPollRevision(value => value + 1); } }
   }
 
-  if (taskId) return <section className="panel flex flex-col gap-3 min-w-0 wrap-anywhere" aria-labelledby="review-task-state">
+  if (taskId) return <section className="review-task flex flex-col gap-4 min-w-0 wrap-anywhere" aria-labelledby="review-task-state">
     <div className="flex flex-wrap items-baseline justify-between gap-2">
       <h2 id="review-task-state" className="text-heading">Review task</h2>
       {task ? <span className="meta" role="status" aria-live="polite">{labels[task.status]}</span> : null}
@@ -194,31 +199,33 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
     {actionError ? <div ref={actionErrorSummary} tabIndex={-1}><ErrorPanel title="Review task action failed">{actionError}</ErrorPanel></div> : null}
     {!task && !taskError ? <Loading label={pendingStartId.current === taskId ? 'Starting review…' : 'Reconnecting to review task…'} /> : null}
     {task ? <>
+      <div className="review-task-facts">
       <p className="text-ui">{task.title} · profile <span className="font-medium">{task.profile}</span>{task.client ? ` · ${clientLabel[task.client]}` : ''}</p>
       {task.context ? <p className="hint">{task.context.surface.toUpperCase()} · {task.context.rootMode} root · {task.context.executionLocation}</p> : null}
       <p className="hint">Working directory: <span className="font-mono">{task.cwd || 'Unavailable'}</span></p>
       <p className="hint">{task.threadId ? 'Native session recorded; its identifiers are available in task details.' : 'Native session identity has not been recorded.'}</p>
       <p className="hint">This task remains associated with the frozen comparison. <Link className="link" to={`/reports/${encodeURIComponent(task.reportRef)}`}>Open its comparison and evidence</Link></p>
+      </div>
       {task.pendingRequests.length && task.status !== 'waiting-for-user' ? <InfoNotice title="Native request unavailable"><p>The saved request is not waiting in a live native session and cannot be replayed.</p></InfoNotice> : null}
       {task.pendingRequests.filter(request => task.status === 'waiting-for-user' && !unavailableRequests.includes(request.requestId)).map(request => <NativeReviewRequest key={request.requestId} request={request} busy={busy || task.pendingRequests[0]?.requestId !== request.requestId} onRespond={(response: ReviewTaskDecision) => respond(request, response)} />)}
       {unavailableRequests.length ? <InfoNotice title="Native request unavailable"><p>This request is no longer active. No response was submitted; it cannot be replayed.</p></InfoNotice> : null}
-      {task.response ? <section className="rounded-control p-3 flex flex-col gap-2" aria-labelledby="review-task-response" style={{ border: '1px solid var(--color-divider)' }}>
+      {task.response ? <section className="review-response panel flex flex-col gap-3" aria-labelledby="review-task-response">
         <h3 id="review-task-response" className="text-body font-semibold">{task.response.status === 'complete' ? 'Captured response' : task.response.status === 'partial' ? 'Partial response' : 'Response unavailable'}</h3>
         {task.response.text ? <div className="text-ui whitespace-pre-wrap break-words">{task.response.text}</div> : <p className="text-ui">{task.response.reason ?? 'No response text was captured.'}</p>}
         <p className="hint">Natural-language output is shown as captured; it does not create ratings or a verdict.</p>
       </section> : null}
       {task.error ? <ErrorPanel title="Review task did not complete">{task.error}</ErrorPanel> : null}
       <p className="hint">Requested model {task.execution?.model ?? 'profile default'} · effort {task.execution?.reasoningEffort ?? 'profile default'}</p>
-      {task.nativeSettings ? <InfoNotice title="Native settings reported"><p>These values were reported by the native session. They do not independently prove which provider settings took effect.</p></InfoNotice>
-        : <InfoNotice title="Native settings unknown"><p>The task record does not establish the settings or provider used.</p></InfoNotice>}
+      {task.nativeSettings ? <section className="review-record-note"><h3 className="text-ui font-semibold">Native settings reported</h3><p className="hint">These values were reported by the native session. They do not independently prove which provider settings took effect.</p></section>
+        : <section className="review-record-note"><h3 className="text-ui font-semibold">Native settings unknown</h3><p className="hint">The task record does not establish the settings or provider used.</p></section>}
       {task.threadId || task.nativeSettings || task.shutdown ? <Disclosure label="Show task technical details" expandedLabel="Hide task technical details"><div className="font-mono text-ui whitespace-pre-wrap wrap-anywhere">{JSON.stringify({ threadId: task.threadId, turnId: task.turnId, responseThreadId: task.response?.threadId ?? null, responseTurnId: task.response?.turnId ?? null, requestedExecution: task.execution, nativeSettings: task.nativeSettings, sourceEvidenceFingerprint: task.sourceEvidenceFingerprint, inputFingerprint: task.inputFingerprint, promptSha256: task.promptSha256, includeRecordedContent: task.includeRecordedContent, shutdown: task.shutdown }, null, 2)}</div></Disclosure> : null}
       {task.frozenPrompt ? <Disclosure label="Show frozen review prompt" expandedLabel="Hide frozen review prompt">
         <pre className="font-mono text-ui whitespace-pre-wrap wrap-anywhere">{task.frozenPrompt}</pre>
       </Disclosure> : null}
       {task.nativeSettings && Object.entries(task.nativeSettings).filter(([key, value]) => /model|provider|effort/i.test(key) && (typeof value === 'string' || typeof value === 'number')).map(([key, value]) => <p className="hint" key={key}>{key}: <span className="font-mono">{String(value)}</span> (reported by native session)</p>)}
       {task.limits.map(limit => <p className="hint" key={limit}>{limit}</p>)}
-      {task.shutdown ? <InfoNotice title="Native process shutdown"><p>Status: {task.shutdown.status}{task.shutdown.groupTerminated ? ' · process group terminated' : ' · process-group shutdown is not confirmed'}</p></InfoNotice> : null}
-      {!task.shutdown && terminal.has(task.status) ? <InfoNotice title="Native process shutdown unknown"><p>The saved task does not contain a shutdown result. A captured response does not establish whether the native process stopped cleanly.</p></InfoNotice> : null}
+      {task.shutdown ? <section className="review-record-note"><h3 className="text-ui font-semibold">Native process shutdown</h3><p className="hint">Status: {task.shutdown.status}{task.shutdown.groupTerminated ? ' · process group terminated' : ' · process-group shutdown is not confirmed'}</p></section> : null}
+      {!task.shutdown && terminal.has(task.status) ? <section className="review-record-note"><h3 className="text-ui font-semibold">Native process shutdown unknown</h3><p className="hint">The saved task does not contain a shutdown result. A captured response does not establish whether the native process stopped cleanly.</p></section> : null}
       {demo ? <SimulatedNote>Demo task result is simulated; no model task starts.</SimulatedNote> : null}
       <div className="flex flex-wrap gap-2">
         <Button variant="secondary" disabled={busy} onClick={reconnectTask}>{task ? 'Refresh task' : 'Retry task connection'}</Button>
@@ -229,12 +236,13 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
     <Button variant="secondary" disabled={busy} onClick={() => { setPreview(null); setSearch({}); setTask(null); }}>Return to review form</Button>
   </section>;
 
-  if (!options.profiles.length) return <section className="panel flex flex-col gap-3" aria-labelledby="start-review"><h2 id="start-review" className="text-heading">Review this comparison</h2><WarningAlert title="No profiles available">Configure a profile before starting an ordinary review task.</WarningAlert></section>;
-  return <section className="panel flex flex-col gap-3 min-w-0 wrap-anywhere" aria-labelledby="start-review">
-    <h2 id="start-review" className="text-heading">Review this comparison</h2>
+  if (!options.profiles.length) return <section className="panel flex flex-col gap-3" aria-labelledby="start-review"><h2 id="start-review" tabIndex={-1} className="text-heading">Review this comparison</h2><WarningAlert title="No profiles available">Configure a profile before starting an ordinary review task.</WarningAlert></section>;
+  return <section className="review-preparation flex flex-col gap-4 min-w-0 wrap-anywhere" aria-labelledby="start-review">
+    <h2 id="start-review" tabIndex={-1} className="text-heading">Review this comparison</h2>
     <p className="text-ui">Choose a profile and its normal workspace, inspect the prompt and retained report content, then preview the exact inputs. No model starts until you select Start review.</p>
     {demo ? <SimulatedNote>The demo uses this same form and shows a simulated review result. No model task starts.</SimulatedNote> : null}
-    <form className="flex flex-col gap-3" onSubmit={prepare}>
+    <form className="review-prepare-grid" onSubmit={prepare}>
+      <div className="review-prepare-fields panel flex flex-col gap-4"><div className="review-profile-fields">
       <div><label htmlFor="review-profile" className="field-label">Profile</label><select id="review-profile" className="input font-mono" value={profileKeyValue} disabled={busy} onChange={event => { const next = event.target.value; setProfile(next); setExecution({});
         const chosen = options.profiles.find(item => profileKey(item) === next);
         setCwd(options.workspaces.find(item => item.available && matchesProfile(item, chosen))?.path ?? ''); inputChanged(); }}>
@@ -243,21 +251,24 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
       <div><label htmlFor="review-cwd" className="field-label">Workspace</label><select id="review-cwd" className="input font-mono" value={cwd} disabled={busy} onChange={event => { setCwd(event.target.value); setExecution({}); inputChanged(); }}>
         <option value="">Profile default workspace</option>{options.workspaces.filter(item => matchesProfile(item, selectedProfile)).map(item => <option key={`${item.profile ?? ''}:${item.path}`} value={item.path} disabled={!item.available}>{item.path}{item.available ? '' : ' · unavailable'}</option>)}
       </select></div>
+      </div>
       <p className="hint">Choose a separate workspace for each simultaneous review.</p>
       <ExecutionFields profile={profile} client={selectedProfile?.client} workspace={cwd} allowPermissionMode={false} value={execution} disabled={busy} onChange={value => { setExecution(value); inputChanged(); }} />
       <div><label htmlFor="review-prompt" className="field-label">Review prompt</label><textarea id="review-prompt" className="input" rows={6} value={prompt} disabled={busy} onChange={event => { setPrompt(event.target.value); inputChanged(); }} /></div>
+      </div><section className="review-prepare-limits panel flex flex-col gap-4" aria-labelledby="review-content-limits"><h3 id="review-content-limits" className="text-body font-semibold">Content and limits</h3>
       <label className="flex gap-2 items-start text-ui"><input type="checkbox" checked={includeContent} disabled={busy} onChange={event => { setIncludeContent(event.target.checked); inputChanged(); }} />Include recorded report content</label>
       <fieldset className="flex flex-col gap-2"><legend className="field-label">Model turn time limit</legend>
         <label className="flex gap-2 items-center text-ui"><input type="radio" name="review-time-cap" checked={!capped} disabled={busy} onChange={() => { setCapped(false); inputChanged(); }} />No time cap (default)</label>
         <label className="flex flex-wrap gap-2 items-center text-ui"><input type="radio" name="review-time-cap" checked={capped} disabled={busy} onChange={() => { setCapped(true); inputChanged(); }} />Limit to <input aria-label="Time limit in minutes" className="input w-24" type="number" min={1} max={1440} value={Math.max(1, Math.round(timeoutMs / 60000))} onChange={event => { setTimeoutMs(Math.max(60000, Number(event.target.value) * 60000)); setCapped(true); inputChanged(); }} disabled={!capped || busy} /> minutes</label>
       </fieldset>
       {error ? <div ref={formError} tabIndex={-1}><ErrorPanel title="Review could not start">{error}</ErrorPanel></div> : null}
-      <Button type="submit" busy={busy} busyLabel="Preparing…" disabled={!profile || !prompt.trim()}>Preview review</Button>
+      <Button ref={previewTrigger} type="submit" variant="primary" busy={busy} busyLabel="Preparing…" disabled={!profile || !prompt.trim()}>Preview review</Button>
+      <p className="hint">Preview freezes the inputs without starting a model. Starting uses the selected profile’s normal native workspace and permissions.</p></section>
     </form>
-    {preview ? <section className="rounded-control p-4 flex flex-col gap-3" role="region" aria-label="Review task preview" style={{ border: '1px solid var(--color-divider)' }}>
+    {preview ? <section ref={previewPanel} tabIndex={-1} className="review-preview panel flex flex-col gap-4" role="region" aria-label="Review task preview">
       <h3 className="text-body font-semibold">Review preview · {preview.title}</h3>
       {!preview.ready ? <WarningAlert title={preview.blocked?.title ?? 'Review is not ready'}>{preview.blocked?.reason ?? 'Resolve the reported issue before starting.'}</WarningAlert> : null}
-      <InfoNotice title="Exact task inputs">
+      <section className="review-preview-inputs flex flex-col gap-2" aria-labelledby="exact-review-inputs"><h4 id="exact-review-inputs" className="text-body font-semibold">Exact task inputs</h4>
         <p>Source comparison: {title} · report reference <span className="font-mono">{refId}</span></p>
         <p>Profile: <span className="font-mono">{preview.profile}</span>{preview.client ? ` · ${clientLabel[preview.client]}` : ''}
           {preview.surface ? ` · ${preview.surface.toUpperCase()} · ${preview.rootMode ? preview.rootMode + ' root' : 'root mode unknown'} · ${preview.executionLocation ?? 'location unknown'}` : ''}</p>
@@ -268,18 +279,22 @@ export function ReviewTaskPanel({ refId, title, options, tasks, demo }: {
         <p>Recorded content: {preview.contentChoice}</p>
         <p>{preview.summary}</p>
         <p>Effective prompt (sent unchanged):</p><pre className="font-mono text-ui whitespace-pre-wrap break-words">{preview.effectivePrompt}</pre>
-      </InfoNotice>
-      <InfoNotice title="Scope and limits">
+      </section>
+      <section className="review-section flex flex-col gap-2" aria-labelledby="review-scope-limits"><h4 id="review-scope-limits" className="text-body font-semibold">Scope and limits</h4>
         <p>The task uses normal native history and runtime behavior. The prompt refers to this report; it does not isolate the session from other files or local tools.</p>
         <p>Redacting recorded session content does not remove private prose or code from report files that are included.</p>
-        {preview.willDo.map(item => <p key={item}>{item}</p>)}{preview.never.map(item => <p key={item}>{item}</p>)}{preview.limits.map(item => <p key={item}>{item}</p>)}
-      </InfoNotice>
-      <div><h4 className="text-ui font-semibold">Input files</h4>{preview.inputs.map(file => <div className="text-ui" key={file.name}><p className="m-0">{file.name}</p><p className="hint break-all">Location: {file.path}</p><Disclosure label="Show file size and SHA-256" expandedLabel="Hide file details"><p className="font-mono text-ui">{file.bytes} bytes · SHA-256 {file.sha256}</p></Disclosure></div>)}</div>
+        <div className="review-effects">
+          <div><h5 className="text-ui font-semibold">Will do</h5><ul className="text-ui list-disc pl-5">{preview.willDo.map(item => <li key={item}>{item}</li>)}</ul></div>
+          <div><h5 className="text-ui font-semibold">Will not do</h5><ul className="text-ui list-disc pl-5">{preview.never.map(item => <li key={item}>{item}</li>)}</ul></div>
+        </div>
+        {preview.limits.length ? <div><h5 className="text-ui font-semibold">Limits</h5><ul className="text-ui list-disc pl-5">{preview.limits.map(item => <li key={item}>{item}</li>)}</ul></div> : null}
+      </section>
+      <div className="review-input-files"><h4 className="text-ui font-semibold">Input files</h4>{preview.inputs.map(file => <div className="text-ui" key={file.name}><p className="m-0">{file.name}</p><p className="hint break-all">Location: {file.path}</p><Disclosure label="Show file size and SHA-256" expandedLabel="Hide file details"><p className="font-mono text-ui">{file.bytes} bytes · SHA-256 {file.sha256}</p></Disclosure></div>)}</div>
       <div className="flex flex-wrap gap-2"><Button variant="primary" busy={busy} busyLabel="Starting…" disabled={!preview.ready || !preview.previewToken} onClick={() => void start()}>Start review</Button>
-        <Button variant="secondary" disabled={busy} onClick={() => { setPreview(null); }}>Edit review</Button></div>
+        <Button variant="secondary" disabled={busy} onClick={() => { setPreview(null); previewTrigger.current?.focus(); }}>Edit review</Button></div>
     </section> : null}
     {tasks.length ? <section className="flex flex-col gap-2" aria-labelledby="prior-review-tasks"><h3 id="prior-review-tasks" className="text-body font-semibold">Ordinary review tasks</h3>
-      {tasks.map(item => <div key={item.id} className="flex flex-wrap gap-2 items-center justify-between rounded-control p-3" style={{ border: '1px solid var(--color-divider)' }}>
+      {tasks.map(item => <div key={item.id} className="review-task-row flex flex-wrap gap-3 items-center justify-between">
         <div className="min-w-0"><p className="text-ui m-0">{item.profile}{item.client ? ` · ${clientLabel[item.client]}` : ''} · {labels[item.status]}</p><p className="hint">{item.createdAt}</p>
           {item.execution ? <p className="hint">Requested {item.execution.model ?? 'profile default'} · effort {item.execution.reasoningEffort ?? 'profile default'}</p> : null}
           {item.observedModel || item.observedEffort ? <p className="hint">Reported {item.observedModel ?? 'unknown model'} · effort {item.observedEffort ?? 'unknown'}</p> : null}

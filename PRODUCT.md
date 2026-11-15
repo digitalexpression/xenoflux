@@ -13,11 +13,17 @@ Xenoflux is a local browser app for working with coding clients on the same Mac.
 The [supported clients and known limits](docs/GUIDE.md#supported-clients-and-known-limits)
 own the current platform and capability boundary.
 
+The redesign should prepare the experience for a future desktop app while retaining
+the supported local browser journey. Desktop packaging is a future delivery goal,
+not a claim of current support.
+
 ## Users
 
-Xenoflux serves people who want to understand and improve the coding-agent harness
-that works for their tasks. A narrower audience segment and an assumed level of
-technical expertise have not been established.
+The redesign serves expert users running controlled comparisons first. They want
+to understand and improve the coding-agent harness that works for their tasks.
+Prioritize efficient inspection, explicit comparison conditions and direct access
+to recorded evidence. Expertise does not remove the need to explain evidence gaps
+or the effects of consequential actions.
 
 ## Product purpose
 
@@ -112,7 +118,6 @@ own verification requirements and exclusions.
 
 ## Open decisions for the redesign
 
-- Which audience and level of expertise should the redesigned UI serve first?
 - Which representative tasks and observable outcomes will establish that the new
   UI helps people make better harness decisions and complete their investigations?
   No quantitative targets or user research findings have been established here.
