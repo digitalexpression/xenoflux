@@ -5,6 +5,10 @@ import { lstat, realpath } from 'node:fs/promises';
 import { resolveHome } from './homes.js';
 import { reconcileInterruptedSignIn } from './home-create.js';
 import { createDesktopRuntime } from './desktop-runtime.js';
+import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
+import { observeCodexDesktopPeer, withProfileOperation } from './desktop-instances.js';
+import { codexResourcePaths, observeCodexCli } from './codex-native-participants.js';
+import { isCodexCliParticipant, profileOwners, releaseProfileParticipant } from './profile-reservations.js';
 import { acquire, exists, globalLock, privateDirectory, readJSON, release } from './metadata.js';
 import { find, strictDescendant } from './profiles.js';
 import { createManagedDesktop } from './managed-desktop.js';
@@ -18,7 +22,7 @@ const alive = pid => {
   catch (error) { return error?.code !== 'ESRCH'; }
 };
 
-async function candidate(store, name, { isAlive, observeProcess }) {
+async function candidate(store, name, { isAlive, observeProcess, instanceRuntime }) {
   const profile = find(await store.read(), name);
   if (!profile.native) throw new Error('Profile has no registered native home');
   const codex = !profile.client || profile.client === 'codex';
@@ -37,10 +41,22 @@ async function candidate(store, name, { isAlive, observeProcess }) {
   const lock = join(native.root, '.run-lock');
   if (!await exists(lock)) throw new Error('No interrupted profile run is locked');
   await privateDirectory(lock);
-  const owner = await readJSON(join(lock, 'owner.json'));
+  const saved = await readJSON(join(lock, 'owner.json'));
+  const owners = codex ? profileOwners(saved) : [saved];
+  const cli = codex && owners.find(isCodexCliParticipant);
+  const owner = cli || saved;
   if (!owner || owner.host !== hostname() || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !uuid.test(owner.runId ?? ''))
     throw new Error('Native run lock owner is invalid or foreign; preserving it');
   if (isAlive(owner.pid)) throw new Error('Native run owner may still be live; preserving its lock');
+
+  if (cli) {
+    const plan = { profileId: profile.id, nativeRoot: native.root, environmentId: environment.id,
+      home: environment.home, desktopData: environment.desktopData };
+    if ((await observeCodexCli(store, plan, cli, instanceRuntime)).status !== 'stopped')
+      throw new Error('Codex CLI may still be live; preserving its reservation');
+    return { profile, native, environment, lock, owner, kind: 'interactive-cli', plan,
+      desktopPeer: owners.find(participant => participant.kind === 'desktop-instance') };
+  }
 
   let kind;
   let signInMarker;
@@ -95,6 +111,7 @@ export async function recoverProfileRun(store, name, {
   isAlive: isAliveProcess = alive,
   observeProcess = observeAuditProcess,
   managedDesktop,
+  instanceRuntime = createDesktopInstanceRuntime(),
 } = {}) {
   if (typeof apply !== 'boolean' || typeof isAliveProcess !== 'function' || typeof observeProcess !== 'function') throw new Error('Invalid profile recovery options');
   const selected = find(await store.read(), name);
@@ -107,7 +124,8 @@ export async function recoverProfileRun(store, name, {
         return (managedDesktop ?? createManagedDesktop(store, { lockOptions: { lockPath } })).recover(name, { apply });
     }
   }
-  const preview = await candidate(store, name, { isAlive: isAliveProcess, observeProcess });
+  const checks = { isAlive: isAliveProcess, observeProcess, instanceRuntime };
+  const preview = await candidate(store, name, checks);
   const result = { status: 'preview', applyChecks: 'pending', profile: { id: preview.profile.id, name: preview.profile.name },
     root: preview.native.root, runId: preview.owner.runId, kind: preview.kind,
     marker: preview.kind === 'native-home-login' && preview.signInMarker.phase === 'login-running'
@@ -117,40 +135,54 @@ export async function recoverProfileRun(store, name, {
     throw new Error('Profile recovery requires external-terminal and writer-quiescence checks');
   await runtime.assertExternal();
 
+  const recover = () => store.withLock(async data => {
+    const current = find(data, preview.profile.id);
+    if (!equal(current.native, preview.profile.native)) throw new Error('Profile native-home binding changed; preserving the run lock');
+    const fresh = await candidate(store, current.id, checks);
+    if (!equal(fresh.owner, preview.owner) || fresh.kind !== preview.kind)
+      throw new Error('Native run lock owner changed; preserving it');
+    if (fresh.plan) {
+      if (!equal(fresh.desktopPeer, preview.desktopPeer)) throw new Error('Desktop peer changed; preserving the CLI reservation');
+      const allowedProcesses = fresh.desktopPeer
+        ? (await observeCodexDesktopPeer(store, fresh.plan, fresh.desktopPeer, instanceRuntime)).processes : [];
+      await instanceRuntime.assertResourcesIdle(codexResourcePaths(fresh.plan), { allowedProcesses, profileHome: fresh.plan.home });
+      const checked = await candidate(store, current.id, checks);
+      if (!equal(checked.owner, fresh.owner) || !equal(checked.desktopPeer, fresh.desktopPeer))
+        throw new Error('Native participants changed; preserving the CLI reservation');
+      await releaseProfileParticipant(fresh.native.root, fresh.owner);
+      return { ...result, status: 'recovered', applyChecks: 'passed' };
+    }
+    const home = fresh.environment.home;
+    await runtime.assertIdle({ cliExecutables: [...new Set([fresh.native.executable, fresh.environment.executable].filter(Boolean))], resourcePaths: [
+      fresh.native.root, home, fresh.environment.cwd, fresh.environment.desktopData,
+      ...(!current.client || current.client === 'codex' ? [join(home, 'config.toml'), join(home, 'auth.json'), join(home, 'state_5.sqlite'),
+        join(home, 'state_5.sqlite-wal'), join(home, 'state_5.sqlite-shm')] : [join(home, 'settings.json')]),
+    ].filter(Boolean) });
+    if (current.client && current.client !== 'codex') {
+      const checked = await candidate(store, current.id, checks);
+      if (!equal(checked.owner, fresh.owner) || !equal(checked.environment, fresh.environment)) throw new Error('Native run changed; preserving its lock');
+    }
+    const ownerBeforeMutation = await readJSON(join(fresh.lock, 'owner.json'));
+    if (!equal(ownerBeforeMutation, fresh.owner) || isAliveProcess(fresh.owner.pid))
+      throw new Error('Native run owner changed or may be live; preserving it');
+    const reconciled = fresh.kind === 'native-home-login'
+      ? await reconcileInterruptedSignIn({ root: fresh.native.root, profileId: current.id, apply: true }) : null;
+    const latestOwner = await readJSON(join(fresh.lock, 'owner.json'));
+    if (!equal(latestOwner, fresh.owner)) throw new Error('Native run lock owner changed; preserving it');
+    if (fresh.kind === 'native-signin' && current.client === 'copilot')
+      await recoverCopilotAccountClaim(fresh.owner.accountClaim, { userHome: fresh.owner.userHome });
+    await release(fresh.lock, fresh.owner);
+    return { ...result, status: 'recovered', applyChecks: 'passed',
+      marker: reconciled?.changed ? 'login-running -> login-cancelled' : 'unchanged',
+      ...(reconciled ? { setupPhase: reconciled.phase } : {}) };
+  });
+  if (preview.plan) {
+    return withProfileOperation(store, preview.profile.id, { lockPath, recovery: true, isAlive: isAliveProcess }, recover);
+  }
   const guardPath = `${lockPath}.operation`;
   const guard = { kind: 'profile-run-recovery', host: hostname(), pid: process.pid,
     runId: randomUUID(), storePath: store.directory };
   await acquire(guardPath, guard, true);
-  try {
-    return await store.withLock(async data => {
-      const current = find(data, preview.profile.id);
-      if (!equal(current.native, preview.profile.native)) throw new Error('Profile native-home binding changed; preserving the run lock');
-      const fresh = await candidate(store, current.id, { isAlive: isAliveProcess, observeProcess });
-      if (!equal(fresh.owner, preview.owner) || fresh.kind !== preview.kind)
-        throw new Error('Native run lock owner changed; preserving it');
-      const home = fresh.environment.home;
-      await runtime.assertIdle({ cliExecutables: [...new Set([fresh.native.executable, fresh.environment.executable].filter(Boolean))], resourcePaths: [
-        fresh.native.root, home, fresh.environment.cwd, fresh.environment.desktopData,
-        ...(!current.client || current.client === 'codex' ? [join(home, 'config.toml'), join(home, 'auth.json'), join(home, 'state_5.sqlite'),
-          join(home, 'state_5.sqlite-wal'), join(home, 'state_5.sqlite-shm')] : [join(home, 'settings.json')]),
-      ].filter(Boolean) });
-      if (current.client && current.client !== 'codex') {
-        const checked = await candidate(store, current.id, { isAlive: isAliveProcess, observeProcess });
-        if (!equal(checked.owner, fresh.owner) || !equal(checked.environment, fresh.environment)) throw new Error('Native run changed; preserving its lock');
-      }
-      const ownerBeforeMutation = await readJSON(join(fresh.lock, 'owner.json'));
-      if (!equal(ownerBeforeMutation, fresh.owner) || isAliveProcess(fresh.owner.pid))
-        throw new Error('Native run owner changed or may be live; preserving it');
-      const reconciled = fresh.kind === 'native-home-login'
-        ? await reconcileInterruptedSignIn({ root: fresh.native.root, profileId: current.id, apply: true }) : null;
-      const latestOwner = await readJSON(join(fresh.lock, 'owner.json'));
-      if (!equal(latestOwner, fresh.owner)) throw new Error('Native run lock owner changed; preserving it');
-      if (fresh.kind === 'native-signin' && current.client === 'copilot')
-        await recoverCopilotAccountClaim(fresh.owner.accountClaim, { userHome: fresh.owner.userHome });
-      await release(fresh.lock, fresh.owner);
-      return { ...result, status: 'recovered', applyChecks: 'passed',
-        marker: reconciled?.changed ? 'login-running -> login-cancelled' : 'unchanged',
-        ...(reconciled ? { setupPhase: reconciled.phase } : {}) };
-    });
-  } finally { await release(guardPath, guard); }
+  try { return await recover(); }
+  finally { await release(guardPath, guard); }
 }

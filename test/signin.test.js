@@ -163,6 +163,18 @@ test('Claude keeps its last checked sign-in after Copilot invalidation and fresh
   assert.equal(await native.observed(profile, { forDisplay: true }), null);
 });
 
+test('a profile reservation that prevents a check leaves the last verified sign-in visible', async t => {
+  const { native, selected, log, marker } = await claudeFixture(t);
+  await writeFile(marker, '');
+  assert.equal((await native.check(selected.name, selected.client)).state, 'signed-in');
+  const profile = await native.resolveProfile(selected.client, selected);
+  await mkdir(join(selected.native.root, '.run-lock'), { mode: 0o700 });
+
+  await assert.rejects(native.check(selected.name, selected.client), /Desktop or CLI run is locked/);
+  assert.equal(await readFile(log, 'utf8'), '--version\nauth status\n');
+  assert.equal((await native.observed(profile, { forDisplay: true }))?.state, 'signed-in');
+});
+
 test('native sign-in exit zero is insufficient and cancellation releases the profile', async t => {
   const failed = await claudeFixture(t, 'signed-out');
   const attempt = await failed.manager.start({ name: failed.selected.name });
@@ -192,6 +204,17 @@ test('the authenticated UI starts browser sign-in and publishes only automatical
   const post = (path, body = {}) => fetch(server.origin + path, { method: 'POST', headers, body: JSON.stringify(body) });
   const login = await post('/api/session', { token: 'signin-fixture' });
   headers.cookie = login.headers.get('set-cookie').split(';')[0];
+  const assertAccountCard = async (signIn, actions) => {
+    const cards = await (await fetch(server.origin + '/api/profiles', { headers })).json();
+    const card = cards.profiles.find(row => row.name === 'Claude fixture');
+    assert.equal(card.signIn, signIn);
+    assert.deepEqual(card.clientActions.filter(action => ['check', 'signin'].includes(action.id)), actions);
+  };
+  const checkAction = { id: 'check', label: 'Check sign-in' };
+  await assertAccountCard('Sign-in not checked', [checkAction]);
+  const checked = await post('/api/profiles/Claude%20fixture/clients', { action: 'check' });
+  assert.equal(checked.status, 200);
+  await assertAccountCard('Signed out', [{ id: 'signin', label: 'Sign in' }]);
   const response = await post('/api/profiles/Claude%20fixture/sign-in', { executable: '/bin/false', command: 'ignored' });
   assert.equal(response.status, 200);
   const attempt = await response.json();
@@ -202,14 +225,10 @@ test('the authenticated UI starts browser sign-in and publishes only automatical
     await delay(20);
   }
   assert.equal(result.state, 'completed', JSON.stringify(result));
-  const cards = await (await fetch(server.origin + '/api/profiles', { headers })).json();
-  const card = cards.profiles.find(row => row.name === 'Claude fixture');
-  assert.equal(card.signIn, 'Signed in');
+  await assertAccountCard('Signed in', []);
   const checkedAt = Date.now();
   t.mock.method(Date, 'now', () => checkedAt + 6 * 60 * 1000);
-  const later = await (await fetch(server.origin + '/api/profiles', { headers })).json();
-  assert.equal(later.profiles.find(row => row.name === 'Claude fixture').signIn, 'Signed in (last checked)');
-  assert.ok(card.clientActions.some(action => action.id === 'signin'));
+  await assertAccountCard('Signed in (last checked)', [checkAction]);
   assert.equal(JSON.stringify(result).includes('oauth'), false);
 });
 

@@ -311,19 +311,25 @@ test('source changes during preparation leave a clear partial creation without c
   await assert.rejects(text(join(profile.native.root, 'codex-home', 'AGENTS.md')), { code: 'ENOENT' });
 });
 
-test('client controls run only on request and refuse a CLI/Desktop conflict', async t => {
+test('Codex client controls open either second surface after the profile saves sign-in', async t => {
   const running = async home => home.includes('native-a')
-    ? { cli: { state: 'running', text: 'running (PID 1)' }, desktop: { state: 'not-running', text: 'not running' } } : idle();
+    ? { cli: { state: 'running', text: 'running (PID 1)' }, desktop: { state: 'not-running', text: 'not running' } }
+    : home.includes('native-b') ? { cli: { state: 'not-running', text: 'not running' }, desktop: { state: 'running', text: 'open' } } : idle();
   const f = await fixture(t, { observeClients: running });
   const cards = (await f.provider.profiles()).profiles;
   assert.equal(f.calls.length, 0, 'listing profiles operates no client');
   const baseline = cards.find(card => card.name === 'baseline');
-  assert.deepEqual(baseline.clientActions.map(action => action.id), ['show-terminal', 'open-desktop']);
-  assert.ok(baseline.clientActions[1].conflict);
+  assert.deepEqual(baseline.clientActions.map(action => action.id), ['show-terminal']);
   await assert.rejects(f.provider.clientAction({ name: 'baseline', action: 'open-desktop' }), error => error.code === 'client-conflict');
   assert.equal(f.calls.length, 0);
+  await put(f.a.home, 'auth.json', 'credential sentinel');
+  const signedIn = (await f.provider.profiles()).profiles;
+  assert.deepEqual(signedIn.find(card => card.name === 'baseline').clientActions.map(action => action.id), ['show-terminal', 'open-desktop']);
+  assert.deepEqual(signedIn.find(card => card.name === 'strict-review').clientActions.map(action => action.id), ['open-terminal', 'focus-desktop']);
+  await f.provider.clientAction({ name: 'baseline', action: 'open-desktop' });
   await f.provider.clientAction({ name: 'strict-review', action: 'open-terminal' });
-  assert.deepEqual(f.calls, [['openTerminal', ['launch', 'strict-review']]]);
+  assert.deepEqual(f.calls, [['openDesktop', 'baseline'], ['openTerminal', ['launch', 'strict-review']]]);
+  await assert.rejects(f.provider.clientAction({ name: 'strict-review', action: 'signin' }), error => error.code === 'client-conflict');
   await f.provider.clientAction({ name: 'baseline', action: 'show-terminal' });
   assert.equal(f.calls.at(-1)[0], 'showTerminal');
   await assert.rejects(f.provider.clientAction({ name: 'baseline', action: 'format-disk' }), error => error.code === 'invalid-action');

@@ -12,6 +12,47 @@ async function createDialog(page, name) {
   await page.getByRole('textbox', { name: 'Name' }).fill(name);
 }
 
+test('visiting Profiles checks each available CLI account once and refreshes current results on revisit', async ({ page }) => {
+  const checks = [];
+  const profiles = [
+    { name: 'claude-work', client: 'claude-code', signIn: 'Sign-in not checked' },
+    { name: 'copilot-work', client: 'copilot', signIn: 'Signed in' },
+    { name: 'desktop-in-use', client: 'claude-code', signIn: 'Sign-in not checked' },
+  ];
+  let result = 'Signed in';
+  await page.route('**/api/profiles', route => route.fulfill({ json: {
+    profiles: profiles.map(profile => ({
+      ...profile, state: 'ready', binding: 'no project', summary: 'Managed profile', moreMenu: null,
+      cli: { state: 'unknown', text: 'CLI' }, desktop: { state: 'unknown', text: 'Desktop' },
+      clientActions: profile.name === 'desktop-in-use' ? [] : [{ id: 'open-terminal', label: 'Open in Terminal' }],
+    })), notes: [], simulated: false,
+  } }));
+  await page.route('**/api/profiles/*/account', route => {
+    const name = new URL(route.request().url()).pathname.split('/')[3];
+    const { client } = route.request().postDataJSON();
+    checks.push([name, client]);
+    profiles.find(profile => profile.name === name).signIn = result;
+    return route.fulfill({ json: {} });
+  });
+
+  const claude = page.getByRole('article', { name: 'claude-work' });
+  const copilot = page.getByRole('article', { name: 'copilot-work' });
+  const available = [['claude-work', 'claude-code'], ['copilot-work', 'copilot']];
+  await openProfiles(page);
+  await expect(claude.getByText(/CLI: Signed in/)).toBeVisible();
+  await expect.poll(() => checks).toEqual(available);
+  const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/profiles');
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await refreshed;
+  expect(checks).toEqual(available);
+
+  result = 'Signed out';
+  await page.reload();
+  await expect(claude.getByText(/CLI: Signed out/)).toBeVisible();
+  await expect(copilot.getByText(/CLI: Signed out/)).toBeVisible();
+  expect(checks).toEqual([...available, ...available]);
+});
+
 async function chooseSourceAndPreview(page, name, source = 'baseline') {
   await createDialog(page, name);
   await page.getByRole('radio', { name: /Selected parts of another profile/ }).check();
@@ -83,9 +124,16 @@ test('create an empty profile and verify its isolated native home on disk', asyn
 
   const profile = (await app.store.read()).profiles.find(item => item.name === 'browser-empty');
   expect(profile?.native?.root).toBeTruthy();
-  const config = await readFile(join(profile.native.root, 'codex-home', 'config.toml'), 'utf8');
+  const home = join(profile.native.root, 'codex-home');
+  const config = await readFile(join(home, 'config.toml'), 'utf8');
   expect(config).toContain('cli_auth_credentials_store = "file"');
-  await expect(page.getByRole('heading', { name: 'browser-empty', exact: true })).toBeVisible();
+  const card = page.getByRole('article', { name: 'browser-empty', exact: true });
+  await expect(card.getByRole('button', { name: 'Sign in via Terminal for browser-empty' })).toBeVisible();
+  await expect(card.getByRole('button', { name: /Check sign-in/ })).toHaveCount(0);
+  await writeFile(join(home, 'auth.json'), '{}');
+  await page.reload();
+  await expect(card.getByText(/Sign-in saved/)).toBeVisible();
+  await expect(card.getByRole('button', { name: /Sign in via Terminal|Check sign-in/ })).toHaveCount(0);
 });
 
 test('create from selected instructions only and verify files and credentials boundary', async ({ app, page }) => {
@@ -293,10 +341,11 @@ test('Claude creation previews and cancels without launching; selected copy and 
   const card = page.getByRole('article', { name: 'claude-parts' });
   await expect(card.getByText('Account independence: not verified.')).toBeVisible();
   await expect(card.getByRole('button', { name: 'Open Claude Desktop for claude-parts', exact: true })).toHaveCount(0);
-  await expect(card.getByRole('button', { name: 'Sign in for claude-parts', exact: true })).toBeVisible();
-  await expect(card.getByText(/Continue in your browser/)).toBeVisible();
-  await card.getByRole('button', { name: 'Check sign-in for claude-parts' }).click();
+  const signIn = card.getByRole('button', { name: 'Sign in for claude-parts', exact: true });
+  const check = card.getByRole('button', { name: 'Check sign-in for claude-parts', exact: true });
   await expect(card.getByText(/Claude Code · CLI: Signed out/)).toBeVisible();
+  await expect(signIn).toBeVisible();
+  await expect(check).toHaveCount(0);
   expect(await readFile(app.nativeProfileLog, 'utf8')).toBe('--version\nauth status\n');
   const opens = [];
   await page.route('**/api/profiles/claude-parts/clients', async route => {

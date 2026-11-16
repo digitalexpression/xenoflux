@@ -302,7 +302,7 @@ export function createDemoProvider({ version = 'demo' } = {}) {
   const saved = [
     { id: 'saved-csv', title: 'Add CSV export to the report', savedAt: 'saved 21 Oct', folder: '[REPORTS FOLDER]/Add CSV export to the report — 21 Oct/' },
   ];
-  const clientState = { [A]: { cli: 'running', desktop: 'not-running' }, [B]: { cli: 'unavailable', desktop: 'running' }, 'docs-only': { cli: 'not-running', desktop: 'not-running' }, Default: { cli: 'not-running', desktop: 'not-running' } };
+  const clientState = { [A]: { cli: 'running', desktop: 'not-running' }, [B]: { cli: 'not-running', desktop: 'running' }, 'docs-only': { cli: 'not-running', desktop: 'not-running' }, Default: { cli: 'not-running', desktop: 'not-running' } };
   const reportFor = ref => {
     if (inspectedPairs.has(ref)) {
       const pair = inspectedPairs.get(ref);
@@ -322,14 +322,15 @@ export function createDemoProvider({ version = 'demo' } = {}) {
 
   function profileCard(name) {
     const state = clientState[name];
-    const clientText = (client, value) => value === 'running' ? (client === 'cli' ? 'running in Terminal' : 'open')
-      : value === 'unavailable' ? 'not available while its Desktop is open' : 'not running';
+    const clientText = (client, value) => value === 'running' ? (client === 'cli' ? 'running in Terminal' : 'open') : 'not running';
     const actions = [];
-    const conflict = { title: `${name} is open in Codex CLI`, body: `A profile can't run in Codex CLI and Codex Desktop at the same time. Finish and close ${name}'s Terminal session, then try again. Other profiles aren't affected.` };
     if (name === 'docs-only') actions.push({ id: 'open-terminal', label: 'Open in Terminal to sign in…' });
-    else if (state.cli === 'running') actions.push({ id: 'show-terminal', label: 'Show Terminal' }, { id: 'open-desktop', label: 'Open Codex Desktop…', conflict });
-    else if (state.desktop === 'running') actions.push({ id: 'focus-desktop', label: 'Show Codex Desktop' });
-    else actions.push({ id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' }, { id: 'open-desktop', label: 'Open Codex Desktop' });
+    else {
+      actions.push(state.cli === 'running' ? { id: 'show-terminal', label: 'Show Terminal' }
+        : { id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' });
+      actions.push(state.desktop === 'running' ? { id: 'focus-desktop', label: 'Show Codex Desktop' }
+        : { id: 'open-desktop', label: 'Open Codex Desktop' });
+    }
     const desktopOpen = state.desktop === 'running';
     const meta = {
       Default: ['Signed in', 'no project', 'Your normal Codex setup · medium reasoning · 7 skills found. Other profiles can copy from it; nothing is copied into it.'],
@@ -339,7 +340,7 @@ export function createDemoProvider({ version = 'demo' } = {}) {
     }[name];
     return {
       name, isDefault: name === 'Default', state: 'ready', reason: null, signIn: meta[0], binding: meta[1], summary: meta[2],
-      cli: { state: state.cli === 'unavailable' ? 'unavailable' : state.cli, text: clientText('cli', state.cli) },
+      cli: { state: state.cli, text: clientText('cli', state.cli) },
       desktop: { state: state.desktop, text: clientText('desktop', state.desktop) },
       clientActions: actions,
       moreMenu: name === 'Default' ? null : [
@@ -381,14 +382,13 @@ export function createDemoProvider({ version = 'demo' } = {}) {
         ] };
     },
     async profiles() {
-      return { profiles: PROFILE_NAMES.map(profileCard), notes: ['Looking at a profile never changes it or opens Codex. Different profiles can be open at the same time.'], simulated: true };
+      return { profiles: PROFILE_NAMES.map(profileCard), notes: ['Named Codex profiles share one sign-in between CLI and Desktop. Sign in from either client, then open the other.'], simulated: true };
     },
     async clientAction({ name, action }) {
       if (!clientState[name]) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
       const state = clientState[name];
       if (action === 'check') return { status: 'neutral', message: `Checked ${name} again (simulated).`, profile: profileCard(name) };
-      if (action === 'open-desktop' && state.cli === 'running') throw new UiError(409, `${name} is open in Codex CLI. Close its Terminal session first.`, 'client-conflict');
-      if (action === 'open-desktop') { state.desktop = 'running'; state.cli = 'unavailable'; }
+      if (action === 'open-desktop') state.desktop = 'running';
       if (action === 'open-terminal') state.cli = 'running';
       return { status: 'success', message: `Simulated: ${action.replace('-', ' ')} for ${name}. Nothing was opened.`, profile: profileCard(name) };
     },

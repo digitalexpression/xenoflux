@@ -585,12 +585,27 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     return { status: 'applied', title: `Added ${name.trim()}`, changes: [], note: 'Xenoflux registered the folder as a profile. Its files weren’t moved or changed.', undo: null };
   }
 
-  function clientActionsFor(name, clients, signIn) {
-    const conflict = { title: `${name} is open in Codex CLI`, body: `A profile can’t run in Codex CLI and Codex Desktop at the same time. Finish and close ${name}’s Terminal session, then try again. Other profiles aren’t affected.` };
+  function clientActionsFor(name, clients, signIn, named) {
+    const terminal = { id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' };
+    const desktop = { id: 'open-desktop', label: 'Open Codex Desktop' };
+    const signin = { id: 'signin', label: 'Sign in via Terminal…' };
+    if (named) {
+      const cliOpen = clients.cli.state === 'running';
+      const desktopOpen = clients.desktop.state === 'running';
+      const signedIn = signIn === 'Sign-in saved';
+      const actions = [];
+      if (cliOpen) actions.push({ id: 'show-terminal', label: 'Show Terminal' });
+      else if (!desktopOpen || signedIn) actions.push(terminal);
+      if (!cliOpen && !desktopOpen && signIn === 'No sign-in saved') actions.push(signin);
+      if (desktopOpen) actions.push({ id: 'focus-desktop', label: 'Show Codex Desktop' });
+      else if (!cliOpen || signedIn) actions.push(desktop);
+      return actions;
+    }
+    const conflict = { title: `${name} is open in Codex CLI`, body: `Close ${name}’s Terminal session before opening its Desktop.` };
     if (clients.cli.state === 'running') return [{ id: 'show-terminal', label: 'Show Terminal' }, { id: 'open-desktop', label: 'Open Codex Desktop…', conflict }];
     if (clients.desktop.state === 'running') return [{ id: 'focus-desktop', label: 'Show Codex Desktop' }];
-    if (signIn === 'No sign-in saved') return [{ id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' }, { id: 'signin', label: 'Sign in via Terminal…' }, { id: 'open-desktop', label: 'Open Codex Desktop' }];
-    return [{ id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' }, { id: 'open-desktop', label: 'Open Codex Desktop' }];
+    if (signIn === 'No sign-in saved') return [terminal, signin, desktop];
+    return [terminal, desktop];
   }
 
   async function titleFor(ref, selection, saved) {
@@ -724,8 +739,9 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       try { instances = (await desktopSurface.list({ ...lockOptions, observe: false })).instances; } catch { /* reported as unknown below */ }
       const byId = new Map(data.profiles.map(profile => [profile.id, profile]));
       const card = async ({ name, isDefault, home, root, state, reason, profile }) => {
+        const named = Boolean(profile?.native);
         const instance = instances.find(item => item.profileId === profile?.id);
-        const clients = state === 'ready' && home ? await observeClients(home, { desktopRunning: instance?.observed?.status === 'running' ? true
+        const clients = state === 'ready' && home ? await observeClients(home, { sharedCodexHome: named, desktopRunning: instance?.observed?.status === 'running' ? true
             : instance?.observed?.status === 'stopped' ? false : null })
           : { cli: { state: 'unknown', text: 'unknown' }, desktop: { state: 'unknown', text: 'unknown' } };
         if (instance && !instance.observed && clients.desktop.state !== 'running')
@@ -737,7 +753,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         return { name, client: 'codex', isDefault, state, reason, signIn,
           binding: isDefault ? 'your standard Codex setup' : repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
           summary: isDefault ? 'Your normal Codex setup. Other profiles can copy from it; nothing is copied into it.' : profile?.description || `Codex folder ${tilde(root ?? home ?? '')}`,
-          cli: clients.cli, desktop: clients.desktop, clientActions: state === 'ready' ? clientActionsFor(name, clients, signIn) : [],
+          cli: clients.cli, desktop: clients.desktop, clientActions: state === 'ready' ? clientActionsFor(name, clients, signIn, named) : [],
           moreMenu: isDefault ? null : [
             { id: 'copy', label: 'Copy settings from another profile…', detail: `Choose items, see exactly what changes in ${name}, undo later` },
             { id: 'binding', label: 'Change project binding…' },
@@ -774,6 +790,12 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         const accountScope = client === 'claude-code' ? 'per-root' : observation?.qualification ? 'shared' : 'unverified';
         const accountState = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state];
         const signIn = accountState ? accountState + (observation.stale ? ' (last checked)' : '') : 'Sign-in not checked';
+        const cliActions = [];
+        if (ready && !desktopClaimed) {
+          cliActions.push({ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` });
+          if (!observation || observation.stale) cliActions.push({ id: 'check', label: 'Check sign-in' });
+          else if (observation.state !== 'signed-in') cliActions.push({ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' });
+        }
         const repositories = selected.repositories;
         cards.push({ name: selected.name, client, isDefault: false, state: ready || desktopReady ? 'ready' : 'unavailable',
           reason: ready || desktopReady ? null : 'The native root or executable no longer matches this binding.',
@@ -782,7 +804,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           summary: selected.description || `${PROFILE_CLIENT_NAMES[client]} folder ${tilde(selected.native?.configRoot ?? '')}`,
           cli: { state: ready ? 'unknown' : 'unavailable', text: ready ? 'Open in Terminal with this profile. Process state not checked.' : 'CLI or profile root unavailable' },
           desktop,
-          clientActions: [...(ready && !desktopClaimed ? [{ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` }, { id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' }, { id: 'check', label: 'Check sign-in' }] : []), ...desktopActions],
+          clientActions: [...cliActions, ...desktopActions],
           moreMenu: [
             ...(ready ? [{ id: 'copy', label: 'Copy settings from another profile…' }] : []),
             { id: 'binding', label: 'Change project binding…' },
@@ -796,7 +818,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           && (client === 'codex' || card.setup)).map(card => card.name),
       ]])));
       return { profiles: cards, copySources, simulated: false,
-        notes: ['Viewing profiles does not open a client. Checking sign-in asks the selected CLI for account status without starting a task.'] };
+        notes: ['Named Codex profiles share one sign-in between CLI and Desktop. Sign in from either client, then open the other.'] };
     },
 
     async sessions({ query, profile, client }) {
@@ -1117,7 +1139,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       }
       return { status: 'applied', title: `${name} created`, changes, guidance, undo,
         note: selectedClient === 'codex' ? 'It has its own settings and no sign-in yet. Open Terminal or Codex Desktop from its Profiles card to sign in.'
-          : 'Choose Sign in on its Profiles card and complete authorization in your browser. Xenoflux verifies CLI sign-in automatically. Desktop sign-in remains separate.' };
+          : 'Open Profiles to check CLI sign-in. Desktop sign-in remains separate.' };
     },
 
     async profileAccount({ name, client }) {
@@ -1186,10 +1208,17 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       if (!card) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
       const isDefault = name === 'Default';
       if (action === 'check') return { status: 'neutral', message: `Checked ${name} again.`, profile: card };
-      if (['open-desktop', 'focus-desktop'].includes(action) && card.cli.state === 'running')
-        throw new UiError(409, `${name} is open in Codex CLI. A profile can’t run in Codex CLI and Codex Desktop at the same time. Finish and close its Terminal session, then try again.`, 'client-conflict');
-      if (['open-terminal', 'resume', 'signin'].includes(action) && card.desktop.state === 'running')
-        throw new UiError(409, `${name} is open in Codex Desktop. Close it there first, or use Show Codex Desktop.`, 'client-conflict');
+      const named = Boolean(selected?.native);
+      const sharedSignIn = named && card.signIn === 'Sign-in saved';
+      const cliOpen = card.cli.state === 'running', desktopOpen = card.desktop.state === 'running';
+      if (cliOpen && !sharedSignIn && (action === 'open-desktop' || !named && action === 'focus-desktop'))
+        throw new UiError(409, named ? `Complete ${name}’s sign-in in Codex CLI before opening Desktop.`
+          : `Close ${name}’s Terminal session before opening Codex Desktop.`, 'client-conflict');
+      if (desktopOpen && !sharedSignIn && ['open-terminal', 'resume'].includes(action))
+        throw new UiError(409, named ? `Complete ${name}’s sign-in in Codex Desktop before opening Terminal.`
+          : `Close ${name}’s Codex Desktop before opening Terminal.`, 'client-conflict');
+      if (action === 'signin' && (cliOpen || desktopOpen))
+        throw new UiError(409, `Use the open Codex client to sign in to ${name}.`, 'client-conflict');
       try {
         if (action === 'open-terminal') await clientOps.openTerminal(['launch', name]);
         else if (action === 'signin') await clientOps.openTerminal(['profile', 'signin', name, '--apply']);

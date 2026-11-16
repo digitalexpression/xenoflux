@@ -33,8 +33,9 @@ xfx pick
 ```
 
 `Default` is the normal native setup and a copy source only. Named profiles use
-separate roots under `~/.xfx/profiles`. Standalone launch/resume needs exclusive
-profile use; app comparisons/reviews use shared execution participants.
+separate roots under `~/.xfx/profiles`. A signed-in named Codex profile can run
+one CLI and one Desktop together. Either can start first. See the [Profiles
+guide](GUIDE.md#create-and-compare-profiles) for supported launch conditions.
 `desktop open` focuses an existing instance; `focus`, `close` and `recover` target
 only the verified profile. Desktop `prepare`/`refresh` is explicit maintenance of
 stopped launcher caches, not a prerequisite to every open.

@@ -53,6 +53,9 @@ installation and roots, then verify through the existing native account check
 before reporting success. Preserve reservations when process shutdown is uncertain.
 Shared GitHub CLI sign-in excludes concurrent Xenoflux Copilot account use across controllers
 and invalidates observations for the shared account scope.
+On a Profiles visit, background CLI account checks use the existing native
+verification and ownership guards. A check refused before it obtains the profile
+reservation preserves the previous account observation.
 Profile cards may retain an expired account observation as **last checked** while
 its executable and roots still match. Displaying that observation never renews
 account qualification or permits task admission.
@@ -105,8 +108,14 @@ protocol/account/event interpretation. Reuse capture, report projection, atomic 
 metadata and `.run-lock` memberships across controllers. Independent jobs have separate
 sessions, requests, workspaces and cancellation; canonical writable review workspaces
 cannot overlap active/unresolved claims. Capacity defaults to eight per controller.
-Profile mutations and new Desktop startup remain exclusive. Verified managed Codex Desktop
-can participate in comparison/review execution without losing its own reservation.
+Profile mutations and Xenoflux sign-in remain exclusive. A named Codex profile
+uses one native file credential store for CLI and Desktop within its own home.
+After sign-in, an interactive CLI and managed Desktop can hold separate claims on
+that home in either launch order. Admit the second client only with a verified
+peer and identifiable file holders. The CLI runs without a shared daemon for
+this pair. Keep sign-in and log storage preparation out of the join path. Closing
+or recovering one client releases only its own claim. Verified managed Codex
+Desktop can also participate in comparison or review under the task admission rules.
 
 Ordinary review uses the selected profile's normal cwd, sign-in, settings, instructions,
 integrations and permissions, with explicit process-local model/effort overrides only.

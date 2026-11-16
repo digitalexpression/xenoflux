@@ -164,10 +164,10 @@ test('the xfx SIGHUP coordinator cancels the owned fake CLI group, removes its l
   if (!existsSync('/usr/bin/expect')) return t.skip('expect is unavailable');
   const f = await fixture(t, '');
   const descendantMarker = join(f.root, 'owned-descendant.pid');
-  // This is a synthetic executable only: it recognizes the bounded version
-  // preflight, then remains interactive and starts one owned descendant.
+  // The fixture models a CLI that lacks the embedded-runtime option.
   await writeFile(f.path, `#!/bin/sh
 if [ "$1" = "--version" ]; then printf 'codex-cli 0.153.4\\n'; exit 0; fi
+if [ "$1" = "--help" ]; then printf 'Usage: codex [PROMPT]\\n'; exit 0; fi
 ( trap '' TERM; while :; do sleep 1; done ) &
 echo $! > ${JSON.stringify(descendantMarker)}
 trap '' TERM

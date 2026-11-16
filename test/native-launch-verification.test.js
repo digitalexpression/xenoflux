@@ -22,6 +22,7 @@ test('launch verification retries stale callback state and still rejects unverif
 import Darwin
 let scenario = CommandLine.arguments[1]
 var registrationReady = false
+var registrationDropped = false
 ${identity}
 func safeAbsolutePath(_ value: String) -> Bool { value.hasPrefix("/") }
 func resolvedPath(_ url: URL) -> String { url.path }
@@ -36,10 +37,17 @@ func processStartSeconds(_ pid: pid_t) -> Int? {
 class NSRunningApplication {
     let processIdentifier: pid_t = 999999
     let isTerminated: Bool
-    init(callback: Bool) { isTerminated = callback || scenario == "terminated" }
+    init(callback: Bool) {
+        isTerminated = (callback && scenario != "fluctuating-registration") || scenario == "terminated"
+    }
     init?(processIdentifier: pid_t) {
         guard registrationReady && scenario != "unregistered" else { return nil }
         isTerminated = scenario == "terminated"
+        if scenario == "fluctuating-registration" && !registrationDropped {
+            registrationDropped = true
+            registrationReady = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { registrationReady = true }
+        }
     }
 }
 class NSWorkspace {
@@ -63,10 +71,12 @@ openApplicationOneShot(["--open-signed-app", "/fixture/app", "--home", "/fixture
 `;
   const swift = join(root, 'main.swift'), executable = join(root, 'verify');
   await writeFile(swift, harness);
-  execFileSync('/usr/bin/xcrun', ['swiftc', '-module-cache-path', join(root, 'modules'), swift, '-o', executable], { timeout: 45000 });
-  const success = spawnSync(executable, ['delayed-registration'], { encoding: 'utf8', timeout: 5000 });
-  assert.equal(success.status, 0, success.stderr);
-  assert.deepEqual(JSON.parse(success.stdout), { pid: 999999, executable: '/fixture/app/Contents/MacOS/Codex', startSeconds: 100 });
+  execFileSync('/usr/bin/xcrun', ['swiftc', '-O', '-module-cache-path', join(root, 'modules'), swift, '-o', executable], { timeout: 45000 });
+  for (const scenario of ['delayed-registration', 'fluctuating-registration']) {
+    const success = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(success.status, 0, `${scenario}: ${success.stderr}`);
+    assert.deepEqual(JSON.parse(success.stdout), { pid: 999999, executable: '/fixture/app/Contents/MacOS/Codex', startSeconds: 100 });
+  }
   for (const scenario of ['wrong-executable', 'reused-pid', 'unavailable', 'unregistered', 'terminated']) {
     const failure = spawnSync(executable, [scenario], { encoding: 'utf8', timeout: 5000 });
     assert.equal(failure.status, 1, scenario);

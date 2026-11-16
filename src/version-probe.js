@@ -25,7 +25,7 @@ function validOptions({ executable, cwd, env, timeoutMs, maxBytes, signal, args 
       (signal !== undefined && (!signal || typeof signal.addEventListener !== 'function'))) throw probeError('INVALID_OPTIONS');
 }
 
-/** Run only a bounded native `--version` preflight in its own process group. */
+/** Run a bounded native metadata preflight in its own process group. */
 async function probeMetadata({ executable, cwd, env, signal, timeoutMs = 2000, maxBytes = 65536, args, allowedExits = [0] }) {
   validOptions({ executable, cwd, env, timeoutMs, maxBytes, signal, args });
   if (!['darwin', 'linux'].includes(process.platform)) throw probeError('UNSUPPORTED_PLATFORM');
@@ -122,6 +122,11 @@ export async function probeVersion({ args = ['--version'], ...options } = {}) {
   const match = /^\s*codex(?:-cli)?\s+v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s*$/i.exec(text);
   if (!match) throw probeError('VERSION_MISMATCH');
   return match[1];
+}
+
+export async function probeCodexEmbeddedCli({ resume, ...options } = {}) {
+  const { text } = await probeMetadata({ ...options, args: resume ? ['resume', '--help'] : ['--help'] });
+  return /^[ \t]+--no-daemon(?:[ \t]|$)/m.test(text);
 }
 
 export async function probeNativeProfileVersion(client, options) {

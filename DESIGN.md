@@ -278,11 +278,12 @@ counts. Align each profile's identity, observed sign-in and project binding with
 its CLI/Desktop state. Keep account scope visible, especially Copilot's shared
 GitHub CLI account and unverified Desktop account independence.
 
-Separate inspection links from explicit sign-in/open/check actions. Keep registry
-edits and selected copying in the named More menu. Creation is the page's primary
-action; reading a row never launches or changes a client. Preserve row identity,
-open dialogs and focus across automatic checks. Closing an edit dialog opened
-from More returns focus to that profile's More button while it remains present.
+Separate inspection links from client actions. When Profiles opens, check
+available CLI accounts in the background. Sign-in and client opening require
+explicit actions. Keep registry edits and selected copying in the named More
+menu. Creation is the page's primary action. Preserve row identity, open dialogs
+and focus across automatic checks. Closing an edit dialog opened from More
+returns focus to that profile's More button while it remains present.
 
 Clients on this Mac keeps installation observations and existing setup findings
 in flat aligned rows. Group check scope, freshness and automatic-check timing

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { probeNativeProfileVersion, probeVersion } from '../src/version-probe.js';
+import { probeCodexEmbeddedCli, probeNativeProfileVersion, probeVersion } from '../src/version-probe.js';
 
 async function executable(t, body) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-version-probe-')));
@@ -13,6 +13,17 @@ async function executable(t, body) {
   return { root, path };
 }
 const options = (entry, extra = {}) => ({ executable: entry.path, cwd: entry.root, env: { PATH: '/usr/bin:/bin' }, timeoutMs: 5000, ...extra });
+
+test('Codex embedded runtime support must be advertised by the selected command', async t => {
+  const fake = await executable(t, `
+    const args = process.argv.slice(2).join(' ');
+    if (args === '--help') console.log('      --no-daemon  Run without the background server');
+    else if (args === 'resume --help') console.log('      --no-daemon-extra  An unrelated option');
+    else process.exitCode = 2;
+  `);
+  assert.equal(await probeCodexEmbeddedCli(options(fake)), true);
+  assert.equal(await probeCodexEmbeddedCli(options(fake, { resume: true })), false);
+});
 
 test('accepts only bounded recognizable version output', async t => {
   const valid = await executable(t, "console.log('codex-cli 0.153.4');");

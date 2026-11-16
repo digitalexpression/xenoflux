@@ -7,11 +7,36 @@ function nativeProfile(client) {
   return { name: client === 'copilot' ? 'copilot-work' : 'claude-work', client,
     accountScope: client === 'copilot' ? 'shared' : 'per-root', accountIndependence: 'not verified',
     isDefault: false, state: 'ready', reason: null,
-    signIn: client === 'copilot' ? 'Not signed in' : 'Signed in (last checked)', binding: 'bound to date-utils',
+    signIn: client === 'copilot' ? 'Signed out' : 'Signed in (last checked)', binding: 'bound to date-utils',
     summary: 'Separate settings and retained local history.',
     cli: { state: 'not-running', text: 'Not running' }, desktop: { state: 'unavailable', text: 'Desktop sign-in is unverified' },
-    clientActions: [{ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' }], moreMenu: null };
+    clientActions: [{ id: 'open-terminal', label: 'Open in Terminal' },
+      client === 'copilot' ? { id: 'signin', label: 'Sign in with GitHub' } : { id: 'check', label: 'Check sign-in' }], moreMenu: null };
 }
+
+test('Codex profiles retain the open client control when the other surface starts', async ({ browser }) => {
+  const server = await startUiServer({ provider: createDemoProvider(), staticRoot: resolve('dist/ui') });
+  const page = await browser.newPage();
+  try {
+    await page.goto(server.launchUrl);
+    await page.goto(`${server.origin}/profiles`);
+    const cliFirst = page.getByRole('article', { name: 'baseline', exact: true });
+    const desktopFirst = page.getByRole('article', { name: 'strict-review', exact: true });
+
+    await expect(cliFirst.getByRole('button', { name: 'Show Terminal for baseline' })).toBeVisible();
+    await cliFirst.getByRole('button', { name: 'Open Codex Desktop for baseline' }).click();
+    await expect(cliFirst.getByRole('button', { name: 'Show Codex Desktop for baseline' })).toBeVisible();
+    await expect(cliFirst.getByRole('button', { name: 'Show Terminal for baseline' })).toBeVisible();
+
+    await expect(desktopFirst.getByRole('button', { name: 'Show Codex Desktop for strict-review' })).toBeVisible();
+    await desktopFirst.getByRole('button', { name: 'Open in Terminal (Codex CLI) for strict-review' }).click();
+    await expect(desktopFirst.getByRole('button', { name: 'Show Terminal for strict-review' })).toBeVisible();
+    await expect(desktopFirst.getByRole('button', { name: 'Show Codex Desktop for strict-review' })).toBeVisible();
+  } finally {
+    await page.close();
+    await server.close();
+  }
+});
 
 for (const theme of ['light', 'dark']) {
   test(`profile inventory and client discovery preserve scope and keyboard actions in ${theme}`, async ({ browser }, testInfo) => {
@@ -24,9 +49,14 @@ for (const theme of ['light', 'dark']) {
       await page.emulateMedia({ reducedMotion: 'reduce' });
       const original = await provider.profiles();
       const discovery = await provider.discovery();
-      await page.route('**/api/profiles', route => route.fulfill({ json: { ...original,
-        profiles: [original.profiles[0], nativeProfile('claude-code'), { ...nativeProfile('copilot'), signIn: signedIn ? 'Signed in' : 'Not signed in' }],
-      } }));
+      await page.route('**/api/profiles', route => {
+        const copilot = nativeProfile('copilot');
+        if (signedIn) {
+          copilot.signIn = 'Signed in';
+          copilot.clientActions = copilot.clientActions.filter(action => action.id !== 'signin');
+        }
+        return route.fulfill({ json: { ...original, profiles: [original.profiles[0], nativeProfile('claude-code'), copilot] } });
+      });
       const attempt = () => ({ id: 'visual-signin', client: 'copilot', profileName: 'copilot-work', accountScope: 'shared', state: signinState,
         message: signinState === 'completed' ? 'Native sign-in verified.' : 'Complete authorization in your browser.', deviceCode: 'DEMO-1234' });
       await page.route('**/api/profiles/copilot-work/sign-in', route => { signIns++; return route.fulfill({ json: attempt() }); });
@@ -58,8 +88,9 @@ for (const theme of ['light', 'dark']) {
       signinState = 'completed'; signedIn = true;
       await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
       await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
-      await expect(copilot.getByRole('button', { name: 'Sign in with GitHub for copilot-work', exact: true })).toBeFocused();
       await expect(copilot.getByText(/CLI: Signed in/)).toBeVisible();
+      await expect(copilot.getByRole('heading', { name: 'copilot-work', exact: true })).toBeFocused();
+      await expect(copilot.getByRole('button', { name: /Sign in with GitHub|Check sign-in/ })).toHaveCount(0);
       await expect(claude.getByText(/Signed in \(last checked\)/)).toBeVisible();
       expect(signIns).toBe(1); expect(clientActions).toBe(0);
       await page.setViewportSize({ width: 320, height: 900 });

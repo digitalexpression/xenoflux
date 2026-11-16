@@ -12,9 +12,9 @@ async function signinFixture(page, client) {
     profileReads++;
     return route.fulfill({ json: { profiles: [{ name: profileName, client, accountScope: client === 'copilot' ? 'shared' : 'per-root',
       accountIndependence: 'not verified', isDefault: false, state: 'ready', reason: null,
-      signIn: state === 'completed' ? 'Signed in' : 'Not signed in', binding: 'Fixture folder', summary: 'Separate settings and history.',
+      signIn: state === 'completed' ? 'Signed in' : 'Signed out', binding: 'Fixture folder', summary: 'Separate settings and history.',
       cli: { state: 'not-running', text: 'Not running' }, desktop: { state: 'unavailable', text: 'Not verified' },
-      clientActions: [{ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' }], moreMenu: null }],
+      clientActions: state === 'completed' ? [] : [{ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' }], moreMenu: null }],
       notes: [], simulated: false } });
   });
   await page.route('**/api/profiles/*/clients', route => { terminalCalls++; return route.fulfill({ json: {} }); });
@@ -29,7 +29,8 @@ async function signinFixture(page, client) {
   await page.goto(new URL('/profiles', page.url()).toString());
   const button = page.getByRole('button', { name: `${client === 'copilot' ? 'Sign in with GitHub' : 'Sign in'} for ${profileName}`, exact: true });
   await expect(button).toBeVisible();
-  return { button, profileName, state: value => { state = value; }, offline: value => { checkOffline = value; },
+  const heading = page.getByRole('heading', { name: profileName, exact: true });
+  return { button, heading, state: value => { state = value; }, offline: value => { checkOffline = value; },
     cancelOffline: value => { cancelOffline = value; }, cancellationState: value => { cancellationState = value; }, get profileReads() { return profileReads; }, get cancelCalls() { return cancelCalls; },
     get terminalCalls() { return terminalCalls; }, get startCalls() { return startCalls; } };
 }
@@ -68,7 +69,8 @@ for (const client of ['claude-code', 'copilot']) {
     await expect(page.getByText(/Signed in · Fixture folder/)).toBeVisible();
     await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
     await expect(dialog).toHaveCount(0);
-    await expect(fixture.button).toBeFocused();
+    await expect(fixture.button).toHaveCount(0);
+    await expect(fixture.heading).toBeFocused();
     expect(fixture.startCalls).toBe(1);
     expect(fixture.terminalCalls).toBe(0);
   });
@@ -100,7 +102,7 @@ test('profile checks pause during browser authorization and refresh after verifi
   await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
   await expect.poll(() => fixture.profileReads).toBeGreaterThan(reads);
   await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
-  await expect(fixture.button).toBeFocused();
+  await expect(fixture.heading).toBeFocused();
 });
 
 test('network and cancellation failures retain the attempt and offer recovery', async ({ page }) => {

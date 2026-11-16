@@ -93,6 +93,22 @@ export function createRamLogs({ disk = createRamDisk(), mountPath = RAM_DISK_PAT
       linked: link === target, state: link === target ? available ? 'ready' : 'unavailable' : 'pending-first-launch',
       persistent: false };
   }
+  async function joinHome({ home, key, signal }) {
+    cancelled(signal);
+    await validateHome(home);
+    const source = join(home, database), target = targetFor(key), current = await exists(source);
+    if (!enabled) {
+      for (const suffix of suffixes) await checkedFile(source + suffix);
+    } else {
+      const route = await inspect({ home, key });
+      if (!current?.isSymbolicLink() || route.state !== 'ready' || await realpath(source) !== target)
+        throw failed('The active profile’s RAM log route is not ready; close its clients before preparing logs');
+      for (const suffix of suffixes) await checkedFile(target + suffix);
+      for (const suffix of suffixes.slice(1)) if (await exists(source + suffix))
+        throw failed('The active RAM log route has local sidecars; preserving both routes');
+    }
+    cancelled(signal);
+  }
   async function noHandles(paths, signal) {
     const present = [];
     for (const path of new Set(paths)) {
@@ -448,5 +464,5 @@ export function createRamLogs({ disk = createRamDisk(), mountPath = RAM_DISK_PAT
       throw failed(`RAM log archiving failed${archivePath ? `; recovery archive retained at ${archivePath}` : ''}: ${e.message}`);
     }
   }
-  return { ensureMounted, prepareHome, restoreHome, archiveHome, inspect };
+  return { ensureMounted, prepareHome, joinHome, restoreHome, archiveHome, inspect };
 }

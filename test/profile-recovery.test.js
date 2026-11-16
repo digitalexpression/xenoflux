@@ -9,6 +9,8 @@ import { createHome, startHomeSignIn } from '../src/home-create.js';
 import { launchHome } from '../src/launcher.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
 import { acquireCopilotAccount } from '../src/copilot-account-lock.js';
+import { nativeRootIdentity } from '../src/codex-native-participants.js';
+import { acquireCodexNativeParticipant, readProfileOwners } from '../src/profile-reservations.js';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-profile-recovery-')));
@@ -114,16 +116,84 @@ test('profile operation reservation blocks stale run recovery without touching e
 test('recovers standalone CLI lock only with matching run report', async t => {
   const f = await fixture(t), lock = join(f.made.root, '.run-lock');
   const ramLogs = { prepareHome: async () => {} };
-  const interrupted = await launchHome(f.store, 'Research', { terminalEnvironment: f.terminalEnvironment, probe: async () => '0.153.4', ramLogs,
-    run: async () => { const error = new Error('shutdown uncertain'); error.code = 'SHUTDOWN_FAILED'; throw error; } });
+  const runner = { pid: 999501, ppid: process.pid, uid: process.getuid(), startedAt: new Date().toISOString(), executable: f.executable };
+  const instanceRuntime = { snapshot: async () => [runner], assertResourcesIdle: async () => {},
+    async observe(row) { assert.deepEqual(row, runner); return { status: 'stopped', processes: [] }; } };
+  const launchOptions = { terminalEnvironment: f.terminalEnvironment, probe: async () => '0.153.4', ramLogs,
+    lockOptions: { lockPath: f.lockPath }, instanceRuntime };
+  const interrupted = await launchHome(f.store, 'Research', { ...launchOptions,
+    async run({ onSpawn }) {
+      await onSpawn(runner.pid);
+      throw Object.assign(new Error('shutdown uncertain'), { code: 'SHUTDOWN_FAILED' });
+    } });
   assert.equal(interrupted.status, 'incomplete');
-  const result = await recoverProfileRun(f.store, 'Research', opts(f, { apply: true }));
+  const result = await recoverProfileRun(f.store, 'Research', opts(f, { apply: true, instanceRuntime }));
   assert.equal(result.kind, 'interactive-cli');
   await assert.rejects(access(lock), { code: 'ENOENT' });
   assert.equal(JSON.parse(await readFile(join(f.made.root, '.xfx-home-setup.json'), 'utf8')).phase, 'registered');
-  const retry = await launchHome(f.store, 'Research', { terminalEnvironment: f.terminalEnvironment, probe: async () => '0.153.4', ramLogs,
+  const retry = await launchHome(f.store, 'Research', { ...launchOptions,
     run: async () => ({ exitCode: 0, signal: null }) });
   assert.equal(retry.status, 'exited');
+});
+
+test('recovery releases only an interrupted Codex CLI while its exact Desktop peer stays open', async t => {
+  const f = await fixture(t);
+  const { id: profileId } = f.made.profile;
+  const nativeRoot = f.made.root, home = join(nativeRoot, 'codex-home');
+  const rootIdentity = await nativeRootIdentity(nativeRoot, home);
+  const host = hostname(), storePath = f.store.directory, environmentId = f.made.binding.environmentId;
+  const runId = randomUUID(), reportPath = join(nativeRoot, 'launches', runId, 'report.json');
+  const owner = { kind: 'interactive-cli', membershipVersion: 1, client: 'codex', pid: 999501,
+    host, runId, storePath, profileId, home, environmentId, reportPath };
+  const runner = { pid: 999502, ppid: owner.pid, uid: process.getuid(), startedAt: new Date().toISOString(), executable: f.executable };
+  const report = { schemaVersion: 1, kind: owner.kind, client: owner.client, runId, profileId, environmentId, home,
+    rootIdentity, pid: runner.pid, status: 'running', embedded: true, spawnIntent: true,
+    executable: runner.executable, executableIdentity: f.made.binding.executableIdentity };
+  await mkdir(dirname(reportPath), { recursive: true, mode: 0o700 });
+  await writeFile(reportPath, JSON.stringify(report), { mode: 0o600 });
+  await acquireCodexNativeParticipant(nativeRoot, owner);
+
+  const desktopRoot = join(storePath, 'desktop-instances'), desktopRunId = randomUUID();
+  await mkdir(desktopRoot, { mode: 0o700 });
+  const journalPath = join(desktopRoot, `${profileId}.json`);
+  const desktop = { kind: 'desktop-instance', host, pid: 999503, runId: desktopRunId, profileId, storePath, journalPath };
+  const appPath = join(desktopRoot, 'apps', profileId, 'Codex · Research.app');
+  const application = { appPath, bundleId: `com.xenoflux.profile.${profileId}`, executable: join(appPath, 'Contents/MacOS/Codex') };
+  const main = { ...runner, pid: 999504, ppid: 1, executable: application.executable };
+  const app = { appPath: '/Applications/Codex.app', bundleId: 'com.openai.codex', executable: '/Applications/Codex.app/Contents/MacOS/Codex' };
+  const routes = { home, desktopData: join(nativeRoot, 'desktop-data'), userHome: join(nativeRoot, 'user-home'), temporary: join(nativeRoot, 'tmp') };
+  const helperSha256 = 'a'.repeat(64);
+  const launcherPaths = { application, bootstrapExecutable: join(appPath, 'Contents/MacOS/XfxProfileLauncher'),
+    helperSha256, helperExecutable: join(desktopRoot, 'native', helperSha256, 'XfxProfileLauncher') };
+  await writeFile(journalPath, JSON.stringify({ schemaVersion: 1, kind: desktop.kind, profileId, runId: desktopRunId, owner: desktop,
+    phase: 'running', plan: { ...routes, app, profileId, nativeRoot, environmentId, rootIdentity }, main, launcherPaths,
+    processes: [main], baselineMains: [], launcher: null }), { mode: 0o600 });
+  await writeFile(join(desktopRoot, `${profileId}.${desktopRunId}.launch`), JSON.stringify({ schemaVersion: 1,
+    kind: 'desktop-instance-launch', runId: desktopRunId, profileId, ...routes, app, application, main }), { mode: 0o600 });
+  await acquireCodexNativeParticipant(nativeRoot, desktop, owner);
+
+  const instanceRuntime = {
+    async observe(row) {
+      if (row.pid === main.pid) { assert.deepEqual(row, main); return { status: 'running', processes: [main] }; }
+      assert.deepEqual(row, runner);
+      return { status: 'stopped', processes: [] };
+    },
+    async assertResourcesIdle(paths, { allowedProcesses }) {
+      assert.ok(paths.includes(home));
+      assert.deepEqual(allowedProcesses, [main]);
+    },
+  };
+  const recovery = opts(f, { apply: true, instanceRuntime });
+  await assert.rejects(recoverProfileRun(f.store, 'Research', recovery), /process identity is unavailable/);
+  assert.deepEqual(await readProfileOwners(nativeRoot), [owner, desktop]);
+  await writeFile(reportPath, JSON.stringify({ ...report, processIdentity: runner }));
+  const operation = `${f.lockPath}.operation`;
+  await mkdir(operation, { mode: 0o700 });
+  await writeFile(join(operation, 'owner.json'), JSON.stringify({ kind: 'desktop-instance-operation', host, pid: owner.pid,
+    runId: randomUUID(), storePath, profileId, journalPath }), { mode: 0o600 });
+  assert.equal((await recoverProfileRun(f.store, 'Research', recovery)).status, 'recovered');
+  assert.deepEqual(await readProfileOwners(nativeRoot), [desktop]);
+  await assert.rejects(access(operation), { code: 'ENOENT' });
 });
 
 async function interruptedNativeSignin(t) {

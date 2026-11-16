@@ -6,14 +6,15 @@ import { hostname } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { resolveHome } from './homes.js';
 import { find } from './profiles.js';
-import { DESKTOP_APP } from './desktop-runtime.js';
+import { DESKTOP_APP, sameDesktopApp } from './desktop-runtime.js';
 import { createDesktopInstanceRuntime, processIdentity, targetStartSeconds } from './desktop-instance-runtime.js';
 import { prepareProfileApp, loadPreparedProfileApp, validateProfileApp } from './profile-launcher.js';
 import { reserveInstanceControl, releaseInstanceControl } from './desktop-instance-guard.js';
 import { createLogStorage } from './log-storage.js';
-import { ramLogTarget } from './ram-logs.js';
 import { acquire, exists, globalLock, privateDirectory, readJSON, record, release } from './metadata.js';
-import { assertNoLegacyAuditLease, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
+import { acquireCodexNativeParticipant, assertNoLegacyAuditLease, isCodexCliParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
+import { assertCodexHolder, assertSavedCodexSignIn, codexResourcePaths as resources, nativeProcessRow as rowValid,
+  nativeRootIdentity, observeCodexCli } from './codex-native-participants.js';
 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -21,8 +22,6 @@ const absolute = path => typeof path === 'string' && path.startsWith('/') && res
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };
 const paths = (store, id) => ({ root: join(store.directory, 'desktop-instances'), journal: join(store.directory, 'desktop-instances', `${id}.json`) });
 const receiptPath = (store, state) => join(paths(store, state.profileId).root, `${state.profileId}.${state.runId}.launch`);
-const rowValid = row => row && Number.isSafeInteger(row.pid) && row.pid > 0 && Number.isSafeInteger(row.ppid) && row.ppid >= 0
-  && row.uid === process.getuid() && typeof row.startedAt === 'string' && Number.isFinite(Date.parse(row.startedAt)) && absolute(row.executable);
 const applicationOf = state => state.launcherPaths?.signedShortcut ? state.plan.app : state.launcherPaths?.application ?? state.plan.app;
 const prepareShortcut = (store, plan) => prepareProfileApp(store, plan, { signedShortcut: true });
 const loadShortcut = (store, plan) => loadPreparedProfileApp(store, plan, { signedShortcut: true });
@@ -110,7 +109,8 @@ async function save(store, state, phase = state.phase) {
 async function assertBinding(store, state) {
   const { profile, native, environment } = await resolveHome(store, state.profileId), plan = state.plan;
   if (native.root !== plan.nativeRoot || environment.id !== plan.environmentId || environment.home !== plan.home || environment.desktopData !== plan.desktopData
-    || environment.launch.env.HOME !== plan.userHome || environment.launch.env.TMPDIR !== plan.temporary)
+    || environment.launch.env.HOME !== plan.userHome || environment.launch.env.TMPDIR !== plan.temporary
+    || plan.rootIdentity && !equal(plan.rootIdentity, await nativeRootIdentity(native.root, environment.home)))
     throw new Error('Desktop profile binding changed; preserving its record and reservation');
   return profile;
 }
@@ -119,6 +119,8 @@ async function ownedReservation(state) {
   if (!await exists(lock)) return false;
   await privateDirectory(lock);
   const owners = await readProfileOwners(state.plan.nativeRoot);
+  if (owners.length === 1 && isCodexCliParticipant(owners[0]) && owners[0].storePath === state.owner.storePath
+    && owners[0].profileId === state.profileId && owners[0].home === state.plan.home && owners[0].environmentId === state.plan.environmentId) return false;
   if (owners.every(owner => ['review-task', 'audit-experiment'].includes(owner?.kind)
     && owner.home === state.plan.home)) return false;
   if (!owners.some(owner => equal(owner, state.owner)))
@@ -136,7 +138,6 @@ async function assertLaunchReceipt(store, state) {
   if (!state.main || !equal(await readJSON(receiptPath(store, state)), launchReceipt(state)))
     throw new Error('Desktop launch receipt is missing or changed; preserving the instance');
 }
-const resources = plan => [plan.home, plan.desktopData, ...['', '-wal', '-shm'].map(s => ramLogTarget(plan.environmentId) + s)];
 async function observation(state, runtime) {
   if (state.main) return runtime.observe(state.main, { trackedProcesses: state.processes,
     ...(state.launcherPaths?.signedShortcut ? { helperExecutable: await pinnedHelper(state) } : {}) });
@@ -149,13 +150,37 @@ async function observation(state, runtime) {
   }
   return { status: 'stopped', processes: [] };
 }
+/** Attest the exact Desktop peer of a named CLI, under the profile operation guard. */
+export async function observeCodexDesktopPeer(store, plan, owner, runtime, { joining = false } = {}) {
+  const state = await readState(store, plan.profileId);
+  if (!state || !equal(state.owner, owner) || state.plan.home !== plan.home || state.plan.nativeRoot !== plan.nativeRoot
+    || state.plan.environmentId !== plan.environmentId || !await ownedReservation(state))
+    throw new Error('Desktop peer does not match its saved reservation.');
+  await assertBinding(store, state);
+  const observed = await observation(state, runtime);
+  if (observed.status === 'stopped' && !joining) return observed;
+  if (observed.status !== 'running' || observed.orphaned || !observed.processes.every(rowValid)
+    || (joining ? state.phase !== 'running' : !['opening', 'running', 'closing'].includes(state.phase)))
+    throw new Error('Desktop peer is not ready or its process ownership is uncertain.');
+  await assertLaunchReceipt(store, state);
+  if (joining) {
+    const currentApp = await runtime.inspectApp(), planned = state.plan.app;
+    if (!state.plan.rootIdentity || !sameDesktopApp(planned, currentApp)
+      || ['version', 'build', 'asarSha256'].some(key => planned[key] !== currentApp[key]))
+      throw new Error('Desktop installation or profile identity changed; reopen Desktop before sharing this profile.');
+    await assertCodexHolder(runtime, [state.plan.desktopData], observed.processes);
+  }
+  return observed;
+}
 async function finishStopped(store, state, runtime, options) {
   const observed = await observation(state, runtime);
   if (observed.status !== 'stopped') throw new Error(observed.reason ?? 'Desktop instance still runs or its ownership is uncertain; preserving its reservation');
   const reserved = await ownedReservation(state);
-  const reviews = await exists(join(state.plan.nativeRoot, '.run-lock'))
-    ? (await readProfileOwners(state.plan.nativeRoot)).filter(owner => owner.kind === 'review-task') : [];
+  const owners = await exists(join(state.plan.nativeRoot, '.run-lock')) ? await readProfileOwners(state.plan.nativeRoot) : [];
+  const reviews = owners.filter(owner => owner.kind === 'review-task');
   const allowedProcesses = [];
+  const cliOwner = owners.find(isCodexCliParticipant);
+  if (cliOwner) allowedProcesses.push(...(await observeCodexCli(store, state.plan, cliOwner, runtime)).processes);
   for (const review of reviews) {
     if (review.home !== state.plan.home || !uuid.test(review.runId))
       throw new Error('Review participant identity is unavailable; preserving reservation');
@@ -235,6 +260,7 @@ export async function desktopInstancePlan(store, name, { runtime = createDesktop
   const { profile, native, environment } = await resolveHome(store, name);
   return { profileId: profile.id, name: profile.name, environmentId: environment.id, nativeRoot: native.root,
     home: environment.home, desktopData: environment.desktopData, temporary: environment.launch.env.TMPDIR, userHome: environment.launch.env.HOME,
+    rootIdentity: await nativeRootIdentity(native.root, environment.home),
     app: await runtime.inspectApp(), displayName: `Codex · ${profile.name}`, liveHomeChanged: false,
     sameProfileConcurrency: 'execution-participants', nativeAcceptance: 'pending' };
 }
@@ -307,6 +333,22 @@ export async function prepareDesktopInstance(store, name, {
   });
 }
 
+async function confirmSharedDesktopStorage(state, runtime) {
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const observed = await observation(state, runtime);
+    if (observed.status !== 'running' || observed.orphaned)
+      throw new Error('Desktop stopped or its ownership changed before opening the selected profile storage.');
+    try {
+      await assertCodexHolder(runtime, [state.plan.desktopData], observed.processes);
+      return observed.processes;
+    } catch (error) {
+      if (error.code !== 'CODEX_HOLDER_UNVERIFIED' || Date.now() >= deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+}
+
 export async function openDesktopInstance(store, name, {
   runtime = createDesktopInstanceRuntime(), loadLauncher = loadShortcut, prepareLauncher = prepareShortcut,
   validateApp = validateProfileApp, ramLogs,
@@ -323,7 +365,8 @@ export async function openDesktopInstance(store, name, {
       const observed = await observation(state, runtime);
       if (observed.status !== 'stopped' && !reserved)
         throw new Error('Desktop instance lost its reservation; preserve it for recovery');
-      if (['opening', 'running'].includes(state.phase) && state.main && state.launcherPaths && observed.status === 'running' && !observed.orphaned) {
+      if ((state.phase === 'running' || state.phase === 'opening' && !state.sharedStartup)
+        && state.main && state.launcherPaths && observed.status === 'running' && !observed.orphaned) {
         if (!state.launcherPaths.application) throw new Error('Close or recover the previous desktop test before opening the named app');
         await assertLaunchReceipt(store, state);
         await pinnedApplication(store, state, validateApp);
@@ -341,21 +384,32 @@ export async function openDesktopInstance(store, name, {
     }
     const plan = await desktopInstancePlan(store, id, { runtime });
     await assertNoLegacyAuditLease(store.directory, plan.home);
+    const lock = join(plan.nativeRoot, '.run-lock');
+    let cliOwner, allowedProcesses = [];
+    if (await exists(lock)) {
+      const owners = await readProfileOwners(plan.nativeRoot);
+      if (owners.length !== 1 || !isCodexCliParticipant(owners[0]))
+        throw new Error('Profile is in use or has an unfinished operation; preserve its reservation');
+      cliOwner = owners[0];
+      await assertSavedCodexSignIn(plan.home);
+      allowedProcesses = (await observeCodexCli(store, plan, cliOwner, runtime, { joining: true })).processes;
+      await assertCodexHolder(runtime, [plan.home], allowedProcesses, plan.home);
+    }
     await privateDirectory(store.directory); await privateDirectory(paths(store, id).root, true);
     const runId = randomUUID();
     const owner = { kind: 'desktop-instance', host: hostname(), pid: process.pid, runId, storePath: store.directory,
       profileId: id, journalPath: paths(store, id).journal };
     state = { schemaVersion: 1, kind: 'desktop-instance', profileId: id, runId, owner, plan, phase: 'preparing',
-      main: null, processes: [], baselineMains: [], launcher: null, launcherPaths: null };
+      main: null, processes: [], baselineMains: [], launcher: null, launcherPaths: null, ...(cliOwner ? { sharedStartup: true } : {}) };
     // Record the intended owner before reserving; recovery can reconcile a crash
     // between lock acquisition and the next journal write without inventing ownership.
     await save(store, state);
     let reserved = false, launchAttempted = false;
     try {
-      await acquire(join(plan.nativeRoot, '.run-lock'), owner, true); reserved = true;
+      await acquireCodexNativeParticipant(plan.nativeRoot, owner, cliOwner); reserved = true;
       await reserveInstanceControl(owner, options);
       await assertBinding(store, state);
-      await runtime.assertResourcesIdle(resources(plan), { profileHome: plan.home });
+      await runtime.assertResourcesIdle(resources(plan), { allowedProcesses, profileHome: plan.home });
       await privateDirectory(plan.desktopData, true);
       try { state.launcherPaths = await loadLauncher(store, plan); }
       catch (error) {
@@ -368,7 +422,7 @@ export async function openDesktopInstance(store, name, {
         const appRoot = `${join(paths(store, id).root, 'apps', id)}/`;
         if ((await runtime.snapshot()).some(row => row.executable.startsWith(appRoot)))
           throw new Error('Profile app is still executing; preserving its cached app and reservation');
-        await runtime.assertResourcesIdle(resources(plan), { profileHome: plan.home });
+        await runtime.assertResourcesIdle(resources(plan), { allowedProcesses, profileHome: plan.home });
         state.launcherPaths = await prepareLauncher(store, plan);
       }
       validateLauncherPaths(state.launcherPaths, store, id);
@@ -376,7 +430,14 @@ export async function openDesktopInstance(store, name, {
       const bootstrap = await launcherCaller(runtime, state.launcherPaths, launcherEnvironment);
       if (bootstrap && typeof onBootstrapReady !== 'function') throw new Error('Profile bootstrap needs a controller handshake');
       const helperExecutable = await pinnedHelper(state);
-      await (ramLogs ?? createLogStorage()).prepareHome({ home: plan.home, key: plan.environmentId });
+      const logs = ramLogs ?? createLogStorage();
+      if (cliOwner) {
+        await assertBinding(store, state);
+        await assertSavedCodexSignIn(plan.home);
+        allowedProcesses = (await observeCodexCli(store, plan, cliOwner, runtime, { joining: true })).processes;
+        await runtime.assertResourcesIdle(resources(plan), { allowedProcesses, profileHome: plan.home });
+        await logs.joinHome({ home: plan.home, key: plan.environmentId });
+      } else await logs.prepareHome({ home: plan.home, key: plan.environmentId });
       const target = applicationOf(state);
       state.baselineMains = (await runtime.snapshot()).filter(row => row.executable === target.executable);
       await save(store, state, 'opening'); launchAttempted = true;
@@ -390,6 +451,7 @@ export async function openDesktopInstance(store, name, {
       await writeFile(receiptPath(store, state), JSON.stringify(launchReceipt(state, opened.main)), { flag: 'wx', mode: 0o600 });
       state.main = opened.main; state.processes = opened.processes;
       await save(store, state);
+      if (cliOwner) state.processes = await confirmSharedDesktopStorage(state, runtime);
       await save(store, state, 'running');
       if (signedShortcut && bootstrap)
         await onBootstrapReady({ kind: 'xfx-profile-bootstrap', status: 'opened', profileId: id, pid: bootstrap.pid });
@@ -397,7 +459,7 @@ export async function openDesktopInstance(store, name, {
     } catch (error) {
       state.error = error.code ?? 'DESKTOP_INSTANCE_FAILED';
       if (!launchAttempted) {
-        if (reserved && await ownedReservation(state)) await release(join(plan.nativeRoot, '.run-lock'), owner);
+        if (reserved && await ownedReservation(state)) await releaseProfileParticipant(plan.nativeRoot, owner);
         await save(store, state, 'closed');
         await releaseInstanceControl(owner, options);
       } else await save(store, state);

@@ -50,7 +50,7 @@ are never copied. Profiles subsequently evolve independently.
 
 | Profile client | CLI | Desktop with the selected profile |
 | --- | --- | --- |
-| Codex | Open in Terminal | Open Codex Desktop, including to sign in |
+| Codex | Open in Terminal | Open Codex Desktop with the same profile sign-in |
 | Claude Code | Sign in through the browser; Open in Terminal for interactive work | Separate Desktop startup and storage; authenticated session/model use unverified |
 | GitHub Copilot | Sign in through the browser with the shared GitHub CLI account; Open in Terminal for interactive work | Profile-bound local startup and storage; authenticated session/model use unverified |
 
@@ -58,13 +58,26 @@ Profiles groups entries by client. Each entry keeps inspection links separate
 from sign-in and opening actions. **More** contains the available registry edits
 and selected-copy actions.
 
-For Claude Code or Copilot, choose **Sign in** on the profile entry. Complete
-authorization in your browser. Xenoflux checks sign-in automatically and updates
-the profile when verification finishes. You do not need to run a command or return
-to **Check sign-in**. GitHub may ask you to enter the device code shown in Xenoflux.
-After five minutes, a previous result is labelled **last checked**. It remains
-visible until another check or a change to its native binding invalidates it.
-This display does not renew account qualification for running tasks.
+Each profile offers the sign-in action that matches its status. For Codex, use
+**Sign in via Terminal** when the profile shows **No sign-in saved**, or open
+Codex Desktop to sign in there. Each named Codex profile has its own native
+account store. Its CLI and Desktop use the same sign-in, and you can choose a
+different account on another profile. **Sign-in saved** means Xenoflux found the
+profile's `auth.json` file.
+
+After signing in, you can open CLI and Desktop on the same named Codex profile
+in either order. Closing one leaves the other running. Concurrent use requires a
+Codex CLI that supports `--no-daemon` and an existing log storage route both
+clients can use. Close both clients before changing or copying the profile.
+
+When you open Profiles, Xenoflux refreshes the CLI sign-in status for available
+Claude Code and Copilot profiles. Choose **Check sign-in** if the status is still
+unknown or marked **last checked**. If the check shows **Signed out** or
+**Sign-in route unverified**, choose **Sign in** or **Sign in with GitHub** and
+finish in your browser. GitHub may ask for the device code shown in Xenoflux.
+Xenoflux verifies sign-in automatically and hides the sign-in action while the
+result is current. After five minutes, Xenoflux marks the previous result **last
+checked**. Checking again can renew Copilot account qualification for tasks.
 
 Claude signs in to the selected configuration root. Copilot signs in through
 GitHub CLI and shares that account across qualified Copilot profiles and other
@@ -78,7 +91,7 @@ retry from Xenoflux. Xenoflux never asks you to paste a credential or Claude
 authorization code. CLI sign-in does not verify Desktop sign-in.
 
 **Open in Terminal** launches the current selected CLI through Xenoflux with the
-profile's configuration root and an exclusive reservation. A bound project is
+profile's configuration root and a profile reservation. A bound project is
 used when present; otherwise it opens the profile's private workspace. Launching
 a CLI starts no task automatically. Close its Terminal session before changing
 or copying that profile. A native startup can still write its own state or run
@@ -356,8 +369,9 @@ a replaced executable/root after preview requires a new preview, not a version p
 Claude's observed account route is per-root/same-account; Copilot's qualified
 `gh-cli` route is shared. Separate roots do not prove separate accounts.
 
-Credential refresh, distinct-account independence and shared sign-out isolation
-are unverified. An interrupted shared-account metadata operation keeps its
+Credential refresh and sign-out during concurrent use remain unverified.
+Distinct-account independence for Claude and Copilot remains unverified.
+An interrupted shared-account metadata operation keeps its
 reservation for maintainer recovery. Some native pair/mode combinations, repeated overlap stress,
 controller-kill reviews and copied-setup loading remain deferred. Real Codex
 stale-callback recovery is unobserved; synthetic Desktop fixtures do not establish

@@ -118,12 +118,16 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     // Verify the kernel executable, including for legacy bootstrap launches.
     let target = TargetIdentity(pid: application.processIdentifier, executable: expectedExecutable,
         startSeconds: startSeconds)
-    // The callback object's AppKit state may lag the live process. Let the
-    // run loop refresh registration until the same bounded identity check passes.
-    while validatedApplication(target) == nil && Date() < deadline {
+    // Let AppKit refresh registration, then use the first complete verification.
+    var verified = false
+    while Date() < deadline {
+        if validatedApplication(target) != nil {
+            verified = true
+            break
+        }
         _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     }
-    guard validatedApplication(target) != nil else {
+    guard verified else {
         let observedStart = processStartSeconds(target.pid).map(String.init) ?? "unavailable"
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)

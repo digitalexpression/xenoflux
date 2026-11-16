@@ -131,7 +131,6 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
     const selected = isDefault ? null : find(await store.read(), name);
     if (selected && selected.client !== client) throw new Error('The selected profile belongs to another client.');
     const key = selected?.native?.environmentId ?? 'default-' + client;
-    observations.delete(key);
     const prefix = await realpath(tmpdir());
     const scratch = await mkdtemp(join(prefix, 'xfx-account-status-'));
     const owner = { kind: 'native-account-status', runId: randomUUID(), host: hostname(), pid: process.pid,
@@ -149,6 +148,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
         if (!alreadyReserved) { await acquire(lock, owner, true); held = true; }
       });
       else profile = await resolveProfile(client, null, client === 'copilot' ? { workspace: scratch } : {});
+      observations.delete(key);
       const roots = await routeIdentity(profile);
       let status, qualification, runtimeVersion;
       if (client === 'claude-code') {
