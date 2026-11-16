@@ -27,13 +27,13 @@ function spawnEscapedDescendant() {
 }
 
 function handle({ method, id, params }) {
-  appendFileSync(join(dirname(logDir), 'fixture-rpc.jsonl'), JSON.stringify({ method, params, cwd: workspace, root }) + '\n', { mode: 0o600 });
+  appendFileSync(join(dirname(logDir), 'fixture-rpc.jsonl'), JSON.stringify({ method, params, cwd: workspace, root, ghRoot: process.env.GH_CONFIG_DIR }) + '\n', { mode: 0o600 });
   const reply = result => write({ id, result });
   switch (method) {
     case 'connect': reply({ ok: true, protocolVersion: 3, version: '1.0.107' }); break;
     case 'status.get': reply({ protocolVersion: 3, version: '1.0.107' }); break;
     case 'auth.getStatus': reply(config.signedOut ? { isAuthenticated: false } :
-      { isAuthenticated: true, authType: config.authType ?? 'gh-cli', login: config.login ?? 'fixture-login', host: 'fixture.invalid' }); break;
+      { isAuthenticated: true, authType: config.authType ?? 'user', login: config.login ?? 'fixture-login', host: 'fixture.invalid' }); break;
     case 'models.list': reply({ models: [], auto: { defaultTier: 'balance', tiers: [
       { id: 'balance', type: 'auto', status: { enabled: true, pickerVisible: true } },
       { id: 'fast', type: 'auto', status: { enabled: true, pickerVisible: false } },

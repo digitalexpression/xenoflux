@@ -10,7 +10,6 @@ import { createUiSignins } from '../src/ui-signins.js';
 import { Store } from '../src/profiles.js';
 import { createEngineProvider } from '../src/ui-engine.js';
 import { startUiServer } from '../src/ui-server.js';
-import { copilotExecutableIdentity } from '../src/copilot-profile.js';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function temporary(t) {
@@ -232,21 +231,26 @@ test('the authenticated UI starts browser sign-in and publishes only automatical
   assert.equal(JSON.stringify(result).includes('oauth'), false);
 });
 
-test('Copilot browser sign-in uses shared GitHub CLI state and verifies the selected and stock routes', async t => {
+test('Copilot device sign-in uses the selected native profile and never probes stock', async t => {
   const root = await temporary(t), store = new Store(join(root, 'store')), executable = join(root, 'copilot');
-  const marker = join(root, 'signed-in'), log = join(root, 'github-args'), stock = join(root, 'stock');
-  await mkdir(stock, { mode: 0o700 });
-  await writeFile(executable, '#!/bin/sh\nprintf "GitHub Copilot CLI 1.0.107\\n"\n', { mode: 0o700 });
-  await writeFile(join(root, 'gh'), `#!/bin/sh\nprintf '%s\\n' "$*" > '${log}'\nprintf '! First copy your one-time code: ABCD-1234\\nOpen this URL to continue in your web browser: https://github.com/login/device\\n' >&2\ntouch '${marker}'\n`, { mode: 0o700 });
+  const log = join(root, 'copilot-args');
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'GitHub Copilot CLI 1.0.107\\n'
+  exit
+fi
+printf '%s\\n' "$*" "$COPILOT_HOME" "$GH_CONFIG_DIR" > '${log}'
+printf 'To authenticate, visit https://github.com/login/device and enter code ABCD-1234\\n' >&2
+touch "$COPILOT_HOME/signed-in"
+`, { mode: 0o700 });
   const checked = [], opened = [];
   const native = managedNativeProfiles({ store, profilesBase: join(root, 'profiles'),
     terminalEnvironment: { ...process.env, PATH: root + ':/usr/bin:/bin' },
     lockOptions: { lockPath: join(root, 'operation') },
     acquireAccount: (_, options) => acquireCopilotAccount(root, options),
-    resolveStockCopilot: async () => ({ home: stock, executable, executableIdentity: copilotExecutableIdentity(await lstat(executable)), rootMode: 'implicit' }),
     readCopilotAccount: async ({ profile }) => {
-      await lstat(marker); checked.push(profile.rootMode);
-      return { state: 'signed-in', route: 'gh-cli', token: 'opaque-fixture-account', version: '1.0.107' };
+      await lstat(join(profile.home, 'signed-in')); checked.push(profile.home);
+      return { state: 'signed-in', route: 'user', token: 'opaque-fixture-account', version: '1.0.107' };
     },
   });
   const selected = await native.createProfile('Copilot fixture', 'copilot', await native.binary('copilot'));
@@ -256,10 +260,10 @@ test('Copilot browser sign-in uses shared GitHub CLI state and verifies the sele
   const attempt = await manager.start({ name: selected.name });
   const result = await done(manager, attempt.id);
   assert.equal(result.state, 'completed', JSON.stringify(result));
-  assert.equal(result.accountScope, 'shared');
-  assert.deepEqual(checked, ['explicit', 'implicit']);
+  assert.equal(result.accountScope, 'per-root');
+  assert.deepEqual(checked, [selected.native.configRoot]);
   assert.deepEqual(opened, ['https://github.com/login/device']);
-  assert.equal(await readFile(log, 'utf8'), 'auth login --web --hostname github.com --skip-ssh-key\n');
+  assert.equal(await readFile(log, 'utf8'), ['login --device-code', selected.native.configRoot, join(selected.native.configRoot, 'gh'), ''].join('\n'));
   assert.equal(JSON.stringify(result).includes('opaque-fixture-account'), false);
 });
 

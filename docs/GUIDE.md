@@ -52,7 +52,7 @@ are never copied. Profiles subsequently evolve independently.
 | --- | --- | --- |
 | Codex | Open in Terminal | Open Codex Desktop with the same profile sign-in |
 | Claude Code | Sign in through the browser; Open in Terminal for interactive work | Open Claude Desktop with its own sign-in |
-| GitHub Copilot | Sign in through the browser with the shared GitHub CLI account; Open in Terminal for interactive work | Profile-bound local startup and storage; authenticated session/model use unverified |
+| GitHub Copilot | Sign in with GitHub for this profile; Open in Terminal for interactive work | Open GitHub Copilot Desktop with its own sign-in |
 
 Profiles groups entries by client. Each entry keeps inspection links separate
 from sign-in and opening actions. **More** contains the available registry edits
@@ -79,10 +79,9 @@ Xenoflux verifies sign-in automatically and hides the sign-in action while the
 result is current. After five minutes, Xenoflux marks the previous result **last
 checked**. Checking again can renew Copilot account qualification for tasks.
 
-Claude signs in to the selected configuration root. Copilot signs in through
-GitHub CLI and shares that account across qualified Copilot profiles and other
-tools using GitHub CLI. Review that shared scope before continuing. Separate
-Copilot settings do not create separate accounts.
+Claude Code and Copilot CLI sign in to the selected profile. For existing managed
+Copilot profiles that used the shared GitHub CLI login, choose **Sign in with
+GitHub** to set up a native Copilot CLI account for that profile.
 
 You can cancel a pending sign-in. Cancellation stops Xenoflux's login process;
 it does not undo authorization already completed in your browser. Closing the
@@ -100,8 +99,8 @@ configured hooks.
 For Copilot, choose **Open GitHub Copilot Desktop** on the profile entry. The
 signed installed app opens with that profile's storage. Xenoflux refuses an
 already-running Copilot app or a profile reserved by other work; it never closes
-those clients for you. Desktop sign-in remains inside the vendor app, separate
-from the CLI's shared-account check.
+those clients for you. Sign in to Desktop separately. Different profiles can use
+different GitHub accounts.
 
 For Claude, choose **Open Claude Desktop** on the profile entry. Each profile has
 its own Desktop data folder alongside its Claude Code configuration folder.
@@ -111,14 +110,14 @@ other instances. Claude Desktop has a separate sign-in from the CLI. If Google
 sign-in returns to a different Claude window on macOS, quit the other Claude
 Desktop instances before signing in, then reopen them.
 
-You can open one managed Claude CLI and one managed Claude Desktop for the same
-profile in either order. Quit either client independently. After you quit Desktop,
-choose **Release closed Desktop reservation** to reopen it or change the profile.
-You can release the stopped Desktop reservation while the CLI stays open.
+For a Claude Code or Copilot profile, you can start one managed CLI and one
+managed Desktop in either order. Quit either client independently. After you quit
+Desktop, choose **Release closed Desktop reservation** to reopen it. You can
+release that reservation while the CLI stays open. Close both clients before
+changing or copying the profile.
 
 Claude and Copilot Desktop keep their reservations when the Xenoflux UI stops.
-For Copilot, release the closed Desktop reservation before reusing the profile in
-the CLI. Xenoflux releases only confirmed-stopped ownership. Uncertain state stays
+Xenoflux releases only confirmed-stopped ownership. Uncertain state stays
 reserved. A missing CLI does not prevent opening an otherwise readable Desktop
 profile.
 
@@ -371,11 +370,11 @@ in macOS Privacy & Security settings. Omit `--port` to select a free port.
 The supported platform is local Apple Silicon macOS with Codex, Claude Code and
 GitHub Copilot CLI. Profiles follow current selected installations and capabilities;
 a replaced executable/root after preview requires a new preview, not a version pin.
-Claude's observed account route is per-root/same-account; Copilot's qualified
-`gh-cli` route is shared. Separate roots do not prove separate accounts.
+Managed Claude and Copilot use a native CLI sign-in for each profile.
+Copilot Default can use the stock GitHub CLI account.
 
 Credential refresh and sign-out during concurrent use remain unverified.
-Claude Desktop and CLI sign in separately. Distinct-account independence for Copilot remains unverified.
+Claude and Copilot sign in separately in CLI and Desktop.
 An interrupted shared-account metadata operation keeps its
 reservation for maintainer recovery. Some native pair/mode combinations, repeated overlap stress,
 controller-kill reviews and copied-setup loading remain deferred. Real Codex

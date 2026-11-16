@@ -4,6 +4,7 @@ import { access, lstat, readdir, realpath } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { createEnvironmentBinding } from './client-contracts.js';
+import { exists, privateDirectory } from './metadata.js';
 
 export const COPILOT_SDK_VERSION = '1.0.29';
 const ambientOverride = /^(?:COPILOT_(?:HOME|CACHE_HOME|CONFIG_DIR|CLI_PATH|DISABLE_KEYTAR|NO_AUTO_LOGIN|.*TOKEN.*|PROVIDERS_CONFIG|PROVIDER_.*)|GH_(?:TOKEN|ENTERPRISE_TOKEN|HOST|CONFIG_DIR)|GITHUB_(?:TOKEN|ENTERPRISE_TOKEN)|XDG_(?:CONFIG|DATA|STATE|CACHE)_HOME|NODE_OPTIONS|NODE_PATH)$/;
@@ -16,6 +17,22 @@ export function assertCopilotEnvironment(env, native = userInfo()) {
     throw new Error('Copilot requires the native HOME, USER and LOGNAME.');
   const keys = Object.keys(env).filter(key => ambientOverride.test(key));
   if (keys.length) throw new Error(`Remove ambient Copilot authentication, provider or root overrides: ${keys.join(', ')}.`);
+}
+
+export function managedCopilotEnvironment(env, configRoot) {
+  return { ...env, COPILOT_HOME: configRoot, GH_CONFIG_DIR: join(configRoot, 'gh') };
+}
+
+export async function assertManagedCopilotCredentials(configRoot) {
+  await privateDirectory(configRoot);
+  const directory = join(configRoot, 'gh');
+  if (!await exists(directory)) return;
+  await privateDirectory(directory);
+  for (const name of ['hosts.yml', 'config.yml']) {
+    const path = join(directory, name), stat = await exists(path);
+    if (stat && (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || (stat.mode & 0o077)))
+      throw new Error('Unsafe Copilot GitHub CLI configuration.');
+  }
 }
 
 export function copilotBinding(profile, workspace) {
@@ -45,6 +62,7 @@ export async function assertCopilotRoots(binding) {
       return child !== '..' && !child.startsWith('../') && !isAbsolute(child);
     };
     if (within(stock, reservation) || within(reservation, stock)) throw new Error('Managed Copilot root overlaps stock.');
+    await assertManagedCopilotCredentials(config);
   }
   for (const path of new Set([config, reservation])) {
     const stat = await lstat(path);
@@ -76,9 +94,9 @@ export async function inspectCopilotExecutable(path) {
 }
 
 export function qualifiedCopilotRoute(binding, qualification) {
-  return qualification?.rootMode === binding.rootMode && isCopilotNativeAuthType(qualification.authType)
+  return qualification?.rootMode === binding.rootMode && qualification.authType === 'user' && qualification.scope === 'per-root'
     && qualification.executableIdentity === binding.executable.identity && qualification.sdk === COPILOT_SDK_VERSION
-    && ['shared', 'per-root'].includes(qualification.scope) && copilotId(qualification.runtimeVersion)
+    && copilotId(qualification.runtimeVersion)
     && qualification.expiresAt > Date.now()
     && JSON.stringify(qualification.route) === JSON.stringify(copilotAccountRoute(binding));
 }

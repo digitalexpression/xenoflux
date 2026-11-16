@@ -23,7 +23,7 @@ export function createSigninDecoder(client, onProgress) {
           && ![...url.searchParams].some(([key, value]) => /^(?:access_token|refresh_token|id_token|token|client_secret|authorization)$/i.test(key) || key === 'code' && value !== 'true')) claudeAuthorization = true;
       } catch {}
     }
-    const code = client === 'copilot' ? clean.match(/(?:one-time code[:\s(]*)([A-Z0-9]{4}-[A-Z0-9]{4})\b/i)?.[1]?.toUpperCase() : undefined;
+    const code = client === 'copilot' ? clean.match(/(?:one-time code|https:\/\/github\.com\/login\/device\s+and enter code)[:\s(]*([A-Z0-9]{4}-[A-Z0-9]{4})\b/i)?.[1]?.toUpperCase() : undefined;
     const progress = { ...(claudeAuthorization ? { state: 'waiting-for-browser' } : {}), ...(browserUrl ? { browserUrl } : {}), ...(code ? { deviceCode: code } : {}) };
     const signature = JSON.stringify(progress);
     if ((claudeAuthorization || browserUrl || code) && signature !== last) { last = signature; onProgress(progress); }

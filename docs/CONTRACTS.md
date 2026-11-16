@@ -51,8 +51,9 @@ never expose raw login output or accept credentials or OAuth callback codes.
 Native exit success alone does not establish sign-in. Revalidate the selected
 installation and roots, then verify through the existing native account check
 before reporting success. Preserve reservations when process shutdown is uncertain.
-Shared GitHub CLI sign-in excludes concurrent Xenoflux Copilot account use across controllers
-and invalidates observations for the shared account scope.
+Managed Copilot uses the selected native CLI account and a profile-local GitHub
+CLI configuration path to exclude the stock fallback. The Desktop app keeps its
+own sign-in. Default Copilot can use its existing stock GitHub CLI account.
 On a Profiles visit, background CLI account checks use the existing native
 verification and ownership guards. A check refused before it obtains the profile
 reservation preserves the previous account observation.
@@ -204,14 +205,15 @@ or retry. A deliberate new attempt has a fresh preview/record.
 ## Desktop and native helpers
 
 Claude and Copilot Desktop own durable profile reservations independent of the UI
-server. A managed Claude profile admits one interactive CLI and one Desktop in
-either launch order. Use separate membership records and require an exact live peer
-before joining. Verify allowed holders on shared resources and scan Claude Desktop
-storage separately. Recovery or closure releases only the stopped owner's membership.
-Xenoflux sign-in, profile mutations, and task admission require an idle Claude profile.
-Before startup, bind the current signed installation and canonical profile roots and
-their identities. Persist intent and refuse conflicting reservations. Copilot Desktop
-requires an exclusive profile reservation and refuses an existing vendor app.
+server. A managed Claude or Copilot profile admits one interactive CLI and one
+Desktop in either launch order. Use separate membership records and require an
+exact live peer before joining. Verify allowed holders on shared resources and
+scan Claude Desktop storage separately. For Copilot, require a Desktop holder
+of the profile database even when the CLI also holds it. Recovery or closure
+releases only the stopped owner's membership. Xenoflux sign-in, profile mutations,
+and task admission require an idle profile. Before startup, bind the current signed
+installation and canonical profile roots and their identities. Persist intent and
+refuse conflicting reservations. Copilot Desktop refuses an existing vendor app.
 Claude uses a distinct Desktop data
 folder and allows other instances without controlling them. Require a new exact native process identity and
 positive selected-root storage evidence before reporting profile-bound startup.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, realpath, rm, writeFile, rename, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir, hostname } from 'node:os';
+import { tmpdir, hostname, userInfo } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { launchHome } from '../src/launcher.js';
 import { readProfileOwners } from '../src/profile-reservations.js';
@@ -74,7 +74,7 @@ test('Desktop opens without a CLI, binds selected database and survives controll
   assert.equal(f.installs, 0, 'polling uses shared installation observation');
   assert.equal((await f.owner.open(f.profile.name, { appKey: f.app.appKey })).state, 'running');
   assert.equal(f.opened, 1);
-  assert.deepEqual(f.calls[0].args, ['-n', '-a', f.app.path, '--env', `COPILOT_HOME=${f.configRoot}`]);
+  assert.deepEqual(f.calls[0].args, ['-n', '-a', f.app.path, '--env', `COPILOT_HOME=${f.configRoot}`, '--env', `GH_CONFIG_DIR=${join(f.configRoot, 'gh')}`]);
   assert.equal(f.calls[0].command, '/usr/bin/open');
   const saved = await readJSON(await f.report());
   assert.equal(saved.phase, 'running'); assert.equal(saved.spawnIntent, true);
@@ -440,10 +440,10 @@ test('Claude startup refuses existing selected-root crash reporters and preserve
   });
 });
 
-for (const desktopFirst of [true, false]) {
-  test(`Claude ${desktopFirst ? 'Desktop' : 'CLI'} first joins the other client and releases only the exiting owner`, async t => {
-    const f = await fixture(t, 'claude');
-    const executable = join(f.base, 'claude');
+for (const [vendor, desktopFirst] of [['claude', true], ['claude', false], ['copilot', true], ['copilot', false]]) {
+  test(`${vendor} ${desktopFirst ? 'Desktop' : 'CLI'} first joins the other client and releases only the exiting owner`, async t => {
+    const f = await fixture(t, vendor);
+    const executable = join(f.base, vendor);
     await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
     const runner = { ...f.main, pid: 99990, ppid: process.pid, executable };
     const { runtime, lockOptions } = f.deps;
@@ -462,12 +462,16 @@ for (const desktopFirst of [true, false]) {
     if (desktopFirst) assert.equal((await desktop()).state, 'running');
     const started = Promise.withResolvers(), finished = Promise.withResolvers();
     const launching = launchHome(f.store, f.profile.id, {
-      instanceRuntime: runtime, lockOptions, defaultUserHome: f.base,
-      terminalEnvironment: { PATH: `${f.base}:/usr/bin:/bin`, HOME: f.base, USER: 'fixture', LOGNAME: 'fixture' },
+      instanceRuntime: runtime, lockOptions, ...(vendor === 'claude' ? {
+        defaultUserHome: f.base, terminalEnvironment: { PATH: `${f.base}:/usr/bin:/bin`, HOME: f.base, USER: 'fixture', LOGNAME: 'fixture' },
+      } : {
+        terminalEnvironment: { PATH: `${f.base}:/usr/bin:/bin`, HOME: userInfo().homedir, USER: userInfo().username, LOGNAME: userInfo().username },
+      }),
       probe: async () => '2.1.319',
       run: async ({ cwd, env, onSpawn }) => {
         assert.equal(cwd, join(f.root, 'workspace'));
-        assert.equal(env.CLAUDE_CONFIG_DIR, f.configRoot);
+        assert.equal(vendor === 'claude' ? env.CLAUDE_CONFIG_DIR : env.COPILOT_HOME, f.configRoot);
+        if (vendor === 'copilot') assert.ok(env.GH_CONFIG_DIR.startsWith(f.configRoot + '/'));
         cliRunning = true;
         await onSpawn(runner.pid);
         started.resolve();
@@ -478,15 +482,17 @@ for (const desktopFirst of [true, false]) {
     });
     try {
       await Promise.race([started.promise, launching.then(result => assert.fail(`CLI exited early: ${result.error}`))]);
-      cliHoldsDesktopStorage = true;
-      if (desktopFirst) assert.equal((await f.owner.status(f.profile.id)).state, 'blocked');
-      else await assert.rejects(desktop(), /Unapproved CLI holder/);
-      cliHoldsDesktopStorage = false;
+      if (vendor === 'claude') {
+        cliHoldsDesktopStorage = true;
+        if (desktopFirst) assert.equal((await f.owner.status(f.profile.id)).state, 'blocked');
+        else await assert.rejects(desktop(), /Unapproved CLI holder/);
+        cliHoldsDesktopStorage = false;
+      }
       if (!desktopFirst) {
         assert.equal((await f.owner.status(f.profile.id, { installation: f.app })).state, 'available');
         assert.equal((await desktop()).state, 'running');
       }
-      assert.deepEqual((await owners()).map(owner => owner.kind).sort(), ['claude-desktop', 'interactive-cli']);
+      assert.deepEqual((await owners()).map(owner => owner.kind).sort(), [`${vendor}-desktop`, 'interactive-cli']);
       const other = { kind: 'native-signin', runId: randomUUID() };
       await assert.rejects(acquire(join(f.root, '.run-lock'), other, true));
       if (desktopFirst) {
@@ -502,7 +508,7 @@ for (const desktopFirst of [true, false]) {
     if (desktopFirst) await assert.rejects(owners(), { code: 'ENOENT' });
     else {
       assert.equal((await f.owner.status(f.profile.id)).state, 'running');
-      assert.deepEqual((await owners()).map(owner => owner.kind), ['claude-desktop']);
+      assert.deepEqual((await owners()).map(owner => owner.kind), [`${vendor}-desktop`]);
     }
   });
 }

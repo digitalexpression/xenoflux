@@ -39,7 +39,7 @@ async function fixture(t, config = {}, workspace) {
   const profile = await resolveCopilotProfile({ stored: { id: randomUUID(), name: 'Readiness', client: 'copilot',
     native: { root, configRoot: home, rootMode: 'explicit', executable } }, workspace, bindingRepository: workspace,
     terminalEnvironment: { ...process.env, PATH: root + ':' + process.env.PATH } });
-  profile.accountQualification = { authType: 'gh-cli', scope: 'shared', sdk: '1.0.29', rootMode: 'explicit',
+  profile.accountQualification = { authType: 'user', scope: 'per-root', sdk: '1.0.29', rootMode: 'explicit',
     executableIdentity: profile.executableIdentity, runtimeVersion: '1.0.107',
     route: copilotAccountRoute(profile.environmentBinding), expiresAt: Date.now() + 300000 };
   const paths = { stdoutPath: join(evidence, 'native.stdout'), stderrPath: join(evidence, 'native.stderr') };

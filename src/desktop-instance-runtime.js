@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { userInfo as nodeUserInfo } from 'node:os';
 import { lstat as nodeLstat, realpath as nodeRealpath } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
+import { installedProcessHelper } from './profile-launcher.js';
 import { DESKTOP_APP, inspectDesktopApp, sameDesktopApp } from './desktop-runtime.js';
 
 const execFileDefault = promisify(nodeExecFile);
@@ -138,6 +139,18 @@ export function createDesktopInstanceRuntime({
       rows = rows.filter(row => !row?.state?.startsWith('Z'));
     }
     return validateRows(rows).filter(row => row.uid === uid);
+  }
+  let processHelper;
+  async function canonicalProcess(row) {
+    if (absoluteCanonical(row.executable)) return row;
+    try {
+      const helper = await (processHelper ??= installedProcessHelper());
+      const { stdout } = await execFile(helper, ['--process-executable', String(row.pid), targetStartSeconds(row.startedAt)],
+        { cwd: '/', encoding: 'utf8', maxBuffer: 8192, timeout: systemTimeoutMs });
+      const executable = stdout.replace(/\n$/, '');
+      if (absoluteCanonical(executable)) return { ...row, executable };
+    } catch { /* Short labels never qualify as exact process identities. */ }
+    return row;
   }
   function ancestors(rows) {
     const byPid = new Map(rows.map(r => [r.pid, r]));
@@ -306,7 +319,7 @@ export function createDesktopInstanceRuntime({
     }
     throw fail('DESKTOP_OPEN_TIMEOUT', []);
   }
-  async function observe(main, { trackedProcesses = [], helperExecutable } = {}) {
+  async function observe(main, { trackedProcesses = [], helperExecutable, resolveExecutable = false } = {}) {
     if (!Array.isArray(trackedProcesses)) throw fail('PROCESS_OBSERVATION_INVALID');
     const owned = ownedFor(main);
     for (const row of trackedProcesses) {
@@ -314,7 +327,14 @@ export function createDesktopInstanceRuntime({
         throw fail('PROCESS_OBSERVATION_INVALID');
       owned.set(row.pid, { pid: row.pid, ppid: row.ppid, uid: row.uid, startedAt: row.startedAt, executable: row.executable });
     }
-    const rows = await snapshotFor(main, helperExecutable, owned);
+    let rows = await snapshotFor(main, helperExecutable, owned);
+    if (resolveExecutable) {
+      const root = rows.find(row => matchesProcessIdentity(row, main) || awaitingExit(row, main));
+      if (root) {
+        const exact = new Map((await Promise.all(descendants(rows, root).map(canonicalProcess))).map(row => [row.pid, row]));
+        rows = rows.map(row => exact.get(row.pid) ?? row);
+      }
+    }
     const samePid = rows.find(r => r.pid === main?.pid);
     if (samePid && !matchesProcessIdentity(samePid, main)) return { status: 'identity-changed', processes: [samePid], identityChange: identityChanged(main, samePid).identityChange };
     const liveTracked = [];
@@ -446,9 +466,12 @@ export function createDesktopInstanceRuntime({
       // belonging to the same process (including SQLite/WAL/SHM files).
       if (executable !== reference.path) holders.add(reference.pid);
     }
-    const processes = [...holders].map(pid => byPid.get(pid));
     const missingPid = [...holders].find(pid => !byPid.has(pid));
     if (missingPid !== undefined) throw resourceInspectionFailure('process snapshot', present.map(item => item.path).join(', '), `holder PID ${missingPid} was absent`);
+    const processes = await Promise.all([...holders].map(pid => {
+      const row = byPid.get(pid);
+      return allowedProcesses.some(expected => awaitingExit(row, expected)) ? canonicalProcess(row) : row;
+    }));
     const unexpected = processes.filter(row => !allowedProcesses.some(expected => matchesProcessIdentity(row, expected)));
     if (unexpected.length) {
       const error = fail('RESOURCE_BUSY', unexpected);
@@ -550,5 +573,5 @@ export function createDesktopInstanceRuntime({
     // a quitting process's argv. That fallback label is never a control target.
     throw fail('DESKTOP_CLOSE_TIMEOUT', remaining.map(row => awaitingExit(row, owned.get(row.pid)) ? owned.get(row.pid) : row));
   }
-  return { inspectApp, snapshot, open, observe, focus, close, assertResourcesIdle };
+  return { inspectApp, snapshot, canonicalProcess, open, observe, focus, close, assertResourcesIdle };
 }

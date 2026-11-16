@@ -218,7 +218,7 @@ function SigninDialog({ profile, returnFocus, onClose, onRefresh }:
         }
       }}>
       <p className="text-ui">{profile.client === 'copilot'
-        ? 'This changes the shared GitHub CLI account for all qualified Copilot profiles and other tools using GitHub CLI.'
+        ? 'Sign in to GitHub for this Copilot CLI profile. Sign in separately in Copilot Desktop.'
         : 'Sign in with your Claude account in your browser. This sign-in belongs to this profile.'}</p>
       <p className="hint">Xenoflux checks sign-in automatically when browser authorization finishes. Never paste passwords, tokens or authorization codes here.</p>
       {busy === 'starting' ? <p role="status">Starting sign-in…</p> : null}
@@ -268,10 +268,10 @@ function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMen
           <dt className="muted">{cliLabel}</dt><dd>{profile.cli.text}</dd>
           <dt className="muted">Desktop app</dt><dd>{profile.desktop.text}</dd>
         </dl>
-        <p className="profile-account-scope">{profile.client === 'copilot' ? 'Signing in changes the shared GitHub CLI account for all qualified Copilot profiles and other tools using GitHub CLI.'
+        <p className="profile-account-scope">{profile.client === 'copilot' ? 'Sign in separately to CLI and Desktop for this profile.'
           : profile.accountScope === 'per-root' ? 'CLI sign-in belongs to this profile. Desktop sign-in is separate and unverified.'
-          : 'Check sign-in to verify the shared GitHub CLI account before running tasks.'}</p>
-        <p className="hint">Account independence: {profile.accountIndependence ?? 'not verified'}.</p>
+          : 'Check CLI sign-in before running tasks.'}</p>
+        {profile.client === 'copilot' ? null : <p className="hint">Account independence: {profile.accountIndependence ?? 'not verified'}.</p>}
       </div>}
       </div>
       <div className="profile-inspect-actions">
@@ -373,10 +373,10 @@ function CreateDialog({ open, onClose, sources, onCreated }: { open: boolean; on
               }}>
                 {Object.entries(clientLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
               </select>
-              {client === 'copilot' ? <p className="hint">Copilot CLI uses a shared GitHub CLI login once the route is verified. Desktop sign-in is separate and its account scope is unverified.</p> : null}
+              {client === 'copilot' ? <p className="hint">Sign in separately to Copilot CLI and Desktop for each profile.</p> : null}
               {client === 'claude-code' ? <p className="hint">Sign in separately in Claude Code for each profile. Desktop sign-in is separate and unverified.</p> : null}
               <p className="hint">{client === 'codex' ? 'Use this profile in Codex CLI or Codex Desktop. Open either client to sign in.'
-                : client === 'copilot' ? 'Use this profile in Copilot CLI or open GitHub Copilot Desktop when installed. Desktop startup uses the selected profile storage; authenticated sessions and model use remain unverified.'
+                : client === 'copilot' ? 'Open Copilot CLI and Desktop for this profile in either order.'
                 : 'Use this profile in Claude Code or open Claude Desktop when installed. Desktop has its own profile storage and can run alongside other Claude instances. Authenticated sessions and model use remain unverified.'}</p>
             </div>
             <fieldset className="flex flex-col gap-3">

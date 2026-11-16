@@ -6,15 +6,12 @@ import test from 'node:test';
 import { createEngineProvider } from '../src/ui-engine.js';
 import { startUiServer } from '../src/ui-server.js';
 import { bind, Store } from '../src/profiles.js';
-import { copilotExecutableIdentity } from '../src/copilot-profile.js';
 import { claudeEnvironment } from '../src/claude-profile.js';
 
 test('Copilot creation, status qualification, copy and Undo use the real Store and authenticated controller', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-e1-fixture-')));
   const executable = join(root, 'copilot'), launches = join(root, 'launches.log');
   const malformedBanner = join(root, 'malformed-banner');
-  const stock = join(root, 'simulated-stock');
-  await mkdir(stock, { mode: 0o700 });
   await writeFile(executable, `#!/bin/sh
 [ "$*" = --version ] && [ -d "$COPILOT_HOME" ] || exit 99
 if [ -f "${malformedBanner}" ]; then printf 'GitHub Copilot CLI 1.0.107.bad\\n'; exit; fi
@@ -24,7 +21,6 @@ printf '%s\\n' 'GitHub Copilot CLI 1.0.107.' "Run 'copilot update' to check for 
   const store = new Store(join(root, 'store'));
   const profilesBase = join(root, 'profiles');
   let managedStatus = { state: 'signed-out', version: '1.0.107' };
-  let stockToken = 'matching-fixture-token';
   const statusRoutes = [];
   const provider = createEngineProvider({ store, profilesBase, reportsRoot: join(root, 'reports'),
     runContext: { terminalEnvironment: { ...process.env, PATH: root + ':/usr/bin:/bin' } },
@@ -32,12 +28,9 @@ printf '%s\\n' 'GitHub Copilot CLI 1.0.107.' "Run 'copilot update' to check for 
     lockOptions: { lockPath: join(root, 'operation') }, copyRuntime: () => ({ assertIdle: async () => {} }),
     accountContext: {
       terminalEnvironment: { ...process.env, PATH: root + ':/usr/bin:/bin' },
-      resolveStockCopilot: async () => ({ home: stock, executable, executableIdentity: copilotExecutableIdentity(await lstat(executable)), rootMode: 'implicit' }),
       readCopilotAccount: async ({ profile }) => {
         statusRoutes.push([profile.rootMode, profile.home]);
-        return profile.rootMode === 'implicit'
-          ? { state: 'signed-in', route: 'gh-cli', version: '1.0.107', token: stockToken }
-          : managedStatus;
+        return managedStatus;
       },
     },
   });
@@ -114,13 +107,12 @@ printf '%s\\n' 'GitHub Copilot CLI 1.0.107.' "Run 'copilot update' to check for 
   const catalog = () => json(get('/api/catalog?' + new URLSearchParams({ profile: 'Target', client: 'copilot', workspace: repository })), 422);
   await catalog();
   managedStatus = { state: 'signed-in', route: 'gh-cli', version: '1.0.107', token: 'matching-fixture-token' };
-  stockToken = 'different-fixture-token';
   assert.equal((await account()).accountScope, 'unverified');
   assert.equal((await card()).accountScope, 'unverified');
-  stockToken = managedStatus.token;
-  const shared = await account();
-  assert.deepEqual(shared, { state: 'signed-in', route: 'gh-cli', accountScope: 'shared', accountIndependence: 'not verified' });
-  assert.equal((await card()).accountScope, 'shared');
+  managedStatus = { ...managedStatus, route: 'user' };
+  const scoped = await account();
+  assert.deepEqual(scoped, { state: 'signed-in', route: 'user', accountScope: 'per-root', accountIndependence: 'not verified' });
+  assert.equal((await card()).accountScope, 'per-root');
   assert.match((await card()).setup.command, /COPILOT_HOME=.*--no-auto-update/);
   assert.equal(JSON.stringify(await store.read()).includes('accountQualification'), false);
   const catalogReady = await json(get('/api/catalog?' + new URLSearchParams({ profile: 'Target', client: 'copilot', workspace: repository })));

@@ -5,16 +5,15 @@ import { randomUUID } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { hostname, userInfo } from 'node:os';
 import { join, resolve } from 'node:path';
-import { acquire, exists, privateDirectory, readJSON, record, release } from './metadata.js';
+import { exists, privateDirectory, readJSON, record } from './metadata.js';
 import { find, strictDescendant, validateProfile } from './profiles.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { createDesktopInstanceRuntime, matchesProcessIdentity, processIdentity } from './desktop-instance-runtime.js';
 import { createStockDesktopApps, STOCK_DESKTOP_APPS } from './stock-desktop-apps.js';
 import { claudeEnvironment } from './claude-profile.js';
-import { assertCopilotEnvironment } from './copilot-profile.js';
-import { acquireNativeParticipant, assertNoLegacyAuditLease, isClaudeCliParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
-
-import { observeClaudeCli } from './native-participants.js';
+import { assertCopilotEnvironment, assertManagedCopilotCredentials, managedCopilotEnvironment } from './copilot-profile.js';
+import { acquireNativeParticipant, assertNoLegacyAuditLease, isNativeCliParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
+import { observeManagedCli } from './native-participants.js';
 
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -62,16 +61,17 @@ export function createManagedDesktop(store, {
     lock: join(native.root, '.run-lock') };
   }
   const resources = value => [value.root, value.configRoot, value.workspace, value.desktopData].filter(Boolean);
-  async function databaseOwner(value, main, processes = [main]) {
+  async function databaseOwner(value, main, processes, cli) {
     const path = value.desktopData ? join(value.desktopData, 'Cookies') : join(value.configRoot, 'data.db');
     const info = await exists(path);
     if (!info) return false;
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid())
       throw new Error('Selected Desktop storage path is unsafe');
-    const observed = await runtime.assertResourcesIdle([path], { allowedProcesses: value.desktopData ? processes : [main] });
+    const owners = value.desktopData ? processes : [main];
+    const observed = await runtime.assertResourcesIdle([path], { allowedProcesses: value.desktopData ? owners : [...owners, ...cli] });
     const checked = await lstat(path);
     if (checked.dev !== info.dev || checked.ino !== info.ino || checked.nlink !== 1 || checked.isSymbolicLink()) throw new Error('Selected Desktop storage changed');
-    return observed.processes.some(row => (value.desktopData ? processes : [main]).some(owned => matchesProcessIdentity(row, owned)));
+    return observed.processes.some(row => owners.some(owned => matchesProcessIdentity(row, owned)));
   }
   async function assertBinding(previous) {
     const current = await binding(previous.profile.id);
@@ -116,9 +116,10 @@ export function createManagedDesktop(store, {
   }
   async function reservations(current) {
     const owners = await exists(current.lock) ? await readProfileOwners(current.value.root) : [];
+    const isCli = owner => isNativeCliParticipant(owner, current.profile.client);
     return { owner: owners.find(owner => owner?.kind === current.kind),
-      cli: current.vendor === 'claude' && owners.find(isClaudeCliParticipant),
-      blocked: owners.some(owner => owner?.kind !== current.kind && !(current.vendor === 'claude' && isClaudeCliParticipant(owner))) };
+      cli: owners.find(isCli),
+      blocked: owners.some(owner => owner?.kind !== current.kind && !isCli(owner)) };
   }
   async function assertOwner(current, owner) {
     const held = await reservations(current);
@@ -128,12 +129,12 @@ export function createManagedDesktop(store, {
   function cliProcesses(current, cli, joining = false) {
     if (!cli) return Promise.resolve([]);
     const { configRoot: home, environmentId, profileId, root: nativeRoot } = current.value;
-    return observeClaudeCli(store, { home, environmentId, profileId, nativeRoot }, cli, runtime, { joining })
+    return observeManagedCli(store, { client: current.profile.client, home, environmentId, profileId, nativeRoot }, cli, runtime, { joining })
       .then(observed => observed.processes);
   }
   async function assertIdle(current, desktopProcesses, cli = []) {
     // The CLI may hold the shared config and workspace, never Desktop's own storage.
-    if (cli.length) await runtime.assertResourcesIdle([current.value.desktopData], { allowedProcesses: desktopProcesses });
+    if (current.value.desktopData && cli.length) await runtime.assertResourcesIdle([current.value.desktopData], { allowedProcesses: desktopProcesses });
     await runtime.assertResourcesIdle(resources(current.value), { allowedProcesses: [...desktopProcesses, ...cli] });
   }
   async function readClaim(current) {
@@ -182,7 +183,7 @@ export function createManagedDesktop(store, {
     if (!equal(await readJSON(claim.path), saved) || !equal((await assertOwner(current, claim.owner)).cli, cli))
       throw new Error('Desktop ownership changed');
     if (main) {
-      if (!await databaseOwner(current.value, main, allowed.filter(row => !row.executable.endsWith('/chrome_crashpad_handler')))) return uncertain('Selected profile database ownership is unconfirmed');
+      if (!await databaseOwner(current.value, main, allowed.filter(row => !row.executable.endsWith('/chrome_crashpad_handler')), cliAllowed)) return uncertain('Selected profile database ownership is unconfirmed');
       return { state: 'running', runId: claim.owner.runId, processes: allowed, ...cliState };
     }
     if (saved.processes.some(previous => rows.some(row => matchesProcessIdentity(row, previous))))
@@ -231,7 +232,10 @@ export function createManagedDesktop(store, {
           if (!equal(prepared.value.identities.slice(0, 3), current.value.identities)) throw new Error('Profile roots changed during preparation');
           current = prepared;
         }
-      } else assertCopilotEnvironment(environment, nativeUser);
+      } else {
+        assertCopilotEnvironment(environment, nativeUser);
+        await assertManagedCopilotCredentials(current.value.configRoot);
+      }
       await assertNoLegacyAuditLease(store.directory, current.value.configRoot);
       const app = await stockApps.binding({ client: current.vendor, appKey });
       const before = await runtime.snapshot();
@@ -254,8 +258,7 @@ export function createManagedDesktop(store, {
       const path = join(directory, 'report.json');
       let saved = { schemaVersion: 1, kind: owner.kind, owner, binding: current.value,
         app, phase: 'prepared', processes: [], spawnIntent: false, createdAt: new Date(now()).toISOString() };
-      if (current.vendor === 'claude') await acquireNativeParticipant(current.value.root, owner, cli || undefined);
-      else await acquire(current.lock, owner, true);
+      await acquireNativeParticipant(current.value.root, owner, cli);
       // Every failure after reservation, including uncertain publication, is retained for inspection.
       await record(path, saved);
       const freshApp = await stockApps.binding({ client: current.vendor, appKey });
@@ -267,11 +270,12 @@ export function createManagedDesktop(store, {
       await assertIdle(current, [], cliAllowed);
       if (!equal((await assertOwner(current, owner)).cli, cli) || !equal(await readJSON(path), saved))
         throw new Error('Desktop reservation changed before startup');
+      if (current.vendor === 'copilot') await assertManagedCopilotCredentials(current.value.configRoot);
       const intent = { ...saved, phase: 'starting', spawnIntent: true };
       // A published intent is the uncertainty boundary; prepared records prove no dispatch.
       await record(path, intent);
       saved = intent;
-      await execFile('/usr/bin/open', current.vendor === 'claude' ? ['-n', '-a', app.path, '--env', `CLAUDE_CONFIG_DIR=${current.value.configRoot}`, '--args', `--user-data-dir=${current.value.desktopData}`] : ['-n', '-a', app.path, '--env', `COPILOT_HOME=${current.value.configRoot}`], {
+      await execFile('/usr/bin/open', current.vendor === 'claude' ? ['-n', '-a', app.path, '--env', `CLAUDE_CONFIG_DIR=${current.value.configRoot}`, '--args', `--user-data-dir=${current.value.desktopData}`] : ['-n', '-a', app.path, ...Object.entries(managedCopilotEnvironment({}, current.value.configRoot)).flatMap(([key, value]) => ['--env', `${key}=${value}`])], {
         cwd: current.value.workspace, timeout: openTimeoutMs, maxBuffer: 1024 * 1024,
         env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin', HOME: nativeUser.homedir, USER: nativeUser.username, LOGNAME: nativeUser.username },
       });
@@ -294,8 +298,9 @@ export function createManagedDesktop(store, {
           }
           let storageOwned;
           try {
-            storageOwned = await databaseOwner(current.value, main, tree);
-            if (storageOwned) await assertIdle(current, processes, await cliProcesses(current, cli));
+            const activeCli = await cliProcesses(current, cli);
+            storageOwned = await databaseOwner(current.value, main, tree, activeCli);
+            if (storageOwned) await assertIdle(current, processes, activeCli);
           } catch (error) {
             // New helpers can appear between the tree snapshot and the handle scan.
             if (error.code !== 'RESOURCE_BUSY' || !error.remainingProcesses?.length) throw error;
@@ -341,20 +346,19 @@ export function createManagedDesktop(store, {
       const { processes: _processes, ...checked } = await observe(current, fresh);
       if (checked.state !== 'recoverable-stopped') return checked;
       await record(fresh.path, { ...fresh.saved, phase: 'recovered' });
-      if (current.vendor === 'claude') await releaseProfileParticipant(current.value.root, fresh.owner);
-      else await release(current.lock, fresh.owner);
+      await releaseProfileParticipant(current.value.root, fresh.owner);
       return { state: 'released', status: 'recovered', kind: claim.owner.kind, runId: fresh.owner.runId };
     });
   }
-  async function observeClaudePeer(name, owner, { joining = false } = {}) {
+  async function observePeer(name, owner, { joining = false } = {}) {
     const current = await binding(name);
     const claim = await readClaim(current);
-    if (current.vendor !== 'claude' || !equal(claim.owner, owner))
-      throw new Error('Claude Desktop reservation changed');
+    if (!equal(claim.owner, owner))
+      throw new Error('Desktop reservation changed');
     const observation = await observe(current, claim);
     if (observation.state === 'running') return observation.processes;
     if (observation.state === 'recoverable-stopped' && !joining) return [];
-    throw new Error('Claude Desktop ownership is uncertain or stopped; release the Desktop reservation before opening Terminal');
+    throw new Error('Desktop ownership is uncertain or stopped; release the Desktop reservation before opening Terminal');
   }
-  return { open, status, recover, observeClaudePeer };
+  return { open, status, recover, observePeer };
 }

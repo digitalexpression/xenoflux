@@ -9,7 +9,7 @@ import { acquire, privateDirectory, record, release } from './metadata.js';
 import { withProfileOperation } from './desktop-instances.js';
 import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { canonicalClaudeDirectory, claudeEnvironment, discoverClaudeExecutable, resolveClaudeProfile } from './claude-profile.js';
-import { assertCopilotEnvironment, copilotAccountRoute, COPILOT_SDK_VERSION, inspectCopilotExecutable, resolveCopilotExecutable, resolveCopilotProfile } from './copilot-profile.js';
+import { assertCopilotEnvironment, copilotAccountRoute, COPILOT_SDK_VERSION, inspectCopilotExecutable, managedCopilotEnvironment, resolveCopilotExecutable, resolveCopilotProfile } from './copilot-profile.js';
 import { nativePath } from './node-runtime.js';
 import { probeClaudeAccount, probeNativeProfileVersion } from './version-probe.js';
 
@@ -27,7 +27,7 @@ function copilotEnv(ambient) {
 
 export function managedNativeProfiles({ store, profilesBase, defaultUserHome = homedir(),
   terminalEnvironment = process.env, copilotRuntime, lockOptions,
-  readCopilotAccount = options => copilotRuntime.accountStatus(options), resolveStockCopilot,
+  readCopilotAccount = options => copilotRuntime.accountStatus(options),
   signinProcess = runSigninProcess, signinTimeoutMs = 300000, acquireAccount = acquireCopilotAccount }) {
   const observations = new Map();
 
@@ -62,7 +62,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
         }
         const env = client === 'claude-code'
           ? claudeEnvironment(terminalEnvironment, { userHome: defaultUserHome, home: configRoot, rootMode: 'explicit' })
-          : { ...copilotEnv(terminalEnvironment), COPILOT_HOME: configRoot };
+          : managedCopilotEnvironment(copilotEnv(terminalEnvironment), configRoot);
         const version = await probeNativeProfileVersion(client, { executable: initial.executable, cwd: workspace, env });
         if (!same(initial, await binary(client))) throw new Error('The selected native executable changed during preparation.');
         profile.native = { root, configRoot, rootMode: 'explicit', environmentId: randomUUID(), version, ...initial };
@@ -118,7 +118,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
     const cwd = join(profile.reservationRoot, 'workspace');
     await privateDirectory(cwd);
     const env = profile.client === 'claude-code'
-      ? { ...profile.env, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } : { ...profile.env, COPILOT_HOME: profile.home };
+      ? { ...profile.env, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } : managedCopilotEnvironment(profile.env, profile.home);
     const args = profile.client === 'claude-code' ? ['auth', 'login'] : ['--no-auto-update'];
     const command = ['cd', shellWord(cwd), '&& /usr/bin/env -i',
       ...Object.entries(env).map(([key, value]) => shellWord(key + '=' + value)), shellWord(profile.executable), ...args].join(' ');
@@ -156,25 +156,15 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
         await privateDirectory(cwd);
         status = await probeClaudeAccount({ executable: profile.executable, cwd, env: profile.env, signal });
       } else {
-        const read = async (profile, label) => {
-          attempted = true;
-          const result = await readCopilotAccount({ profile, workspace: scratch, signal,
-            stdoutPath: join(scratch, label + '.out'), stderrPath: join(scratch, label + '.err') });
-          attempted = false;
-          return result;
-        };
-        const managed = await read(profile, 'selected');
+        attempted = true;
+        const managed = await readCopilotAccount({ profile, workspace: scratch, signal,
+          stdoutPath: join(scratch, 'selected.out'), stderrPath: join(scratch, 'selected.err') });
+        attempted = false;
         runtimeVersion = managed.version;
         status = { state: managed.state, route: managed.route };
         if (selected && managed.state === 'signed-in') {
-          const stock = await (resolveStockCopilot ?? (options => resolveProfile(client, null, options)))({ workspace: scratch });
-          if (stock.executable !== profile.executable || stock.executableIdentity !== profile.executableIdentity
-            || stock.home === profile.home || strictDescendant(profile.reservationRoot, stock.home))
-            throw new Error('Stock Copilot does not match the selected executable and independent root.');
-          const implicit = await read(stock, 'stock');
-          if (implicit.state === 'signed-in' && managed.token && implicit.token === managed.token
-            && managed.version === implicit.version) {
-            qualification = { scope: 'shared', authType: 'gh-cli', sdk: COPILOT_SDK_VERSION, runtimeVersion: managed.version,
+          if (managed.route === 'user' && managed.token) {
+            qualification = { scope: 'per-root', authType: 'user', sdk: COPILOT_SDK_VERSION, runtimeVersion: managed.version,
               rootMode: profile.rootMode, executableIdentity: profile.executableIdentity,
               route: copilotAccountRoute(profile.environmentBinding), expiresAt: Date.now() + freshnessMs,
               rootIdentities: roots, accountToken: managed.token };
@@ -186,7 +176,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
         || !same(roots, await routeIdentity(profile))) throw new Error('The native account binding changed during the check.');
       observations.set(key, { client, ...status, qualification, runtimeVersion, roots, binary: [profile.executable, profile.executableIdentity],
         expiresAt: qualification?.expiresAt ?? Date.now() + freshnessMs });
-      return { ...status, accountScope: client === 'claude-code' ? 'per-root' : qualification ? 'shared' : 'unverified',
+      return { ...status, accountScope: client === 'claude-code' ? 'per-root' : qualification?.scope ?? 'unverified',
         accountIndependence: 'not verified' };
     } catch (error) {
       preserve = error?.code === 'SHUTDOWN_FAILED' || (attempted && error.process?.shutdown.groupTerminated !== true);
@@ -199,14 +189,6 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
 
   function invalidate(client) {
     for (const [key, observation] of observations) if (observation.client === client) observations.delete(key);
-  }
-
-  async function githubBinary(env) {
-    for (const directory of env.PATH.split(':')) {
-      try { return await inspectCopilotExecutable(join(directory, 'gh')); }
-      catch (error) { if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error; }
-    }
-    throw new Error('GitHub CLI is unavailable. Install GitHub CLI before signing in to Copilot.');
   }
 
   async function signin(name, client, { signal, onProgress = () => {}, onSpawn } = {}) {
@@ -229,26 +211,24 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
         await acquire(lock, owner, true); held = true;
       });
       const roots = await routeIdentity(profile);
-      const env = client === 'claude-code' ? profile.env : copilotEnv(terminalEnvironment);
-      const binary = client === 'claude-code' ? { executable: profile.executable, executableIdentity: profile.executableIdentity } : await githubBinary(env);
+      const env = client === 'claude-code' ? profile.env : managedCopilotEnvironment(profile.env, profile.home);
+      const executable = { executable: profile.executable, executableIdentity: profile.executableIdentity };
       const revalidate = async () => {
         const fresh = find(await store.read(), selected.id);
         const native = await resolveProfile(client, fresh, client === 'copilot' ? { workspace: cwd } : {});
-        const login = client === 'claude-code' ? native : await githubBinary(env);
         if (!same(selected.native, fresh.native) || !same(roots, await routeIdentity(native))
-          || native.executable !== profile.executable || native.executableIdentity !== profile.executableIdentity
-          || login.executable !== binary.executable || login.executableIdentity !== binary.executableIdentity)
+          || native.executable !== profile.executable || native.executableIdentity !== profile.executableIdentity)
           throw new Error('The native sign-in binding changed. Check the profile and try again.');
       };
       await revalidate();
-      Object.assign(owner, { executable: binary.executable, executableIdentity: binary.executableIdentity, roots, configRoot: profile.home, userHome: profile.userHome });
+      Object.assign(owner, executable, { roots, configRoot: profile.home, userHome: profile.userHome });
       if (account) { await account.checkpoint({ spawnIntent: true }); owner.accountClaim = account.reference; }
       await record(join(lock, 'owner.json'), owner);
       invalidate(client);
       const execute = async () => {
         signal?.throwIfAborted();
-        const result = await signinProcess({ ...binary, args: client === 'claude-code' ? ['auth', 'login', '--claudeai']
-          : ['auth', 'login', '--web', '--hostname', 'github.com', '--skip-ssh-key'], cwd, env, client, signal,
+        const result = await signinProcess({ ...executable, args: client === 'claude-code' ? ['auth', 'login', '--claudeai']
+          : ['login', '--device-code'], cwd, env, client, signal,
           timeoutMs: signinTimeoutMs, onProgress, async onSpawn(identity) {
             owner.processIdentity = identity ?? null;
             if (account) { await account.checkpoint({ processIdentity: identity ?? null }); owner.accountClaim = account.reference; }
@@ -270,7 +250,7 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
         const status = await check(name, client, { alreadyReserved: true, signal });
         await revalidate();
         signal?.throwIfAborted();
-        if (status.state !== 'signed-in' || client === 'copilot' && status.accountScope !== 'shared')
+        if (status.state !== 'signed-in' || status.accountScope !== 'per-root')
           throw new Error('Browser sign-in finished, but this profile could not be verified. Try again or check the selected client account.');
         return status;
       };

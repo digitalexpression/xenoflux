@@ -4,7 +4,7 @@ import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { matchesProcessIdentity } from './desktop-instance-runtime.js';
 import { privateDirectory, readJSON } from './metadata.js';
-import { isClaudeCliParticipant, isCodexCliParticipant } from './profile-reservations.js';
+import { isNativeCliParticipant } from './profile-reservations.js';
 import { ramLogTarget } from './ram-logs.js';
 
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -35,9 +35,8 @@ export async function assertSavedCodexSignIn(home) {
 }
 
 async function readCliReport(store, plan, owner, client) {
-  const isCliParticipant = client === 'codex' ? isCodexCliParticipant : isClaudeCliParticipant;
   const reportPath = cliReportPath(plan.nativeRoot, owner.runId);
-  if (!isCliParticipant(owner) || owner.host !== hostname() || owner.storePath !== store.directory
+  if (!isNativeCliParticipant(owner, client) || owner.host !== hostname() || owner.storePath !== store.directory
     || owner.profileId !== plan.profileId || owner.home !== plan.home || owner.environmentId !== plan.environmentId
     || owner.reportPath !== reportPath) throw new Error('Terminal reservation belongs to another profile or controller; preserving it');
   await privateDirectory(join(plan.nativeRoot, 'launches'));
@@ -62,11 +61,12 @@ async function observeCli(store, plan, owner, runtime, { joining = false, client
     if (!joining && (!report.spawnIntent || report.shutdown?.groupTerminated === true)) return { status: 'stopped', processes: [] };
     throw new Error('Terminal process identity is unavailable; preserving its reservation');
   }
-  let observed = await runtime.observe(runner, { trackedProcesses: [runner] });
-  if (client === 'claude-code') {
+  const observation = { trackedProcesses: [runner], ...(client === 'copilot' ? { resolveExecutable: true } : {}) };
+  let observed = await runtime.observe(runner, observation);
+  if (client !== 'codex') {
     for (let attempt = 0; attempt < 3 && observed.status === 'running' && observed.processes.some(row => !nativeProcessRow(row)); attempt++) {
       await delay(35);
-      observed = await runtime.observe(runner, { trackedProcesses: [runner] });
+      observed = await runtime.observe(runner, observation);
     }
   }
   if (observed.status === 'stopped' && !joining) return observed;
@@ -86,8 +86,8 @@ async function observeCli(store, plan, owner, runtime, { joining = false, client
 
 export const observeCodexCli = (store, plan, owner, runtime, options) =>
   observeCli(store, plan, owner, runtime, { ...options, client: 'codex' });
-export const observeClaudeCli = (store, plan, owner, runtime, options) =>
-  observeCli(store, plan, owner, runtime, { ...options, client: 'claude-code' });
+export const observeManagedCli = (store, plan, owner, runtime, options) =>
+  observeCli(store, plan, owner, runtime, { ...options, client: plan.client });
 
 export async function assertCodexHolder(runtime, paths, allowedProcesses, profileHome) {
   const observed = await runtime.assertResourcesIdle(paths, { allowedProcesses, ...(profileHome ? { profileHome } : {}) });

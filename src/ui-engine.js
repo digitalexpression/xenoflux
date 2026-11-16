@@ -787,13 +787,13 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           ? [{ id: 'open-desktop', label: `Open ${desktopName} Desktop`, appKey: desktopStatus.appKey }]
           : desktopStatus?.state === 'recoverable-stopped' ? [{ id: 'recover-desktop', label: 'Release closed Desktop reservation' }] : [];
         const desktopClaimed = desktopStatus && !['available', 'unavailable'].includes(desktopStatus.state);
-        const accountScope = client === 'claude-code' ? 'per-root' : observation?.qualification ? 'shared' : 'unverified';
+        const accountScope = client === 'claude-code' ? 'per-root' : observation?.qualification?.scope ?? 'unverified';
         const accountState = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state];
         const signIn = accountState ? accountState + (observation.stale ? ' (last checked)' : '') : 'Sign-in not checked';
         const cliActions = [];
         const cliReserved = desktopStatus?.cliReserved === true;
         const cliRunning = desktopStatus?.cliRunning === true;
-        if (ready && !cliReserved && (!desktopClaimed || client === 'claude-code' && desktopStatus?.state === 'running'))
+        if (ready && !cliReserved && (!desktopClaimed || desktopStatus?.state === 'running'))
           cliActions.push({ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` });
         if (ready && !desktopClaimed && !cliReserved) {
           if (!observation || observation.stale) cliActions.push({ id: 'check', label: 'Check sign-in' });
@@ -806,7 +806,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           binding: repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
           summary: selected.description || `${PROFILE_CLIENT_NAMES[client]} folder ${tilde(selected.native?.configRoot ?? '')}`,
           cli: { state: cliRunning ? 'running' : ready ? 'unknown' : 'unavailable',
-            text: cliRunning ? 'Claude Code is using this profile in Terminal.'
+            text: cliRunning ? 'The CLI is using this profile in Terminal.'
               : cliReserved ? 'A Terminal reservation is still held for this profile.' : ready ? 'Open in Terminal with this profile. Process state not checked.' : 'CLI or profile root unavailable' },
           desktop,
           clientActions: [...cliActions, ...desktopActions],

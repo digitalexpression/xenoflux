@@ -8,20 +8,21 @@ import { acquire, exists, globalLock, privateDirectory, readJSON, record, releas
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const taskKinds = new Set(['audit-experiment', 'review-task']);
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
-const memberKinds = new Set([...taskKinds, 'desktop-instance', 'interactive-cli', 'claude-desktop']);
+const memberKinds = new Set([...taskKinds, 'desktop-instance', 'interactive-cli', 'claude-desktop', 'copilot-desktop']);
 const validMember = owner => memberKinds.has(owner?.kind) && typeof owner.profileId === 'string'
   && typeof owner.storePath === 'string' && owner.storePath.startsWith('/')
   && uuid.test(owner.runId ?? '');
-const isNativeCliParticipant = (owner, client) => validMember(owner) && owner.kind === 'interactive-cli'
+export const isNativeCliParticipant = (owner, client) => validMember(owner) && owner.kind === 'interactive-cli'
   && owner.client === client && owner.membershipVersion === 1 && uuid.test(owner.profileId)
   && uuid.test(owner.environmentId ?? '') && isAbsolute(owner.home ?? '') && isAbsolute(owner.reportPath ?? '')
   && Number.isSafeInteger(owner.pid) && owner.pid > 0 && typeof owner.host === 'string';
 
 export const isCodexCliParticipant = owner => isNativeCliParticipant(owner, 'codex');
-export const isClaudeCliParticipant = owner => isNativeCliParticipant(owner, 'claude-code');
+export const managedDesktopKind = client => client === 'claude-code' ? 'claude-desktop' : client === 'copilot' ? 'copilot-desktop' : undefined;
+const managedCli = owner => Boolean(managedDesktopKind(owner?.client)) && isNativeCliParticipant(owner, owner.client);
 
 const nativePair = (a, b) => validMember(b) && (isCodexCliParticipant(a) && b.kind === 'desktop-instance'
-  || isClaudeCliParticipant(a) && b.kind === 'claude-desktop' && b.schemaVersion === 1)
+  || managedCli(a) && b.kind === managedDesktopKind(a.client) && b.schemaVersion === 1)
   && a.profileId === b.profileId && a.storePath === b.storePath && a.host === b.host && a.runId !== b.runId;
 
 export function profileOwners(value) {
@@ -30,7 +31,7 @@ export function profileOwners(value) {
     if (value.schemaVersion !== 1 || !Array.isArray(owners) || owners.length < 2
       || owners.some(owner => !validMember(owner)) || new Set(owners.map(owner => owner.runId)).size !== owners.length
       || owners.filter(owner => owner.kind === 'desktop-instance').length > 1
-      || owners.some(owner => ['interactive-cli', 'claude-desktop'].includes(owner.kind)) && (owners.length !== 2
+      || owners.some(owner => ['interactive-cli', 'claude-desktop', 'copilot-desktop'].includes(owner.kind)) && (owners.length !== 2
         || !(nativePair(owners[0], owners[1]) || nativePair(owners[1], owners[0]))))
       throw new Error('Invalid execution participant set; preserving it');
     return owners;
@@ -75,7 +76,7 @@ export async function acquireProfileParticipant(root, owner, desktopOwner) {
 /** Record a native lease only against the exact peer validated under the operation guard. */
 export async function acquireNativeParticipant(root, owner, peer) {
   const path = join(root, '.run-lock');
-  if (!validMember(owner) || !(isCodexCliParticipant(owner) || isClaudeCliParticipant(owner) || ['desktop-instance', 'claude-desktop'].includes(owner.kind)))
+  if (!validMember(owner) || !(isCodexCliParticipant(owner) || managedCli(owner) || ['desktop-instance', 'claude-desktop', 'copilot-desktop'].includes(owner.kind)))
     throw new Error('Invalid native participant');
   if (!peer) return acquire(path, owner, true);
   const owners = await readProfileOwners(root);

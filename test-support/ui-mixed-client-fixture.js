@@ -71,7 +71,7 @@ export async function createMixedClientFixture() {
         const profile = await resolveCopilotProfile({ ...options, defaultUserHome: homedir });
         // Reuse the captured fixture account-route qualification. Dispatch still
         // checks the actual bound binary, workspace and fixture account response.
-        profile.accountQualification = { scope: 'shared', authType: 'gh-cli', sdk: '1.0.29',
+        profile.accountQualification = { scope: 'per-root', authType: 'user', sdk: '1.0.29',
           rootMode: 'explicit', runtimeVersion: '1.0.107', executableIdentity: profile.executableIdentity,
           route: copilotAccountRoute(profile.environmentBinding), expiresAt: Number.MAX_SAFE_INTEGER };
         return profile;

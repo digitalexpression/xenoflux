@@ -56,12 +56,7 @@ for (const client of ['claude-code', 'copilot']) {
     await assert.rejects(recoverProfileRun(f.store, 'First', { ...options, isAlive: pid => pid === child.pid, apply: true }), /Native CLI may still be live/);
     childAlive = false;
     assert.equal((await recoverProfileRun(f.store, 'First', { ...options, apply: true })).status, 'recovered');
-    const { root, configRoot } = f.profiles[0].native;
-    assert.ok(checked[0].resourcePaths.includes(root));
-    if (client === 'copilot') {
-      assert.ok(checked[0].resourcePaths.includes(configRoot));
-      assert.ok(checked[0].cliExecutables.includes(f.executable));
-    }
+    assert.ok(checked[0].resourcePaths.includes(f.profiles[0].native.root));
     await assert.rejects(access(join(f.profiles[0].native.root, '.run-lock')), { code: 'ENOENT' });
     await access(result.reportPath);
   });

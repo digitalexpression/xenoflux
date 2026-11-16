@@ -31,7 +31,7 @@ async function setup(t) {
       stored: { id: label, name: label, client: 'copilot', native: { root: reservation, configRoot: home, rootMode: 'explicit', executable } },
       workspace, terminalEnvironment: { ...process.env, PATH: root + ':' + process.env.PATH },
     });
-    profile.accountQualification = { scope: 'shared', authType: 'gh-cli', sdk,
+    profile.accountQualification = { scope: 'per-root', authType: 'user', sdk,
       rootMode: 'explicit', executableIdentity: profile.executableIdentity, runtimeVersion: '1.0.107',
       route: copilotAccountRoute(profile.environmentBinding), expiresAt: Date.now() + 300000 };
     return profile;
@@ -56,7 +56,19 @@ test('Copilot account status is bounded metadata even before an explicit profile
   assert.ok(rows.some(row => row.method === 'auth.getStatus'));
   assert.ok(rows.every(row => ['connect', 'ping', 'status.get', 'auth.getStatus', 'runtime.shutdown'].includes(row.method)),
     JSON.stringify(rows.map(row => row.method)));
-  assert.ok(rows.every(row => row.root === profile.home && row.cwd === workspace));
+  assert.ok(rows.every(row => row.root === profile.home && row.cwd === workspace && row.ghRoot === join(profile.home, 'gh')));
+});
+
+test('managed Copilot refuses a GitHub CLI host file redirected outside the profile', async t => {
+  const { root, workspace, profileFor, evidence } = await setup(t);
+  const profile = await profileFor('Redirected');
+  const ghRoot = join(profile.home, 'gh'), stockHosts = join(root, 'stock-hosts.yml');
+  await mkdir(ghRoot, { mode: 0o700 });
+  await writeFile(stockHosts, '{}\n', { mode: 0o600 });
+  await symlink(stockHosts, join(ghRoot, 'hosts.yml'));
+  const paths = await evidence('redirected-status');
+  await assert.rejects(createCopilotRuntime().accountStatus({ ...paths, profile, workspace }), /Unsafe Copilot GitHub CLI configuration/);
+  await assert.rejects(paths.log(), { code: 'ENOENT' });
 });
 
 test('Copilot catalog keeps advertised explicit and Auto choices separate', () => {
@@ -290,7 +302,7 @@ test('a worker constructor failure releases its shared account reader before any
 
 test('a different current auth route stops before Copilot discovery or submission', async t => {
   const { profileFor, workspace, evidence } = await setup(t);
-  const profile = await profileFor('Changed', { authType: 'user' });
+  const profile = await profileFor('Changed', { authType: 'gh-cli' });
   const paths = await evidence('changed-discovery');
   await assert.rejects(createCopilotRuntime().discover({ ...paths, profile, workspace }), /account scope is unverified/);
   assert.deepEqual((await paths.log()).map(row => row.method), ['connect', 'status.get', 'auth.getStatus', 'runtime.shutdown']);
@@ -310,7 +322,6 @@ test('permission validation refuses altered action ownership and any persistent 
 test('a separately qualified native user route is carried through bound list and import', async t => {
   const { profileFor, workspace, evidence, root } = await setup(t);
   const profile = await profileFor('UserRoute', { authType: 'user' });
-  profile.accountQualification = { ...profile.accountQualification, authType: 'user', scope: 'per-root' };
   const paths = await evidence('user-list');
   const [row] = await createCopilotRuntime().listSessions({ ...paths, profile, workspace });
   assert.equal(row.selection.authType, 'user');

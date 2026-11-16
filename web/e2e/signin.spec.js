@@ -4,13 +4,13 @@ async function signinFixture(page, client) {
   let state = 'waiting-for-browser', profileReads = 0, cancelCalls = 0, terminalCalls = 0, startCalls = 0;
   let checkOffline = false, cancelOffline = false, cancellationState = 'cancelled';
   const profileName = client === 'copilot' ? 'copilot-work' : 'claude-work';
-  const attempt = () => ({ id: 'fixture-signin', client, profileName, accountScope: client === 'copilot' ? 'shared' : 'per-root',
+  const attempt = () => ({ id: 'fixture-signin', client, profileName, accountScope: 'per-root',
     state, browserUrl: client === 'copilot' ? 'https://github.com/login/device' : undefined,
     deviceCode: client === 'copilot' ? 'ABCD-1234' : undefined,
     message: state === 'completed' ? 'Account sign-in verified.' : state === 'verifying' ? 'Checking the native account.' : 'Finish authorization in your browser.' });
   await page.route('**/api/profiles', route => {
     profileReads++;
-    return route.fulfill({ json: { profiles: [{ name: profileName, client, accountScope: client === 'copilot' ? 'shared' : 'per-root',
+    return route.fulfill({ json: { profiles: [{ name: profileName, client, accountScope: 'per-root',
       accountIndependence: 'not verified', isDefault: false, state: 'ready', reason: null,
       signIn: state === 'completed' ? 'Signed in' : 'Signed out', binding: 'Fixture folder', summary: 'Separate settings and history.',
       cli: { state: 'not-running', text: 'Not running' }, desktop: { state: 'unavailable', text: 'Not verified' },
@@ -39,7 +39,7 @@ for (const client of ['claude-code', 'copilot']) {
   test(`${client} signs in through browser and automatically verifies in narrow light and dark layouts`, async ({ page }, testInfo) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const fixture = await signinFixture(page, client);
-    if (client === 'copilot') await expect(page.getByText(/Signing in changes the shared GitHub CLI account/)).toBeVisible();
+    if (client === 'copilot') await expect(page.getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
     await fixture.button.focus();
     await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog');
@@ -50,7 +50,7 @@ for (const client of ['claude-code', 'copilot']) {
     await expect(dialog.getByRole('textbox')).toHaveCount(0);
     if (client === 'copilot') {
       await expect(dialog.getByText('ABCD-1234')).toBeVisible();
-      await expect(dialog.getByText(/all qualified Copilot profiles and other tools using GitHub CLI/)).toBeVisible();
+      await expect(dialog.getByText(/Sign in to GitHub for this Copilot CLI profile/)).toBeVisible();
     }
     for (const theme of ['light', 'dark']) {
       await page.evaluate(value => document.documentElement.setAttribute('data-theme', value), theme);

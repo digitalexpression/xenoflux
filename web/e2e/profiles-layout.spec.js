@@ -5,7 +5,7 @@ import { startUiServer } from '../../src/ui-server.js';
 
 function nativeProfile(client) {
   return { name: client === 'copilot' ? 'copilot-work' : 'claude-work', client,
-    accountScope: client === 'copilot' ? 'shared' : 'per-root', accountIndependence: 'not verified',
+    accountScope: 'per-root', accountIndependence: 'not verified',
     isDefault: false, state: 'ready', reason: null,
     signIn: client === 'copilot' ? 'Signed out' : 'Signed in (last checked)', binding: 'bound to date-utils',
     summary: 'Separate settings and retained local history.',
@@ -57,7 +57,7 @@ for (const theme of ['light', 'dark']) {
         }
         return route.fulfill({ json: { ...original, profiles: [original.profiles[0], nativeProfile('claude-code'), copilot] } });
       });
-      const attempt = () => ({ id: 'visual-signin', client: 'copilot', profileName: 'copilot-work', accountScope: 'shared', state: signinState,
+      const attempt = () => ({ id: 'visual-signin', client: 'copilot', profileName: 'copilot-work', accountScope: 'per-root', state: signinState,
         message: signinState === 'completed' ? 'Native sign-in verified.' : 'Complete authorization in your browser.', deviceCode: 'DEMO-1234' });
       await page.route('**/api/profiles/copilot-work/sign-in', route => { signIns++; return route.fulfill({ json: attempt() }); });
       await page.route('**/api/sign-ins/visual-signin', route => route.fulfill({ json: attempt() }));
@@ -75,7 +75,7 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByRole('region', { name: 'Claude Code profiles', exact: true })).toBeVisible();
       const copilot = page.getByRole('article', { name: 'copilot-work', exact: true });
       const claude = page.getByRole('article', { name: 'claude-work', exact: true });
-      await expect(copilot.getByText(/Signing in changes the shared GitHub CLI account/)).toBeVisible();
+      await expect(copilot.getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
       await expect(claude.getByText(/Signed in \(last checked\)/)).toBeVisible();
       await expect(page.getByRole('heading', { name: 'Native apps', exact: true })).toHaveCount(0);
       await page.screenshot({ path: testInfo.outputPath(`profiles-${theme}.png`), fullPage: true, animations: 'disabled' });
@@ -83,8 +83,8 @@ for (const theme of ['light', 'dark']) {
       await page.keyboard.press('Enter');
       const dialog = page.getByRole('dialog', { name: 'Sign in to GitHub Copilot', exact: true });
       await expect(dialog.getByText('Continue in your browser', { exact: true })).toBeVisible();
-      await expect(dialog.getByText(/all qualified Copilot profiles and other tools using GitHub CLI/)).toBeVisible();
-      await page.screenshot({ path: testInfo.outputPath(`shared-signin-${theme}.png`), fullPage: true, animations: 'disabled' });
+      await expect(dialog.getByText(/Sign in to GitHub for this Copilot CLI profile/)).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath(`copilot-signin-${theme}.png`), fullPage: true, animations: 'disabled' });
       signinState = 'completed'; signedIn = true;
       await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
       await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
