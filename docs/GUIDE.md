@@ -51,7 +51,7 @@ are never copied. Profiles subsequently evolve independently.
 | Profile client | CLI | Desktop with the selected profile |
 | --- | --- | --- |
 | Codex | Open in Terminal | Open Codex Desktop with the same profile sign-in |
-| Claude Code | Sign in through the browser; Open in Terminal for interactive work | Separate Desktop startup and storage; authenticated session/model use unverified |
+| Claude Code | Sign in through the browser; Open in Terminal for interactive work | Open Claude Desktop with its own sign-in |
 | GitHub Copilot | Sign in through the browser with the shared GitHub CLI account; Open in Terminal for interactive work | Profile-bound local startup and storage; authenticated session/model use unverified |
 
 Profiles groups entries by client. Each entry keeps inspection links separate
@@ -107,8 +107,9 @@ For Claude, choose **Open Claude Desktop** on the profile entry. Each profile ha
 its own Desktop data folder alongside its Claude Code configuration folder.
 Other Claude Desktop instances can stay open. Xenoflux starts a new instance
 and verifies its selected storage without focusing, closing or changing the
-other instances. Desktop sign-in and its use of Claude Code settings remain
-unverified. The CLI sign-in check does not check Desktop sign-in.
+other instances. A fresh Claude Desktop instance asks for its own sign-in after
+you sign in to the CLI. Desktop account isolation and use of Claude Code settings
+remain unverified.
 
 Claude and Copilot Desktop keep their profile reservations when the Xenoflux UI stops.
 After you quit the app, choose **Release closed Desktop reservation** before
