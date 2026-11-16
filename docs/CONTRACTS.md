@@ -203,10 +203,16 @@ or retry. A deliberate new attempt has a fresh preview/record.
 
 ## Desktop and native helpers
 
-Claude and Copilot Desktop own one durable, exclusive reservation per profile independent of
-the UI server. Before startup, bind the current signed installation, canonical
-profile roots and their identities, persist intent and refuse a conflicting reservation.
-Copilot also refuses an existing vendor app. Claude uses a distinct Desktop data
+Claude and Copilot Desktop own durable profile reservations independent of the UI
+server. A managed Claude profile admits one interactive CLI and one Desktop in
+either launch order. Use separate membership records and require an exact live peer
+before joining. Verify allowed holders on shared resources and scan Claude Desktop
+storage separately. Recovery or closure releases only the stopped owner's membership.
+Xenoflux sign-in, profile mutations, and task admission require an idle Claude profile.
+Before startup, bind the current signed installation and canonical profile roots and
+their identities. Persist intent and refuse conflicting reservations. Copilot Desktop
+requires an exclusive profile reservation and refuses an existing vendor app.
+Claude uses a distinct Desktop data
 folder and allows other instances without controlling them. Require a new exact native process identity and
 positive selected-root storage evidence before reporting profile-bound startup.
 For Claude, that evidence can come from an exact owned descendant holding the
@@ -215,8 +221,8 @@ Do not pass prompts, authentication choices or account overrides. Readonly statu
 never releases the reservation. Explicit recovery rechecks the exact stopped
 owner, roots and complete holder observations; uncertain startup, reused process
 identities and incomplete scans retain ownership. Other Claude instances alone
-do not block recovery of a confirmed-stopped profile. Never broaden shared task
-participant admission to bypass this exclusive claim.
+do not block recovery of a confirmed-stopped profile. Claude and Copilot Desktop
+remain outside shared task admission.
 
 Open/focus/quit verifies the signed vendor app, selected profile routes and exact
 PID/kernel start identity. Preserve signatures/entitlements; never re-sign vendor

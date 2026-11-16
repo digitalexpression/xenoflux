@@ -107,16 +107,20 @@ For Claude, choose **Open Claude Desktop** on the profile entry. Each profile ha
 its own Desktop data folder alongside its Claude Code configuration folder.
 Other Claude Desktop instances can stay open. Xenoflux starts a new instance
 and verifies its selected storage without focusing, closing or changing the
-other instances. A fresh Claude Desktop instance asks for its own sign-in after
-you sign in to the CLI. Desktop account isolation and use of Claude Code settings
-remain unverified.
+other instances. Claude Desktop has a separate sign-in from the CLI. If Google
+sign-in returns to a different Claude window on macOS, quit the other Claude
+Desktop instances before signing in, then reopen them.
 
-Claude and Copilot Desktop keep their profile reservations when the Xenoflux UI stops.
-After you quit the app, choose **Release closed Desktop reservation** before
-reusing the profile in the CLI, copying settings or editing its registry entry.
-Xenoflux releases only confirmed-stopped ownership with no remaining profile
-holders. Uncertain state stays reserved. A missing CLI does not prevent opening
-an otherwise readable Desktop profile.
+You can open one managed Claude CLI and one managed Claude Desktop for the same
+profile in either order. Quit either client independently. After you quit Desktop,
+choose **Release closed Desktop reservation** to reopen it or change the profile.
+You can release the stopped Desktop reservation while the CLI stays open.
+
+Claude and Copilot Desktop keep their reservations when the Xenoflux UI stops.
+For Copilot, release the closed Desktop reservation before reusing the profile in
+the CLI. Xenoflux releases only confirmed-stopped ownership. Uncertain state stays
+reserved. A missing CLI does not prevent opening an otherwise readable Desktop
+profile.
 
 Copy preview lists additions, replacements, removals and kept items. Unselected
 and destination-only state is preserved. Selected standalone skills are replaced
@@ -371,7 +375,7 @@ Claude's observed account route is per-root/same-account; Copilot's qualified
 `gh-cli` route is shared. Separate roots do not prove separate accounts.
 
 Credential refresh and sign-out during concurrent use remain unverified.
-Distinct-account independence for Claude and Copilot remains unverified.
+Claude Desktop and CLI sign in separately. Distinct-account independence for Copilot remains unverified.
 An interrupted shared-account metadata operation keeps its
 reservation for maintainer recovery. Some native pair/mode combinations, repeated overlap stress,
 controller-kill reviews and copied-setup loading remain deferred. Real Codex
@@ -379,9 +383,9 @@ stale-callback recovery is unobserved; synthetic Desktop fixtures do not establi
 real sign-in, Dock behavior or account isolation. Unreported effort/usage stays
 unknown, and sampled ancestry does not prove escaped descendants stopped.
 
-Claude and Copilot Desktop qualification covers local startup and selected-root storage.
-Desktop authentication, effective session settings, model use and account
-independence remain unverified. Cloud execution,
+Claude and Copilot Desktop qualification covers local startup and selected-root
+storage. Xenoflux does not inspect Desktop accounts. Effective Desktop session
+settings and model use remain unverified. Cloud execution,
 generic configuration editing and cross-client setup copying are outside the
 supported scope. Xenoflux never transfers credentials or grants native trust
 through inspection/copying.

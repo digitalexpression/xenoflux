@@ -1,9 +1,10 @@
 import { lstat, realpath } from 'node:fs/promises';
+import { setTimeout as delay } from 'node:timers/promises';
 import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { matchesProcessIdentity } from './desktop-instance-runtime.js';
 import { privateDirectory, readJSON } from './metadata.js';
-import { isCodexCliParticipant } from './profile-reservations.js';
+import { isClaudeCliParticipant, isCodexCliParticipant } from './profile-reservations.js';
 import { ramLogTarget } from './ram-logs.js';
 
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -33,40 +34,48 @@ export async function assertSavedCodexSignIn(home) {
     throw new Error('Save your Codex sign-in before opening this profile in both Terminal and Desktop.');
 }
 
-export async function readCodexCliReport(store, plan, owner) {
+async function readCliReport(store, plan, owner, client) {
+  const isCliParticipant = client === 'codex' ? isCodexCliParticipant : isClaudeCliParticipant;
   const reportPath = cliReportPath(plan.nativeRoot, owner.runId);
-  if (!isCodexCliParticipant(owner) || owner.host !== hostname() || owner.storePath !== store.directory
+  if (!isCliParticipant(owner) || owner.host !== hostname() || owner.storePath !== store.directory
     || owner.profileId !== plan.profileId || owner.home !== plan.home || owner.environmentId !== plan.environmentId
     || owner.reportPath !== reportPath) throw new Error('Terminal reservation belongs to another profile or controller; preserving it');
   await privateDirectory(join(plan.nativeRoot, 'launches'));
   await privateDirectory(dirname(reportPath));
   const report = await readJSON(reportPath);
-  if (report.schemaVersion !== 1 || report.kind !== 'interactive-cli' || report.client !== 'codex'
+  if (report.schemaVersion !== 1 || report.kind !== 'interactive-cli' || report.client !== client
     || report.runId !== owner.runId || report.profileId !== owner.profileId || report.environmentId !== owner.environmentId
     || report.home !== owner.home || !equal(report.rootIdentity, await nativeRootIdentity(plan.nativeRoot, plan.home))
     || !absolute(report.executable) || typeof report.executableIdentity !== 'string'
     || !['starting', 'running', 'incomplete', 'exited', 'failed'].includes(report.status)
     || (report.processIdentity !== undefined && (!nativeProcessRow(report.processIdentity)
-      || report.processIdentity.pid !== report.pid || report.processIdentity.ppid !== owner.pid)))
+      || report.processIdentity.pid !== report.pid || report.processIdentity.ppid !== owner.pid
+      || client === 'claude-code' && report.processIdentity.executable !== report.executable)))
     throw new Error('Terminal run has no matching native ownership record; preserving its reservation');
   return report;
 }
 
-export async function observeCodexCli(store, plan, owner, runtime, { joining = false } = {}) {
-  const report = await readCodexCliReport(store, plan, owner);
+async function observeCli(store, plan, owner, runtime, { joining = false, client }) {
+  const report = await readCliReport(store, plan, owner, client);
   const runner = report.processIdentity;
   if (!runner) {
     if (!joining && (!report.spawnIntent || report.shutdown?.groupTerminated === true)) return { status: 'stopped', processes: [] };
     throw new Error('Terminal process identity is unavailable; preserving its reservation');
   }
-  const observed = await runtime.observe(runner, { trackedProcesses: [runner] });
+  let observed = await runtime.observe(runner, { trackedProcesses: [runner] });
+  if (client === 'claude-code') {
+    for (let attempt = 0; attempt < 3 && observed.status === 'running' && observed.processes.some(row => !nativeProcessRow(row)); attempt++) {
+      await delay(35);
+      observed = await runtime.observe(runner, { trackedProcesses: [runner] });
+    }
+  }
   if (observed.status === 'stopped' && !joining) return observed;
   if (observed.status !== 'running' || observed.orphaned
     || !observed.processes.every(nativeProcessRow)
     || !observed.processes.some(row => matchesProcessIdentity(row, runner) && row.ppid === owner.pid))
     throw new Error('Terminal process ownership is uncertain; preserving its reservation');
   if (joining) {
-    if (report.status !== 'running' || report.spawnIntent !== true || report.embedded !== true)
+    if (report.status !== 'running' || report.spawnIntent !== true || client === 'codex' && report.embedded !== true)
       throw new Error('This Terminal launch cannot share its profile; close it before opening Desktop.');
     const stat = await lstat(await realpath(report.executable));
     if (!stat.isFile() || JSON.stringify([stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs]) !== report.executableIdentity)
@@ -74,6 +83,11 @@ export async function observeCodexCli(store, plan, owner, runtime, { joining = f
   }
   return observed;
 }
+
+export const observeCodexCli = (store, plan, owner, runtime, options) =>
+  observeCli(store, plan, owner, runtime, { ...options, client: 'codex' });
+export const observeClaudeCli = (store, plan, owner, runtime, options) =>
+  observeCli(store, plan, owner, runtime, { ...options, client: 'claude-code' });
 
 export async function assertCodexHolder(runtime, paths, allowedProcesses, profileHome) {
   const observed = await runtime.assertResourcesIdle(paths, { allowedProcesses, ...(profileHome ? { profileHome } : {}) });

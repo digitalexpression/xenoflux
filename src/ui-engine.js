@@ -264,8 +264,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       if (!selected || !['claude-code', 'copilot'].includes(selected.client) || !selected.native)
         throw new UiError(400, 'Choose a managed Claude Code or Copilot profile.', 'invalid-selection');
       const desktop = await managedDesktop.status(selected.id);
-      if (!['available', 'unavailable'].includes(desktop.state))
-        throw new UiError(409, 'Close the Desktop app and release its reservation before signing in.', 'profile-busy');
+      if (desktop.cliReserved || !['available', 'unavailable'].includes(desktop.state))
+        throw new UiError(409, 'Close the active clients and release any remaining reservation before signing in.', 'profile-busy');
       return selected;
     },
   });
@@ -781,7 +781,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         const desktop = !desktopStatus ? { state: 'unavailable', text: 'Desktop observation is unavailable.' }
           : desktopStatus.state === 'available' ? { state: 'not-running', text: `${desktopName} Desktop startup and profile storage are supported. Desktop sign-in and task execution are unverified.` }
           : desktopStatus.state === 'running' ? { state: 'running', text: `${desktopName} Desktop is using this profile’s storage. Desktop sign-in and task execution are unverified.` }
-          : desktopStatus.state === 'recoverable-stopped' ? { state: 'not-running', text: 'Desktop is stopped. Release its reservation before opening another client. Desktop sign-in and task execution are unverified.' }
+          : desktopStatus.state === 'recoverable-stopped' ? { state: 'not-running', text: 'Desktop is stopped. Release its reservation before reopening Desktop. Desktop sign-in and task execution are unverified.' }
           : { state: desktopStatus.state === 'unavailable' ? 'unavailable' : 'unknown', text: desktopStatus.reason ?? 'Desktop ownership needs attention' };
         const desktopActions = desktopStatus?.state === 'available'
           ? [{ id: 'open-desktop', label: `Open ${desktopName} Desktop`, appKey: desktopStatus.appKey }]
@@ -791,8 +791,11 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         const accountState = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state];
         const signIn = accountState ? accountState + (observation.stale ? ' (last checked)' : '') : 'Sign-in not checked';
         const cliActions = [];
-        if (ready && !desktopClaimed) {
+        const cliReserved = desktopStatus?.cliReserved === true;
+        const cliRunning = desktopStatus?.cliRunning === true;
+        if (ready && !cliReserved && (!desktopClaimed || client === 'claude-code' && desktopStatus?.state === 'running'))
           cliActions.push({ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` });
+        if (ready && !desktopClaimed && !cliReserved) {
           if (!observation || observation.stale) cliActions.push({ id: 'check', label: 'Check sign-in' });
           else if (observation.state !== 'signed-in') cliActions.push({ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' });
         }
@@ -802,7 +805,9 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           signIn, accountScope, accountIndependence: 'not verified', setup,
           binding: repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
           summary: selected.description || `${PROFILE_CLIENT_NAMES[client]} folder ${tilde(selected.native?.configRoot ?? '')}`,
-          cli: { state: ready ? 'unknown' : 'unavailable', text: ready ? 'Open in Terminal with this profile. Process state not checked.' : 'CLI or profile root unavailable' },
+          cli: { state: cliRunning ? 'running' : ready ? 'unknown' : 'unavailable',
+            text: cliRunning ? 'Claude Code is using this profile in Terminal.'
+              : cliReserved ? 'A Terminal reservation is still held for this profile.' : ready ? 'Open in Terminal with this profile. Process state not checked.' : 'CLI or profile root unavailable' },
           desktop,
           clientActions: [...cliActions, ...desktopActions],
           moreMenu: [
@@ -810,7 +815,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
             { id: 'binding', label: 'Change project binding…' },
             { id: 'rename', label: 'Rename…' },
             { id: 'remove', label: 'Remove from Xenoflux…', detail: 'Keeps the profile’s files on disk.' },
-          ].map(item => desktopClaimed ? { ...item, disabledReason: 'Finish the active client or recover the interrupted reservation before changing this profile.' } : item) });
+          ].map(item => desktopClaimed || cliReserved ? { ...item, disabledReason: 'Finish the active client or recover the interrupted reservation before changing this profile.' } : item) });
       }
       const copySources = Object.fromEntries(await Promise.all(PROFILE_CLIENTS.map(async client => [client, [
         ...((client === 'codex' ? !!defaultHome : await nativeProfiles.hasStock(client)) ? ['Default'] : []),

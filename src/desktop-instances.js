@@ -12,9 +12,9 @@ import { prepareProfileApp, loadPreparedProfileApp, validateProfileApp } from '.
 import { reserveInstanceControl, releaseInstanceControl } from './desktop-instance-guard.js';
 import { createLogStorage } from './log-storage.js';
 import { acquire, exists, globalLock, privateDirectory, readJSON, record, release } from './metadata.js';
-import { acquireCodexNativeParticipant, assertNoLegacyAuditLease, isCodexCliParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
+import { acquireNativeParticipant, assertNoLegacyAuditLease, isCodexCliParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
 import { assertCodexHolder, assertSavedCodexSignIn, codexResourcePaths as resources, nativeProcessRow as rowValid,
-  nativeRootIdentity, observeCodexCli } from './codex-native-participants.js';
+  nativeRootIdentity, observeCodexCli } from './native-participants.js';
 
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -406,7 +406,7 @@ export async function openDesktopInstance(store, name, {
     await save(store, state);
     let reserved = false, launchAttempted = false;
     try {
-      await acquireCodexNativeParticipant(plan.nativeRoot, owner, cliOwner); reserved = true;
+      await acquireNativeParticipant(plan.nativeRoot, owner, cliOwner); reserved = true;
       await reserveInstanceControl(owner, options);
       await assertBinding(store, state);
       await runtime.assertResourcesIdle(resources(plan), { allowedProcesses, profileHome: plan.home });

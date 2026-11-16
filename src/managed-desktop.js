@@ -12,7 +12,9 @@ import { createDesktopInstanceRuntime, matchesProcessIdentity, processIdentity }
 import { createStockDesktopApps, STOCK_DESKTOP_APPS } from './stock-desktop-apps.js';
 import { claudeEnvironment } from './claude-profile.js';
 import { assertCopilotEnvironment } from './copilot-profile.js';
-import { assertNoLegacyAuditLease } from './profile-reservations.js';
+import { acquireNativeParticipant, assertNoLegacyAuditLease, isClaudeCliParticipant, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
+
+import { observeClaudeCli } from './native-participants.js';
 
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -112,10 +114,31 @@ export function createManagedDesktop(store, {
     }
     return result;
   }
+  async function reservations(current) {
+    const owners = await exists(current.lock) ? await readProfileOwners(current.value.root) : [];
+    return { owner: owners.find(owner => owner?.kind === current.kind),
+      cli: current.vendor === 'claude' && owners.find(isClaudeCliParticipant),
+      blocked: owners.some(owner => owner?.kind !== current.kind && !(current.vendor === 'claude' && isClaudeCliParticipant(owner))) };
+  }
+  async function assertOwner(current, owner) {
+    const held = await reservations(current);
+    if (held.blocked || !equal(held.owner, owner)) throw new Error('Desktop ownership changed');
+    return held;
+  }
+  function cliProcesses(current, cli, joining = false) {
+    if (!cli) return Promise.resolve([]);
+    const { configRoot: home, environmentId, profileId, root: nativeRoot } = current.value;
+    return observeClaudeCli(store, { home, environmentId, profileId, nativeRoot }, cli, runtime, { joining })
+      .then(observed => observed.processes);
+  }
+  async function assertIdle(current, desktopProcesses, cli = []) {
+    // The CLI may hold the shared config and workspace, never Desktop's own storage.
+    if (cli.length) await runtime.assertResourcesIdle([current.value.desktopData], { allowedProcesses: desktopProcesses });
+    await runtime.assertResourcesIdle(resources(current.value), { allowedProcesses: [...desktopProcesses, ...cli] });
+  }
   async function readClaim(current) {
-    await privateDirectory(current.lock);
-    const owner = await readJSON(join(current.lock, 'owner.json'));
-    if (owner?.kind !== current.kind || owner.schemaVersion !== 1 || owner.host !== hostname()
+    const { owner, blocked } = await reservations(current);
+    if (blocked || owner?.kind !== current.kind || owner.schemaVersion !== 1 || owner.host !== hostname()
       || owner.profileId !== current.profile.id || owner.storePath !== store.directory || !uuid.test(owner.runId ?? '')
       || Object.keys(owner).sort().join(',') !== 'host,kind,profileId,runId,schemaVersion,storePath')
       throw new Error('Profile has a foreign or unresolved reservation');
@@ -140,6 +163,9 @@ export function createManagedDesktop(store, {
     return { owner, saved, path };
   }
   async function observe(current, claim) {
+    const { cli } = await assertOwner(current, claim.owner);
+    const cliAllowed = await cliProcesses(current, cli);
+    const cliState = cli ? { cliReserved: true, cliRunning: cliAllowed.length > 0 } : {};
     const rows = await runtime.snapshot(), saved = claim.saved;
     if (!saved.main && saved.spawnIntent !== false) return uncertain('Desktop startup attribution is incomplete; preserve its reservation');
     for (const previous of saved.processes) {
@@ -151,38 +177,50 @@ export function createManagedDesktop(store, {
     const allowed = [...new Map([...saved.processes, ...(main ? descendants(rows, main) : [])]
       .map(row => [processIdentity(row), row])).values()];
     if (scoped.some(row => !allowed.some(previous => matchesProcessIdentity(row, previous)))) return uncertain('A selected-root crash reporter is still running; preserve its reservation');
-    await runtime.assertResourcesIdle(resources(current.value), { allowedProcesses: allowed });
+    await assertIdle(current, allowed, cliAllowed);
     await assertBinding(current);
-    if (!equal(await readJSON(claim.path), saved) || !equal(await readJSON(join(current.lock, 'owner.json')), claim.owner))
+    if (!equal(await readJSON(claim.path), saved) || !equal((await assertOwner(current, claim.owner)).cli, cli))
       throw new Error('Desktop ownership changed');
     if (main) {
       if (!await databaseOwner(current.value, main, allowed.filter(row => !row.executable.endsWith('/chrome_crashpad_handler')))) return uncertain('Selected profile database ownership is unconfirmed');
-      return { state: 'running', runId: claim.owner.runId };
+      return { state: 'running', runId: claim.owner.runId, processes: allowed, ...cliState };
     }
     if (saved.processes.some(previous => rows.some(row => matchesProcessIdentity(row, previous))))
       return uncertain('A Desktop descendant is still running; preserve its reservation');
     if (current.vendor === 'copilot' && appProcesses(rows, saved.app.path).length) return uncertain('A Copilot app process is still running; preserve its reservation');
-    await runtime.assertResourcesIdle(resources(current.value));
+    await assertIdle(current, [], cliAllowed);
     const stopped = await runtime.snapshot();
     if (saved.processes.some(previous => stopped.some(row => row.pid === previous.pid))
       || current.vendor === 'copilot' && appProcesses(stopped, saved.app.path).length
       || (await scopedCrashpads(current, saved.app, stopped)).length) return uncertain('Desktop processes changed during the stopped check; preserve its reservation');
-    return { state: 'recoverable-stopped', runId: claim.owner.runId };
+    return { state: 'recoverable-stopped', runId: claim.owner.runId, ...cliState };
   }
   async function status(name, { installation } = {}) {
     try {
       const current = await binding(name);
-      if (await exists(current.lock)) return await observe(current, await readClaim(current));
+      const { owner, cli, blocked } = await reservations(current);
+      if (blocked) throw new Error('Profile has a foreign or unresolved reservation');
+      if (owner) {
+        const { processes, ...state } = await observe(current, await readClaim(current));
+        return cli ? { cliReserved: true, ...state } : state;
+      }
+      await cliProcesses(current, cli, true);
       return installation?.status === 'available' && /^[a-f0-9]{64}$/.test(installation.appKey ?? '')
-        ? { state: 'available', appKey: installation.appKey }
-        : { state: 'unavailable', reason: `${current.vendor === 'claude' ? 'Claude' : 'GitHub Copilot'} Desktop is unavailable in the selected installation` };
+        ? { state: 'available', appKey: installation.appKey, ...(cli ? { cliReserved: true, cliRunning: true } : {}) }
+        : { state: 'unavailable', reason: `${current.vendor === 'claude' ? 'Claude' : 'GitHub Copilot'} Desktop is unavailable in the selected installation`, ...(cli ? { cliReserved: true, cliRunning: true } : {}) };
     } catch (error) { return { state: 'blocked', reason: error.message }; }
   }
   async function open(name, { appKey } = {}) {
     const initial = await binding(name);
     return withProfileOperation(store, initial.profile.id, lockOptions, async () => {
       let current = await assertBinding(initial);
-      if (await exists(current.lock)) return observe(current, await readClaim(current));
+      const { owner: existing, cli, blocked } = await reservations(current);
+      if (blocked) throw new Error('Profile has a foreign or unresolved reservation');
+      if (existing) {
+        const { processes, ...state } = await observe(current, await readClaim(current));
+        return state;
+      }
+      const cliAllowed = await cliProcesses(current, cli, true);
       if (current.vendor === 'claude') {
         claudeEnvironment(environment, { userHome: nativeUser.homedir, home: current.value.configRoot, rootMode: 'explicit' });
         if (Object.keys(environment).some(key => /^(?:CLAUDE_|ELECTRON_|CHROME_|REMOTE_DEBUGGING|DEBUG|VSCODE_INSPECTOR_OPTIONS)/i.test(key))) throw new Error('Remove ambient Claude Desktop overrides');
@@ -207,7 +245,7 @@ export function createManagedDesktop(store, {
         if (ancestor.executable === app.executable || ancestor.executable.startsWith(`${app.path}/`)) throw new Error('Open Desktop from outside the app');
         ancestor = before.find(row => row.pid === ancestor.ppid);
       }
-      await runtime.assertResourcesIdle(resources(current.value));
+      await assertIdle(current, [], cliAllowed);
       await assertBinding(current);
       const owner = { kind: current.kind, schemaVersion: 1, host: hostname(), runId: randomUUID(),
         profileId: current.profile.id, storePath: store.directory };
@@ -216,7 +254,8 @@ export function createManagedDesktop(store, {
       const path = join(directory, 'report.json');
       let saved = { schemaVersion: 1, kind: owner.kind, owner, binding: current.value,
         app, phase: 'prepared', processes: [], spawnIntent: false, createdAt: new Date(now()).toISOString() };
-      await acquire(current.lock, owner, true);
+      if (current.vendor === 'claude') await acquireNativeParticipant(current.value.root, owner, cli || undefined);
+      else await acquire(current.lock, owner, true);
       // Every failure after reservation, including uncertain publication, is retained for inspection.
       await record(path, saved);
       const freshApp = await stockApps.binding({ client: current.vendor, appKey });
@@ -225,8 +264,8 @@ export function createManagedDesktop(store, {
       const beforeDispatch = await runtime.snapshot();
       if (current.vendor === 'copilot' && appProcesses(beforeDispatch, app.path).length) throw new Error('Another Copilot app appeared; preserving reservation');
       if ((await scopedCrashpads(current, app, beforeDispatch)).length) throw new Error('A selected-root Claude crash reporter appeared; preserving reservation');
-      await runtime.assertResourcesIdle(resources(current.value));
-      if (!equal(await readJSON(join(current.lock, 'owner.json')), owner) || !equal(await readJSON(path), saved))
+      await assertIdle(current, [], cliAllowed);
+      if (!equal((await assertOwner(current, owner)).cli, cli) || !equal(await readJSON(path), saved))
         throw new Error('Desktop reservation changed before startup');
       const intent = { ...saved, phase: 'starting', spawnIntent: true };
       // A published intent is the uncertainty boundary; prepared records prove no dispatch.
@@ -256,7 +295,7 @@ export function createManagedDesktop(store, {
           let storageOwned;
           try {
             storageOwned = await databaseOwner(current.value, main, tree);
-            if (storageOwned) await runtime.assertResourcesIdle(resources(current.value), { allowedProcesses: processes });
+            if (storageOwned) await assertIdle(current, processes, await cliProcesses(current, cli));
           } catch (error) {
             // New helpers can appear between the tree snapshot and the handle scan.
             if (error.code !== 'RESOURCE_BUSY' || !error.remainingProcesses?.length) throw error;
@@ -269,7 +308,7 @@ export function createManagedDesktop(store, {
           }
           if (storageOwned) {
             await assertBinding(current);
-            if (!equal(await readJSON(join(current.lock, 'owner.json')), owner) || !equal(await readJSON(path), saved))
+            if (!equal((await assertOwner(current, owner)).cli, cli) || !equal(await readJSON(path), saved))
               throw new Error('Desktop reservation changed during startup');
             if (!equal(await stockApps.binding({ client: current.vendor, appKey }), app)) throw new Error('Desktop installation changed during startup');
             const latest = await runtime.snapshot();
@@ -293,18 +332,29 @@ export function createManagedDesktop(store, {
   async function recover(name, { apply = false } = {}) {
     if (typeof apply !== 'boolean') throw new Error('Recovery apply must be a boolean');
     const initial = await binding(name), claim = await readClaim(initial);
-    const preview = await observe(initial, claim);
+    const { processes: _processes, ...preview } = await observe(initial, claim);
     if (preview.state !== 'recoverable-stopped') return preview;
     if (!apply) return { ...preview, status: 'preview', kind: claim.owner.kind };
     return withProfileOperation(store, initial.profile.id, { ...lockOptions, recovery: true }, async () => {
       const current = await assertBinding(initial), fresh = await readClaim(current);
       if (!equal(fresh.owner, claim.owner) || !equal(fresh.saved, claim.saved)) throw new Error('Desktop ownership changed; preserving reservation');
-      const checked = await observe(current, fresh);
+      const { processes: _processes, ...checked } = await observe(current, fresh);
       if (checked.state !== 'recoverable-stopped') return checked;
       await record(fresh.path, { ...fresh.saved, phase: 'recovered' });
-      await release(current.lock, fresh.owner);
+      if (current.vendor === 'claude') await releaseProfileParticipant(current.value.root, fresh.owner);
+      else await release(current.lock, fresh.owner);
       return { state: 'released', status: 'recovered', kind: claim.owner.kind, runId: fresh.owner.runId };
     });
   }
-  return { open, status, recover };
+  async function observeClaudePeer(name, owner, { joining = false } = {}) {
+    const current = await binding(name);
+    const claim = await readClaim(current);
+    if (current.vendor !== 'claude' || !equal(claim.owner, owner))
+      throw new Error('Claude Desktop reservation changed');
+    const observation = await observe(current, claim);
+    if (observation.state === 'running') return observation.processes;
+    if (observation.state === 'recoverable-stopped' && !joining) return [];
+    throw new Error('Claude Desktop ownership is uncertain or stopped; release the Desktop reservation before opening Terminal');
+  }
+  return { open, status, recover, observeClaudePeer };
 }

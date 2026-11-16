@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
-import { find } from './profiles.js';
+import { find, strictDescendant } from './profiles.js';
 import { resolveClaudeProfile } from './claude-profile.js';
 import { resolveCopilotProfile } from './copilot-profile.js';
 import { loadHomeBinding, resolveHome } from './homes.js';
@@ -15,9 +15,10 @@ import { getAuditProcessIdentity } from './audit-process.js';
 import { acquireCopilotAccount } from './copilot-account-lock.js';
 import { createDesktopInstanceRuntime, matchesProcessIdentity } from './desktop-instance-runtime.js';
 import { observeCodexDesktopPeer, reconcileDesktopInstance, withProfileOperation } from './desktop-instances.js';
-import { acquireCodexNativeParticipant, assertNoLegacyAuditLease, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
+import { acquireNativeParticipant, assertNoLegacyAuditLease, readProfileOwners, releaseProfileParticipant } from './profile-reservations.js';
 import { assertSavedCodexSignIn, cliReportPath, codexResourcePaths, nativeProcessRow,
-  nativeRootIdentity as checkedNativeRoots } from './codex-native-participants.js';
+  nativeRootIdentity as checkedNativeRoots } from './native-participants.js';
+import { createManagedDesktop } from './managed-desktop.js';
 import { exists } from './metadata.js';
 
 const knownErrors = new Set(['CANCELLED', 'SPAWN_FAILED', 'SHUTDOWN_FAILED', 'VERSION_MISMATCH', 'EXECUTABLE_CHANGED', 'HOME_CHANGED', 'OUTPUT_LIMIT', 'RPC_TIMEOUT', 'RAM_LOGS_UNAVAILABLE', 'CLI_DESKTOP_UNSUPPORTED']);
@@ -144,27 +145,31 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
   probeEmbedded = probe ? async () => false : probeCodexEmbeddedCli,
   instanceRuntime = createDesktopInstanceRuntime(), lockOptions = {}, ramLogs = createLogStorage() } = {}) {
   let plan = await launchPlan(store, name, terminalEnvironment, { repository, resumeId, defaultUserHome });
-  const codex = plan.client === 'codex';
+  const codex = plan.client === 'codex', claude = plan.client === 'claude-code';
+  const managedDesktop = claude && createManagedDesktop(store, { runtime: instanceRuntime, lockOptions });
+  const desktopData = claude && join(plan.nativeRoot, 'desktop');
+  if (claude && (plan.cwd === desktopData || strictDescendant(desktopData, plan.cwd)))
+    throw new Error('Choose a CLI workspace outside Claude Desktop storage');
   const account = plan.client === 'copilot' ? await acquireCopilotAccount(plan.env.HOME) : null;
   const lock = join(plan.nativeRoot, '.run-lock'), runId = randomUUID();
   const owner = { pid: process.pid, host: hostname(), runId, kind: 'interactive-cli',
-    ...(codex ? { membershipVersion: 1, client: 'codex', storePath: store.directory, profileId: plan.profileId,
+    ...(codex || claude ? { membershipVersion: 1, client: plan.client, storePath: store.directory, profileId: plan.profileId,
       home: plan.home, environmentId: plan.environmentId, reportPath: cliReportPath(plan.nativeRoot, runId) } : {}) };
   const guard = (action, waitMs = 5000) => withProfileOperation(store, plan.profileId, { waitMs, ...lockOptions }, action);
-  async function assertSameCodexRoots() {
+  async function assertSameNativeRoots() {
     if (JSON.stringify(await checkedNativeRoots(plan.nativeRoot, plan.home)) !== JSON.stringify(plan.rootIdentity))
-      throw Object.assign(new Error('The selected Codex home changed.'), { code: 'HOME_CHANGED' });
+      throw Object.assign(new Error(codex ? 'The selected Codex home changed.' : 'The selected Claude profile changed.'), { code: 'HOME_CHANGED' });
   }
   async function currentDesktopPeer() {
     const owners = await readProfileOwners(plan.nativeRoot);
     if (!owners.some(current => JSON.stringify(current) === JSON.stringify(owner)))
       throw new Error('Terminal ownership changed; preserving the current reservation.');
-    return owners.find(current => current.kind === 'desktop-instance');
+    return owners.find(current => current.kind === (claude ? 'claude-desktop' : 'desktop-instance'));
   }
   let reportPath, preserveLock = false;
   const report = { schemaVersion: 1, kind: 'interactive-cli', client: plan.client, runId, profileId: plan.profileId,
     environmentId: plan.environmentId, home: plan.home, cwd: plan.cwd, operation: plan.operation,
-    rootIdentity: plan.rootIdentity, executable: plan.executable, ...(codex ? { executableIdentity: plan.executableIdentity } : {}),
+    rootIdentity: plan.rootIdentity, executable: plan.executable, ...(codex || claude ? { executableIdentity: plan.executableIdentity } : {}),
     ...(resumeId ? { resumeId } : {}), status: 'starting',
     startedAt: new Date().toISOString(), terminalOutputRetained: false };
   async function prepareReport() {
@@ -176,7 +181,7 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
   }
   let desktopOwner;
   if (codex) await guard(async () => {
-    await assertSameCodexRoots();
+    await assertSameNativeRoots();
     await assertNoLegacyAuditLease(store.directory, plan.home);
     if (await exists(lock)) {
       let owners = await readProfileOwners(plan.nativeRoot);
@@ -192,14 +197,27 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
       }
     }
     await prepareReport();
-    await acquireCodexNativeParticipant(plan.nativeRoot, owner, desktopOwner);
+    await acquireNativeParticipant(plan.nativeRoot, owner, desktopOwner);
+  });
+  else if (claude) await guard(async () => {
+    await assertSameNativeRoots();
+    await assertNoLegacyAuditLease(store.directory, plan.home);
+    if (await exists(lock)) {
+      const owners = await readProfileOwners(plan.nativeRoot);
+      if (owners.length !== 1 || owners[0]?.kind !== 'claude-desktop')
+        throw new Error('This native home is in use or an earlier run needs recovery');
+      desktopOwner = owners[0];
+      await managedDesktop.observeClaudePeer(plan.profileId, desktopOwner, { joining: true });
+    }
+    await prepareReport();
+    await acquireNativeParticipant(plan.nativeRoot, owner, desktopOwner);
   });
   else {
     try { await mkdir(lock, { mode: 0o700 }); }
     catch { await account?.release(); throw new Error('This native home is in use or an earlier run needs recovery'); }
   }
   try {
-    if (!codex) {
+    if (!codex && !claude) {
       await writeFile(join(lock, 'owner.json'), JSON.stringify(owner), { flag: 'wx', mode: 0o600 });
       await prepareReport();
     }
@@ -215,7 +233,7 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     plan = fresh;
     report.version = version; report.configurationChangedSinceRegistration = plan.configurationChangedSinceRegistration;
     if (codex) await guard(async () => {
-      await assertSameCodexRoots();
+      await assertSameNativeRoots();
       const logs = { home: plan.home, key: plan.environmentId, signal };
       const peer = await currentDesktopPeer();
       if (peer) {
@@ -232,9 +250,10 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     await onStart(plan);
     if (signal?.aborted) throw Object.assign(new Error('Launch cancelled'), { code: 'CANCELLED' });
     await account?.checkpoint({ spawnIntent: true });
-    if (codex) await guard(async () => {
-      await assertSameCodexRoots();
-      await currentDesktopPeer();
+    if (codex || claude) await guard(async () => {
+      await assertSameNativeRoots();
+      const peer = await currentDesktopPeer();
+      if (claude && peer) await managedDesktop.observeClaudePeer(plan.profileId, peer, { joining: true });
       report.spawnIntent = true;
       await record(reportPath, report);
     });
@@ -243,11 +262,11 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
       async onSpawn(pid) {
         if (account) await account.checkpoint({ processIdentity: await getAuditProcessIdentity(pid) });
         report.pid = pid;
-        if (codex) {
-          await assertSameCodexRoots();
+        if (codex || claude) {
+          await assertSameNativeRoots();
           await record(reportPath, report);
           report.processIdentity = await attestRunner(instanceRuntime, pid).catch(() => undefined);
-          await assertSameCodexRoots();
+          await assertSameNativeRoots();
         }
         report.status = 'running'; await record(reportPath, report);
       } });
@@ -278,7 +297,7 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     }
     report.finishedAt = new Date().toISOString();
     if (codex) await guard(async () => {
-      try { await assertSameCodexRoots(); }
+      try { await assertSameNativeRoots(); }
       catch { reportPath = null; preserveLock = true; }
       if (!preserveLock && report.embedded && report.spawnIntent) {
         try {
@@ -290,6 +309,21 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
         }
       }
       if (reportPath) await record(reportPath, report);
+      if (!preserveLock) await releaseProfileParticipant(plan.nativeRoot, owner);
+    }, 40000);
+    else if (claude) await guard(async () => {
+      try { await assertSameNativeRoots(); }
+      catch { reportPath = null; preserveLock = true; }
+      if (reportPath) await record(reportPath, report);
+      if (!preserveLock) {
+        try {
+          const peer = await currentDesktopPeer();
+          if (peer) await managedDesktop.observeClaudePeer(plan.profileId, peer);
+        } catch {
+          preserveLock = true; report.status = 'incomplete'; report.error = 'SHUTDOWN_FAILED';
+          await record(reportPath, report);
+        }
+      }
       if (!preserveLock) await releaseProfileParticipant(plan.nativeRoot, owner);
     }, 40000);
     else {

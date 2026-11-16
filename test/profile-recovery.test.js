@@ -9,8 +9,8 @@ import { createHome, startHomeSignIn } from '../src/home-create.js';
 import { launchHome } from '../src/launcher.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
 import { acquireCopilotAccount } from '../src/copilot-account-lock.js';
-import { nativeRootIdentity } from '../src/codex-native-participants.js';
-import { acquireCodexNativeParticipant, readProfileOwners } from '../src/profile-reservations.js';
+import { nativeRootIdentity } from '../src/native-participants.js';
+import { acquireNativeParticipant, readProfileOwners } from '../src/profile-reservations.js';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-profile-recovery-')));
@@ -151,7 +151,7 @@ test('recovery releases only an interrupted Codex CLI while its exact Desktop pe
     executable: runner.executable, executableIdentity: f.made.binding.executableIdentity };
   await mkdir(dirname(reportPath), { recursive: true, mode: 0o700 });
   await writeFile(reportPath, JSON.stringify(report), { mode: 0o600 });
-  await acquireCodexNativeParticipant(nativeRoot, owner);
+  await acquireNativeParticipant(nativeRoot, owner);
 
   const desktopRoot = join(storePath, 'desktop-instances'), desktopRunId = randomUUID();
   await mkdir(desktopRoot, { mode: 0o700 });
@@ -170,7 +170,7 @@ test('recovery releases only an interrupted Codex CLI while its exact Desktop pe
     processes: [main], baselineMains: [], launcher: null }), { mode: 0o600 });
   await writeFile(join(desktopRoot, `${profileId}.${desktopRunId}.launch`), JSON.stringify({ schemaVersion: 1,
     kind: 'desktop-instance-launch', runId: desktopRunId, profileId, ...routes, app, application, main }), { mode: 0o600 });
-  await acquireCodexNativeParticipant(nativeRoot, desktop, owner);
+  await acquireNativeParticipant(nativeRoot, desktop, owner);
 
   const instanceRuntime = {
     async observe(row) {

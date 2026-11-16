@@ -8,16 +8,20 @@ import { acquire, exists, globalLock, privateDirectory, readJSON, record, releas
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const taskKinds = new Set(['audit-experiment', 'review-task']);
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
-const memberKinds = new Set([...taskKinds, 'desktop-instance', 'interactive-cli']);
+const memberKinds = new Set([...taskKinds, 'desktop-instance', 'interactive-cli', 'claude-desktop']);
 const validMember = owner => memberKinds.has(owner?.kind) && typeof owner.profileId === 'string'
   && typeof owner.storePath === 'string' && owner.storePath.startsWith('/')
   && uuid.test(owner.runId ?? '');
-export const isCodexCliParticipant = owner => validMember(owner) && owner.kind === 'interactive-cli'
-  && owner.client === 'codex' && owner.membershipVersion === 1 && uuid.test(owner.profileId)
+const isNativeCliParticipant = (owner, client) => validMember(owner) && owner.kind === 'interactive-cli'
+  && owner.client === client && owner.membershipVersion === 1 && uuid.test(owner.profileId)
   && uuid.test(owner.environmentId ?? '') && isAbsolute(owner.home ?? '') && isAbsolute(owner.reportPath ?? '')
   && Number.isSafeInteger(owner.pid) && owner.pid > 0 && typeof owner.host === 'string';
 
-const nativePair = (a, b) => isCodexCliParticipant(a) && validMember(b) && b.kind === 'desktop-instance'
+export const isCodexCliParticipant = owner => isNativeCliParticipant(owner, 'codex');
+export const isClaudeCliParticipant = owner => isNativeCliParticipant(owner, 'claude-code');
+
+const nativePair = (a, b) => validMember(b) && (isCodexCliParticipant(a) && b.kind === 'desktop-instance'
+  || isClaudeCliParticipant(a) && b.kind === 'claude-desktop' && b.schemaVersion === 1)
   && a.profileId === b.profileId && a.storePath === b.storePath && a.host === b.host && a.runId !== b.runId;
 
 export function profileOwners(value) {
@@ -26,7 +30,7 @@ export function profileOwners(value) {
     if (value.schemaVersion !== 1 || !Array.isArray(owners) || owners.length < 2
       || owners.some(owner => !validMember(owner)) || new Set(owners.map(owner => owner.runId)).size !== owners.length
       || owners.filter(owner => owner.kind === 'desktop-instance').length > 1
-      || owners.some(owner => owner.kind === 'interactive-cli') && (owners.length !== 2
+      || owners.some(owner => ['interactive-cli', 'claude-desktop'].includes(owner.kind)) && (owners.length !== 2
         || !(nativePair(owners[0], owners[1]) || nativePair(owners[1], owners[0]))))
       throw new Error('Invalid execution participant set; preserving it');
     return owners;
@@ -60,7 +64,7 @@ export async function acquireProfileParticipant(root, owner, desktopOwner) {
   if (!await exists(path)) return acquire(path, owner, true);
   const owners = await readProfileOwners(root);
   if (owners.some(current => !validMember(current)
-    || current.kind === 'interactive-cli'
+    || !taskKinds.has(current.kind) && current.kind !== 'desktop-instance'
     || (current.kind === 'desktop-instance' ? !equal(current, desktopOwner)
       : current.home !== owner.home || current.membershipVersion !== 1 && current.kind !== 'review-task')))
     throw new Error('Profile has an exclusive or unverified reservation');
@@ -69,10 +73,10 @@ export async function acquireProfileParticipant(root, owner, desktopOwner) {
 }
 
 /** Record a native lease only against the exact peer validated under the operation guard. */
-export async function acquireCodexNativeParticipant(root, owner, peer) {
+export async function acquireNativeParticipant(root, owner, peer) {
   const path = join(root, '.run-lock');
-  if (!validMember(owner) || !(isCodexCliParticipant(owner) || owner.kind === 'desktop-instance'))
-    throw new Error('Invalid Codex native participant');
+  if (!validMember(owner) || !(isCodexCliParticipant(owner) || isClaudeCliParticipant(owner) || ['desktop-instance', 'claude-desktop'].includes(owner.kind)))
+    throw new Error('Invalid native participant');
   if (!peer) return acquire(path, owner, true);
   const owners = await readProfileOwners(root);
   if (owners.length !== 1 || !equal(owners[0], peer)

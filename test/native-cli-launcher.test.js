@@ -37,18 +37,31 @@ printf '%s\\n' "$CLAUDE_CONFIG_DIR" "$COPILOT_HOME" "$HOME" "$PWD" > '${log}'
 for (const client of ['claude-code', 'copilot']) {
   test(`${client}: stopped interactive owners recover through the existing explicit recovery boundary`, async t => {
     const f = await fixture(t, client);
-    const result = await launchHome(f.store, 'First', { defaultUserHome: f.defaultUserHome, terminalEnvironment: f.terminalEnvironment,
-      run: async options => { await options.onSpawn(123); throw Object.assign(new Error('Fixture uncertain shutdown'), { code: 'SHUTDOWN_FAILED' }); } });
-    assert.equal(result.error, 'SHUTDOWN_FAILED');
+    const child = { pid: 123, ppid: process.pid, uid: process.getuid(), startedAt: 'Mon Nov 16 09:00:00 2026 UTC', executable: f.executable };
+    let childAlive = false;
     const checked = [];
-    const options = { lockPath: join(f.root, 'recovery.lock'), isAlive: () => false,
+    const instanceRuntime = {
+      snapshot: async () => [child],
+      observe: async () => childAlive ? { status: 'running', processes: [child] } : { status: 'stopped', processes: [] },
+      assertResourcesIdle: async resourcePaths => checked.push({ resourcePaths }),
+    };
+    const result = await launchHome(f.store, 'First', { defaultUserHome: f.defaultUserHome, terminalEnvironment: f.terminalEnvironment, instanceRuntime,
+      run: async options => { await options.onSpawn(child.pid); throw Object.assign(new Error('Fixture uncertain shutdown'), { code: 'SHUTDOWN_FAILED' }); } });
+    assert.equal(result.error, 'SHUTDOWN_FAILED');
+    const options = { lockPath: join(f.root, 'recovery.lock'), isAlive: () => false, instanceRuntime,
       runtime: { assertExternal: async () => {}, assertIdle: async input => checked.push(input) } };
     assert.equal((await recoverProfileRun(f.store, 'First', options)).status, 'preview');
     assert.equal(checked.length, 0);
-    await assert.rejects(recoverProfileRun(f.store, 'First', { ...options, isAlive: pid => pid === 123, apply: true }), /Native CLI may still be live/);
+    childAlive = true;
+    await assert.rejects(recoverProfileRun(f.store, 'First', { ...options, isAlive: pid => pid === child.pid, apply: true }), /Native CLI may still be live/);
+    childAlive = false;
     assert.equal((await recoverProfileRun(f.store, 'First', { ...options, apply: true })).status, 'recovered');
-    assert.ok(checked[0].resourcePaths.includes(f.profiles[0].native.configRoot));
-    assert.ok(checked[0].cliExecutables.includes(f.executable));
+    const { root, configRoot } = f.profiles[0].native;
+    assert.ok(checked[0].resourcePaths.includes(root));
+    if (client === 'copilot') {
+      assert.ok(checked[0].resourcePaths.includes(configRoot));
+      assert.ok(checked[0].cliExecutables.includes(f.executable));
+    }
     await assert.rejects(access(join(f.profiles[0].native.root, '.run-lock')), { code: 'ENOENT' });
     await access(result.reportPath);
   });

@@ -7,8 +7,8 @@ import { reconcileInterruptedSignIn } from './home-create.js';
 import { createDesktopRuntime } from './desktop-runtime.js';
 import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
 import { observeCodexDesktopPeer, withProfileOperation } from './desktop-instances.js';
-import { codexResourcePaths, observeCodexCli } from './codex-native-participants.js';
-import { isCodexCliParticipant, profileOwners, releaseProfileParticipant } from './profile-reservations.js';
+import { codexResourcePaths, observeClaudeCli, observeCodexCli } from './native-participants.js';
+import { isClaudeCliParticipant, isCodexCliParticipant, profileOwners, releaseProfileParticipant } from './profile-reservations.js';
 import { acquire, exists, globalLock, privateDirectory, readJSON, release } from './metadata.js';
 import { find, strictDescendant } from './profiles.js';
 import { createManagedDesktop } from './managed-desktop.js';
@@ -25,7 +25,7 @@ const alive = pid => {
 async function candidate(store, name, { isAlive, observeProcess, instanceRuntime }) {
   const profile = find(await store.read(), name);
   if (!profile.native) throw new Error('Profile has no registered native home');
-  const codex = !profile.client || profile.client === 'codex';
+  const codex = !profile.client || profile.client === 'codex', claude = profile.client === 'claude-code';
   let native, environment, rootIdentity;
   if (codex) ({ native, environment } = await resolveHome(store, profile.id));
   else {
@@ -42,8 +42,8 @@ async function candidate(store, name, { isAlive, observeProcess, instanceRuntime
   if (!await exists(lock)) throw new Error('No interrupted profile run is locked');
   await privateDirectory(lock);
   const saved = await readJSON(join(lock, 'owner.json'));
-  const owners = codex ? profileOwners(saved) : [saved];
-  const cli = codex && owners.find(isCodexCliParticipant);
+  const owners = codex || claude ? profileOwners(saved) : [saved];
+  const cli = codex ? owners.find(isCodexCliParticipant) : claude && owners.find(isClaudeCliParticipant);
   const owner = cli || saved;
   if (!owner || owner.host !== hostname() || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !uuid.test(owner.runId ?? ''))
     throw new Error('Native run lock owner is invalid or foreign; preserving it');
@@ -52,10 +52,11 @@ async function candidate(store, name, { isAlive, observeProcess, instanceRuntime
   if (cli) {
     const plan = { profileId: profile.id, nativeRoot: native.root, environmentId: environment.id,
       home: environment.home, desktopData: environment.desktopData };
-    if ((await observeCodexCli(store, plan, cli, instanceRuntime)).status !== 'stopped')
-      throw new Error('Codex CLI may still be live; preserving its reservation');
+    const observeCli = codex ? observeCodexCli : observeClaudeCli;
+    if ((await observeCli(store, plan, cli, instanceRuntime)).status !== 'stopped')
+      throw new Error('Native CLI may still be live; preserving its reservation');
     return { profile, native, environment, lock, owner, kind: 'interactive-cli', plan,
-      desktopPeer: owners.find(participant => participant.kind === 'desktop-instance') };
+      desktopPeer: owners.find(participant => participant.kind === (claude ? 'claude-desktop' : 'desktop-instance')) };
   }
 
   let kind;
@@ -120,8 +121,11 @@ export async function recoverProfileRun(store, name, {
     await privateDirectory(selected.native.root);
     if (await exists(lock)) {
       await privateDirectory(lock);
-      if ((await readJSON(join(lock, 'owner.json')))?.kind === (selected.client === 'copilot' ? 'copilot-desktop' : 'claude-desktop'))
-        return (managedDesktop ?? createManagedDesktop(store, { lockOptions: { lockPath } })).recover(name, { apply });
+      const owners = profileOwners(await readJSON(join(lock, 'owner.json')));
+      const desktop = owners.find(owner => owner?.kind === (selected.client === 'copilot' ? 'copilot-desktop' : 'claude-desktop'));
+      const cli = owners.find(isClaudeCliParticipant);
+      if (desktop && (!cli || isAliveProcess(cli.pid)))
+        return (managedDesktop ?? createManagedDesktop(store, { lockOptions: { lockPath }, runtime: instanceRuntime })).recover(name, { apply });
     }
   }
   const checks = { isAlive: isAliveProcess, observeProcess, instanceRuntime };
@@ -143,9 +147,15 @@ export async function recoverProfileRun(store, name, {
       throw new Error('Native run lock owner changed; preserving it');
     if (fresh.plan) {
       if (!equal(fresh.desktopPeer, preview.desktopPeer)) throw new Error('Desktop peer changed; preserving the CLI reservation');
-      const allowedProcesses = fresh.desktopPeer
-        ? (await observeCodexDesktopPeer(store, fresh.plan, fresh.desktopPeer, instanceRuntime)).processes : [];
-      await instanceRuntime.assertResourcesIdle(codexResourcePaths(fresh.plan), { allowedProcesses, profileHome: fresh.plan.home });
+      if (current.client === 'claude-code') {
+        const desktop = managedDesktop ?? createManagedDesktop(store, { runtime: instanceRuntime, lockOptions: { lockPath } });
+        if (fresh.desktopPeer) await desktop.observeClaudePeer(current.id, fresh.desktopPeer);
+        else await instanceRuntime.assertResourcesIdle([fresh.native.root]);
+      } else {
+        const allowedProcesses = fresh.desktopPeer
+          ? (await observeCodexDesktopPeer(store, fresh.plan, fresh.desktopPeer, instanceRuntime)).processes : [];
+        await instanceRuntime.assertResourcesIdle(codexResourcePaths(fresh.plan), { allowedProcesses, profileHome: fresh.plan.home });
+      }
       const checked = await candidate(store, current.id, checks);
       if (!equal(checked.owner, fresh.owner) || !equal(checked.desktopPeer, fresh.desktopPeer))
         throw new Error('Native participants changed; preserving the CLI reservation');
