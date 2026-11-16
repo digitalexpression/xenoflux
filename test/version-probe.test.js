@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { probeCodexEmbeddedCli, probeNativeProfileVersion, probeVersion } from '../src/version-probe.js';
+import { probeClaudeAccount, probeCodexEmbeddedCli, probeNativeProfileVersion, probeVersion } from '../src/version-probe.js';
 
 async function executable(t, body) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-version-probe-')));
@@ -13,6 +13,16 @@ async function executable(t, body) {
   return { root, path };
 }
 const options = (entry, extra = {}) => ({ executable: entry.path, cwd: entry.root, env: { PATH: '/usr/bin:/bin' }, timeoutMs: 5000, ...extra });
+
+test('Claude rejects account status reported for a different profile directory', async t => {
+  const fake = await executable(t, `
+    if (process.argv.slice(2).join(' ') !== 'auth status') process.exit(2);
+    console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', configDirectory: process.cwd() }));
+  `);
+  const selected = configDirectory => options(fake, { env: { PATH: '/usr/bin:/bin', CLAUDE_CONFIG_DIR: configDirectory } });
+  assert.equal((await probeClaudeAccount(selected(fake.root))).state, 'signed-in');
+  assert.equal((await probeClaudeAccount(selected(join(fake.root, 'other-profile')))).state, 'unverified');
+});
 
 test('Codex embedded runtime support must be advertised by the selected command', async t => {
   const fake = await executable(t, `

@@ -143,6 +143,9 @@ export async function probeClaudeAccount(options) {
     maxBytes: 16384, allowedExits: [0, 1] });
   let value;
   try { value = JSON.parse(text); } catch { throw new Error('Unrecognized Claude sign-in status'); }
+  const configDirectory = options.env?.CLAUDE_CONFIG_DIR;
+  if (configDirectory && value?.configDirectory !== undefined && value.configDirectory !== configDirectory)
+    return { state: 'unverified' };
   if (value?.loggedIn === false && exitCode === 1) return { state: 'signed-out' };
   if (value?.loggedIn === true && exitCode === 0 && ['claude.ai', 'oauth', 'claudeai'].includes(value.authMethod))
     return { state: 'signed-in', route: 'native subscription' };
