@@ -12,6 +12,7 @@ import { managedNativeProfiles } from '../src/managed-native-profile.js';
 import { runInteractive } from '../src/interactive-process.js';
 import { createEngineProvider } from '../src/ui-engine.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
+import { readProfileOwners } from '../src/profile-reservations.js';
 
 async function fixture(t, client) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-native-launch-')));
@@ -33,6 +34,38 @@ printf '%s\\n' "$CLAUDE_CONFIG_DIR" "$COPILOT_HOME" "$HOME" "$PWD" > '${log}'
   }
   return { root, store, profiles, log, executable, terminalEnvironment, defaultUserHome: userHome };
 }
+
+test('Profiles stops a real owned CLI process group and waits for its reservation to clear', async t => {
+  const f = await fixture(t, 'copilot'), [profile] = f.profiles;
+  const lockOptions = { lockPath: join(f.root, 'operation') };
+  const provider = createEngineProvider({ store: f.store, defaultUserHome: f.defaultUserHome, lockOptions,
+    runContext: { terminalEnvironment: f.terminalEnvironment } });
+  t.after(() => provider.close());
+  const launched = Promise.withResolvers(), signal = new AbortController();
+  const running = launchHome(f.store, profile.id, {
+    defaultUserHome: f.defaultUserHome, terminalEnvironment: f.terminalEnvironment, lockOptions, signal: signal.signal,
+    probe: async () => '1.0.107',
+    run: options => runInteractive({
+      ...options, executable: '/bin/sleep', args: ['60'], testStdio: 'ignore',
+      async onSpawn(pid) { await options.onSpawn(pid); launched.resolve(pid); },
+    }),
+  });
+  try {
+    const pid = await Promise.race([launched.promise, running.then(result => assert.fail(`CLI ended early: ${result.error}`))]);
+    const { runId } = (await readProfileOwners(profile.native.root))[0];
+    await assert.rejects(provider.clientAction({ name: profile.name, action: 'close-terminal', runId: randomUUID() }),
+      { code: 'managed-cli-close-failed' });
+    assert.doesNotThrow(() => process.kill(pid, 0));
+    assert.equal((await provider.clientAction({ name: profile.name, action: 'close-terminal', runId })).status, 'success');
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  } finally {
+    signal.abort();
+    const report = await running;
+    assert.equal(report.closedFromProfiles, true);
+    assert.equal(report.shutdown.groupTerminated, true);
+  }
+  await assert.rejects(access(join(profile.native.root, '.run-lock')), { code: 'ENOENT' });
+});
 
 for (const client of ['claude-code', 'copilot']) {
   test(`${client}: stopped interactive owners recover through the existing explicit recovery boundary`, async t => {

@@ -13,6 +13,16 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { useResource } from '@/lib/useResource';
 
 const clientLabels: Record<ProfileClient, string> = { codex: 'Codex', 'claude-code': 'Claude Code', copilot: 'GitHub Copilot' };
+const sharedSignIn = 'One sign-in works in CLI and Desktop for this profile.';
+const separateSignIns = 'Sign in separately to CLI and Desktop for this profile.';
+const clientBusyLabels: Record<string, string> = {
+  'open-terminal': 'Opening Terminal…',
+  'show-terminal': 'Showing Terminal…',
+  'close-terminal': 'Closing CLI…',
+  'open-desktop': 'Opening Desktop…',
+  'focus-desktop': 'Showing Desktop…',
+  'close-desktop': 'Closing Desktop…',
+};
 
 type DialogState =
   | { kind: 'conflict'; profile: string; action: ClientAction }
@@ -25,7 +35,15 @@ export function Profiles() {
   const info = useInfo();
   const [params, setParams] = useSearchParams();
   const [signIn, setSignIn] = useState<{ profile: ProfileCard; heading: HTMLHeadingElement | null } | null>(null);
-  const view = useResource(() => apiGet<ProfilesView>('/api/profiles'), 'profiles', { live: true, paused: signIn !== null });
+  const view = useResource(async () => {
+    if (info?.mode === 'engine') {
+      try { return await apiPost<ProfilesView>('/api/profiles/refresh'); }
+      catch (error) {
+        if (!(error instanceof ApiError && [404, 405].includes(error.status))) throw error;
+      }
+    }
+    return apiGet<ProfilesView>('/api/profiles');
+  }, 'profiles', { live: true, paused: signIn !== null });
   const [dialog, setDialog] = useState<DialogState>(null);
   const editTrigger = useRef<HTMLButtonElement | null>(null);
   const [message, setMessage] = useState<{ status: StatusKind; text: string } | null>(null);
@@ -43,8 +61,8 @@ export function Profiles() {
 
   useEffect(() => {
     if (!clientControls || !data || data.simulated || loading || signIn || checkingAccount || document.hidden) return;
-    const profile = data.profiles.find(({ name, client, clientActions }) => client && client !== 'codex'
-      && clientActions.some(action => action.id === 'open-terminal')
+    const profile = data.profiles.find(({ name, client, clientActions, accountCheck }) => client
+      && (accountCheck ?? (client !== 'codex' && clientActions.some(action => action.id === 'open-terminal')))
       && !checkedOnVisit.current.has(name) && !pendingClients.current.has(name));
     if (!profile) return;
 
@@ -71,14 +89,18 @@ export function Profiles() {
     pendingClients.current.add(profile.name);
     setBusyClients(value => ({ ...value, [profile.name]: action.id }));
     try {
-      const result = await apiPost<ClientActionResult>(`/api/profiles/${encodeURIComponent(profile.name)}/clients`, { action: action.id, ...(action.appKey ? { appKey: action.appKey } : {}) });
+      const result = await apiPost<ClientActionResult>(`/api/profiles/${encodeURIComponent(profile.name)}/clients`, {
+        action: action.id,
+        ...(action.appKey ? { appKey: action.appKey } : {}),
+        ...(action.runId ? { runId: action.runId } : {}),
+      });
       setMessage({ status: result.status, text: result.message });
       view.reload();
     } catch (error) { setMessage({ status: 'error', text: (error as Error).message }); }
     finally {
       pendingClients.current.delete(profile.name);
       setBusyClients(value => { const next = { ...value }; delete next[profile.name]; return next; });
-      if (action.id === 'check' && document.activeElement === document.body) heading?.focus();
+      if ((action.id === 'check' || action.id === 'close-terminal') && document.activeElement === document.body) heading?.focus();
     }
   }
 
@@ -87,7 +109,7 @@ export function Profiles() {
   return (
     <Page current="profiles" title="Profiles">
       <PageTitle title="Profiles"
-        subtitle="Profiles keep separate settings and history. Sign-in may belong to a profile or be shared through the native client."
+        subtitle="Codex profiles you create or add share one sign-in across CLI and Desktop. Claude Code and GitHub Copilot require separate sign-ins for CLI and Desktop."
         actions={info?.features.profileEdits ? (
           <>
             <Button onClick={() => { editTrigger.current = null; setDialog({ kind: 'add' }); }}>Add an existing Codex folder…</Button>
@@ -134,6 +156,7 @@ export function Profiles() {
       <CreateDialog open={dialog?.kind === 'create'} onClose={close} sources={view.data?.copySources ?? { codex: names, 'claude-code': [], copilot: [] }}
         onCreated={text => { setMessage({ status: 'success', text }); view.reload(); close(); }} />
       <SimpleEditDialog state={dialog && (dialog.kind === 'rename' || dialog.kind === 'binding' || dialog.kind === 'remove' || dialog.kind === 'add') ? dialog : null}
+        repositories={dialog?.kind === 'binding' ? profileCards.find(profile => profile.name === dialog.profile)?.repositories : undefined}
         returnFocus={editTrigger.current}
         onClose={close} onDone={(text, status) => { setMessage({ status, text }); view.reload(); close(); }} />
     </Page>
@@ -243,35 +266,47 @@ function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMen
   const info = useInfo();
   const navigate = useNavigate();
   const titleId = useId();
+  const handoffHintId = useId();
   const title = useRef<HTMLHeadingElement>(null);
-  const retainAccountFocus = useCallback((button: HTMLButtonElement | null) => () => {
+  const retainActionFocus = useCallback((button: HTMLButtonElement | null) => () => {
     if (button && document.activeElement === button) title.current?.focus();
   }, []);
   const menuTrigger = useRef<HTMLButtonElement | null>(null);
   const clientLabel = clientLabels[profile.client ?? 'codex'];
   const cliLabel = profile.client === 'copilot' ? 'Copilot CLI' : clientLabel;
   const signIn = checkingAccount ? 'Checking sign-in…' : profile.signIn;
+  const showClaudeHandoff = info?.features.clientControls && profile.client === 'claude-code'
+    && (profile.cli.state === 'running' || profile.clientActions.some(action => action.id === 'open-terminal'))
+    && (profile.desktop.state === 'running' || profile.clientActions.some(action => action.id === 'open-desktop'));
   return (
     <article className="profile-row min-w-0 wrap-anywhere" aria-labelledby={titleId}>
       <div className="profile-identity">
         <h3 id={titleId} ref={title} tabIndex={-1} className="text-body font-semibold wrap-anywhere">{profile.name}</h3>
         <p className="meta">{clientLabel} · {profile.client === 'copilot' || profile.client === 'claude-code' ? `CLI: ${signIn}` : signIn} · {profile.binding}</p>
+        {profile.account ? <p className="text-ui wrap-anywhere">
+          <span className="muted">{(profile.client ?? 'codex') === 'codex' && !profile.isDefault ? 'CLI and Desktop account' : 'CLI account'}</span>
+          {' · '}{profile.account.label}{profile.account.lastChecked ? ' (last checked)' : ''}
+        </p> : null}
         <p className="text-ui">{profile.summary}</p>
         {profile.state !== 'ready' ? <WarningAlert title={profile.state === 'unbound' ? 'No Codex folder bound' : 'Couldn’t read this profile'}>{profile.reason}</WarningAlert> : null}
       </div>
       <div className="profile-runtime">
-      {(profile.client ?? 'codex') === 'codex' ? <dl className="grid gap-x-4 gap-y-1 text-ui">
-        <dt className="muted">Codex CLI</dt><dd>{profile.cli.text}</dd>
-        <dt className="muted">Codex Desktop</dt><dd>{profile.desktop.text}</dd>
-      </dl> : <div className="flex flex-col gap-2 text-ui">
+      {(profile.client ?? 'codex') === 'codex' ? <div className="flex flex-col gap-2 text-ui">
+        <dl className="grid gap-x-4 gap-y-1">
+          <dt className="muted">Codex CLI</dt><dd>{profile.cli.text}</dd>
+          <dt className="muted">Codex Desktop</dt><dd>{profile.desktop.text}</dd>
+        </dl>
+        {!profile.isDefault && profile.state === 'ready' ? <p className="profile-account-scope">{sharedSignIn}</p> : null}
+      </div> : <div className="flex flex-col gap-2 text-ui">
         <dl className="grid gap-x-4 gap-y-1">
           <dt className="muted">{cliLabel}</dt><dd>{profile.cli.text}</dd>
           <dt className="muted">Desktop app</dt><dd>{profile.desktop.text}</dd>
         </dl>
-        <p className="profile-account-scope">{profile.client === 'copilot' ? 'Sign in separately to CLI and Desktop for this profile.'
-          : profile.accountScope === 'per-root' ? 'CLI sign-in belongs to this profile. Desktop sign-in is separate and unverified.'
-          : 'Check CLI sign-in before running tasks.'}</p>
-        {profile.client === 'copilot' ? null : <p className="hint">Account independence: {profile.accountIndependence ?? 'not verified'}.</p>}
+        <p className="profile-account-scope">{separateSignIns}</p>
+        <p className="hint">See the Desktop account in the app’s account menu.</p>
+        {showClaudeHandoff ? <p id={handoffHintId} className="hint">
+          Run <code>/app</code> in Terminal to move your session to Claude Desktop. Xenoflux opens this profile’s Desktop if it’s closed. If prompted, sign in there and retry <code>/app</code>.
+        </p> : null}
       </div>}
       </div>
       <div className="profile-inspect-actions">
@@ -293,9 +328,11 @@ function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMen
       {info?.features.clientControls && profile.clientActions.length ? (
         <div className="profile-client-actions" role="group" aria-label={`Client actions for ${profile.name}`}>
           {profile.clientActions.map(action => (
-            <Button key={action.id === 'check' ? 'signin' : action.id} ref={['check', 'signin'].includes(action.id) ? retainAccountFocus : undefined}
+            <Button key={action.id === 'check' ? 'signin' : action.id} ref={retainActionFocus}
               onClick={() => onClient(action, title.current)} disabled={Boolean(busyAction)} aria-disabled={checkingAccount || undefined} busy={busyAction === action.id}
-              busyLabel={action.id === 'open-desktop' ? 'Opening Desktop…' : action.id === 'signin' && profile.client && profile.client !== 'codex' ? 'Starting sign-in…' : action.id === 'open-terminal' || action.id === 'signin' ? 'Opening Terminal…' : action.id === 'recover-desktop' ? 'Releasing reservation…' : 'Checking…'}
+              busyLabel={action.id === 'signin' ? (profile.client && profile.client !== 'codex' ? 'Starting sign-in…' : 'Opening Terminal…')
+                : clientBusyLabels[action.id] ?? 'Checking…'}
+              aria-describedby={showClaudeHandoff && action.id === 'open-terminal' ? handoffHintId : undefined}
               aria-label={`${action.label.replace(/…$/, '')} for ${profile.name}`}>{action.label}</Button>
           ))}
         </div>
@@ -332,7 +369,7 @@ function CreateDialog({ open, onClose, sources, onCreated }: { open: boolean; on
   const sourceAvailable = profiles.includes(from);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const nameId = useId(), errorId = useId(), fromId = useId(), clientId = useId();
+  const nameId = useId(), errorId = useId(), fromId = useId(), clientId = useId(), signInHintId = useId();
   const nameInput = useRef<HTMLInputElement>(null);
   useEffect(() => { if (open) { setName(''); setError(null); setStart('empty'); setClient('codex'); setSource(''); } }, [open]);
 
@@ -365,7 +402,7 @@ function CreateDialog({ open, onClose, sources, onCreated }: { open: boolean; on
             </div>
             <div>
               <label htmlFor={clientId} className="field-label">Client</label>
-              <select id={clientId} className="input" value={client} onChange={event => {
+              <select id={clientId} className="input" aria-describedby={signInHintId} value={client} onChange={event => {
                 const next = event.target.value as ProfileClient;
                 setClient(next);
                 setSource(sources[next][0] ?? '');
@@ -373,11 +410,7 @@ function CreateDialog({ open, onClose, sources, onCreated }: { open: boolean; on
               }}>
                 {Object.entries(clientLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
               </select>
-              {client === 'copilot' ? <p className="hint">Sign in separately to Copilot CLI and Desktop for each profile.</p> : null}
-              {client === 'claude-code' ? <p className="hint">Sign in separately in Claude Code for each profile. Desktop sign-in is separate and unverified.</p> : null}
-              <p className="hint">{client === 'codex' ? 'Use this profile in Codex CLI or Codex Desktop. Open either client to sign in.'
-                : client === 'copilot' ? 'Open Copilot CLI and Desktop for this profile in either order.'
-                : 'Use this profile in Claude Code or open Claude Desktop when installed. Desktop has its own profile storage and can run alongside other Claude instances. Authenticated sessions and model use remain unverified.'}</p>
+              <p id={signInHintId} className="hint">{client === 'codex' ? sharedSignIn : separateSignIns}</p>
             </div>
             <fieldset className="flex flex-col gap-3">
               <legend className="field-label">Start from</legend>
@@ -415,32 +448,41 @@ function CreateDialog({ open, onClose, sources, onCreated }: { open: boolean; on
 const EDIT_COPY = {
   add: { title: 'Add an existing Codex folder', field: 'Profile name', second: 'Codex folder', action: 'Add folder', path: '/api/profiles/new', note: 'Xenoflux registers the folder as a profile. It doesn’t move or change its files.' },
   rename: { title: 'Rename profile', field: 'New name', second: null, action: 'Rename', path: 'rename', note: 'Renaming changes how Xenoflux lists the profile. Its files, sign-in and history stay as they are.' },
-  binding: { title: 'Change project binding', field: 'Project folder', second: null, action: 'Save binding', path: 'binding', note: 'Binding tells the client which project folder this profile works in. Nothing is copied.' },
+  binding: { title: 'Change project binding', field: 'Project folder', second: null, action: 'Save binding', path: 'binding', note: 'Bindings point to project folders. Removing a binding keeps the folder and its files.' },
   remove: { title: 'Remove from Xenoflux', field: null, second: null, action: 'Remove from Xenoflux', path: 'remove', note: 'Keeps the profile’s files on disk.' },
 } as const;
 
-function SimpleEditDialog({ state, returnFocus, onClose, onDone }:
-  { state: { kind: 'rename' | 'binding' | 'remove' | 'add'; profile?: string } | null; returnFocus: HTMLButtonElement | null; onClose: () => void; onDone: (text: string, status: StatusKind) => void }) {
+type EditSubmission = { kind: 'form' } | { kind: 'unbind'; repository: string };
+
+function SimpleEditDialog({ state, repositories = [], returnFocus, onClose, onDone }:
+  { state: { kind: 'rename' | 'binding' | 'remove' | 'add'; profile?: string } | null; repositories?: string[];
+    returnFocus: HTMLButtonElement | null; onClose: () => void; onDone: (text: string, status: StatusKind) => void }) {
   const [value, setValue] = useState('');
   const [second, setSecond] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState<EditSubmission | null>(null);
   const id = useId(), secondId = useId(), errorId = useId();
   useEffect(() => { setValue(''); setSecond(''); setError(null); }, [state?.kind, state?.profile]);
   if (!state) return <Dialog open={false} />;
   const copy = EDIT_COPY[state.kind];
+  const profilePath = `/api/profiles/${encodeURIComponent(state.profile ?? '')}`;
+  async function save(path: string, body: unknown, submission: EditSubmission) {
+    if (saving) return;
+    setSaving(submission);
+    setError(null);
+    try {
+      const result = await apiPost<ClientActionResult & { title?: string }>(path, body);
+      onDone(result.message ?? result.title ?? 'Done.', result.status === 'error' ? 'error' : 'success');
+    } catch (reason) { setError(reason instanceof ApiError ? reason.message : String(reason)); } finally { setSaving(null); }
+  }
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!state) return;
     if (copy.field && !value.trim()) { setError(`Enter the ${copy.field.toLowerCase()}.`); return; }
-    setBusy(true); setError(null);
-    try {
-      const body = state.kind === 'rename' ? { newName: value.trim() } : state.kind === 'binding' ? { repository: value.trim() }
-        : state.kind === 'add' ? { name: value.trim(), folder: second.trim(), register: true } : {};
-      const path = state.kind === 'add' ? copy.path : `/api/profiles/${encodeURIComponent(state.profile ?? '')}/${copy.path}`;
-      const result = await apiPost<ClientActionResult & { title?: string }>(path, body);
-      onDone(result.message ?? result.title ?? 'Done.', result.status === 'error' ? 'error' : 'success');
-    } catch (reason) { setError(reason instanceof ApiError ? reason.message : String(reason)); } finally { setBusy(false); }
+    const body = state.kind === 'rename' ? { newName: value.trim() } : state.kind === 'binding' ? { repository: value.trim() }
+      : state.kind === 'add' ? { name: value.trim(), folder: second.trim(), register: true } : {};
+    const path = state.kind === 'add' ? copy.path : `${profilePath}/${copy.path}`;
+    await save(path, body, { kind: 'form' });
   }
   return (
     <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
@@ -461,9 +503,21 @@ function SimpleEditDialog({ state, returnFocus, onClose, onDone }:
             </div>
           ) : null}
           {error ? <ErrorPanel title="Not changed"><span id={errorId}>{error}</span></ErrorPanel> : null}
+          {state.kind === 'binding' && repositories.length ? <div className="flex flex-col gap-2">
+            <p className="field-label">Bound project folders</p>
+            <ul className="flex flex-col gap-2">
+              {repositories.map(repository => <li key={repository} className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                <code className="min-w-0 wrap-anywhere text-ui">{repository}</code>
+                <Button disabled={Boolean(saving)} busy={saving?.kind === 'unbind' && saving.repository === repository}
+                  busyLabel="Removing binding…" aria-label={`Remove binding for ${repository}`}
+                  onClick={() => void save(`${profilePath}/unbind`, { repository }, { kind: 'unbind', repository })}>Remove binding</Button>
+              </li>)}
+            </ul>
+          </div> : null}
           <p className="hint">{copy.note}</p>
           <div className="flex flex-wrap gap-2">
-            <Button type="submit" variant={state.kind === 'remove' ? 'destructive' : 'primary'} busy={busy} busyLabel="Saving…">{copy.action}</Button>
+            <Button type="submit" variant={state.kind === 'remove' ? 'destructive' : 'primary'}
+              disabled={saving?.kind === 'unbind'} busy={saving?.kind === 'form'} busyLabel="Saving…">{copy.action}</Button>
             <DialogClose asChild><Button>Cancel</Button></DialogClose>
           </div>
         </form>

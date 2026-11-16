@@ -135,8 +135,8 @@ export async function runInteractive({
     // An abort racing a normal exit is still a cancellation request: the caller
     // cannot safely treat that run as a completed interactive operation.
     if (outcome.kind === 'cancelled' || abortRequested || signal?.aborted) {
-      await cleanup();
-      throw error('CANCELLED');
+      const shutdown = await cleanup();
+      throw Object.assign(error('CANCELLED'), { shutdown });
     }
     if (outcome.kind === 'error' && !exitObserved) {
       await cleanup();

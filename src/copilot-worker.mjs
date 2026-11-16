@@ -212,7 +212,8 @@ async function metadata({ status, auth, publicAccount }) {
     if (auth?.isAuthenticated !== true || auth.authType !== (binding.rootMode === 'explicit' ? 'user' : 'gh-cli')
       || !copilotId(auth.login) || !copilotId(auth.host))
       return { state: 'unverified', version: status.version };
-    return { state: 'signed-in', route: auth.authType, version: status.version, token: accountToken(auth) };
+    const accountLabel = /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(auth.login) ? auth.login : null;
+    return { state: 'signed-in', route: auth.authType, version: status.version, token: accountToken(auth), accountLabel };
   }
   // Bind list-to-read to account metadata without retaining the login or host.
   const token = operation === 'list' || operation === 'journal' ? accountToken(auth) : null;

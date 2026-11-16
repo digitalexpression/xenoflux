@@ -56,7 +56,10 @@ are never copied. Profiles subsequently evolve independently.
 
 Profiles groups entries by client. Each entry keeps inspection links separate
 from sign-in and opening actions. **More** contains the available registry edits
-and selected-copy actions.
+and selected-copy actions. Profiles shows the email or GitHub username reported
+by the profile’s CLI. A named Codex profile uses the same account in CLI and
+Desktop. Check the account menu in Claude Desktop or Copilot Desktop for their
+separate sign-ins.
 
 Each profile offers the sign-in action that matches its status. For Codex, use
 **Sign in via Terminal** when the profile shows **No sign-in saved**, or open
@@ -110,16 +113,27 @@ other instances. Claude Desktop has a separate sign-in from the CLI. If Google
 sign-in returns to a different Claude window on macOS, quit the other Claude
 Desktop instances before signing in, then reopen them.
 
-For a Claude Code or Copilot profile, you can start one managed CLI and one
-managed Desktop in either order. Quit either client independently. After you quit
-Desktop, choose **Release closed Desktop reservation** to reopen it. You can
-release that reservation while the CLI stays open. Close both clients before
-changing or copying the profile.
+Run `/app` in a managed Claude Code Terminal session to move the conversation to
+that profile's Claude Desktop. Xenoflux starts the matching Desktop if needed.
+If Desktop asks you to sign in, sign in there separately and retry `/app` in the
+same Terminal session. Claude Code exits and Xenoflux releases its Terminal
+reservation after it verifies Desktop opened the conversation. If Xenoflux
+cannot confirm the handoff, the conversation stays open in Terminal. If you
+can see the conversation in Desktop, you can close Terminal yourself.
 
-Claude and Copilot Desktop keep their reservations when the Xenoflux UI stops.
-Xenoflux releases only confirmed-stopped ownership. Uncertain state stays
-reserved. A missing CLI does not prevent opening an otherwise readable Desktop
-profile.
+For a Claude Code or Copilot profile, you can start one managed CLI and one
+managed Desktop in either order. Use **Show Desktop** or **Close Desktop** on
+an open managed profile’s card. Use **Close CLI** to stop a terminal session
+launched by the current Xenoflux version. You can also exit the CLI in Terminal
+or quit Desktop normally. Closing either client leaves the other running.
+Finish both clients before changing or copying the profile.
+
+The CLI launcher clears its own reservation after verified shutdown. Xenoflux
+checks for closed Desktop clients in the background while the local app is
+running, even with the Profiles tab closed. Profiles also checks on refresh
+and before profile actions. If the local app was stopped when you quit Desktop,
+the next refresh or profile action clears its verified reservation. Xenoflux
+preserves active or uncertain reservations.
 
 Copy preview lists additions, replacements, removals and kept items. Unselected
 and destination-only state is preserved. Selected standalone skills are replaced
@@ -132,8 +146,9 @@ Other profiles can stay open while you copy. The app checks both copy profiles
 for active reservations and file holders and never closes their clients.
 See [terminal copying and recovery](CLI.md#profiles-copy-and-recovery).
 
-Rename, repository binding and removal affect registry metadata; removing a profile
-leaves its files on disk. Native Open controls submit no task. The separate **Native apps** controls
+Use the profile’s **More** menu to rename it, add or remove project bindings,
+or remove the profile from Xenoflux. Removing a profile or project binding
+keeps its files on disk. Native Open controls submit no task. The separate **Native apps** controls
 under **Clients on this Mac** open stock Claude/Copilot with the app's existing setup; they do not select a managed
 profile. A Copilot session link dispatch does not prove that the target session exists.
 

@@ -275,13 +275,14 @@ totals never imply a per-turn allocation. Keep scoped usage in Time and tokens.
 
 Profiles is a compact inventory grouped by client, with neutral profile names and
 counts. Align each profile's identity, observed sign-in and project binding with
-its CLI/Desktop state. Keep account scope visible, especially Copilot's shared
-GitHub CLI account and unverified Desktop account independence.
+its CLI/Desktop state. Label the account with the surface that reports it. Use
+one account label for named Codex profiles, where CLI and Desktop share a sign-in.
 
 Separate inspection links from client actions. When Profiles opens, check
-available CLI accounts in the background. Sign-in and client opening require
-explicit actions. Keep registry edits and selected copying in the named More
-menu. Creation is the page's primary action. Preserve row identity, open dialogs
+available CLI accounts in the background and reconcile confirmed-stopped clients.
+Show the normal Open action after reconciliation. Sign-in, opening and closing
+clients require explicit actions. Keep registry edits and selected copying in the
+named More menu. Creation is the page's primary action. Preserve row identity, open dialogs
 and focus across automatic checks. Closing an edit dialog opened from More
 returns focus to that profile's More button while it remains present.
 

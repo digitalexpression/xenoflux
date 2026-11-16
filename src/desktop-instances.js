@@ -518,8 +518,12 @@ export async function closeDesktopInstance(store, name, { runtime = createDeskto
   });
 }
 
-export async function recoverDesktopInstance(store, name, { runtime = createDesktopInstanceRuntime(), ...options } = {}) {
+export async function recoverDesktopInstance(store, name, { runtime = createDesktopInstanceRuntime(), onlyIfStopped = false, ...options } = {}) {
   const id = find(await store.read(), name).id;
+  if (onlyIfStopped) {
+    const state = await readState(store, id);
+    if (!state || (await observation(state, runtime)).status !== 'stopped') return;
+  }
   return withOperation(store, id, { ...options, recovery: true }, async () => {
     const state = await readState(store, id);
     if (!state) return { status: 'unmanaged', profileId: id, liveHomeChanged: false };

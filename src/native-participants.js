@@ -34,7 +34,7 @@ export async function assertSavedCodexSignIn(home) {
     throw new Error('Save your Codex sign-in before opening this profile in both Terminal and Desktop.');
 }
 
-async function readCliReport(store, plan, owner, client) {
+export async function readCliReport(store, plan, owner, client = plan.client) {
   const reportPath = cliReportPath(plan.nativeRoot, owner.runId);
   if (!isNativeCliParticipant(owner, client) || owner.host !== hostname() || owner.storePath !== store.directory
     || owner.profileId !== plan.profileId || owner.home !== plan.home || owner.environmentId !== plan.environmentId
@@ -54,14 +54,14 @@ async function readCliReport(store, plan, owner, client) {
   return report;
 }
 
-async function observeCli(store, plan, owner, runtime, { joining = false, client }) {
+async function observeCli(store, plan, owner, runtime, { joining = false, client, resolveExecutable = client !== 'codex' }) {
   const report = await readCliReport(store, plan, owner, client);
   const runner = report.processIdentity;
   if (!runner) {
     if (!joining && (!report.spawnIntent || report.shutdown?.groupTerminated === true)) return { status: 'stopped', processes: [] };
     throw new Error('Terminal process identity is unavailable; preserving its reservation');
   }
-  const observation = { trackedProcesses: [runner], ...(client === 'copilot' ? { resolveExecutable: true } : {}) };
+  const observation = { trackedProcesses: [runner], ...(resolveExecutable ? { resolveExecutable: true } : {}) };
   let observed = await runtime.observe(runner, observation);
   if (client !== 'codex') {
     for (let attempt = 0; attempt < 3 && observed.status === 'running' && observed.processes.some(row => !nativeProcessRow(row)); attempt++) {

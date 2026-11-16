@@ -129,7 +129,7 @@ test('Profiles reconciles another controller removal while preserving entered fo
   await dialog.getByLabel('Copy parts from').selectOption('baseline');
   await name.focus();
   await app.store.update(data => remove(data, 'baseline'));
-  await tick(page, '/api/profiles');
+  await tick(page, '/api/profiles/refresh');
   await expect(name).toHaveValue('keep-my-input');
   await expect(name).toBeFocused();
   await expect(dialog.getByLabel('Copy parts from')).toHaveValue('baseline');
@@ -140,7 +140,7 @@ test('Profiles reconciles another controller removal while preserving entered fo
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'baseline', exact: true })).toHaveCount(0);
   await rm(app.homes.strict.root, { recursive: true });
-  await tick(page, '/api/profiles');
+  await tick(page, '/api/profiles/refresh');
   await expect(page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'strict-review', exact: true }) })).toContainText('Couldn’t read this profile');
 });
 
@@ -151,7 +151,7 @@ test('a local profile removal fences a pending older profile response and immedi
   let release;
   const hold = new Promise(resolve => { release = resolve; });
   let calls = 0;
-  await page.route('**/api/profiles', async route => {
+  await page.route('**/api/profiles/refresh', async route => {
     calls++;
     if (calls === 1) {
       const response = await route.fetch();

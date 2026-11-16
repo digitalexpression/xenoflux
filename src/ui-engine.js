@@ -18,14 +18,18 @@ import { evaluateAuditEvidence, previewAuditEvidence } from './audit-review-comm
 import { ASSOCIATION, presentComparison, presentEvidence, presentReviews, presentRunExecution, presentSetupComparison, presentSetupInventory, presentSkillPackage } from './audit-presentation.js';
 import { inspectCopyProfile } from './copy-client.js';
 import { managedNativeProfiles, PROFILE_CLIENT_NAMES } from './managed-native-profile.js';
+import { createCodexProfileAccounts } from './codex-profile-accounts.js';
 import { createUiSignins } from './ui-signins.js';
 import { inspectSetupGuidance } from './setup-guidance.js';
 import { DESKTOP_APP } from './desktop-runtime.js';
 import { createHome, planHomeCreation } from './home-create.js';
 import { nativeClient } from './profile-command.js';
-import { bind, find, PROFILE_CLIENTS, renameProfile as renameInData } from './profiles.js';
+import { bind, unbind, find, PROFILE_CLIENTS, renameProfile as renameInData } from './profiles.js';
 import { editProfileRegistry, removeProfile as removeFromStore } from './profile-removal.js';
-import { acquire, privateDirectory, record, release } from './metadata.js';
+import { acquire, exists, privateDirectory, record, release } from './metadata.js';
+import { managedDesktopKind, readProfileOwners } from './profile-reservations.js';
+import { recoverProfileRun } from './profile-recovery.js';
+import { cliCloseRunId, requestCliClose } from './cli-close.js';
 import { findHistory, listHistory, recordedHistoryClient } from './history.js';
 import { listHomes, registerHome } from './homes.js';
 import { createCodexDesktopSurface } from './desktop-surface.js';
@@ -56,6 +60,8 @@ function decodeRef(ref) {
   try { return JSON.parse(Buffer.from(ref, 'base64url').toString('utf8')); }
   catch { return null; }
 }
+const displayAccount = observation => observation?.accountLabel
+  ? { account: { label: observation.accountLabel, lastChecked: observation.stale === true } } : {};
 const tilde = path => path?.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path;
 const profileArg = id => id === 'default' ? 'Default' : id;
 
@@ -106,6 +112,7 @@ export function defaultClientOps(store, desktopSurface = createCodexDesktopSurfa
     openDefaultDesktop: () => desktopSurface.openDefault(),
     openDesktop: name => desktopSurface.open(name),
     focusDesktop: name => desktopSurface.focus(name),
+    closeDesktop: (name, options) => desktopSurface.close(name, options),
   };
 }
 
@@ -128,14 +135,51 @@ function profileCopyRuntime() {
 
 export function createEngineProvider({ store, version = 'unknown', reportsRoot = join(homedir(), 'Xenoflux reports'), defaultUserHome = homedir(),
   observeClients = observeProfileClients, desktopSurface = createCodexDesktopSurface(store), stockApps = createStockDesktopApps(), clientOps = defaultClientOps(store, desktopSurface), copyRuntime = profileCopyRuntime,
-  resolveClient = signal => nativeClient(store, {}, signal), profilesBase = join(dirname(store.directory), 'profiles'), lockOptions = {}, runContext = {}, reviewContext = {}, catalogContext = {}, copilotImportContext = {}, accountContext = {}, maxActiveJobs = 8, discoveryContext = {}, managedDesktop }) {
+  resolveClient = signal => nativeClient(store, {}, signal), profilesBase = join(dirname(store.directory), 'profiles'), lockOptions = {}, runContext = {}, reviewContext = {}, catalogContext = {}, copilotImportContext = {}, accountContext = {}, maxActiveJobs = 8, discoveryContext = {}, managedDesktop, recoveryContext = {},
+  profileWatchIntervalMs = 5000 }) {
   managedDesktop ??= createManagedDesktop(store, { stockApps, lockOptions });
   if (!Number.isSafeInteger(maxActiveJobs) || maxActiveJobs < 1) throw new Error('Invalid active job capacity');
   const admitted = new Set();
   const activeImports = new Set();
+  const cliRuntime = recoveryContext.instanceRuntime ?? createDesktopInstanceRuntime();
+  let refreshingProfiles, stopProfileWatch;
+  async function reconcileProfile(name, { managedDesktopClaim = true, onlyIfStopped = false } = {}) {
+    if (!name) return;
+    const profile = (await store.read()).profiles.find(profile => profile.name === name || profile.id === name);
+    const root = profile?.native?.root;
+    const desktopKind = managedDesktopKind(profile?.client);
+    if (!root) return;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        if (!await exists(join(root, '.run-lock'))) return;
+        await privateDirectory(root);
+        const owners = await readProfileOwners(root);
+        const nativeRun = owners.find(owner => ['interactive-cli', 'native-home-login', 'native-signin'].includes(owner?.kind)
+          && owner.host === hostname() && Number.isSafeInteger(owner.pid) && owner.pid > 0);
+        let stopped = false;
+        if (nativeRun) {
+          try { process.kill(nativeRun.pid, 0); } catch (error) { stopped = error.code === 'ESRCH'; }
+        }
+        if (stopped) {
+          const result = await recoverProfileRun(store, profile.id, {
+            ...recoveryContext, apply: true, lockPath: lockOptions.lockPath, managedDesktop,
+          });
+          if (['recovered', 'released'].includes(result.status)) continue;
+        }
+        if (owners.some(owner => owner?.kind === 'desktop-instance'))
+          await desktopSurface.recover(profile.id, { ...lockOptions, onlyIfStopped });
+        else if (managedDesktopClaim && desktopKind && owners.some(owner => owner?.kind === desktopKind))
+          await managedDesktop.recover(profile.id, { apply: true, ...(onlyIfStopped ? { onlyIfStopped } : {}) });
+        return;
+      } catch { return; } // The normal action still checks ownership before it changes anything.
+    }
+  }
+  const closeCliAction = runId => ({ id: 'close-terminal', label: 'Close CLI', runId });
   const sessionSelections = { codex: new Map(), 'claude-code': new Map(), copilot: new Map() };
   const claudeSelections = sessionSelections['claude-code'], copilotSelections = sessionSelections.copilot;
   const copilotRuntime = createCopilotRuntime();
+  const codexAccounts = createCodexProfileAccounts(store, { defaultUserHome, lockOptions,
+    terminalEnvironment: runContext.terminalEnvironment ?? process.env, probe: accountContext.probeCodexAccount });
   const nativeProfiles = managedNativeProfiles({ terminalEnvironment: runContext.terminalEnvironment ?? process.env,
     ...accountContext, store, profilesBase, defaultUserHome, copilotRuntime, lockOptions });
   const resolvers = context => ({ copilot: nativeProfiles.qualifiedCopilot, ...context.profileResolvers });
@@ -585,7 +629,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     return { status: 'applied', title: `Added ${name.trim()}`, changes: [], note: 'Xenoflux registered the folder as a profile. Its files weren’t moved or changed.', undo: null };
   }
 
-  function clientActionsFor(name, clients, signIn, named) {
+  function clientActionsFor(name, clients, signIn, named, ownedDesktop) {
     const terminal = { id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' };
     const desktop = { id: 'open-desktop', label: 'Open Codex Desktop' };
     const signin = { id: 'signin', label: 'Sign in via Terminal…' };
@@ -599,6 +643,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       if (!cliOpen && !desktopOpen && signIn === 'No sign-in saved') actions.push(signin);
       if (desktopOpen) actions.push({ id: 'focus-desktop', label: 'Show Codex Desktop' });
       else if (!cliOpen || signedIn) actions.push(desktop);
+      if (ownedDesktop) actions.push({ id: 'close-desktop', label: 'Close Codex Desktop' });
       return actions;
     }
     const conflict = { title: `${name} is open in Codex CLI`, body: `Close ${name}’s Terminal session before opening its Desktop.` };
@@ -674,13 +719,36 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   const discovery = createProfileDiscovery({ store, profilesBase, defaultUserHome, stockApps,
     terminalEnvironment: runContext.terminalEnvironment ?? process.env, ...discoveryContext });
   const provider = {
+    watchProfileStops() {
+      if (stopProfileWatch) return stopProfileWatch;
+      let pending, stopped = false;
+      const timer = setInterval(() => {
+        if (stopped || closing || pending || refreshingProfiles) return;
+        pending = (async () => {
+          for (const profile of (await store.read()).profiles) {
+            if (stopped || closing) break;
+            await reconcileProfile(profile.id, { onlyIfStopped: true });
+          }
+        })().catch(() => {}).finally(() => { pending = undefined; });
+      }, profileWatchIntervalMs);
+      timer.unref();
+      stopProfileWatch = async () => {
+        stopped = true;
+        clearInterval(timer);
+        await pending;
+      };
+      return stopProfileWatch;
+    },
     discovery: discovery.discovery,
     apps: discovery.apps,
     async openApp(input) {
       try { return await stockApps.open(input); }
       catch (error) { throw new UiError(409, error.message, 'stock-app-unavailable'); }
     },
-    startSignin: signins.start,
+    async startSignin(input) {
+      await reconcileProfile(input.name);
+      return signins.start(input);
+    },
     signin: signins.get,
     cancelSignin: signins.cancel,
     catalog: catalogs.get,
@@ -700,7 +768,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     respondReviewTask: reviewTasks.respondReviewTask,
     async close() {
       closing = true;
-      const results = await Promise.allSettled([runs.close(), reviewTasks.close(), catalogs.close(), signins.close(), Promise.allSettled([...activeImports])]);
+      const results = await Promise.allSettled([runs.close(), reviewTasks.close(), catalogs.close(), signins.close(), codexAccounts.close(), stopProfileWatch?.(), refreshingProfiles, Promise.allSettled([...activeImports])]);
       const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
       if (failures.length) throw new AggregateError(failures, failures.map(error => error.message).join('\n'));
     },
@@ -728,7 +796,15 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         setups: { text: `${count} ${count === 1 ? 'profile' : 'profiles'} · read-only, nothing is copied, activated or signed in` }, recent };
     },
 
-    async profiles() {
+    async refreshProfiles() {
+      return refreshingProfiles ??= provider.profiles({ reconcile: true }).finally(() => { refreshingProfiles = undefined; });
+    },
+
+    async profiles({ reconcile = false } = {}) {
+      if (reconcile) {
+        const { profiles } = await store.read();
+        for (const profile of profiles) await reconcileProfile(profile.id, { managedDesktopClaim: false });
+      }
       const { homes, data, defaultHome } = await profileRecords();
       let desktopInstallations = [];
       if (data.profiles.some(profile => ['copilot', 'claude-code'].includes(profile.client))) {
@@ -736,7 +812,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         catch { /* Missing or unreadable installation stays unavailable. */ }
       }
       let instances = [];
-      try { instances = (await desktopSurface.list({ ...lockOptions, observe: false })).instances; } catch { /* reported as unknown below */ }
+      try { instances = (await desktopSurface.list({ ...lockOptions, observe: reconcile })).instances; } catch { /* reported as unknown below */ }
       const byId = new Map(data.profiles.map(profile => [profile.id, profile]));
       const card = async ({ name, isDefault, home, root, state, reason, profile }) => {
         const named = Boolean(profile?.native);
@@ -746,14 +822,22 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           : { cli: { state: 'unknown', text: 'unknown' }, desktop: { state: 'unknown', text: 'unknown' } };
         if (instance && !instance.observed && clients.desktop.state !== 'running')
           clients.desktop = { state: 'unknown', text: 'unknown (Desktop journal has not been checked)' };
+        const closeRunId = named && await cliCloseRunId(store, profile, cliRuntime);
+        if (closeRunId) clients.cli = { state: 'running', text: 'The CLI is using this profile in Terminal.' };
         let signIn = 'Sign-in unknown';
         try { if (home) { await lstat(join(home, 'auth.json')); signIn = 'Sign-in saved'; } }
         catch (error) { if (error.code === 'ENOENT') signIn = 'No sign-in saved'; }
+        const accountCheck = state === 'ready' && (isDefault || named && signIn === 'Sign-in saved');
+        const account = accountCheck ? await codexAccounts.observed(name, profile?.id ?? 'default') : null;
+        if (isDefault && account?.state === 'signed-in') signIn = 'Sign-in saved';
         const repositories = profile?.repositories ?? [];
-        return { name, client: 'codex', isDefault, state, reason, signIn,
+        return { name, client: 'codex', isDefault, state, reason, signIn, accountCheck, ...displayAccount(account),
           binding: isDefault ? 'your standard Codex setup' : repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
+          repositories: repositories.map(row => row.path),
           summary: isDefault ? 'Your normal Codex setup. Other profiles can copy from it; nothing is copied into it.' : profile?.description || `Codex folder ${tilde(root ?? home ?? '')}`,
-          cli: clients.cli, desktop: clients.desktop, clientActions: state === 'ready' ? clientActionsFor(name, clients, signIn, named) : [],
+          cli: clients.cli, desktop: clients.desktop, clientActions: state === 'ready'
+            ? [...clientActionsFor(name, clients, signIn, named, instance?.observed?.status === 'running' && !instance.observed.orphaned),
+              ...(closeRunId ? [closeCliAction(closeRunId)] : [])] : [],
           moreMenu: isDefault ? null : [
             { id: 'copy', label: 'Copy settings from another profile…', detail: `Choose items, see exactly what changes in ${name}, undo later` },
             { id: 'binding', label: 'Change project binding…' },
@@ -776,24 +860,34 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         } catch { /* Show the unavailable binding without offering native actions. */ }
         const ready = Boolean(setup);
         const desktopName = client === 'claude-code' ? 'Claude' : 'GitHub Copilot';
-        const desktopStatus = await managedDesktop.status(selected.id, { installation: desktopInstallations.find(app => app.client === (client === 'claude-code' ? 'claude' : 'copilot')) });
+        const installation = desktopInstallations.find(app => app.client === (client === 'claude-code' ? 'claude' : 'copilot'));
+        let desktopStatus = await managedDesktop.status(selected.id, { installation });
+        if (reconcile && desktopStatus?.state === 'recoverable-stopped') {
+          await reconcileProfile(selected.id);
+          desktopStatus = await managedDesktop.status(selected.id, { installation });
+        }
         const desktopReady = desktopStatus && ['available', 'running', 'recoverable-stopped'].includes(desktopStatus.state);
         const desktop = !desktopStatus ? { state: 'unavailable', text: 'Desktop observation is unavailable.' }
           : desktopStatus.state === 'available' ? { state: 'not-running', text: `${desktopName} Desktop startup and profile storage are supported. Desktop sign-in and task execution are unverified.` }
           : desktopStatus.state === 'running' ? { state: 'running', text: `${desktopName} Desktop is using this profile’s storage. Desktop sign-in and task execution are unverified.` }
-          : desktopStatus.state === 'recoverable-stopped' ? { state: 'not-running', text: 'Desktop is stopped. Release its reservation before reopening Desktop. Desktop sign-in and task execution are unverified.' }
+          : desktopStatus.state === 'recoverable-stopped' ? { state: 'not-running', text: `${desktopName} Desktop is closed.` }
           : { state: desktopStatus.state === 'unavailable' ? 'unavailable' : 'unknown', text: desktopStatus.reason ?? 'Desktop ownership needs attention' };
-        const desktopActions = desktopStatus?.state === 'available'
-          ? [{ id: 'open-desktop', label: `Open ${desktopName} Desktop`, appKey: desktopStatus.appKey }]
-          : desktopStatus?.state === 'recoverable-stopped' ? [{ id: 'recover-desktop', label: 'Release closed Desktop reservation' }] : [];
+        const desktopActions = desktopStatus?.state === 'running'
+          ? [{ id: 'focus-desktop', label: `Show ${desktopName} Desktop` }, { id: 'close-desktop', label: `Close ${desktopName} Desktop` }]
+          : desktopStatus?.state === 'available' || desktopStatus?.state === 'recoverable-stopped' && installation?.status === 'available'
+            ? [{ id: 'open-desktop', label: `Open ${desktopName} Desktop`, appKey: desktopStatus.appKey ?? installation?.appKey }] : [];
         const desktopClaimed = desktopStatus && !['available', 'unavailable'].includes(desktopStatus.state);
         const accountScope = client === 'claude-code' ? 'per-root' : observation?.qualification?.scope ?? 'unverified';
         const accountState = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state];
         const signIn = accountState ? accountState + (observation.stale ? ' (last checked)' : '') : 'Sign-in not checked';
         const cliActions = [];
-        const cliReserved = desktopStatus?.cliReserved === true;
-        const cliRunning = desktopStatus?.cliRunning === true;
-        if (ready && !cliReserved && (!desktopClaimed || desktopStatus?.state === 'running'))
+        const closeRunId = await cliCloseRunId(store, selected, cliRuntime);
+        const cliReserved = desktopStatus?.cliReserved === true || Boolean(closeRunId);
+        const cliRunning = desktopStatus?.cliRunning === true || Boolean(closeRunId);
+        if (cliRunning) cliActions.push({ id: 'show-terminal', label: 'Show Terminal' });
+        if (closeRunId) cliActions.push(closeCliAction(closeRunId));
+        if (ready && !cliReserved && (!desktopClaimed || desktopStatus?.state === 'running'
+          || client === 'claude-code' && desktopStatus?.state === 'recoverable-stopped'))
           cliActions.push({ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` });
         if (ready && !desktopClaimed && !cliReserved) {
           if (!observation || observation.stale) cliActions.push({ id: 'check', label: 'Check sign-in' });
@@ -802,8 +896,9 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         const repositories = selected.repositories;
         cards.push({ name: selected.name, client, isDefault: false, state: ready || desktopReady ? 'ready' : 'unavailable',
           reason: ready || desktopReady ? null : 'The native root or executable no longer matches this binding.',
-          signIn, accountScope, accountIndependence: 'not verified', setup,
+          signIn, accountCheck: ready && !desktopClaimed && !cliReserved, accountScope, accountIndependence: 'not verified', setup, ...displayAccount(observation),
           binding: repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
+          repositories: repositories.map(row => row.path),
           summary: selected.description || `${PROFILE_CLIENT_NAMES[client]} folder ${tilde(selected.native?.configRoot ?? '')}`,
           cli: { state: cliRunning ? 'running' : ready ? 'unknown' : 'unavailable',
             text: cliRunning ? 'The CLI is using this profile in Terminal.'
@@ -815,7 +910,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
             { id: 'binding', label: 'Change project binding…' },
             { id: 'rename', label: 'Rename…' },
             { id: 'remove', label: 'Remove from Xenoflux…', detail: 'Keeps the profile’s files on disk.' },
-          ].map(item => desktopClaimed || cliReserved ? { ...item, disabledReason: 'Finish the active client or recover the interrupted reservation before changing this profile.' } : item) });
+          ].map(item => desktopClaimed || cliReserved ? { ...item, disabledReason: 'Profile changes are available once Xenoflux verifies that its clients have stopped.' } : item) });
       }
       const copySources = Object.fromEntries(await Promise.all(PROFILE_CLIENTS.map(async client => [client, [
         ...((client === 'codex' ? !!defaultHome : await nativeProfiles.hasStock(client)) ? ['Default'] : []),
@@ -1029,6 +1124,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       const guidance = selectedManual(reviewed, manualItems);
       if (!Array.isArray(items) || !items.length) throw new UiError(400, 'Choose at least one item.', 'nothing-selected');
       if (items.some(id => !reviewed.changes.has(id))) throw new UiError(400, 'Choose items from the preview.', 'invalid-selection');
+      await reconcileProfile(from);
+      await reconcileProfile(target);
       const options = await copyOptions(from, target, reviewed.client);
       const current = await planCopy(store, from, target, { selection: items, ...options });
       for (const entry of current.items ?? []) if (items.includes(entry.id) && reviewed.changes.get(entry.id) !== entry.fingerprint)
@@ -1050,6 +1147,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       let preview;
       try { preview = await planUndo(store, id); }
       catch (error) { throw new UiError(409, `Can’t undo safely: ${error.message}. Nothing was changed.`, 'undo-refused'); }
+      await reconcileProfile(preview.target?.name);
       try { await undoCopy(store, id, { expectedHash: preview.hash, defaultUserHome, runtime: copyRuntime(), ...lockOptions }); }
       catch (error) {
         const mapped = copyError(error);
@@ -1102,6 +1200,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       let options;
       if (items.length) {
         try {
+          await reconcileProfile(reviewed.from);
           options = await copyOptions(reviewed.from, null, selectedClient);
           const current = await validateAdvancedSelection(store, reviewed.from, items, options);
           if (current.sourceEndpointFingerprint !== reviewed.sourceEndpointFingerprint
@@ -1148,13 +1247,15 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     },
 
     async profileAccount({ name, client }) {
-      if (!plain(name) || !['claude-code', 'copilot'].includes(client))
-        throw new UiError(400, 'Choose a Claude Code or Copilot CLI profile.', 'invalid-selection');
+      if (!plain(name) || !PROFILE_CLIENTS.includes(client))
+        throw new UiError(400, 'Choose a native CLI profile.', 'invalid-selection');
       try {
+        await reconcileProfile(name);
+        if (client === 'codex') return await codexAccounts.check(name);
         const selected = (await store.read()).profiles.find(profile => profile.name === name && profile.client === client);
         if (selected?.native) {
           const desktop = await managedDesktop.status(selected.id);
-          if (!['available', 'unavailable'].includes(desktop.state)) throw new Error('Release the closed Desktop reservation before checking sign-in');
+          if (!['available', 'unavailable'].includes(desktop.state)) throw new Error('Finish the active client before checking sign-in');
         }
         return await nativeProfiles.check(name, client);
       }
@@ -1164,37 +1265,71 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     async renameProfile({ name, newName }) {
       if (!plain(newName)) throw new UiError(400, 'Enter the new name.', 'invalid-name');
       if (name === 'Default') throw new UiError(400, 'Default can’t be renamed.', 'invalid-target');
-      try { await editProfileRegistry(store, name, (data, profile) => renameInData(data, profile.id, newName.trim()), lockOptions); }
+      try {
+        await reconcileProfile(name);
+        await editProfileRegistry(store, name, (data, profile) => renameInData(data, profile.id, newName.trim()), lockOptions);
+      }
       catch (error) { throw new UiError(409, error.message, 'rename-failed'); }
       return { status: 'success', message: `Renamed ${name} to ${newName.trim()}. Its files, sign-in and history are unchanged.` };
     },
 
     async bindProfile({ name, repository }) {
       if (typeof repository !== 'string' || !isAbsolute(repository.trim())) throw new UiError(400, 'Enter the project folder’s full path, starting with /.', 'invalid-path');
-      try { await editProfileRegistry(store, name, (data, profile) => bind(data, profile.id, repository.trim()), lockOptions); }
+      try {
+        await reconcileProfile(name);
+        await editProfileRegistry(store, name, (data, profile) => bind(data, profile.id, repository.trim()), lockOptions);
+      }
       catch (error) { throw new UiError(409, error.message, 'bind-failed'); }
       return { status: 'success', message: `Bound ${name} to ${basename(repository.trim())}.` };
     },
 
+    async unbindProfile({ name, repository }) {
+      if (typeof repository !== 'string' || !isAbsolute(repository)) throw new UiError(400, 'Choose a bound project folder.', 'invalid-path');
+      try {
+        await reconcileProfile(name);
+        await editProfileRegistry(store, name, (data, profile) => unbind(data, profile.id, repository), lockOptions);
+      } catch (error) { throw new UiError(409, error.message, 'unbind-failed'); }
+      return { status: 'success', message: `Removed ${basename(repository)} from ${name}’s project bindings.` };
+    },
+
     async removeProfile({ name }) {
       if (name === 'Default') throw new UiError(400, 'Default can’t be removed.', 'invalid-target');
-      try { await removeFromStore(store, name, lockOptions); }
+      try {
+        await reconcileProfile(name);
+        await removeFromStore(store, name, lockOptions);
+      }
       catch (error) { throw new UiError(409, `${error.message}. Nothing was removed.`, 'remove-failed'); }
       return { status: 'success', message: `Removed ${name} from Xenoflux. Its files are still on disk.` };
     },
 
-    async clientAction({ name, action, session, appKey }) {
+    async clientAction({ name, action, session, appKey, runId }) {
       const selected = (await store.read()).profiles.find(profile => profile.name === name);
+      if (action === 'close-terminal') {
+        if (!selected?.native || !UUID.test(runId ?? '')) throw new UiError(400, 'Choose a managed CLI run to close.', 'invalid-selection');
+        try {
+          const result = await requestCliClose(store, selected.id, runId, { runtime: cliRuntime, lockOptions });
+          return result === 'closed' ? { status: 'success', message: `Closed the CLI for ${name}.` }
+            : { status: 'neutral', message: `Xenoflux is still checking CLI shutdown for ${name}.` };
+        } catch (error) { throw new UiError(409, error.message, 'managed-cli-close-failed'); }
+      }
+      if (['open-desktop', 'open-terminal', 'signin', 'resume'].includes(action))
+        await reconcileProfile(selected?.id, { managedDesktopClaim: action !== 'open-desktop' });
       if (selected?.client && selected.client !== 'codex') {
-        if (['copilot', 'claude-code'].includes(selected.client) && ['open-desktop', 'recover-desktop'].includes(action)) {
+        if (['copilot', 'claude-code'].includes(selected.client) && ['open-desktop', 'focus-desktop', 'close-desktop'].includes(action)) {
           try {
+            const desktop = selected.client === 'claude-code' ? 'Claude Desktop' : 'GitHub Copilot Desktop';
             const result = action === 'open-desktop' ? await managedDesktop.open(selected.id, { appKey })
-              : await managedDesktop.recover(selected.id, { apply: true });
-            return { status: action === 'open-desktop' && result.state === 'running' || result.status === 'recovered' ? 'success' : 'neutral',
-              message: result.status === 'recovered' ? `Released the closed ${selected.client === 'claude-code' ? 'Claude' : 'GitHub Copilot'} Desktop reservation.`
-                : action === 'open-desktop' && result.state === 'running' ? `${selected.client === 'claude-code' ? 'Claude' : 'GitHub Copilot'} Desktop is open for ${name}. Sign-in and task execution are not checked.`
-                : result.reason ?? 'Desktop reservation was preserved. Close the app before recovery.' };
+              : action === 'focus-desktop' ? await managedDesktop.focus(selected.id) : await managedDesktop.close(selected.id);
+            const messages = { 'open-desktop': `Opened ${desktop} for ${name}.`, 'focus-desktop': `Brought ${name}’s ${desktop} to the front.`,
+              'close-desktop': `Closed ${desktop} for ${name}.` };
+            const success = result.state === (action === 'close-desktop' ? 'closed' : 'running');
+            return { status: success ? 'success' : 'neutral', message: success ? messages[action]
+              : result.reason ?? 'Couldn’t verify the managed Desktop state. Check the profile again.' };
           } catch (error) { throw new UiError(409, error.message, 'managed-desktop-failed'); }
+        }
+        if (action === 'show-terminal') {
+          await clientOps.showTerminal();
+          return { status: 'success', message: 'Brought Terminal to the front.' };
         }
         if (action === 'open-terminal') {
           try {
@@ -1231,13 +1366,15 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         else if (action === 'show-terminal') await clientOps.showTerminal();
         else if (action === 'open-desktop') await (isDefault ? clientOps.openDefaultDesktop() : clientOps.openDesktop(name));
         else if (action === 'focus-desktop') await (isDefault ? clientOps.openDefaultDesktop() : clientOps.focusDesktop(name));
+        else if (action === 'close-desktop' && named) await clientOps.closeDesktop(name, lockOptions);
         else throw new UiError(400, 'Unknown client action.', 'invalid-action');
       } catch (error) {
         if (error instanceof UiError) throw error;
         throw new UiError(422, `Couldn’t ${action.replace('-', ' ')} for ${name}: ${error.message}`, 'client-failed');
       }
       const done = { 'open-terminal': `Opened a Terminal window for ${name}.`, signin: `Opened a Terminal window to sign in to ${name}.`, resume: `Opened the session in a Terminal window for ${name}.`,
-        'show-terminal': 'Brought Terminal to the front.', 'open-desktop': `Opening Codex Desktop for ${name}.`, 'focus-desktop': `Brought ${name}’s Codex Desktop to the front.` }[action];
+        'show-terminal': 'Brought Terminal to the front.', 'open-desktop': `Opening Codex Desktop for ${name}.`,
+        'focus-desktop': `Brought ${name}’s Codex Desktop to the front.`, 'close-desktop': `Closed Codex Desktop for ${name}.` }[action];
       return { status: 'success', message: done };
     },
 

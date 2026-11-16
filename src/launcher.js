@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { homedir, hostname } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { find, strictDescendant } from './profiles.js';
 import { resolveClaudeProfile } from './claude-profile.js';
 import { assertManagedCopilotCredentials, managedCopilotEnvironment, resolveCopilotProfile } from './copilot-profile.js';
@@ -17,6 +18,8 @@ import { acquireNativeParticipant, assertNoLegacyAuditLease, managedDesktopKind,
 import { assertSavedCodexSignIn, cliReportPath, codexResourcePaths, nativeProcessRow,
   nativeRootIdentity as checkedNativeRoots } from './native-participants.js';
 import { createManagedDesktop } from './managed-desktop.js';
+import { serveClaudeHandoff } from './claude-handoff.js';
+import { watchCliClose } from './cli-close.js';
 import { exists } from './metadata.js';
 
 const knownErrors = new Set(['CANCELLED', 'SPAWN_FAILED', 'SHUTDOWN_FAILED', 'VERSION_MISMATCH', 'EXECUTABLE_CHANGED', 'HOME_CHANGED', 'OUTPUT_LIMIT', 'RPC_TIMEOUT', 'RAM_LOGS_UNAVAILABLE', 'CLI_DESKTOP_UNSUPPORTED']);
@@ -165,7 +168,9 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
       throw new Error('Terminal ownership changed; preserving the current reservation.');
     return owners.find(current => current.kind === (desktopKind ?? 'desktop-instance'));
   }
-  let reportPath, preserveLock = false;
+  const requestedClose = new AbortController();
+  const launchSignal = signal ? AbortSignal.any([signal, requestedClose.signal]) : requestedClose.signal;
+  let reportPath, handoff, stopCloseWatch, preserveLock = false;
   const report = { schemaVersion: 1, kind: 'interactive-cli', client: plan.client, runId, profileId: plan.profileId,
     environmentId: plan.environmentId, home: plan.home, cwd: plan.cwd, operation: plan.operation,
     rootIdentity: plan.rootIdentity, executable: plan.executable, executableIdentity: plan.executableIdentity,
@@ -206,7 +211,7 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
       if (owners.length !== 1 || owners[0]?.kind !== desktopKind)
         throw new Error('This native home is in use or an earlier run needs recovery');
       desktopOwner = owners[0];
-      await managedDesktop.observePeer(plan.profileId, desktopOwner, { joining: true });
+      await managedDesktop.observePeer(plan.profileId, desktopOwner, { joining: true, allowStopped: claude });
     }
     await prepareReport();
     await acquireNativeParticipant(plan.nativeRoot, owner, desktopOwner);
@@ -243,27 +248,49 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     await guard(async () => {
       await assertSameNativeRoots();
       const peer = await currentDesktopPeer();
-      if (managedDesktop && peer) await managedDesktop.observePeer(plan.profileId, peer, { joining: true });
+      if (managedDesktop && peer) await managedDesktop.observePeer(plan.profileId, peer, { joining: true, allowStopped: claude });
       if (plan.client === 'copilot') await assertManagedCopilotCredentials(plan.home);
       report.spawnIntent = true;
       await record(reportPath, report);
     });
+    if (claude && process.platform === 'darwin') handoff = await serveClaudeHandoff((sessionId, isRequested) =>
+      managedDesktop.handoffClaude(plan.profileId, owner, sessionId, () => !launchSignal.aborted && isRequested()));
+    const env = handoff ? { ...plan.env, PATH: `${handoff.directory}:${plan.env.PATH}` } : plan.env;
     const result = await run({ executable: plan.executable, args: report.embedded ? [...plan.args, '--no-daemon'] : plan.args,
-      cwd: plan.cwd, env: plan.env, signal,
+      cwd: plan.cwd, env, signal: launchSignal,
       async onSpawn(pid) {
         report.pid = pid;
         await assertSameNativeRoots();
         await record(reportPath, report);
-        report.processIdentity = await attestRunner(instanceRuntime, pid, plan.client === 'copilot').catch(() => undefined);
+        report.processIdentity = await attestRunner(instanceRuntime, pid, true).catch(() => undefined);
         await assertSameNativeRoots();
-        report.status = 'running'; await record(reportPath, report);
+        report.status = 'running';
+        if (report.processIdentity) {
+          report.closeSupported = true;
+          stopCloseWatch = watchCliClose(owner, async () => {
+            await assertSameNativeRoots();
+            await currentDesktopPeer();
+          }, () => requestedClose.abort());
+        }
+        await record(reportPath, report);
       } });
     Object.assign(report, result);
     report.status = result.exitCode === 0 ? 'exited' : 'failed';
   } catch (error) {
-    preserveLock = error.code === 'SHUTDOWN_FAILED';
-    report.status = 'incomplete'; report.error = knownErrors.has(error.code) ? error.code : 'LAUNCH_FAILED';
+    if (error.shutdown?.groupTerminated === true) report.shutdown = error.shutdown;
+    if (requestedClose.signal.aborted && error.code === 'CANCELLED' && report.shutdown?.groupTerminated) {
+      report.status = 'exited';
+      report.closedFromProfiles = true;
+    } else {
+      preserveLock = error.code === 'SHUTDOWN_FAILED' || requestedClose.signal.aborted;
+      report.status = 'incomplete'; report.error = knownErrors.has(error.code) ? error.code : 'LAUNCH_FAILED';
+    }
   } finally {
+    await stopCloseWatch?.();
+    if (handoff) {
+      await handoff.close().catch(() => { report.handoffCleanup = 'failed'; });
+      if (handoff.accepted) report.desktopHandoff = 'accepted';
+    }
     if (!preserveLock) {
       try {
         if (plan.client === 'codex') {
@@ -287,7 +314,7 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
     if (codex) await guard(async () => {
       try { await assertSameNativeRoots(); }
       catch { reportPath = null; preserveLock = true; }
-      if (!preserveLock && report.embedded && report.spawnIntent) {
+      if (!preserveLock && report.spawnIntent && (report.embedded || report.shutdown?.groupTerminated === true)) {
         try {
           const peer = await currentDesktopPeer();
           const allowedProcesses = peer ? (await observeCodexDesktopPeer(store, plan, peer, instanceRuntime)).processes : [];
@@ -306,7 +333,21 @@ export async function launchHome(store, name, { signal, terminalEnvironment, onS
       if (!preserveLock) {
         try {
           const peer = await currentDesktopPeer();
-          if (peer) await managedDesktop.observePeer(plan.profileId, peer);
+          if (peer) {
+            // Desktop helpers can change during the first holder scan.
+            const attempts = report.shutdown?.groupTerminated === true ? 4 : 1;
+            for (let attempt = 1; ; attempt++) {
+              try {
+                await managedDesktop.observePeer(plan.profileId, peer);
+                break;
+              } catch (error) {
+                if (attempt === attempts) throw error;
+                await delay(250);
+              }
+            }
+          } else if (report.shutdown?.groupTerminated === true) {
+            await instanceRuntime.assertResourcesIdle([plan.nativeRoot]);
+          }
         } catch {
           preserveLock = true; report.status = 'incomplete'; report.error = 'SHUTDOWN_FAILED';
           await record(reportPath, report);

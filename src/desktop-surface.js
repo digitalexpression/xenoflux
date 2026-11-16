@@ -4,7 +4,7 @@ import { execFile as nodeExecFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DESKTOP_APP } from './desktop-runtime.js';
 import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
-import { focusDesktopInstance, listDesktopInstances, openDesktopInstance } from './desktop-instances.js';
+import { closeDesktopInstance, focusDesktopInstance, listDesktopInstances, openDesktopInstance, recoverDesktopInstance } from './desktop-instances.js';
 import { capabilityState } from './client-contracts.js';
 
 export function createCodexDesktopSurface(store, { runtime = createDesktopInstanceRuntime(),
@@ -14,6 +14,8 @@ export function createCodexDesktopSurface(store, { runtime = createDesktopInstan
     async openDefault() { await execFile('/usr/bin/open', ['-b', DESKTOP_APP.bundleId], { timeout: 15000 }); },
     open: (name, extra) => openDesktopInstance(store, name, operationOptions(extra)),
     focus: (name, extra) => focusDesktopInstance(store, name, operationOptions(extra)),
+    close: (name, extra) => closeDesktopInstance(store, name, operationOptions(extra)),
+    recover: (name, extra) => recoverDesktopInstance(store, name, operationOptions(extra)),
     list: extra => listDesktopInstances(store, operationOptions(extra)),
     snapshot: () => runtime.snapshot(),
     async inspect() {

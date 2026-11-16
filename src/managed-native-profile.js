@@ -170,13 +170,15 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
               rootIdentities: roots, accountToken: managed.token };
           } else status = { state: 'unverified' };
         }
+        if (status.state === 'signed-in' && managed.accountLabel) status.accountLabel = managed.accountLabel;
       }
       const current = await binary(client);
       if (profile.executable !== current.executable || profile.executableIdentity !== current.executableIdentity
         || !same(roots, await routeIdentity(profile))) throw new Error('The native account binding changed during the check.');
       observations.set(key, { client, ...status, qualification, runtimeVersion, roots, binary: [profile.executable, profile.executableIdentity],
         expiresAt: qualification?.expiresAt ?? Date.now() + freshnessMs });
-      return { ...status, accountScope: client === 'claude-code' ? 'per-root' : qualification?.scope ?? 'unverified',
+      const { accountLabel, ...publicStatus } = status;
+      return { ...publicStatus, accountScope: client === 'claude-code' ? 'per-root' : qualification?.scope ?? 'unverified',
         accountIndependence: 'not verified' };
     } catch (error) {
       preserve = error?.code === 'SHUTDOWN_FAILED' || (attempted && error.process?.shutdown.groupTerminated !== true);

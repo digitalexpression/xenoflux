@@ -8,7 +8,7 @@ async function signinFixture(page, client) {
     state, browserUrl: client === 'copilot' ? 'https://github.com/login/device' : undefined,
     deviceCode: client === 'copilot' ? 'ABCD-1234' : undefined,
     message: state === 'completed' ? 'Account sign-in verified.' : state === 'verifying' ? 'Checking the native account.' : 'Finish authorization in your browser.' });
-  await page.route('**/api/profiles', route => {
+  await page.route('**/api/profiles/refresh', route => {
     profileReads++;
     return route.fulfill({ json: { profiles: [{ name: profileName, client, accountScope: 'per-root',
       accountIndependence: 'not verified', isDefault: false, state: 'ready', reason: null,

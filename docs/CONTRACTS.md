@@ -56,7 +56,10 @@ CLI configuration path to exclude the stock fallback. The Desktop app keeps its
 own sign-in. Default Copilot can use its existing stock GitHub CLI account.
 On a Profiles visit, background CLI account checks use the existing native
 verification and ownership guards. A check refused before it obtains the profile
-reservation preserves the previous account observation.
+reservation preserves the previous account observation. Account labels are
+display metadata for the authenticated local Profiles page. Keep them in memory
+and omit them from reports and raw probe logs. Codex account checks do not
+refresh credentials. Report the surface that provides the identity.
 Profile cards may retain an expired account observation as **last checked** while
 its executable and roots still match. Displaying that observation never renews
 account qualification or permits task admission.
@@ -220,8 +223,11 @@ positive selected-root storage evidence before reporting profile-bound startup.
 For Claude, that evidence can come from an exact owned descendant holding the
 selected Desktop storage. A configuration environment variable alone is insufficient.
 Do not pass prompts, authentication choices or account overrides. Readonly status
-never releases the reservation. Explicit recovery rechecks the exact stopped
-owner, roots and complete holder observations; uncertain startup, reused process
+never releases the reservation. The Profiles refresh and profile actions may
+reconcile confirmed-stopped ownership using the same guarded checks as explicit
+recovery. The running local controller also checks registered claims in the
+background. Recheck the exact stopped owner, roots and complete holder observations
+before release. Uncertain startup, reused process
 identities and incomplete scans retain ownership. Other Claude instances alone
 do not block recovery of a confirmed-stopped profile. Claude and Copilot Desktop
 remain outside shared task admission.
@@ -231,6 +237,22 @@ PID/kernel start identity. Preserve signatures/entitlements; never re-sign vendo
 executables/helpers. Stock opening sends no prompt or account/surface selection and
 establishes no managed isolation or historical session identity. Refuse control from
 the target's own invocation ancestry or mismatched/unrelated processes.
+
+Profiles can request CLI shutdown for a verified, exact interactive run. The
+browser supplies the recorded run ID and the controller publishes a bounded
+request beside that run’s private report. Only the launcher for that run acts
+on the request through its own process-group cleanup. Repeated requests target
+the same run. Verify shutdown and release only the CLI reservation, preserving
+any Desktop peer. Stock CLI sessions and earlier launches without support
+continue to exit in Terminal.
+
+Managed Claude's `/app` starts the same profile's Desktop if needed, using the
+normal admission checks. It may release only a verified stopped Desktop claim
+before starting a replacement. Send the session ID once to the verified PID.
+Require fresh, matching session evidence from the selected Desktop storage
+after delivery. An unverifiable target, rejected delivery or missing session
+confirmation keeps Terminal open. Never fall back to the stock app or transfer
+either client's sign-in. Verify CLI shutdown before releasing only its reservation.
 
 Ship the prebuilt universal helper with source/binary identities and private binary-keyed
 caches. No install/pack compilation or fallback; damaged helpers need a corrected package.

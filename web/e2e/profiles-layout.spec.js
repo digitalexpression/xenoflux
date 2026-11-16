@@ -75,6 +75,8 @@ for (const theme of ['light', 'dark']) {
       await expect(page.getByRole('region', { name: 'Claude Code profiles', exact: true })).toBeVisible();
       const copilot = page.getByRole('article', { name: 'copilot-work', exact: true });
       const claude = page.getByRole('article', { name: 'claude-work', exact: true });
+      await expect(page.getByText(/Codex profiles you create or add share one sign-in/)).toBeVisible();
+      await expect(claude.getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
       await expect(copilot.getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
       await expect(claude.getByText(/Signed in \(last checked\)/)).toBeVisible();
       await expect(page.getByRole('heading', { name: 'Native apps', exact: true })).toHaveCount(0);
@@ -98,6 +100,13 @@ for (const theme of ['light', 'dark']) {
       await page.screenshot({ path: testInfo.outputPath(`profiles-narrow-${theme}.png`), fullPage: true, animations: 'disabled' });
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.getByRole('button', { name: 'Create profile…', exact: true }).click();
+      const create = page.getByRole('dialog', { name: 'Create a profile', exact: true });
+      const client = create.getByRole('combobox', { name: 'Client' });
+      await expect(client).toHaveAccessibleDescription('One sign-in works in CLI and Desktop for this profile.');
+      for (const value of ['claude-code', 'copilot']) {
+        await client.selectOption(value);
+        await expect(client).toHaveAccessibleDescription('Sign in separately to CLI and Desktop for this profile.');
+      }
       await expect(page.getByRole('dialog', { name: 'Create a profile', exact: true })).toBeVisible();
       await page.keyboard.press('Escape');
       await expect(page.getByRole('button', { name: 'Create profile…', exact: true })).toBeFocused();

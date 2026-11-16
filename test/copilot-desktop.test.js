@@ -10,6 +10,7 @@ import { createManagedDesktop } from '../src/managed-desktop.js';
 import { Store, create } from '../src/profiles.js';
 import { acquire, readJSON, record } from '../src/metadata.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
+import { requestCliClose } from '../src/cli-close.js';
 
 async function fixture(t, vendor = 'copilot') {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'xfx-copilot-desktop-')));
@@ -26,9 +27,19 @@ async function fixture(t, vendor = 'copilot') {
   const app = { status: 'available', appKey: 'a'.repeat(64), path: join(base, 'Copilot.app'),
     executable: join(base, vendor === 'claude' ? 'Copilot.app/Contents/MacOS/Claude' : 'Copilot.app/Contents/MacOS/github') };
   const main = { pid: 99999, ppid: 1, uid: process.getuid(), startedAt: 'Fri Nov 13 10:00:00 2026 UTC', executable: app.executable };
-  let rows = [], holder = false, busy = false, opened = 0, failOpen = false, installs = 0, checks = 0;
+  let rows = [], holder = false, busy = false, opened = 0, focused = 0, closed = 0, failOpen = false, installs = 0, checks = 0;
   const runtime = {
     async snapshot() { return structuredClone(rows); },
+    async focus(target) {
+      assert.ok(rows.some(row => row.pid === target.pid && row.startedAt === target.startedAt && row.executable === target.executable));
+      focused++;
+      return { status: 'focused' };
+    },
+    async close(target) {
+      assert.ok(rows.some(row => row.pid === target.pid && row.startedAt === target.startedAt && row.executable === target.executable));
+      closed++; rows = []; holder = false;
+      return { status: 'stopped', processes: [] };
+    },
     async assertResourcesIdle(paths, { allowedProcesses = [] } = {}) {
       assert.equal(new Set(allowedProcesses.map(row => row.pid)).size, allowedProcesses.length,
         'native resource observations require unique process identities');
@@ -63,7 +74,8 @@ async function fixture(t, vendor = 'copilot') {
     return join(root, 'launches', claim.runId, 'report.json');
   };
   return { base, store, profile, root, configRoot, app, main, owner, deps, calls, report,
-    get opened() { return opened; }, get installs() { return installs; }, get checks() { return checks; },
+    get opened() { return opened; }, get focused() { return focused; }, get closed() { return closed; },
+    get installs() { return installs; }, get checks() { return checks; },
     setRows(value) { rows = value; }, setHolder(value) { holder = value; }, setBusy(value) { busy = value; },
     setFailOpen(value) { failOpen = value; }, changeApp() { key = 'b'.repeat(64); } };
 }
@@ -102,6 +114,74 @@ test('normal quit stays reserved until explicit preview and fresh recovery', asy
   await assert.rejects(readFile(join(f.root, '.run-lock/owner.json')), { code: 'ENOENT' });
   assert.equal((await readJSON(path)).phase, 'recovered');
   assert.equal((await f.owner.status(f.profile.id, { installation: f.app })).state, 'available');
+});
+
+test('background stopped-only recovery skips holder scans for live, reused and unattributed startup processes', async t => {
+  const f = await fixture(t);
+  await f.owner.open(f.profile.id, { appKey: f.app.appKey });
+  const checks = f.checks, ownerPath = join(f.root, '.run-lock/owner.json');
+  assert.equal((await f.owner.recover(f.profile.id, { apply: true, onlyIfStopped: true })).state, 'running');
+  assert.equal(f.checks, checks, 'live exact main avoids storage-holder scans');
+  f.setRows([{ ...f.main, startedAt: 'replacement identity' }]);
+  assert.equal((await f.owner.recover(f.profile.id, { apply: true, onlyIfStopped: true })).state, 'uncertain');
+  assert.equal(f.checks, checks, 'reused PID preserves ownership without holder scans');
+  assert.equal((await readJSON(ownerPath)).kind, 'copilot-desktop');
+
+  const started = await fixture(t);
+  started.setFailOpen(true);
+  await assert.rejects(started.owner.open(started.profile.id, { appKey: started.app.appKey }));
+  const startupChecks = started.checks;
+  assert.equal((await started.owner.recover(started.profile.id, { apply: true, onlyIfStopped: true })).state, 'uncertain');
+  assert.equal(started.checks, startupChecks, 'unattributed spawn intent avoids unsafe cleanup scans');
+  assert.equal((await readJSON(join(started.root, '.run-lock/owner.json'))).kind, 'copilot-desktop');
+});
+
+test('background stopped-only recovery runs full gated proof and releases exact stopped owner', async t => {
+  const f = await fixture(t);
+  await f.owner.open(f.profile.id, { appKey: f.app.appKey });
+  f.setRows([]); f.setHolder(false);
+  const checks = f.checks;
+  const result = await f.owner.recover(f.profile.id, { apply: true, onlyIfStopped: true });
+  assert.equal(result.status, 'recovered');
+  assert.ok(f.checks > checks, 'stopped owner uses the full storage-holder proof');
+  await assert.rejects(readFile(join(f.root, '.run-lock/owner.json')), { code: 'ENOENT' });
+});
+
+test('profile focus and close control only the verified owned instance', async t => {
+  for (const vendor of ['copilot', 'claude']) await t.test(vendor, async t => {
+    const f = await fixture(t, vendor);
+    await f.owner.open(f.profile.id, { appKey: f.app.appKey });
+    const runId = (await readJSON(await f.report())).owner.runId;
+    assert.deepEqual(await f.owner.focus(f.profile.id), { state: 'running', runId });
+    assert.equal(f.focused, 1);
+    assert.deepEqual(await f.owner.close(f.profile.id), { state: 'closed', runId });
+    assert.equal(f.closed, 1);
+    await assert.rejects(readFile(join(f.root, '.run-lock/owner.json')), { code: 'ENOENT' });
+    assert.equal((await f.owner.status(f.profile.id, { installation: f.app })).state, 'available');
+  });
+});
+
+test('opening a confirmed-stopped reservation verifies the app key before release and reopens normally', async t => {
+  for (const vendor of ['copilot', 'claude']) await t.test(vendor, async t => {
+    const f = await fixture(t, vendor);
+    await f.owner.open(f.profile.id, { appKey: f.app.appKey });
+    const path = await f.report(), previous = await readJSON(path);
+    f.setRows([]); f.setHolder(false);
+    await assert.rejects(f.owner.open(f.profile.id, { appKey: 'b'.repeat(64) }));
+    assert.deepEqual(await readJSON(path), previous);
+    assert.equal((await readJSON(join(f.root, '.run-lock/owner.json'))).runId, previous.owner.runId);
+    assert.equal(f.opened, 1);
+    assert.deepEqual(await f.owner.open(f.profile.id, { appKey: f.app.appKey }), { state: 'running', runId: (await readJSON(await f.report())).owner.runId });
+    assert.equal(f.opened, 2);
+    assert.notEqual((await readJSON(await f.report())).owner.runId, previous.owner.runId);
+  });
+});
+
+test('invalid Claude app key does not prepare Desktop storage', async t => {
+  const f = await fixture(t, 'claude');
+  await assert.rejects(f.owner.open(f.profile.id, { appKey: 'b'.repeat(64) }));
+  await assert.rejects(readFile(join(f.root, 'desktop')), { code: 'ENOENT' });
+  await assert.rejects(readFile(join(f.root, '.run-lock/owner.json')), { code: 'ENOENT' });
 });
 
 test('live app, reused PID, descendant and foreign holders preserve reservations', async t => {
@@ -440,8 +520,79 @@ test('Claude startup refuses existing selected-root crash reporters and preserve
   });
 });
 
-for (const [vendor, desktopFirst] of [['claude', true], ['claude', false], ['copilot', true], ['copilot', false]]) {
-  test(`${vendor} ${desktopFirst ? 'Desktop' : 'CLI'} first joins the other client and releases only the exiting owner`, async t => {
+test('Claude handoff opens only the managed window and requires fresh Desktop session evidence', async t => {
+  const f = await fixture(t, 'claude'), executable = join(f.base, 'claude');
+  await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const runner = { ...f.main, pid: 99990, ppid: process.pid, executable };
+  const { runtime, lockOptions } = f.deps;
+  const desktopSnapshot = runtime.snapshot;
+  runtime.snapshot = async () => [...await desktopSnapshot(), runner];
+  let cliRunning = true, recordFocus = false, createdAt, sends = 0;
+  runtime.observe = async () => cliRunning ? { status: 'running', processes: [runner] } : { status: 'stopped', processes: [] };
+  const cwd = join(f.root, 'workspace'), sessionId = randomUUID();
+  const directory = join(f.root, 'desktop', 'claude-code-sessions', randomUUID(), randomUUID());
+  const service = createManagedDesktop(f.store, { ...f.deps, handoffTimeoutMs: 10, openTimeoutMs: 200,
+    stockApps: { ...f.deps.stockApps, async list() { return [{ ...f.app, client: 'claude' }]; } },
+    processHelper: async () => '/fixture/helper',
+    async execFile(command, args, options) {
+      if (command !== '/fixture/helper') return f.deps.execFile(command, args, options);
+      sends++;
+      assert.deepEqual(args, ['--handoff-claude', String(f.main.pid), '1794564000', f.app.path, sessionId]);
+      if (recordFocus) {
+        await mkdir(directory, { mode: 0o700, recursive: true });
+        const timestamp = Date.now();
+        await record(join(directory, `local_${sessionId}.json`), { sessionId: `local_${sessionId}`, cliSessionId: sessionId, cwd,
+          fromCliTranscript: true, createdAt: createdAt ?? timestamp, ...(createdAt === undefined ? {} : { lastFocusedAt: timestamp }) });
+        createdAt ??= timestamp;
+      }
+    },
+  });
+  const started = Promise.withResolvers(), finished = Promise.withResolvers();
+  const launching = launchHome(f.store, f.profile.id, { instanceRuntime: runtime, lockOptions,
+    defaultUserHome: f.base, terminalEnvironment: { PATH: `${f.base}:/usr/bin:/bin`, HOME: f.base, USER: 'fixture', LOGNAME: 'fixture' },
+    probe: async () => '2.1.319',
+    run: async ({ onSpawn }) => {
+      await onSpawn(runner.pid);
+      started.resolve();
+      await finished.promise;
+      cliRunning = false;
+      return { exitCode: 0, shutdown: { groupTerminated: true } };
+    },
+  });
+  try {
+    await Promise.race([started.promise, launching.then(result => assert.fail(`CLI exited early: ${result.error}`))]);
+    const owner = (await readProfileOwners(f.root)).find(owner => owner.kind === 'interactive-cli');
+    const handoff = () => service.handoffClaude(f.profile.id, owner, sessionId, () => true);
+    await assert.rejects(handoff(), /did not confirm/);
+    assert.equal(f.opened, 1);
+    assert.equal((await service.status(f.profile.id)).cliRunning, true);
+    f.setHolder(false);
+    await assert.rejects(handoff(), /target is unverified/);
+    assert.equal(sends, 1);
+    f.setHolder(true);
+    recordFocus = true;
+    await handoff();
+    recordFocus = false;
+    await assert.rejects(handoff(), /did not confirm/);
+    assert.equal(f.opened, 1);
+    f.setRows([]);
+    f.setHolder(false);
+    recordFocus = true;
+    await handoff();
+    assert.equal(f.opened, 2);
+    assert.equal(sends, 4);
+  } finally {
+    finished.resolve();
+    assert.equal((await launching).status, 'exited');
+  }
+  assert.deepEqual((await readProfileOwners(f.root)).map(owner => owner.kind), ['claude-desktop']);
+});
+
+for (const [vendor, desktopFirst, closeFromUi] of [
+  ['claude', true], ['claude', false], ['copilot', true], ['copilot', false], ['claude', false, true], ['copilot', false, true],
+]) {
+  test(closeFromUi ? `${vendor} Close CLI releases only the CLI reservation`
+    : `${vendor} ${desktopFirst ? 'Desktop' : 'CLI'} first joins the other client and releases only the exiting owner`, async t => {
     const f = await fixture(t, vendor);
     const executable = join(f.base, vendor);
     await writeFile(executable, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
@@ -468,15 +619,16 @@ for (const [vendor, desktopFirst] of [['claude', true], ['claude', false], ['cop
         terminalEnvironment: { PATH: `${f.base}:/usr/bin:/bin`, HOME: userInfo().homedir, USER: userInfo().username, LOGNAME: userInfo().username },
       }),
       probe: async () => '2.1.319',
-      run: async ({ cwd, env, onSpawn }) => {
+      run: async ({ cwd, env, onSpawn, signal }) => {
         assert.equal(cwd, join(f.root, 'workspace'));
         assert.equal(vendor === 'claude' ? env.CLAUDE_CONFIG_DIR : env.COPILOT_HOME, f.configRoot);
         if (vendor === 'copilot') assert.ok(env.GH_CONFIG_DIR.startsWith(f.configRoot + '/'));
         cliRunning = true;
         await onSpawn(runner.pid);
         started.resolve();
-        await finished.promise;
+        await Promise.race([finished.promise, new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))]);
         cliRunning = false;
+        if (signal.aborted) throw Object.assign(new Error('Cancelled'), { code: 'CANCELLED', shutdown: { groupTerminated: true } });
         return { exitCode: 0, shutdown: { groupTerminated: true } };
       },
     });
@@ -495,16 +647,26 @@ for (const [vendor, desktopFirst] of [['claude', true], ['claude', false], ['cop
       assert.deepEqual((await owners()).map(owner => owner.kind).sort(), [`${vendor}-desktop`, 'interactive-cli']);
       const other = { kind: 'native-signin', runId: randomUUID() };
       await assert.rejects(acquire(join(f.root, '.run-lock'), other, true));
+      if (closeFromUi) {
+        const { runId } = (await owners()).find(owner => owner.kind === 'interactive-cli');
+        const close = id => requestCliClose(f.store, f.profile.id, id, { runtime, lockOptions });
+        await assert.rejects(close(randomUUID()), /no longer available/);
+        assert.equal(cliRunning, true);
+        assert.equal(await close(runId), 'closed');
+        assert.equal(cliRunning, false);
+      }
       if (desktopFirst) {
         f.setRows([]); f.setHolder(false);
-        assert.equal((await f.owner.recover(f.profile.id, { apply: true })).state, 'released');
+        assert.equal((await f.owner.recover(f.profile.id, { apply: true, onlyIfStopped: true })).state, 'released');
         assert.equal(cliRunning, true);
         assert.deepEqual((await owners()).map(owner => owner.kind), ['interactive-cli']);
       }
     } finally {
       finished.resolve();
     }
-    assert.equal((await launching).status, 'exited');
+    const report = await launching;
+    assert.equal(report.status, 'exited');
+    if (closeFromUi) assert.equal(report.closedFromProfiles, true);
     if (desktopFirst) await assert.rejects(owners(), { code: 'ENOENT' });
     else {
       assert.equal((await f.owner.status(f.profile.id)).state, 'running');
