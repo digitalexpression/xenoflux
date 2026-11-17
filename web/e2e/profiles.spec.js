@@ -63,6 +63,10 @@ test('visiting Profiles checks each available CLI account once and refreshes cur
   await expect(claude.getByText(/CLI account · claude@example.test/)).toBeVisible();
   await expect(copilot.getByText(/CLI account · copilot-work/)).toBeVisible();
   await expect(copilot.getByText('See the Desktop account in the app’s account menu.')).toBeVisible();
+  const desktopSignInHint = /Quit all other Claude Desktop instances before signing in to this profile.*open regular Claude Desktop first, then reopen this profile/;
+  const claudeDesktopAction = claude.getByRole('button', { name: 'Open Claude Desktop for claude-work' });
+  await expect(claudeDesktopAction).toHaveAccessibleDescription(desktopSignInHint);
+  await expect(copilot.getByText(desktopSignInHint)).toHaveCount(0);
   const handoffHint = /Run \/app in Terminal.*Xenoflux opens this profile’s Desktop if it’s closed.*sign in there and retry \/app/;
   const claudeTerminal = claude.getByRole('button', { name: 'Open in Terminal for claude-work' });
   await expect(claudeTerminal).toHaveAccessibleDescription(handoffHint);
@@ -72,6 +76,7 @@ test('visiting Profiles checks each available CLI account once and refreshes cur
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await refreshed;
   await expect(claude.getByText('Desktop is open for this profile.')).toBeVisible();
+  await expect(claude.getByText(desktopSignInHint)).toBeVisible();
   await expect(claude.getByText(handoffHint)).toBeVisible();
   expect(checks).toEqual(available);
 

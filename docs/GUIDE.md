@@ -107,16 +107,20 @@ different GitHub accounts.
 
 For Claude, choose **Open Claude Desktop** on the profile entry. Each profile has
 its own Desktop data folder alongside its Claude Code configuration folder.
-Other Claude Desktop instances can stay open. Xenoflux starts a new instance
-and verifies its selected storage without focusing, closing or changing the
-other instances. Claude Desktop has a separate sign-in from the CLI. If Google
-sign-in returns to a different Claude window on macOS, quit the other Claude
-Desktop instances before signing in, then reopen them.
+Xenoflux opens and verifies the profile's own instance. Claude Desktop has a
+separate sign-in from the CLI. Keep only the target Desktop instance running
+during sign-in so macOS delivers the browser's sign-in link to that instance.
+
+1. Quit regular Claude Desktop and any other Claude Desktop profiles.
+2. In Xenoflux, choose **Open Claude Desktop** for the profile you want to sign
+   in to. Complete sign-in and check the account menu in that window.
+3. Quit the profile's Desktop. Open regular Claude Desktop first, then reopen
+   the profile from Xenoflux. Both instances can stay open once signed in.
 
 Run `/app` in a managed Claude Code Terminal session to move the conversation to
 that profile's Claude Desktop. Xenoflux starts the matching Desktop if needed.
-If Desktop asks you to sign in, sign in there separately and retry `/app` in the
-same Terminal session. Claude Code exits and Xenoflux releases its Terminal
+If Desktop asks you to sign in, follow the steps above, then retry `/app` in
+the same Terminal session. Claude Code exits and Xenoflux releases its Terminal
 reservation after it verifies Desktop opened the conversation. If Xenoflux
 cannot confirm the handoff, the conversation stays open in Terminal. If you
 can see the conversation in Desktop, you can close Terminal yourself.

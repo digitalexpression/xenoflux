@@ -267,6 +267,7 @@ function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMen
   const navigate = useNavigate();
   const titleId = useId();
   const handoffHintId = useId();
+  const desktopSignInHintId = useId();
   const title = useRef<HTMLHeadingElement>(null);
   const retainActionFocus = useCallback((button: HTMLButtonElement | null) => () => {
     if (button && document.activeElement === button) title.current?.focus();
@@ -275,9 +276,10 @@ function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMen
   const clientLabel = clientLabels[profile.client ?? 'codex'];
   const cliLabel = profile.client === 'copilot' ? 'Copilot CLI' : clientLabel;
   const signIn = checkingAccount ? 'Checking sign-in…' : profile.signIn;
-  const showClaudeHandoff = info?.features.clientControls && profile.client === 'claude-code'
-    && (profile.cli.state === 'running' || profile.clientActions.some(action => action.id === 'open-terminal'))
+  const showClaudeDesktopSignIn = info?.features.clientControls && profile.client === 'claude-code'
     && (profile.desktop.state === 'running' || profile.clientActions.some(action => action.id === 'open-desktop'));
+  const showClaudeHandoff = showClaudeDesktopSignIn
+    && (profile.cli.state === 'running' || profile.clientActions.some(action => action.id === 'open-terminal'));
   return (
     <article className="profile-row min-w-0 wrap-anywhere" aria-labelledby={titleId}>
       <div className="profile-identity">
@@ -304,6 +306,9 @@ function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMen
         </dl>
         <p className="profile-account-scope">{separateSignIns}</p>
         <p className="hint">See the Desktop account in the app’s account menu.</p>
+        {showClaudeDesktopSignIn ? <p id={desktopSignInHintId} className="hint">
+          Quit all other Claude Desktop instances before signing in to this profile. After signing in, quit this profile, open regular Claude Desktop first, then reopen this profile from Xenoflux.
+        </p> : null}
         {showClaudeHandoff ? <p id={handoffHintId} className="hint">
           Run <code>/app</code> in Terminal to move your session to Claude Desktop. Xenoflux opens this profile’s Desktop if it’s closed. If prompted, sign in there and retry <code>/app</code>.
         </p> : null}
@@ -332,7 +337,8 @@ function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMen
               onClick={() => onClient(action, title.current)} disabled={Boolean(busyAction)} aria-disabled={checkingAccount || undefined} busy={busyAction === action.id}
               busyLabel={action.id === 'signin' ? (profile.client && profile.client !== 'codex' ? 'Starting sign-in…' : 'Opening Terminal…')
                 : clientBusyLabels[action.id] ?? 'Checking…'}
-              aria-describedby={showClaudeHandoff && action.id === 'open-terminal' ? handoffHintId : undefined}
+              aria-describedby={showClaudeHandoff && action.id === 'open-terminal' ? handoffHintId
+                : showClaudeDesktopSignIn && action.id === 'open-desktop' ? desktopSignInHintId : undefined}
               aria-label={`${action.label.replace(/…$/, '')} for ${profile.name}`}>{action.label}</Button>
           ))}
         </div>
