@@ -81,6 +81,16 @@ Standalone skill replacement is exact, including supported resources/scripts,
 obsolete package members, directory shape and modes. Explicit conflicts support
 keep/skip/replace. Refuse unsafe paths, ambiguous ownership, unsupported content/type
 transitions or insufficient owner permissions before mutation; never partially overlay.
+For Claude Default, an owned same-name link from `~/.claude/skills` into
+`~/.agents/skills` can supply a standalone package. Copy the verified package
+as files, recheck it on apply and leave the source link intact.
+For Claude agent and skill definitions, preview the copy with MCP bindings and
+tool pre-approvals removed. Preserve local tool restrictions when dropping MCP
+tools from a supported allowlist. Drop a plan-mode override only when the
+remaining allowlist is limited to Read, Grep and Glob. Omit Graphify's install
+version marker. Referenced Markdown can describe manual integration setup.
+For a stock native source, check holders of the selected files and packages.
+Keep the idle-root requirement for managed destinations.
 Project, plugin and built-in resources retain their ownership. Discovery can be wider
 than copying, without making visible unknown configuration freely copyable.
 

@@ -56,6 +56,22 @@ Skill replacement includes obsolete package files; unsafe packages/transitions
 are refused. Manual plugin/hook/MCP guidance is conditional and outside Undo.
 Preserve the copy journal/payload while Undo is needed; intervening edits block it.
 
+For Claude Code, use `xfx copy Default "Claude profile" --advanced` to preview
+individual agents and skills from `~/.claude`. The named destination determines
+which client's Default is used. Add `--apply` to review and copy your selection.
+Close clients using the selected profiles before applying.
+
+Claude copies eligible agent and skill definitions without their MCP bindings
+or tool pre-approvals. Local tool restrictions still apply in the destination.
+For new skill resources, preview lists each file with its size and SHA-256.
+
+Global installs from `npx skills add -g -a claude-code` normally place packages
+under `~/.agents/skills` and expose them in Claude through links. Xenoflux can
+copy an eligible same-name link from Default as an independent package in the
+destination. Updates to the shared installation do not update that copy. Use
+`npx skills list -g -a claude-code` to list the installer-managed skills and
+`npx skills check`, `npx skills update` or `npx skills remove` to maintain them.
+
 Preparation, copy, sign-in and Desktop integration are separate. A later failed
 sign-in does not erase completed copying. For a hard-interrupted login/CLI run:
 

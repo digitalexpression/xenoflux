@@ -1,5 +1,6 @@
 // Transfer eligibility is narrower than setup discovery. Native integrations stay manual.
-import { relative } from 'node:path';
+import { lstat, readlink, realpath } from 'node:fs/promises';
+import { dirname, join, relative, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { discoverAuditProfile } from './audit-discovery.js';
 import { inspectProfile } from './profile-inventory.js';
@@ -21,6 +22,27 @@ export function clientCopyPath(clientId, path, kind) {
   const prefix = kind === 'agent' ? 'agents' : kind === 'rule' ? clientId === 'claude-code' ? 'rules' : 'instructions' : null;
   return prefix !== null && new RegExp('^' + prefix + '/(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\\.md$').test(path);
 }
+export async function resolveClaudeGlobalSkill(userHome, alias) {
+  const name = relative(join(userHome, '.claude', 'skills'), alias);
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) return;
+  const shared = join(userHome, '.agents', 'skills', name);
+  try {
+    for (const path of [userHome, join(userHome, '.claude'), dirname(alias), join(userHome, '.agents'), dirname(shared), shared]) {
+      const info = await lstat(path);
+      if (!info.isDirectory() || info.uid !== process.getuid() || info.mode & 0o7022 || await realpath(path) !== path) return;
+    }
+    const link = await lstat(alias);
+    if (!link.isSymbolicLink() || link.uid !== process.getuid()
+      || resolve(dirname(alias), await readlink(alias)) !== shared || await realpath(alias) !== shared) return;
+    const definition = await lstat(join(shared, 'SKILL.md'));
+    if (!definition.isFile() || definition.nlink !== 1 || definition.uid !== process.getuid() || definition.mode & 0o7022) return;
+    return shared;
+  } catch (error) {
+    if (['ENOENT', 'ELOOP', 'ENOTDIR', 'EINVAL', 'EACCES', 'EPERM'].includes(error.code)) return;
+    throw error;
+  }
+}
+
 export async function inspectCopyProfile(store, name, options = {}) {
   if (!options.clientId || options.clientId === 'codex') return inspectProfile(store, name, { ...options, includeProjects: false, copyOnly: true });
   const { clientId, binding, defaultUserHome } = options;
@@ -42,8 +64,14 @@ export async function inspectCopyProfile(store, name, options = {}) {
     const path = relative(profile.home, resource.path);
     const owned = ['user', 'profile'].includes(resource.scope) && ['user-home', 'profile-home'].includes(resource.origin)
       && resource.status === 'present' && !resource.canonicalPath;
-    const eligible = owned && clientCopyPath(profile.clientId, path, resource.category);
-    const base = { ...resource, label: resource.name, origin: profile.profileName, copyable: false,
+    const globalClaudeSkill = clientId === 'claude-code' && profile.rootMode === 'implicit'
+      && resource.category === 'skill' && resource.scope === 'user' && Boolean(resource.canonicalPath)
+      && await resolveClaudeGlobalSkill(dirname(profile.home), resource.path) === resource.canonicalPath;
+    const eligible = (owned || globalClaudeSkill) && clientCopyPath(profile.clientId, path, resource.category);
+    const base = { ...resource, ...(globalClaudeSkill && {
+      id: createHash('sha256').update(resource.id + '\0' + resource.path).digest('hex'),
+      status: 'present',
+    }), label: resource.name, origin: profile.profileName, copyable: false,
       reason: 'Native/manual or unsupported ownership; discovery does not authorize transfer.' };
     if (['plugin', 'hook', 'mcp'].includes(resource.category) && resource.status === 'present') {
       const identity = resource.integrationId ?? resource.provider ?? resource.name;
@@ -67,7 +95,7 @@ export async function inspectCopyProfile(store, name, options = {}) {
       // Retain an explicit kept entry for unselected/unknown settings.
       items.push(base);
     } else items.push(eligible ? { ...base, copyable: true,
-      transfer: { kind: resource.category, path, sourcePath: resource.path } } : base);
+      transfer: { kind: resource.category, path, sourcePath: resource.path, ...(globalClaudeSkill && { globalClaudeSkill }) } } : base);
   }
   return { profile: { ...profile, name: profile.profileName }, items,
     limitations: snapshot.warnings, coverage: snapshot.coverage };

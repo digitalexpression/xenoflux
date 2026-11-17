@@ -577,8 +577,17 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       inventory = await inspectCopyProfile(store, from, { ...options, binding: options.sourceBinding, mainConversationsOnly: true });
       if (target && client === 'codex') guidance = await inspectSetupGuidance(store, from, target, { defaultUserHome });
     } catch (error) { throw new UiError(422, `Couldn’t read ${from}: ${error.message}`, 'inventory-failed'); }
-    const copyable = inventory.items.filter(entry => entry.copyable === true && entry.status !== 'unsupported'
+    let copyable = inventory.items.filter(entry => entry.copyable === true && entry.status !== 'unsupported'
       && entry.scope !== 'project' && !['project', 'db', 'runtime', 'docs'].includes(entry.category));
+    let unavailable = [];
+    if (client !== 'codex' && copyable.length) {
+      try {
+        const verified = await validateAdvancedSelection(store, from, copyable.map(entry => entry.id), { ...options, skipUnsafe: true });
+        const ids = new Set(verified.selection);
+        unavailable = copyable.filter(entry => !ids.has(entry.id)).map(entry => entry.label);
+        copyable = copyable.filter(entry => ids.has(entry.id));
+      } catch (error) { throw new UiError(422, `Couldn’t validate ${from}: ${error.message}`, 'inventory-failed'); }
+    }
     let endpointFingerprint = null;
     let planned = copyable.map(entry => ({ id: entry.id, label: entry.label, category: entry.category, status: 'new', changes: [] }));
     if (target && copyable.length) {
@@ -599,6 +608,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     const manual = (guidance.items ?? []).filter(entry => entry.destinationStatus !== 'same').slice(0, 8)
       .map(entry => `${entry.label}: ${(entry.steps ?? [])[0] ?? 'Set it up in Codex if you want it there.'}`);
     if (!manual.length) manual.push(`Set up plugins, MCP servers and hooks in ${PROFILE_CLIENT_NAMES[client]} if you want them in this profile.`);
+    if (unavailable.length) manual.push(`Unavailable for copying: ${unavailable.join(', ')}.`);
     const manualOptions = inventory.items.filter(entry => entry.setup === true).slice(0, 50)
       .map(entry => ({ id: entry.id, label: entry.label, steps: entry.steps }));
     return { items, manual, manualOptions, endpointFingerprint };

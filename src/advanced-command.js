@@ -1,11 +1,35 @@
 import { homedir } from 'node:os';
-import { inspectProfile } from './profile-inventory.js';
+import { createEnvironmentBinding } from './client-contracts.js';
+import { inspectCopyProfile } from './copy-client.js';
+import { managedNativeProfiles } from './managed-native-profile.js';
+import { find } from './profiles.js';
 import { pickAdvancedItems } from './advanced-picker.js';
 import { planCopy, validateAdvancedSelection } from './native-copy.js';
 import { confirmCopyAction } from './copy-picker.js';
 import { inspectSetupGuidance } from './setup-guidance.js';
 
 const clean = value => String(value ?? '').replace(/[\x00-\x1f\x7f-\x9f]/g, ' ');
+
+export async function copyCommandOptions(store, source, target, { defaultUserHome = homedir(), terminalEnvironment } = {}) {
+  const data = await store.read();
+  const destination = target.toLowerCase() === 'default' ? null : find(data, target);
+  if (!destination) throw new Error('Default is a source; copy into a named profile');
+  const selectedSource = source.toLowerCase() === 'default' ? null : find(data, source);
+  const clientId = destination.client ?? 'codex';
+  if (selectedSource && (selectedSource.client ?? 'codex') !== clientId)
+    throw new Error('Copy settings between profiles using the same client');
+  if (clientId === 'codex') return { defaultUserHome };
+
+  const native = managedNativeProfiles({ store, defaultUserHome, terminalEnvironment });
+  async function binding(selected) {
+    if (!selected) return;
+    const profile = await native.resolveProfile(clientId, selected);
+    return createEnvironmentBinding({ client: clientId, profileId: profile.profileId, surface: 'cli', executionLocation: 'local', rootMode: profile.rootMode,
+      roots: { config: profile.home, reservation: profile.reservationRoot, user: profile.userHome, runtime: profile.home },
+      workspace: null, executable: { path: profile.executable, identity: profile.executableIdentity, version: profile.version }, settingsIdentity: null });
+  }
+  return { defaultUserHome, clientId, sourceBinding: await binding(selectedSource), targetBinding: await binding(destination) };
+}
 
 /** Each conflicting item needs an explicit replacement choice; otherwise keep it. */
 export async function reviewAdvancedConflicts(preview, selection, io = {}) {
@@ -41,6 +65,7 @@ export async function reviewAdvancedConflicts(preview, selection, io = {}) {
 /** Read-only selection, shared by creation and copying. Never creates a profile. */
 export async function selectAdvancedCopy(store, source, target, {
   input = process.stdin, output = process.stdout, signal, defaultUserHome = homedir(),
+  clientId, sourceBinding, targetBinding,
 } = {}) {
   const controller = signal ? null : new AbortController();
   signal ??= controller.signal;
@@ -50,23 +75,37 @@ export async function selectAdvancedCopy(store, source, target, {
   const io = { input, output, signal };
   try {
     if (!input.isTTY || !output.isTTY) throw new Error('Advanced selection requires an interactive terminal; use profile inspect NAME --json for inventory');
-    const inventory = await inspectProfile(store, source, { defaultUserHome, includeProjects: false, mainConversationsOnly: true, copyOnly: true });
+    const options = { defaultUserHome, clientId, sourceBinding, targetBinding };
+    const inventory = await inspectCopyProfile(store, source, { defaultUserHome, clientId, binding: sourceBinding, mainConversationsOnly: true });
     // Storage artifacts are not separate transferable conversations or settings.
     inventory.items = inventory.items.filter(item => item.scope !== 'project' && !['project', 'db', 'runtime', 'docs'].includes(item.category));
-    const guidance = await inspectSetupGuidance(store, source, target, { defaultUserHome });
-    const setupIds = new Set(guidance.items.map(item => item.id));
+    if (clientId && clientId !== 'codex') {
+      const candidates = inventory.items.filter(item => item.copyable && !item.setup);
+      if (candidates.length) {
+        const verified = await validateAdvancedSelection(store, source, candidates.map(item => item.id), { ...options, skipUnsafe: true });
+        const verifiedIds = new Set(verified.selection);
+        for (const item of candidates) {
+          if (verifiedIds.has(item.id)) continue;
+          item.copyable = false;
+          item.reason = 'Excluded by the native copy safety checks.';
+        }
+      }
+    }
+    const guidance = !clientId || clientId === 'codex'
+      ? await inspectSetupGuidance(store, source, target, { defaultUserHome }) : { items: [], limitations: [] };
+    const setupIds = new Set([...inventory.items.filter(item => item.setup), ...guidance.items].map(item => item.id));
     inventory.items.push(...guidance.items);
     const review = ids => {
       const transferSelection = ids.filter(id => !setupIds.has(id));
       return target
-        ? planCopy(store, source, target, { selection: transferSelection, defaultUserHome })
-        : validateAdvancedSelection(store, source, transferSelection, { defaultUserHome });
+        ? planCopy(store, source, target, { ...options, selection: transferSelection })
+        : validateAdvancedSelection(store, source, transferSelection, options);
     };
     const picked = await pickAdvancedItems(inventory, { ...io, review });
     if (!picked || signal?.aborted) return null;
     const selection = picked.filter(id => !setupIds.has(id));
-    const selectedSetup = guidance.items.filter(item => picked.includes(item.id));
-    if (selection.length) await validateAdvancedSelection(store, source, selection, { defaultUserHome });
+    const selectedSetup = inventory.items.filter(item => setupIds.has(item.id) && picked.includes(item.id));
+    if (selection.length) await validateAdvancedSelection(store, source, selection, options);
     return { selection, setup: selectedSetup, limitations: [...new Set([...(inventory.limitations ?? []), ...guidance.limitations])], skipped: [] };
   } finally { if (controller) for (const name of signals) process.off(name, abort); }
 }
