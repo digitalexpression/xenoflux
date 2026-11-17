@@ -56,19 +56,22 @@ Skill replacement includes obsolete package files; unsafe packages/transitions
 are refused. Manual plugin/hook/MCP guidance is conditional and outside Undo.
 Preserve the copy journal/payload while Undo is needed; intervening edits block it.
 
-For Claude Code, use `xfx copy Default "Claude profile" --advanced` to preview
-individual agents and skills from `~/.claude`. The named destination determines
-which client's Default is used. Add `--apply` to review and copy your selection.
-Close clients using the selected profiles before applying.
+Use `xfx copy Default Research --advanced` to preview individual agents and
+skills. The destination determines which client's Default is used. Add
+`--apply` to review and copy your selection. Close clients using the selected
+profiles before applying.
 
-Claude copies eligible agent and skill definitions without their MCP bindings
-or tool pre-approvals. Local tool restrictions still apply in the destination.
-For new skill resources, preview lists each file with its size and SHA-256.
+Codex, Claude Code and GitHub Copilot CLI each copy eligible standalone definitions
+within the same client. Copy removes MCP bindings and tool pre-approvals and
+preserves supported local restrictions. For new skill resources, preview lists
+each file with its size and SHA-256.
 
 Global installs from `npx skills add -g -a claude-code` normally place packages
 under `~/.agents/skills` and expose them in Claude through links. Xenoflux can
-copy an eligible same-name link from Default as an independent package in the
-destination. Updates to the shared installation do not update that copy. Use
+copy an eligible same-name link into `~/.agents/skills` from any client's
+Default as an independent package. Codex and Copilot can also copy directly
+from that shared skill directory. Updates to the shared installation do not
+update the copy. Use
 `npx skills list -g -a claude-code` to list the installer-managed skills and
 `npx skills check`, `npx skills update` or `npx skills remove` to maintain them.
 

@@ -6,7 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { resolveHome } from './homes.js';
 import { createEnvironmentBinding } from './client-contracts.js';
-import { clientCopyPath, resolveClaudeGlobalSkill } from './copy-client.js';
+import { clientCopyPath } from './copy-client.js';
 import { resolveAuditProfile } from './audit-discovery.js';
 import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { acquire, release, globalLock, privateDirectory, readJSON, record, exists } from './metadata.js';
@@ -36,26 +36,14 @@ function packageResourcePaths(packages = []) {
   return packages.flatMap(pkg => [pkg.path, ...[...(pkg.before?.directories ?? []), ...(pkg.after?.directories ?? [])]
     .map(directory => directory.path)]);
 }
-async function clientScope(journal, targetOnly = false) {
+function clientScope(journal, targetOnly, sourceSkillPaths) {
   const relativePaths = [...(journal.files ?? []).map(file => file.path), ...packageResourcePaths(journal.packages)];
   const paths = targetResourcePaths(journal.target.home, relativePaths);
   if (!targetOnly) {
     const source = journal.source;
-    const aliases = new Map();
-    if (source.clientId === 'claude-code' && source.rootMode === 'implicit') {
-      for (const pkg of journal.packages ?? []) {
-        const alias = join(source.home, pkg.path);
-        const canonical = await resolveClaudeGlobalSkill(dirname(source.home), alias);
-        if (canonical) aliases.set(alias, canonical);
-      }
-    }
-    const selectedSourcePaths = relativePaths.map(path => join(source.home, path));
-    const sourcePaths = source.clientId && source.rootMode === 'implicit'
-      ? selectedSourcePaths : [source.home, ...selectedSourcePaths];
-    for (const path of sourcePaths) {
-      const alias = [...aliases.keys()].find(root => path === root || path.startsWith(root + '/'));
-      paths.push(alias ? aliases.get(alias) + path.slice(alias.length) : path);
-    }
+    if (!source.clientId || source.rootMode !== 'implicit') paths.push(source.home);
+    paths.push(...sourceSkillPaths);
+    for (const file of journal.files) if (!file.path.startsWith('skills/')) paths.push(join(source.home, file.path));
   }
   return { resourcePaths: [...new Set(paths)] };
 }
@@ -115,6 +103,7 @@ async function build(store, sourceName, targetName, { include, selection: select
       throw new Error('Source, destination and backup storage must be separate');
     const built = await buildAdvancedCopy(store, sourceName, targetName, selectedItems, copyOptions);
     return { report: built.report, plan: { source, target, components: ['advanced'], selection: selectedItems, sourceFingerprints: built.plan.sourceFingerprints,
+      sourceSkillPaths: built.plan.sourceSkillPaths,
       files: built.plan.files.filter(f => f.before === null || f.after === null || !f.before.equals(f.after) || f.beforeMode !== f.afterMode),
       packages:built.plan.packages??[], createdDirectories: built.plan.createdDirectories ?? [], defaultUserHome } };
   }
@@ -140,7 +129,7 @@ export async function planCopy(store, source, target, options = {}) { return (aw
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
 }
-async function locks(store, journal, preflight, action, { runtime = createDesktopRuntime(), lockPath = globalLock(), isAlive = alive, signal } = {}, recovering = false, targetOnly = false) {
+async function locks(store, journal, preflight, action, { runtime = createDesktopRuntime(), lockPath = globalLock(), isAlive = alive, signal } = {}, recovering = false, targetOnly = false, sourceSkillPaths = []) {
   const owner = { kind: 'native-copy', host: hostname(), pid: process.pid, runId: journal.id, storePath: store.directory };
   const profileLocks = new Set([journal.source.root ?? journal.source.home, journal.target.root ?? journal.target.home]
     .filter(Boolean).map(path => join(path, '.run-lock')));
@@ -167,7 +156,7 @@ async function locks(store, journal, preflight, action, { runtime = createDeskto
     if (signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
     if (needsClients !== false) {
       const cliExecutables = [...new Set([journal.source.executable, journal.target.executable].filter(Boolean))];
-      const scope = await clientScope(journal, targetOnly);
+      const scope = clientScope(journal, targetOnly, sourceSkillPaths);
       if (!journal.target.clientId) await runtime.prepareClients?.({ cliExecutables, includeDesktop: true });
       await runtime.assertIdle({ cliExecutables, ...scope });
     }
@@ -304,8 +293,9 @@ export async function applyCopy(store, source, target, options = {}) {
   const packageChanges=(initial.plan.packages??[]).some(p=>JSON.stringify(p.before)!==JSON.stringify(p.after));
   if (!initial.plan.files.length&&!packageChanges) return { ...initial.report, status: 'unchanged' };
   if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
+  const { sourceSkillPaths, ...journalPlan } = initial.plan;
   const j = { schemaVersion: 3, kind: 'native-settings-copy', id: randomUUID(), storePath: store.directory,
-    phase: 'prepared', createdAt: new Date().toISOString(), ...initial.plan };
+    phase: 'prepared', createdAt: new Date().toISOString(), ...journalPlan };
   j.payloadHash = digest(journalPayload(j));
   const verifyInputs = async () => {
     if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
@@ -359,7 +349,7 @@ export async function applyCopy(store, source, target, options = {}) {
       }
       throw new Error('Copy failed and prior settings were restored. Backup ID: ' + j.id);
     }
-  }, options);
+  }, options, false, false, sourceSkillPaths);
 }
 export async function planUndo(store, id) {
   const { journal: j } = await readJournal(store, id);

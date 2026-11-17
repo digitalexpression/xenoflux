@@ -9,7 +9,8 @@ import { parse } from 'smol-toml';
 import { find } from './profiles.js';
 import { resolveNativeSettingsHome } from './native-copy.js';
 import { redactValue } from './redact.js';
-import { AGENT_KEYS, CONFIG_KEYS, ROLE_KEYS, supportsNativeProvider } from './native-config.js';
+import { resolveSharedSkill } from './copy-skill-source.js';
+import { AGENT_KEYS, CONFIG_KEYS, portableCodexAgent, supportsNativeProvider } from './native-config.js';
 const MAX_DEPTH = 5, MAX_ENTRIES = 256, MAX_PROJECTS = 256, MAX_FILE = 384 * 1024;
 const MAX_PLUGIN_ENTRIES = 512;
 const INVENTORY_METADATA = new Set(['.DS_Store', '.git', '.tmp']);
@@ -78,9 +79,8 @@ async function safeSkill(path) {
 async function supportedAgent(path) {
   try {
     const content=await safeText(path); if(content===null) return false;
-    const data = parse(content);
-    return Object.keys(data).every(k => ROLE_KEYS.includes(k)) && typeof data.name === 'string'
-      && typeof data.description === 'string' && typeof data.developer_instructions === 'string';
+    portableCodexAgent(content, { strip: true });
+    return true;
   } catch { return false; }
 }
 async function settings(home, items, scope, origin) {
@@ -249,13 +249,15 @@ async function collectProjects(store, profile, home, defaultUserHome, items, pro
   if(projects.some(p=>p.status==='partial')) limitations.push(`Project scans include unreadable paths or were capped at depth ${MAX_DEPTH} or ${MAX_ENTRIES} entries per root.`);
   if(count===0) { limitations.push('No accessible project roots were discovered.'); add(items,{category:'project',label:'project roots',scope:'project',origin:'discovery',reason:'No accessible project roots discovered'}); }
 }
-async function skillDirs(home, scope, origin, items) {
+async function skillDirs(home, scope, origin, items, { aliasUserHome, sharedRoot = false } = {}) {
   const dir=join(home,'skills'), entries=await safeNames(dir);
   if(!entries) { const k=await kind(dir); add(items,{category:'skill',label:'skills',scope,origin,path:dir,reason:k==='missing'?'No standalone skills':k}); return; }
   if(entries.length===0) add(items,{category:'skill',label:'skills',scope,origin,path:dir,reason:'No standalone skills'});
   if(entries.partial) add(items,{category:'skill',label:'additional skills',scope,origin,path:dir,reason:'Skill enumeration is partial'});
   for(const e of entries) {
-    const p=join(dir,e.name), isDir=e.isDirectory()&&!e.isSymbolicLink(), valid=isDir&&!e.name.startsWith('.')&&await safeSkill(p);
+    const p=join(dir,e.name), isDir=e.isDirectory()&&!e.isSymbolicLink();
+    const canonicalPath = aliasUserHome && e.isSymbolicLink() ? await resolveSharedSkill(aliasUserHome, home, p) : undefined;
+    const valid = (isDir || canonicalPath) && !e.name.startsWith('.') && await safeSkill(canonicalPath ?? p);
     if(e.name==='.system'&&isDir) {
       const bundled=await safeNames(p);
       if(bundled?.length) for(const skill of bundled) {
@@ -267,8 +269,13 @@ async function skillDirs(home, scope, origin, items) {
       if(bundled?.partial) add(items,{category:'skill',label:'additional bundled skills',scope:'system',origin:'bundled-skills',path:p,reason:'Bundled skill enumeration is partial'});
       continue;
     }
-    add(items,{category:'skill',label:e.name,scope,origin,path:p,copyable:valid&&['profile','user'].includes(scope),reason:valid?(scope==='project'?'Project skills are inventory-only':undefined):(isDir?'Missing or unsafe SKILL.md':'Unsupported or hidden skill entry'),...(valid&&['profile','user'].includes(scope)?{transfer:{kind:'skill',path:`skills/${e.name}`,sourcePath:p}}:{})});
+    add(items,{category:'skill',label:e.name,scope,origin,path:p,copyable:valid&&['profile','user'].includes(scope),reason:valid?(scope==='project'?'Project skills are inventory-only':undefined):(isDir?'Missing or unsafe SKILL.md':'Unsupported or hidden skill entry'),...(valid&&['profile','user'].includes(scope)?{transfer:{kind:'skill',path:`skills/${e.name}`,sourcePath:p,...(canonicalPath && { linkedSkill: canonicalPath }),...(sharedRoot && { sharedSkill: true })}}:{})});
   }
+}
+export async function inspectSharedCopySkills(userHome) {
+  const items = [];
+  await skillDirs(join(userHome, '.agents'), 'user', 'user', items, { sharedRoot: true });
+  return items.filter(item => item.copyable);
 }
 async function runtimeItems(home,items,limitations) {
   const pluginDir=join(home,'plugins'), plugins=await safeNames(pluginDir);
@@ -342,10 +349,16 @@ export async function inspectProfile(store, name, { defaultUserHome = homedir(),
     'Credential, conversation, memory, and plugin bodies are never inspected or returned.'
   ];
   await settings(home,items,'profile',profile.name);
-  await skillDirs(home,'profile',profile.name,items);
   const effectiveUserHome=profile.name==='Default'?defaultUserHome:join(endpoint.root,'user-home');
+  await skillDirs(home,'profile',profile.name,items,{ aliasUserHome: effectiveUserHome });
   const userAgents=join(effectiveUserHome,'.agents');
   await skillDirs(userAgents,'user',profile.name==='Default'?'user':'profile-user-home',items);
+  const linkedSkills = new Set(items.map(item => item.transfer?.linkedSkill).filter(Boolean));
+  for (const item of items) if (linkedSkills.has(item.path) && item.category === 'skill') {
+    item.copyable = false;
+    delete item.transfer;
+    item.reason = 'Also available through the linked Codex skill.';
+  }
   if (!copyOnly) {
     add(items,{category:'skill',label:'system skills',scope:'system',origin:'native-runtime',reason:'System skill roots are not discoverable from native home'});
     limitations.push('System-provided skills are not discoverable; plugin inventory covers direct native-home entries and safe manifest metadata only.');

@@ -6,10 +6,12 @@ import { dirname, join, relative, resolve, sep, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { parse, stringify } from 'smol-toml';
-import { inspectCopyProfile, CLIENT_COPY_SETTINGS, clientCopyPath, resolveClaudeGlobalSkill, validClientSetting } from './copy-client.js';
+import { inspectCopyProfile, CLIENT_COPY_SETTINGS, clientCopyPath, validClientSetting } from './copy-client.js';
+import { resolveSharedSkill } from './copy-skill-source.js';
+import { portableCopilotAgent } from './copilot-copy-agent.js';
 import { resolveNativeSettingsHome } from './native-copy.js';
 import { redactText, redactValue } from './redact.js';
-import { supportsNativeProvider } from './native-config.js';
+import { portableCodexAgent, supportsNativeProvider } from './native-config.js';
 import { privateDirectory } from './metadata.js';
 
 const settingsTokens = /"(?:\\.|[^"\\])*"|[{}[\]:,]|[^\s{}[\]:,]+/g;
@@ -66,12 +68,14 @@ function updateCopySettings(text, values) {
   return text;
 }
 
-const claudeLocalFields = new Set(['mcpServers', 'allowed-tools', 'permissionMode']);
+const skillLocalFields = new Set(['mcpServers', 'mcp-servers', 'mcp_servers', 'allowed-tools']);
+const claudeAgentLocalFields = new Set([...skillLocalFields, 'permissionMode']);
 const readOnlyClaudeTools = new Set(['Read', 'Grep', 'Glob']);
 const ownershipError = () => new Error('Unknown or integration-bearing definition ownership');
 
 function portableDefinition(text, { skill = false, claude = false, strip = false } = {}) {
   const opening = /^---[ \t]*\r?\n/.exec(text)?.[0];
+  if (!opening && (skill || claude) && /^\s*---(?=[\s\u0085]|$)/u.test(text)) throw ownershipError();
   if (opening) {
     const rest = text.slice(opening.length);
     const end = /^---[ \t]*(?:\r?\n|$)/m.exec(rest)?.index;
@@ -82,9 +86,11 @@ function portableDefinition(text, { skill = false, claude = false, strip = false
     const localTools = [];
     let planMode = false;
     let field, descriptionBlock = false, omit = false;
-    for (const raw of rest.slice(0, end).match(/[^\n]*\n/g) ?? []) {
+    const frontmatter = rest.slice(0, end);
+    if (/\r(?!\n)|[\u0000\u0085\u2028\u2029]/u.test(frontmatter)) throw ownershipError();
+    for (const raw of frontmatter.match(/[^\n]*\n/g) ?? []) {
       const line = raw.replace(/\r?\n$/, '');
-      if (!line.trim() || descriptionBlock && /^ +\S/.test(line)) {
+      if (!line.trim() || /^ *#/.test(line) || descriptionBlock && /^ +\S/.test(line)) {
         if (!omit) header.push(raw);
         continue;
       }
@@ -100,7 +106,7 @@ function portableDefinition(text, { skill = false, claude = false, strip = false
         }
       }
       if (field === 'metadata') {
-        const [, key] = /^ {2}(version|author|compatibility|tags): +\S.*$/.exec(line) ?? [];
+        const [, key] = /^ {2}(version|author|compatibility|tags|short-description): +\S.*$/.exec(line) ?? [];
         if (key) {
           if (metadata.has(key)) throw ownershipError();
           metadata.add(key);
@@ -108,14 +114,13 @@ function portableDefinition(text, { skill = false, claude = false, strip = false
           continue;
         }
       }
-      const [, next, value] = /^([a-z][a-zA-Z-]*):([^\r\n]*)$/.exec(line) ?? [];
+      const [, next, value] = /^([a-z][a-zA-Z_-]*):([^\r\n]*)$/.exec(line) ?? [];
       field = next;
-      omit = claude && strip && claudeLocalFields.has(field);
+      omit = strip && (skill ? skillLocalFields.has(field) : claude && claudeAgentLocalFields.has(field));
       const portable = /^(?:name|description|model|color|argument-hint|user-invocable|disable-model-invocation)$/.test(field)
-        || skill && (field === 'icon' || field === 'paths')
-        || claude && (skill && (field === 'license' || field === 'metadata' && !value.trim())
-          || !skill && (field === 'skills' && /^\[ *[\w-]+(?: *, *[\w-]+)* *\]$/.test(value.trim())
-            || field === 'tools' && !value.trim()));
+        || skill && (/^(?:icon|paths|license|compatibility)$/.test(field) || field === 'metadata' && !value.trim())
+        || claude && !skill && (field === 'skills' && /^\[ *[\w-]+(?: *, *[\w-]+)* *\]$/.test(value.trim())
+            || field === 'tools' && !value.trim());
       if ((!omit && !portable) || fields.has(field)) throw ownershipError();
       fields.add(field);
       if (field === 'permissionMode') {
@@ -130,9 +135,45 @@ function portableDefinition(text, { skill = false, claude = false, strip = false
       || planMode && (!localTools.length || localTools.some(tool => !readOnlyClaudeTools.has(tool))))) throw ownershipError();
     text = header.join('') + rest.slice(end);
   }
-  if (/"(?:hooks|mcpServers|mcp-servers|plugins)"\s*:|^(?:hooks|mcpServers|mcp-servers|plugins):/m.test(text))
+  if (/"(?:hooks|mcpServers|mcp[-_]servers|plugins)"\s*:|^(?:hooks|mcpServers|mcp[-_]servers|plugins):/m.test(text))
     throw new Error('Integration definitions require native/manual setup');
   return text;
+}
+
+const codexSkillMetadataPath = '/agents/openai.yaml';
+const codexSkillMetadata = {
+  interface: /^(?:display_name|short_description|icon_small|icon_large|brand_color|default_prompt): +\S/,
+  policy: /^allow_implicit_invocation: +(?:true|false)[ \t]*$/,
+};
+function portableCodexSkillMetadata(text, strip) {
+  if (/\r(?!\n)|[\u0000\u0085\u2028\u2029]/u.test(text)) throw ownershipError();
+  if (text.trim() === '{}') return text;
+  const sections = new Set(), fields = new Set(), kept = [];
+  let section;
+  for (const raw of text.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
+    const line = raw.replace(/\r?\n$/, '');
+    if (!line.trim() || /^ *#/.test(line)) {
+      if (section !== 'dependencies') kept.push(raw);
+      continue;
+    }
+    const [, key, value] = /^(interface|policy|dependencies):(.*)$/.exec(line) ?? [];
+    if (key) {
+      if (sections.has(key) || (key === 'dependencies' ? !strip : value.trim())) throw ownershipError();
+      section = key;
+      sections.add(key);
+      if (key !== 'dependencies') kept.push(raw);
+    } else if (section === 'dependencies' && /^ +\S/.test(line)) {
+      continue;
+    } else if (section && /^ {2}\S/.test(line) && codexSkillMetadata[section]?.test(line.slice(2))) {
+      const field = line.slice(2).split(':', 1)[0];
+      if (fields.has(field)) throw ownershipError();
+      fields.add(field);
+      kept.push(raw);
+    } else {
+      throw ownershipError();
+    }
+  }
+  return sections.has('dependencies') && !fields.size ? '{}\n' : kept.join('');
 }
 
 export const MAX_PACKAGE_ENTRIES = 512;
@@ -181,7 +222,7 @@ async function parentSafe(root, path, { allowMissing = false } = {}) {
   let cursor = root;
   for (const part of rel ? rel.split(sep) : []) { cursor = join(cursor, part); try { await ownedDir(cursor); } catch (e) { if (!allowMissing || e.code !== 'ENOENT') throw e; } }
 }
-async function tree(root, sourcePath, destination, { allowEmpty = false, stripClaude = false } = {}) {
+async function tree(root, sourcePath, destination, { allowEmpty = false, copySkill = false } = {}) {
   if (!inside(root, sourcePath) || !validRel(destination)) throw new Error('Invalid advanced-copy item path');
   const out = [];
   let total = 0, entries = 0; const directories=[];
@@ -194,7 +235,7 @@ async function tree(root, sourcePath, destination, { allowEmpty = false, stripCl
       if (await realpath(src) !== src) throw new Error('Non-canonical advanced-copy directory');
       directories.push({path:dst,mode:s.mode&0o777});
       for (const e of (await readdir(src, { withFileTypes: true })).sort((a,b) => a.name.localeCompare(b.name))) {
-        if (stripClaude && depth === 0 && destination === 'skills/graphify' && e.name === '.graphify_version' && e.isFile()) continue;
+        if (copySkill && depth === 0 && destination === 'skills/graphify' && e.name === '.graphify_version' && e.isFile()) continue;
         if (!/^[A-Za-z0-9_.-]+$/.test(e.name) || e.name === '.' || e.name === '..') throw new Error('Unsafe advanced-copy entry name');
         if (e.name.startsWith('.') || ['.git','.env','.npmrc','auth.json'].includes(e.name)) throw new Error('Hidden or credential-like skill package entry is unsupported: ' + e.name);
         await walk(join(src, e.name), dst + '/' + e.name, depth + 1);
@@ -209,14 +250,16 @@ async function tree(root, sourcePath, destination, { allowEmpty = false, stripCl
     let data = loaded.data;
     if (/\.(?:md|toml|rules|txt|json|yaml|yml|sh|py|[cm]?js|ts)$/i.test(src)) {
       const text = new TextDecoder('utf-8', { fatal: true }).decode(data);
-      const portable = stripClaude && dst === destination + '/SKILL.md'
-        ? portableDefinition(text, { skill: true, claude: true, strip: true }) : text;
+      let portable = text;
+      if (copySkill && dst === destination + '/SKILL.md') portable = portableDefinition(text, { skill: true, strip: true });
+      if (copySkill && dst === destination + codexSkillMetadataPath) portable = portableCodexSkillMetadata(text, true);
       if (!safePackageText(portable, src)) throw new Error('Credential-like content in selected skill package: ' + src);
       if (portable !== text) data = Buffer.from(portable);
     }
     out.push({ path: dst, after: data, afterMode: loaded.mode, sha256: sha(data) });
   }
   await walk(sourcePath, destination, 0);
+  if (copySkill && !out.some(file => file.path === destination + '/SKILL.md')) throw new Error('Selected skill definition is missing');
   if (!out.length&&!allowEmpty) throw new Error('Cannot copy an empty skill package');
   return {files:out,directories};
 }
@@ -282,7 +325,7 @@ export async function validateAdvancedSelection(store, source, selection, { defa
     const files=payload.kind==='tree'?payload.files:payload.kind==='file'?[payload.file]:[];
     fingerprints[item.id] = fingerprintPayload(payload);
     previews.push({id:item.id,label:item.label,category:item.category,status:'new',origin:item.origin,scope:item.scope,sourcePath:item.transfer.sourcePath,changes:payload.kind==='config'?[{path:item.transfer.path+':'+payload.key,action:'new',after:previewValue(payload.value)}]:[
-      ...files.map(f => copyFilePreview(f, clientId === 'claude-code' && payload.kind === 'tree')),
+      ...files.map(f => copyFilePreview(f, payload.kind === 'tree')),
       ...(payload.kind === 'tree' ? payload.directories.map(d => ({path:d.path,action:'add-directory',afterMode:d.mode})) : []),
     ]});
   }
@@ -294,9 +337,12 @@ async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint)
   if (!validRel(t.path) || typeof t.sourcePath !== 'string') throw new Error('Invalid generated transfer descriptor');
   const nativeClient = sourceEndpoint.clientId && sourceEndpoint.clientId !== 'codex';
   if (nativeClient && !clientCopyPath(sourceEndpoint.clientId, t.path, t.kind)) throw new Error('Unsupported client transfer ownership');
-  const expectedRoot = nativeClient ? profileHome : item.scope !== 'user' ? profileHome : item.origin === 'user' ? join(defaultUserHome,'.agents') : join(sourceEndpoint.root,'user-home','.agents');
+  const userHome = nativeClient || sourceEndpoint.root === null ? defaultUserHome : join(sourceEndpoint.root, 'user-home');
+  const personalSkill = t.kind === 'skill' && (t.sharedSkill || !nativeClient && item.scope === 'user');
+  const expectedRoot = personalSkill ? join(userHome, '.agents') : profileHome;
   const expected = join(expectedRoot, t.path);
   if (resolve(t.sourcePath) !== expected || !inside(expectedRoot, expected)) throw new Error('Generated item path does not match its inventory scope');
+  if (personalSkill) await ownedDir(expectedRoot);
   await parentSafe(expectedRoot, expected);
   if (t.kind === 'config') {
     const f = await readSafe(expected, { text: true }); if (!f) throw new Error('Selected config source is missing');
@@ -317,32 +363,39 @@ async function sourcePayload(item, profileHome, defaultUserHome, sourceEndpoint)
   }
   if (t.kind === 'skill') {
     let root = expectedRoot, packagePath = expected;
-    if (t.globalClaudeSkill) {
-      packagePath = await resolveClaudeGlobalSkill(dirname(profileHome), expected);
-      if (!packagePath || packagePath !== item.canonicalPath) throw new Error('Linked Claude skill changed; preview again');
+    if (t.linkedSkill) {
+      packagePath = await resolveSharedSkill(userHome, profileHome, expected);
+      if (!packagePath || packagePath !== t.linkedSkill) throw new Error('Linked skill changed; preview again');
       root = dirname(packagePath);
     }
-    const claude = sourceEndpoint.clientId === 'claude-code';
-    const payload = await tree(root, packagePath, t.path, { stripClaude: claude });
-    if (nativeClient) assertPortablePackage(payload, claude);
-    return { kind:'tree', ...payload };
+    const payload = await tree(root, packagePath, t.path, { copySkill: true });
+    assertPortablePackage(payload, t.path);
+    return { kind:'tree', ...payload, sourcePath: packagePath };
   }
   const f = await readSafe(expected, { text: true }); if (!f) throw new Error('Selected source file is missing');
-  const claude = sourceEndpoint.clientId === 'claude-code' && t.kind === 'agent';
-  const content = nativeClient ? portableDefinition(f.content, { claude, strip: claude }) : f.content;
+  const content = definitionForCopy(f.content, sourceEndpoint.clientId, t.kind, true);
   if(redactText(content,expected)!==content) throw new Error('Credential-like content in selected settings; copy refused: '+t.path);
   const data = content === f.content ? f.data : Buffer.from(content);
   return { kind:'file', file:{ path:t.path, after:data, afterMode:f.mode, sha256:sha(data) } };
 }
-function assertPortablePackage({ files }, claude) {
+function definitionForCopy(text, clientId, kind, strip = false) {
+  if (kind === 'agent') {
+    if (!clientId || clientId === 'codex') return portableCodexAgent(text, { strip });
+    if (clientId === 'copilot') return portableCopilotAgent(text, { strip });
+    if (clientId === 'claude-code') return portableDefinition(text, { claude: true, strip });
+  }
+  return clientId && clientId !== 'codex' ? portableDefinition(text) : text;
+}
+function assertPortablePackage({ files }, root) {
   for (const file of files) {
     if (/(?:^|\/)(?:auth|credentials?|tokens?|config|settings|history|sessions?|hooks|mcp(?:-config)?|plugin)\.(?:jsonl?|ya?ml)$/i.test(file.path))
       throw new Error('Native state or integration file in selected skill package');
-    const skill = file.path.endsWith('/SKILL.md');
-    // Claude loads SKILL.md as the definition. Other Markdown files are references,
-    // which can document manual integration setup without configuring anything.
-    if (skill || (!claude && /\.md$/i.test(file.path)) || /\.(?:json|ya?ml)$/i.test(file.path))
-      portableDefinition(new TextDecoder('utf-8', { fatal: true }).decode(file.after), { claude, skill });
+    const skill = file.path === root + '/SKILL.md';
+    if (file.path === root + codexSkillMetadataPath)
+      portableCodexSkillMetadata(new TextDecoder('utf-8', { fatal: true }).decode(file.after), false);
+    // Supporting Markdown files may document manual integration setup.
+    if (skill || /\.(?:json|ya?ml)$/i.test(file.path))
+      portableDefinition(new TextDecoder('utf-8', { fatal: true }).decode(file.after), { skill });
   }
 }
 function fingerprintPayload(payload) {
@@ -373,10 +426,11 @@ function preview(data,path) {
   catch { return `[binary ${data.length} bytes sha256:${sha(data).slice(0,16)}]`; }
 }
 
-function copyFilePreview({ path, before = null, after, beforeMode, afterMode }, claudeSkill) {
+function copyFilePreview({ path, before = null, after, beforeMode, afterMode }, skill) {
   const action = after === null ? 'remove' : before === null ? 'add'
     : before.equals(after) && beforeMode === afterMode ? 'identical' : 'replace';
-  const summarize = claudeSkill && !path.endsWith('/SKILL.md') && ['add', 'identical'].includes(action);
+  const summarize = skill && !path.endsWith('/SKILL.md') && !path.endsWith(codexSkillMetadataPath)
+    && ['add', 'identical'].includes(action);
   return { path, action, beforeMode, afterMode, ...(summarize
     ? { afterHash: sha(after), afterSize: after.length }
     : { before: preview(before, path), after: preview(after, path) }) };
@@ -448,6 +502,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
   }
   const destinations=new Map();
   const packageRoots=new Set();
+  const sourceSkillPaths = [];
   for (const item of items.filter(x => x.transfer.kind !== 'config')) {
     const value = await sourcePayload(item,inventory.profile.home,defaultUserHome,sourceEndpoint);
     sourceFingerprints[item.id] = fingerprintPayload(value);
@@ -455,11 +510,12 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     if(value.kind==='tree') {
       if(packageRoots.has(item.transfer.path)) throw new Error('Two selected skills target the same destination package');
       packageRoots.add(item.transfer.path);
+      sourceSkillPaths.push(value.sourcePath);
       const destRoot=join(targetEndpoint.home,item.transfer.path);
       let beforeTree={files:[],directories:[]};
       try { const st=await lstat(destRoot); if(st.isSymbolicLink()||!st.isDirectory()) throw new Error('Unsafe existing skill destination'); beforeTree=await tree(targetEndpoint.home,destRoot,item.transfer.path,{allowEmpty:true}); }
       catch(e) { if(e.code!=='ENOENT') throw e; }
-      if (nativeClient) assertPortablePackage(beforeTree, clientId === 'claude-code');
+      assertPortablePackage(beforeTree, item.transfer.path);
       const afterDirectories=value.directories;
       const beforeFiles=new Map(beforeTree.files.map(f=>[f.path,f]));
       const afterFiles=new Map(value.files.map(f=>[f.path,f]));
@@ -491,9 +547,10 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
       destinations.set(file.path,item.id);
       const destination = join(targetEndpoint.home,file.path);
       await parentSafe(targetEndpoint.home,destination,{allowMissing:true});
-      const prior = await readSafe(destination, { text: Boolean(nativeClient) });
-      if (nativeClient && prior) {
-        portableDefinition(prior.content, { claude: clientId === 'claude-code' && item.transfer.kind === 'agent' });
+      const inspectDefinition = nativeClient || item.transfer.kind === 'agent';
+      const prior = await readSafe(destination, { text: Boolean(inspectDefinition) });
+      if (inspectDefinition && prior) {
+        definitionForCopy(prior.content, clientId, item.transfer.kind);
         if (redactText(prior.content, destination) !== prior.content) throw new Error('Credential-like content in destination definition; copy refused: ' + file.path);
       }
       payloads.push({path:file.path,before:prior?.data ?? null,beforeMode:prior?.mode ?? null,after:file.after,afterMode:file.afterMode});
@@ -516,7 +573,7 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
     const identical = changes.length > 0 && changes.every(f => f.before && f.after && f.before.equals(f.after) && f.beforeMode === f.afterMode) && !(item._package?.directoryChanges.length);
     const conflict = changes.some(f => f.before && (!f.after||!f.before.equals(f.after) || f.beforeMode !== f.afterMode))
       || Boolean(item._package?.before.directories.some(directory => directory.mode !== null) && item._package.directoryChanges.length);
-    const reportChanges = changes.map(f => copyFilePreview(f, clientId === 'claude-code' && item.transfer.kind === 'skill'));
+    const reportChanges = changes.map(f => copyFilePreview(f, item.transfer.kind === 'skill'));
     for(const d of item._package?.directoryChanges??[]) reportChanges.push({path:d.path,action:d.after===null?'remove-directory':d.before===null?'add-directory':'mode',beforeMode:d.before,afterMode:d.after});
     const fingerprint = sha(Buffer.from(JSON.stringify({
       files: changes.map(file => ({ path: file.path, before: file.before && sha(file.before), after: file.after && sha(file.after), beforeMode: file.beforeMode, afterMode: file.afterMode })),
@@ -545,8 +602,8 @@ export async function buildAdvancedCopy(store, source, target, selection, { defa
   }).map(item=>({id:item.id,label:item.label,category:item.category,origin:item.origin,scope:item.scope,
     destinationPath:item.transfer?.sourcePath??item.path,status:'kept',inventoryStatus:item.status,
     ...(item.reason?{reason:item.reason}:{})}));
-  const plan={source:sourceEndpoint,target:targetEndpoint,selection:items.map(x=>x.id),sourceFingerprints,files:payloads,packages,createdDirectories:[...new Set(createdDirectories)]};
-  const hash=createHash('sha256').update(JSON.stringify({source:plan.source,target:plan.target,selection:plan.selection,sourceFingerprints,packages,createdDirectories:plan.createdDirectories,files:payloads.map(f=>({path:f.path,before:f.before&&sha(f.before),beforeMode:f.beforeMode,after:f.after&&sha(f.after),afterMode:f.afterMode}))})).digest('hex');
+  const plan={source:sourceEndpoint,target:targetEndpoint,selection:items.map(x=>x.id),sourceFingerprints,sourceSkillPaths,files:payloads,packages,createdDirectories:[...new Set(createdDirectories)]};
+  const hash=createHash('sha256').update(JSON.stringify({source:plan.source,target:plan.target,selection:plan.selection,sourceFingerprints,sourceSkillPaths,packages,createdDirectories:plan.createdDirectories,files:payloads.map(f=>({path:f.path,before:f.before&&sha(f.before),beforeMode:f.beforeMode,after:f.after&&sha(f.after),afterMode:f.afterMode}))})).digest('hex');
   return {plan,report:{status:'preview',hash,endpointFingerprint:sha(Buffer.from(JSON.stringify({source:sourceEndpoint,target:targetEndpoint}))),source:inventory.profile,target:{name:targetEndpoint.name,home:targetEndpoint.home},items:reports,kept,destinationLimitations:destinationInventory.limitations,changes:[
     ...payloads.filter(f=>f.before===null||f.after===null||!f.before.equals(f.after)||f.beforeMode!==f.afterMode).map(f=>({path:f.path,action:f.after===null?'remove':f.before===null?'add':'replace',beforeSha256:f.before&&sha(f.before),afterSha256:f.after&&sha(f.after),beforeMode:f.beforeMode,afterMode:f.afterMode})),
     ...packages.flatMap(p=>p.directoryChanges.map(d=>({path:d.path,action:d.after===null?'remove-directory':d.before===null?'add-directory':'directory-mode',beforeMode:d.before,afterMode:d.after})))

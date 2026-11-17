@@ -258,7 +258,7 @@ exit [lindex $result 3]`;
   assert.equal(preview.target.home, target);
   assert.deepEqual(preview.items.map(({ label, status }) => [label, status]).sort(), [['copy-test-agent.md', 'new'], ['copy-test-skill', 'new']]);
   assert(!preview.items.find(item => item.label === 'copy-test-agent.md').changes[0].after.includes('mcpServers'));
-  assert.match(result.stdout, /unsafe-agent\.md — unavailable: Excluded by the native copy safety checks/);
+  assert.match(result.stdout, /unsafe-agent\.md — unavailable: Excluded by the copy safety checks/);
   assert.doesNotMatch(result.stdout, /fixture-not-for-copy|Unsafe fixture|Could not build preview/);
   await absent(join(target, 'agents', 'copy-test-agent.md'));
   await absent(join(target, 'skills', 'copy-test-skill', 'SKILL.md'));

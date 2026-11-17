@@ -580,7 +580,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     let copyable = inventory.items.filter(entry => entry.copyable === true && entry.status !== 'unsupported'
       && entry.scope !== 'project' && !['project', 'db', 'runtime', 'docs'].includes(entry.category));
     let unavailable = [];
-    if (client !== 'codex' && copyable.length) {
+    if (copyable.length) {
       try {
         const verified = await validateAdvancedSelection(store, from, copyable.map(entry => entry.id), { ...options, skipUnsafe: true });
         const ids = new Set(verified.selection);

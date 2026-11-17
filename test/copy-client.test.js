@@ -41,6 +41,36 @@ async function put(path, data, mode = 0o600) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, typeof data === 'object' && !Buffer.isBuffer(data) ? JSON.stringify(data) : data, { mode });
 }
+
+test('Copilot Default snapshots native aliases and shared skills without tool grants', async t => {
+  const f = await fixture(t, 'copilot');
+  const { sourceBinding: _source, ...options } = f.options;
+  const shared = join(f.user, '.agents/skills');
+  const aliases = join(f.user, '.copilot/skills');
+  const linked = join(shared, 'linked'), direct = join(shared, 'direct');
+  const portable = '---\nname: linked\ndescription: Scan packages\nlicense: MIT\n---\nScan the local files.\n';
+  const original = portable.replace('license: MIT\n', 'license: MIT\nallowed-tools: shell\n');
+  await put(join(linked, 'SKILL.md'), original);
+  await put(join(direct, 'SKILL.md'), portable.replace('name: linked', 'name: direct'));
+  await mkdir(aliases, { recursive: true, mode: 0o700 });
+  await symlink('../../.agents/skills/linked', join(aliases, 'linked'));
+  await symlink('../../.agents/skills/linked', join(aliases, 'wrong-name'));
+  const inventory = await inspectCopyProfile(f.store, 'Default', options);
+  const skills = inventory.items.filter(item => item.copyable && item.category === 'skill');
+  assert.deepEqual(skills.map(item => item.name).sort(), ['direct', 'linked']);
+  const selection = skills.map(item => item.id);
+  const runtime = { async assertIdle({ resourcePaths }) {
+    assert(!resourcePaths.some(path => path.startsWith(aliases)));
+    if (resourcePaths.includes(direct)) assert(resourcePaths.includes(linked));
+  } };
+  const applied = await applyCopy(f.store, 'Default', 'Target', { ...options, selection, runtime });
+  assert.equal(await readFile(join(f.target, 'skills/linked/SKILL.md'), 'utf8'), portable);
+  assert.equal(await readFile(join(f.target, 'skills/direct/SKILL.md'), 'utf8'), portable.replace('name: linked', 'name: direct'));
+  assert.equal(await readFile(join(linked, 'SKILL.md'), 'utf8'), original);
+  assert((await lstat(join(f.target, 'skills/linked'))).isDirectory());
+  await undoCopy(f.store, applied.id, options);
+  await assert.rejects(lstat(join(f.target, 'skills/linked')), { code: 'ENOENT' });
+});
 async function fixture(t, clientId) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-copy-client-')));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -270,3 +300,52 @@ for (const clientId of ['claude-code', 'copilot']) {
     assert.equal(unsafe.copyable, false);
   });
 }
+
+test('Copilot copies agent instructions and local tool restrictions without MCP bindings', async t => {
+  const f = await fixture(t, 'copilot');
+  const definition = '---\nname: Research\ndescription: >\n  Find relevant tests.\ntarget: github-copilot\n';
+  const agentBody = '---\nSummarize the existing tests.\n';
+  const integrations = 'allowed-tools: shell\nmcp-servers:\n  tracker:\n    command: never-execute\n    env:\n      TOKEN: credential-omitted\n';
+  const agents = [
+    ['block.agent.md', 'tools:\n  - read\n  - \'tracker/issue\'\n  - search\n', 'tools: ["read","search"]\n'],
+    ['flow.agent.md', 'tools: ["tracker/*"]\n', 'tools: []\n'],
+    ['scalar.agent.md', 'tools: read, tracker/issue\n', 'tools: ["read"]\n'],
+    ['local.agent.md', 'tools: ["read", "search"]\n', 'tools: ["read", "search"]\n'],
+  ];
+  for (const [name, tools] of agents) await put(join(f.source, 'agents', name), definition + tools + integrations + agentBody);
+  const options = { ...f.options, selection: await Promise.all(agents.map(([name]) => f.select('agent', name))) };
+  const preview = await planCopy(f.store, 'Source', 'Target', options);
+  assert(preview.items.every(item => item.status === 'new'));
+  assert.doesNotMatch(JSON.stringify(preview), /never-execute|credential-omitted|tracker\/|allowed-tools/);
+  const result = await applyCopy(f.store, 'Source', 'Target', { ...options, expectedHash: preview.hash });
+  for (const [name, original, projected] of agents) {
+    assert.equal(await readFile(join(f.target, 'agents', name), 'utf8'), definition + projected + agentBody);
+    assert.equal(await readFile(join(f.source, 'agents', name), 'utf8'), definition + original + integrations + agentBody);
+  }
+  assert((await planCopy(f.store, 'Source', 'Target', options)).items.every(item => item.status === 'identical'));
+  const undo = await planUndo(f.store, result.id);
+  await undoCopy(f.store, result.id, { ...f.options, expectedHash: undo.hash });
+  for (const [name] of agents) await assert.rejects(stat(join(f.target, 'agents', name)), { code: 'ENOENT' });
+});
+
+test('Copilot refuses ambiguous agent tool lists and an existing destination MCP binding', async t => {
+  const f = await fixture(t, 'copilot');
+  const path = 'agents/research.agent.md';
+  const definition = '---\nname: Research\ndescription: Find tests.\n';
+  await put(join(f.source, path), definition + 'tools: [read]\n---\nRead local tests.\n');
+  const options = { ...f.options, selection: [await f.select('agent', 'research.agent.md')] };
+  const connected = definition + 'mcp-servers:\n  tracker:\n    command: keeper\n---\nRead local tests.\n';
+  await put(join(f.target, path), connected);
+  await assert.rejects(planCopy(f.store, 'Source', 'Target', options), /ownership/);
+  assert.equal(await readFile(join(f.target, path), 'utf8'), connected);
+  await rm(join(f.target, path));
+  for (const tools of [
+    'tools: [read]\ntools: [shell]\n',
+    'tools: [*, tracker/search]\n',
+    'tools: "read", tracker/search\n',
+    '"tools": [shell]\n',
+  ]) {
+    await put(join(f.source, path), definition + tools + '---\nRead local tests.\n');
+    await assert.rejects(planCopy(f.store, 'Source', 'Target', options), /ownership/);
+  }
+});

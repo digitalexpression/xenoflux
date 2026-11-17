@@ -79,16 +79,14 @@ export async function selectAdvancedCopy(store, source, target, {
     const inventory = await inspectCopyProfile(store, source, { defaultUserHome, clientId, binding: sourceBinding, mainConversationsOnly: true });
     // Storage artifacts are not separate transferable conversations or settings.
     inventory.items = inventory.items.filter(item => item.scope !== 'project' && !['project', 'db', 'runtime', 'docs'].includes(item.category));
-    if (clientId && clientId !== 'codex') {
-      const candidates = inventory.items.filter(item => item.copyable && !item.setup);
-      if (candidates.length) {
-        const verified = await validateAdvancedSelection(store, source, candidates.map(item => item.id), { ...options, skipUnsafe: true });
-        const verifiedIds = new Set(verified.selection);
-        for (const item of candidates) {
-          if (verifiedIds.has(item.id)) continue;
-          item.copyable = false;
-          item.reason = 'Excluded by the native copy safety checks.';
-        }
+    const candidates = inventory.items.filter(item => item.copyable && !item.setup);
+    if (candidates.length) {
+      const verified = await validateAdvancedSelection(store, source, candidates.map(item => item.id), { ...options, skipUnsafe: true });
+      const verifiedIds = new Set(verified.selection);
+      for (const item of candidates) {
+        if (verifiedIds.has(item.id)) continue;
+        item.copyable = false;
+        item.reason = 'Excluded by the copy safety checks.';
       }
     }
     const guidance = !clientId || clientId === 'codex'
