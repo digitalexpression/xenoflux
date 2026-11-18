@@ -339,7 +339,7 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       'docs-only': ['Sign-in unknown', 'no project', 'Low reasoning · 2 skills found. Sign in from Codex itself; Xenoflux never signs in for you or copies credentials.'],
     }[name];
     return {
-      name, isDefault: name === 'Default', state: 'ready', reason: null, signIn: meta[0], binding: meta[1], summary: meta[2],
+      name, folder: name === 'Default' ? '[DEMO]/.codex' : `[DEMO]/.codex-${name}`, isDefault: name === 'Default', state: 'ready', reason: null, signIn: meta[0], binding: meta[1], summary: meta[2],
       cli: { state: state.cli, text: clientText('cli', state.cli) },
       desktop: { state: state.desktop, text: clientText('desktop', state.desktop) },
       clientActions: actions,
@@ -384,6 +384,11 @@ export function createDemoProvider({ version = 'demo' } = {}) {
     async profiles() {
       return { profiles: PROFILE_NAMES.map(profileCard), notes: ['Named Codex profiles share one sign-in between CLI and Desktop. Sign in from either client, then open the other.'], simulated: true };
     },
+    async revealProfileFolder({ name }) {
+      if (!clientState[name]) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
+      return { status: 'neutral', message: 'Simulated: Finder was not opened.' };
+    },
+    async clientIcons() { return { codex: null, 'claude-code': null, copilot: null }; },
     async clientAction({ name, action }) {
       if (!clientState[name]) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
       const state = clientState[name];

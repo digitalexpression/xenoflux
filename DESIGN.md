@@ -274,16 +274,34 @@ totals never imply a per-turn allocation. Keep scoped usage in Time and tokens.
 ### Profiles and clients
 
 Profiles is a compact inventory grouped by client, with neutral profile names and
-counts. Align each profile's identity, observed sign-in and project binding with
-its CLI/Desktop state. Label the account with the surface that reports it. Use
-one account label for named Codex profiles, where CLI and Desktop share a sign-in.
+counts. Each profile is a flat card in a responsive grid (one column below 800px):
+the client's app icon (initials when the app icon is unavailable), name, client and
+binding. Show in Finder is a header icon when the profile has a folder. Its
+tooltip includes the full path, which also appears in Details.
+
+CLI and Desktop have separate rows with a status dot, text label and the
+actions available for that surface. Open uses the success color, Closed a solid
+neutral and Unknown a hollow ring. Show the observed account on the CLI row
+and identify it as shared for a managed Codex profile. Point Claude and Copilot
+users to the Desktop app for its account. Icon actions have a tooltip and an
+accessible name. Keep Close visually secondary to Show.
+
+An inset notice above the rows shows progress, success or a problem for that
+profile. A quiet card omits the notice. Warnings and errors include **See
+details**, which opens the profile inspector and returns focus to the notice
+action when dismissed.
+
+Details open a right-side inspector per profile. It holds what the card omits:
+full status and CLI/Desktop sentences, the account with its scope, the full folder
+path, the setup summary and bound folders, how sign-in works, and the inspection
+links. Closing it returns focus to the profile's Details button.
 
 Separate inspection links from client actions. When Profiles opens, check
 available CLI accounts in the background and reconcile confirmed-stopped clients.
 Show the normal Open action after reconciliation. Sign-in, opening and closing
 clients require explicit actions. Keep registry edits and selected copying in the
-named More menu. Creation is the page's primary action. Preserve row identity, open dialogs
-and focus across automatic checks. Closing an edit dialog opened from More
+named More menu. Creation is the page's primary action. Preserve card identity, open
+dialogs and focus across automatic checks. Closing an edit dialog opened from More
 returns focus to that profile's More button while it remains present.
 
 Clients on this Mac keeps installation observations and existing setup findings

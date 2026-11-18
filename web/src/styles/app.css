@@ -340,16 +340,50 @@
   .profiles-toolbar { font-size: var(--text-ui); }
   .profile-inventory { display: flex; flex-direction: column; gap: var(--space-32); }
   .profile-client-group { min-width: 0; display: flex; flex-direction: column; gap: var(--space-12); }
-  .profile-rows { border-top: 1px solid var(--color-divider); }
-  .profile-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: var(--space-16) var(--space-32); padding-block: var(--space-24); border-bottom: 1px solid var(--color-divider); }
-  .profile-identity { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
-  .profile-runtime { min-width: 0; }
-  .profile-runtime dl { grid-template-columns: minmax(100px, auto) minmax(0, 1fr); }
-  .profile-runtime dd { min-width: 0; overflow-wrap: anywhere; }
-  .profile-account-scope { font-size: var(--text-ui); }
+  .profile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: var(--space-16); }
+  .profile-card { display: flex; flex-direction: column; min-width: 0; background: var(--color-surface); border: 1px solid var(--color-divider); border-radius: var(--radius-panel); }
+  .profile-card-header { display: flex; align-items: center; gap: var(--space-8); min-width: 0; padding: var(--space-12); }
+  .profile-card-title { flex: 1; min-width: 0; }
+  .profile-card-tools { display: flex; flex: none; gap: var(--space-4); }
+  .profile-card .btn-icon { border-radius: var(--radius-control); }
+  .profile-card-tools .btn-icon:not(:hover) { border-color: transparent; color: var(--color-text-muted); }
+  .profile-app-icon { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-control); background: var(--color-surface-raised); color: var(--color-text-muted); font-size: var(--text-meta); font-weight: 600; object-fit: cover; }
+  .profile-card-notice { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 var(--space-8); margin: 0 var(--space-8) var(--space-8); padding: var(--space-4) var(--space-8); min-height: 32px; background: var(--color-info-surface); border: 1px solid var(--color-divider); border-radius: var(--radius-control); font-size: var(--text-meta); }
+  .profile-card-notice[data-status='success'] { color: var(--color-success); background: var(--surface-success); }
+  .profile-card-notice[data-status='warning'] { color: var(--color-warning); background: var(--surface-warning); border-color: var(--border-warning); }
+  .profile-card-notice[data-status='error'] { color: var(--color-error); background: var(--surface-error); border-color: var(--border-error); }
+  .profile-card-notice-text { display: flex; align-items: start; gap: var(--space-8); flex: 1 1 150px; min-width: 0; overflow-wrap: anywhere; }
+  .profile-card-notice-text :is(svg, .profile-spinner) { flex: none; margin-top: 2px; }
+  .profile-card-notice .btn-link { color: inherit; margin-inline-start: auto; padding-inline: var(--space-4); }
+  .profile-surface { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4) var(--space-8); padding: var(--space-8) var(--space-12); min-height: 52px; border-top: 1px solid var(--color-divider); font-size: var(--text-meta); }
+  .profile-surface-name { display: inline-flex; align-items: center; gap: var(--space-8); flex: 0 0 79px; font-weight: 500; }
+  .profile-surface-name svg { color: var(--color-text-muted); }
+  .profile-surface-facts { flex: 1 1 72px; min-width: 0; overflow-wrap: anywhere; }
+  .profile-status-item { display: flex; align-items: center; gap: var(--space-8); }
+  .profile-status-account { display: block; color: var(--color-text-muted); }
+  .surface-dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: var(--radius-pill); box-sizing: border-box; }
+  .surface-dot[data-state='open'] { background: var(--color-success); }
+  .surface-dot[data-state='closed'] { background: var(--color-control-border); }
+  .surface-dot[data-state='unknown'] { border: 1.5px solid var(--color-control-border); }
+  .profile-spinner { display: inline-block; flex: none; width: 12px; height: 12px; box-sizing: border-box; border: 2px solid currentColor; border-right-color: transparent; border-radius: var(--radius-pill); animation: spin 0.8s linear infinite; }
+  .tooltip-anchor { position: relative; display: inline-flex; min-width: 0; }
+  .tooltip-bubble { position: absolute; bottom: calc(100% + var(--space-4)); left: 0; z-index: 40; width: max-content; max-width: min(480px, 90vw); padding: var(--space-4) var(--space-8); background: var(--color-surface-raised); border: 1px solid var(--color-divider); border-radius: var(--radius-control); box-shadow: 0 4px 12px rgb(10 13 22 / 0.15); font-family: var(--font-mono); font-size: var(--text-meta); overflow-wrap: anywhere; }
+  .tooltip-bubble[hidden] { display: none; }
+  .profile-card .tooltip-bubble { left: auto; right: 0; max-width: min(200px, 60vw); font-family: var(--font-ui); }
+  .btn.btn-sm { min-height: 32px; padding: var(--space-4) var(--space-12); }
+  .btn.btn-icon.btn-sm { width: 32px; padding: 0; }
+  .sheet.profile-inspector { width: min(440px, 100vw); }
+  .profile-inspector [data-slot='sheet-header'] { padding: var(--space-24) var(--space-48) var(--space-16) var(--space-16); }
+  .profile-inspector-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: var(--space-16); padding: var(--space-16); overflow-wrap: anywhere; }
+  .profile-inspector-section { display: flex; flex-direction: column; gap: var(--space-8); }
+  .profile-inspector-section + .profile-inspector-section { padding-top: var(--space-16); border-top: 1px solid var(--color-divider); }
+  .profile-inspector-facts { display: grid; grid-template-columns: minmax(100px, auto) minmax(0, 1fr); gap: var(--space-4) var(--space-16); font-size: var(--text-ui); }
+  .profile-inspector-facts dt { display: flex; align-items: center; gap: var(--space-8); }
+  .profile-inspector-path { padding: var(--space-8) var(--space-12); background: var(--color-surface-raised); border-radius: var(--radius-control); font-family: var(--font-mono); font-size: var(--text-meta); }
   .profile-inspect-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8) var(--space-16); font-size: var(--text-ui); }
   .profile-inspect-actions > a { display: inline-flex; align-items: center; min-height: var(--control-height); }
-  .profile-client-actions { display: flex; flex-wrap: wrap; align-items: start; gap: var(--space-8); }
+  .profile-client-actions { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-inline-start: auto; }
+  .profile-client-actions [data-secondary='true']:not(:hover) { border-color: transparent; color: var(--color-text-muted); }
   .discovery-intro { display: flex; flex-direction: column; gap: var(--space-12); }
   .discovery-check-meta { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-16); align-items: baseline; }
   .discovery-section { display: flex; flex-direction: column; gap: var(--space-16); }
@@ -362,10 +396,9 @@
   .native-app-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: var(--space-16); }
   .native-app-list > li + li { padding-top: var(--space-16); border-top: 1px solid var(--color-divider); }
   @media (width < 800px) {
-    .profile-row, .discovery-installation-row, .discovery-setup-group, .discovery-setup-row { grid-template-columns: minmax(0, 1fr); }
+    .profile-grid { grid-template-columns: minmax(0, 1fr); }
+    .discovery-installation-row, .discovery-setup-group, .discovery-setup-row { grid-template-columns: minmax(0, 1fr); }
     .profile-inspect-actions { gap: var(--space-4) var(--space-16); }
-    .profile-row { gap: var(--space-12); }
-    .profile-client-actions { padding-top: var(--space-8); }
     .discovery-setup-group > h3 { padding-top: 0; }
     .discovery-installation-row { gap: var(--space-12); }
   }
@@ -615,5 +648,6 @@
   .progress-fill { height: 100%; background: var(--color-link-focus); transition: width 200ms linear; }
 }
 
+@keyframes spin { to { rotate: 360deg; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop-in { from { opacity: 0; translate: 0 4px; } to { opacity: 1; translate: 0 0; } }

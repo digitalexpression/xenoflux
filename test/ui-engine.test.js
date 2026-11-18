@@ -434,3 +434,14 @@ test('inspected sessions compare retained sides without rereading lost history, 
   assert.match(markdown, /Recorded comparison: Harness controls differ/);
   assert.match(markdown, /Full historical harness/);
 });
+
+test('profile cards report their folder and reveal rejects profiles the store does not know', async t => {
+  const { provider, root } = await fixture(t);
+  const { profiles } = await provider.profiles();
+  const baseline = profiles.find(card => card.name === 'baseline');
+  assert.equal(baseline.folder, join(root, 'native-a'));
+  await assert.rejects(provider.revealProfileFolder({ name: 'unknown-profile', client: 'codex' }), { status: 404 });
+  await assert.rejects(provider.revealProfileFolder({ name: 'baseline', client: 'claude-code' }), { status: 404 });
+  await assert.rejects(provider.revealProfileFolder({ name: 'baseline', client: 'not-a-client' }), { status: 400 });
+  await provider.close();
+});

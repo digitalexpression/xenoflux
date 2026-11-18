@@ -30,7 +30,7 @@ async function signinFixture(page, client) {
   const button = page.getByRole('button', { name: `${client === 'copilot' ? 'Sign in with GitHub' : 'Sign in'} for ${profileName}`, exact: true });
   await expect(button).toBeVisible();
   const heading = page.getByRole('heading', { name: profileName, exact: true });
-  return { button, heading, state: value => { state = value; }, offline: value => { checkOffline = value; },
+  return { button, heading, profileName, state: value => { state = value; }, offline: value => { checkOffline = value; },
     cancelOffline: value => { cancelOffline = value; }, cancellationState: value => { cancellationState = value; }, get profileReads() { return profileReads; }, get cancelCalls() { return cancelCalls; },
     get terminalCalls() { return terminalCalls; }, get startCalls() { return startCalls; } };
 }
@@ -39,11 +39,16 @@ for (const client of ['claude-code', 'copilot']) {
   test(`${client} signs in through browser and automatically verifies in narrow light and dark layouts`, async ({ page }, testInfo) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const fixture = await signinFixture(page, client);
-    if (client === 'copilot') await expect(page.getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
+    if (client === 'copilot') {
+      await page.getByRole('button', { name: 'Details for copilot-work', exact: true }).click();
+      await expect(page.getByRole('dialog', { name: 'copilot-work', exact: true }).getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
+      await page.keyboard.press('Escape');
+    }
     await fixture.button.focus();
     await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByText('Continue in your browser', { exact: true })).toBeVisible();
+    await expect(page.getByText('Signing in…', { exact: true })).toBeVisible();
     const link = dialog.getByRole('link', { name: 'Open sign-in page in browser' });
     if (client === 'copilot') await expect(link).toHaveAttribute('href', 'https://github.com/login/device');
     else await expect(link).toHaveCount(0);
@@ -66,9 +71,9 @@ for (const client of ['claude-code', 'copilot']) {
     fixture.state('completed');
     await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
     await expect.poll(() => fixture.profileReads).toBeGreaterThan(reads);
-    await expect(page.getByText(/Signed in · Fixture folder/)).toBeVisible();
     await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
     await expect(dialog).toHaveCount(0);
+    await expect(page.getByRole('article', { name: fixture.profileName }).getByText('Signed in', { exact: true })).toBeVisible();
     await expect(fixture.button).toHaveCount(0);
     await expect(fixture.heading).toBeFocused();
     expect(fixture.startCalls).toBe(1);

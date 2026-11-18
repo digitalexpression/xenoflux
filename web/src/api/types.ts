@@ -41,6 +41,7 @@ export interface ProfileCard {
   name: string;
   client?: ProfileClient;
   accountCheck?: boolean;
+  folder: string | null;
   account?: { label: string; lastChecked: boolean };
   accountScope?: 'per-root' | 'shared' | 'unverified';
   accountIndependence?: 'not verified';

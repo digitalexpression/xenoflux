@@ -39,7 +39,8 @@ test('Close CLI targets the displayed run and leaves its Desktop running', async
     await expect(close).toHaveCount(0);
     await expect(card.getByRole('heading', { name })).toBeFocused();
     await expect(card.getByRole('button', { name: `Show Claude Desktop for ${name}` })).toBeEnabled();
-    await expect(card).toContainText('Claude Desktop is using this profile.');
+    await expect(card.getByRole('group', { name: 'CLI', exact: true }).getByText('Closed', { exact: true })).toBeVisible();
+    await expect(card.getByRole('group', { name: 'Desktop', exact: true }).getByText('Open', { exact: true })).toBeVisible();
     expect(requests).toHaveLength(1);
   } finally { finish(); }
 });
@@ -95,7 +96,8 @@ for (const [client, vendor, cli] of [['copilot', 'GitHub Copilot', 'Copilot CLI'
         await page.goto(`${app.origin}/profiles`);
         await page.getByRole('combobox', { name: 'Theme', exact: true }).selectOption(theme);
         const card = page.getByRole('article', { name, exact: true });
-        await expect(card).toContainText(`${cli} is not installed`);
+        await expect(card.getByRole('group', { name: 'CLI', exact: true }).getByText('Unknown', { exact: true })).toBeVisible();
+        await expect(card.getByRole('group', { name: 'Desktop', exact: true }).getByText('Closed', { exact: true })).toBeVisible();
         await expect(card).toContainText(vendor);
         const open = card.getByRole('button', { name: `Open ${vendor} Desktop for ${name}`, exact: true });
         await open.focus(); await page.keyboard.press('Enter');
@@ -105,11 +107,11 @@ for (const [client, vendor, cli] of [['copilot', 'GitHub Copilot', 'Copilot CLI'
         expect(native.requests).toEqual([{ action: 'open-desktop', appKey: 'a'.repeat(64) }]);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         native.finish();
-        await expect(card).toContainText('Running with the selected profile storage');
+        await expect(card.getByRole('group', { name: 'Desktop', exact: true }).getByText('Open', { exact: true })).toBeVisible();
         await expect(open).toHaveCount(0);
         await expect(card.getByRole('button', { name: /Check sign-in/ })).toHaveCount(0);
         await card.getByRole('button', { name: `Show ${vendor} Desktop for ${name}` }).click();
-        await expect(page.getByRole('status')).toContainText(`Showed ${vendor} Desktop for this profile.`);
+        await expect(page.getByRole('status').filter({ hasText: `Showed ${vendor} Desktop for this profile.` })).toBeVisible();
         expect(native.requests[1]).toEqual({ action: 'focus-desktop' });
         native.quit();
         await page.clock.fastForward(5000);
@@ -118,7 +120,7 @@ for (const [client, vendor, cli] of [['copilot', 'GitHub Copilot', 'Copilot CLI'
         expect(native.requests).toHaveLength(2);
         await open.click();
         await card.getByRole('button', { name: `Close ${vendor} Desktop for ${name}` }).click();
-        await expect(page.getByRole('status')).toContainText(`Closed ${vendor} Desktop for this profile.`);
+        await expect(page.getByRole('status').filter({ hasText: `Closed ${vendor} Desktop for this profile.` })).toBeVisible();
         await expect(open).toBeEnabled();
         expect(native.requests.slice(2)).toEqual([{ action: 'open-desktop', appKey: 'a'.repeat(64) }, { action: 'close-desktop' }]);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -133,12 +135,14 @@ for (const [client, vendor, cli] of [['copilot', 'GitHub Copilot', 'Copilot CLI'
     const card = page.getByRole('article', { name, exact: true });
     const open = card.getByRole('button', { name: `Open ${vendor} Desktop for ${name}`, exact: true });
     await open.click();
-    await expect(page.getByRole('status').filter({ hasText: `${vendor} changed after discovery.` })).toBeVisible();
+    await expect(card.getByRole('alert').filter({ hasText: `${vendor} changed after discovery.` })).toBeVisible();
     await expect(open).toBeEnabled();
     expect(native.requests).toEqual([{ action: 'open-desktop', appKey: 'a'.repeat(64) }]);
     const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/profiles/refresh');
     await page.clock.fastForward(5000); await refreshed;
-    await expect(card).toContainText('Updated installation is available for this profile.');
+    await page.getByRole('button', { name: `Details for ${name}`, exact: true }).click();
+    await expect(page.getByRole('dialog', { name, exact: true }).getByText('Updated installation is available for this profile.')).toBeVisible();
+    await page.keyboard.press('Escape');
     const retried = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/clients'));
     await open.click();
     await retried;

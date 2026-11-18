@@ -105,6 +105,8 @@ export function uiRoutes(provider) {
     route('GET', '/api/setups/options', call('setupChoices', () => ({}))),
     route('GET', '/api/profiles/:name/setup', call('profileSetup', ({ params, query }) => ({ ...q({ query }), name: params.name }))),
     route('POST', '/api/profiles/:name/clients', call('clientAction', ({ params, body }) => ({ ...body, name: params.name }))),
+    route('POST', '/api/profiles/:name/reveal', call('revealProfileFolder', ({ params, body }) => ({ name: params.name, client: body?.client })), { bodyLimit: 2048 }),
+    route('GET', '/api/clients/icons', call('clientIcons', () => ({}))),
     route('POST', '/api/profiles/:name/sign-in', call('startSignin', ({ params }) => ({ name: params.name })), { bodyLimit: 2048 }),
     route('GET', '/api/sign-ins/:id', call('signin', ({ params }) => params)),
     route('POST', '/api/sign-ins/:id/cancel', call('cancelSignin', ({ params }) => params), { bodyLimit: 2048 }),

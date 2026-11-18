@@ -4,8 +4,8 @@
 import { createProfileDiscovery } from './profile-discovery.js';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
-import { homedir, hostname } from 'node:os';
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareAuditProfiles, compareAuditSessions } from './audit.js';
@@ -21,7 +21,8 @@ import { managedNativeProfiles, PROFILE_CLIENT_NAMES } from './managed-native-pr
 import { createCodexProfileAccounts } from './codex-profile-accounts.js';
 import { createUiSignins } from './ui-signins.js';
 import { inspectSetupGuidance } from './setup-guidance.js';
-import { DESKTOP_APP } from './desktop-runtime.js';
+import { DEFAULT_APP_PATHS, DESKTOP_APP } from './desktop-runtime.js';
+import { STOCK_DESKTOP_APPS } from './stock-desktop-apps.js';
 import { createHome, planHomeCreation } from './home-create.js';
 import { nativeClient } from './profile-command.js';
 import { bind, unbind, find, PROFILE_CLIENTS, renameProfile as renameInData } from './profiles.js';
@@ -102,6 +103,32 @@ const XFX = fileURLToPath(new URL('../bin/xfx.js', import.meta.url));
 const shellQuote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
 const appleString = value => `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 const run = (file, args) => new Promise((resolve, reject) => execFile(file, args, { timeout: 15000 }, error => error ? reject(error) : resolve()));
+const capture = (file, args) => new Promise((resolve, reject) => execFile(file, args, { timeout: 15000 }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+
+const CLIENT_APP_PATHS = Object.freeze({
+  codex: DEFAULT_APP_PATHS,
+  'claude-code': [STOCK_DESKTOP_APPS.claude.path],
+  copilot: [STOCK_DESKTOP_APPS.copilot.path],
+});
+
+async function readAppIcon(appPath) {
+  const icon = (await capture('/usr/bin/plutil', ['-extract', 'CFBundleIconFile', 'raw', '-o', '-', join(appPath, 'Contents', 'Info.plist')])).trim();
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-icon-'));
+  try {
+    const target = join(directory, 'icon.png');
+    await run('/usr/bin/sips', ['-s', 'format', 'png', '-Z', '64', join(appPath, 'Contents', 'Resources', icon.endsWith('.icns') ? icon : `${icon}.icns`), '--out', target]);
+    return `data:image/png;base64,${(await readFile(target)).toString('base64')}`;
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+async function clientIcon(client) {
+  try {
+    for (const appPath of CLIENT_APP_PATHS[client]) {
+      if (await lstat(appPath).then(() => true, () => false)) return await readAppIcon(appPath);
+    }
+  } catch { /* A missing or unreadable icon falls back to initials. */ }
+  return null;
+}
 
 /** Explicit client operations, each started by a person in the app. Replaceable in tests. */
 export function defaultClientOps(store, desktopSurface = createCodexDesktopSurface(store)) {
@@ -142,7 +169,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   const admitted = new Set();
   const activeImports = new Set();
   const cliRuntime = recoveryContext.instanceRuntime ?? createDesktopInstanceRuntime();
-  let refreshingProfiles, stopProfileWatch;
+  let refreshingProfiles, stopProfileWatch, clientIcons;
   async function reconcileProfile(name, { managedDesktopClaim = true, onlyIfStopped = false } = {}) {
     if (!name) return;
     const profile = (await store.read()).profiles.find(profile => profile.name === name || profile.id === name);
@@ -841,7 +868,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         const account = accountCheck ? await codexAccounts.observed(name, profile?.id ?? 'default') : null;
         if (isDefault && account?.state === 'signed-in') signIn = 'Sign-in saved';
         const repositories = profile?.repositories ?? [];
-        return { name, client: 'codex', isDefault, state, reason, signIn, accountCheck, ...displayAccount(account),
+        return { name, client: 'codex', folder: (isDefault ? home : root ?? home) ?? null, isDefault, state, reason, signIn, accountCheck, ...displayAccount(account),
           binding: isDefault ? 'your standard Codex setup' : repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
           repositories: repositories.map(row => row.path),
           summary: isDefault ? 'Your normal Codex setup. Other profiles can copy from it; nothing is copied into it.' : profile?.description || `Codex folder ${tilde(root ?? home ?? '')}`,
@@ -904,7 +931,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           else if (observation.state !== 'signed-in') cliActions.push({ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' });
         }
         const repositories = selected.repositories;
-        cards.push({ name: selected.name, client, isDefault: false, state: ready || desktopReady ? 'ready' : 'unavailable',
+        cards.push({ name: selected.name, client, folder: selected.native?.configRoot ?? null, isDefault: false, state: ready || desktopReady ? 'ready' : 'unavailable',
           reason: ready || desktopReady ? null : 'The native root or executable no longer matches this binding.',
           signIn, accountCheck: ready && !desktopClaimed && !cliReserved, accountScope, accountIndependence: 'not verified', setup, ...displayAccount(observation),
           binding: repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
@@ -1254,6 +1281,25 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       return { status: 'applied', title: `${name} created`, changes, guidance, undo,
         note: selectedClient === 'codex' ? 'It has its own settings and no sign-in yet. Open Terminal or Codex Desktop from its Profiles card to sign in.'
           : 'Open Profiles to check CLI sign-in. Desktop sign-in remains separate.' };
+    },
+
+    async revealProfileFolder({ name, client }) {
+      if (!plain(name) || !PROFILE_CLIENTS.includes(client)) throw new UiError(400, 'Choose a profile and client.', 'invalid-selection');
+      const { homes, data, defaultHome } = await profileRecords();
+      let folder = null;
+      if (client === 'codex') {
+        if (name === 'Default') folder = defaultHome;
+        else { const home = homes.find(item => item.name === name); folder = home ? home.root ?? home.home : null; }
+      } else folder = data.profiles.find(profile => profile.name === name && profile.client === client)?.native?.configRoot ?? null;
+      if (!folder) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
+      try { await run('/usr/bin/open', ['-R', folder]); }
+      catch { throw new UiError(422, `Finder could not show ${tilde(folder)}. Check that the folder still exists.`, 'reveal-failed'); }
+      return { status: 'success', message: `Showed ${tilde(folder)} in Finder.` };
+    },
+
+    async clientIcons() {
+      clientIcons ??= Promise.all(PROFILE_CLIENTS.map(async client => [client, await clientIcon(client)])).then(Object.fromEntries);
+      return clientIcons;
     },
 
     async profileAccount({ name, client }) {

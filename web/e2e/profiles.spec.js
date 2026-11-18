@@ -7,6 +7,13 @@ async function openProfiles(page) {
   await page.getByRole('heading', { name: 'Profiles', exact: true }).waitFor();
 }
 
+async function inspect(page, name) {
+  await page.getByRole('button', { name: `Details for ${name}`, exact: true }).click();
+  const inspector = page.getByRole('dialog', { name, exact: true });
+  await expect(inspector).toBeVisible();
+  return inspector;
+}
+
 async function createDialog(page, name) {
   await page.getByRole('button', { name: 'Create profile…' }).click();
   await page.getByRole('textbox', { name: 'Name' }).fill(name);
@@ -57,27 +64,42 @@ test('visiting Profiles checks each available CLI account once and refreshes cur
   const copilot = page.getByRole('article', { name: 'copilot-work' });
   const available = [['codex-work', 'codex'], ['claude-work', 'claude-code'], ['copilot-work', 'copilot']];
   await openProfiles(page);
-  await expect(claude.getByText(/CLI: Signed in/)).toBeVisible();
+  await expect(claude.getByText('claude@example.test', { exact: true })).toBeVisible();
   await expect.poll(() => checks).toEqual(available);
-  await expect(page.getByRole('article', { name: 'codex-work' }).getByText(/CLI and Desktop account · codex@example.test/)).toBeVisible();
-  await expect(claude.getByText(/CLI account · claude@example.test/)).toBeVisible();
-  await expect(copilot.getByText(/CLI account · copilot-work/)).toBeVisible();
-  await expect(copilot.getByText('See the Desktop account in the app’s account menu.')).toBeVisible();
+  await expect(page.getByRole('article', { name: 'codex-work' }).getByText('codex@example.test', { exact: true })).toBeVisible();
+  await expect(copilot.getByRole('group', { name: 'CLI', exact: true }).getByText('copilot-work', { exact: true })).toBeVisible();
   const desktopSignInHint = /Quit all other Claude Desktop instances before signing in to this profile.*open regular Claude Desktop first, then reopen this profile/;
   const claudeDesktopAction = claude.getByRole('button', { name: 'Open Claude Desktop for claude-work' });
   await expect(claudeDesktopAction).toHaveAccessibleDescription(desktopSignInHint);
-  await expect(copilot.getByText(desktopSignInHint)).toHaveCount(0);
   const handoffHint = /Run \/app in Terminal.*Xenoflux opens this profile’s Desktop if it’s closed.*sign in there and retry \/app/;
   const claudeTerminal = claude.getByRole('button', { name: 'Open in Terminal for claude-work' });
   await expect(claudeTerminal).toHaveAccessibleDescription(handoffHint);
+
+  let inspector = await inspect(page, 'codex-work');
+  await expect(inspector.getByText(/CLI and Desktop account · codex@example.test/)).toBeVisible();
+  await page.keyboard.press('Escape');
+  inspector = await inspect(page, 'claude-work');
+  await expect(inspector.getByText(/CLI account · claude@example.test/)).toBeVisible();
+  await page.keyboard.press('Escape');
+  inspector = await inspect(page, 'copilot-work');
+  await expect(inspector.getByText(/CLI account · copilot-work/)).toBeVisible();
+  await expect(inspector.getByText('See the Desktop account in the app’s account menu.')).toBeVisible();
+  await expect(inspector.getByText(desktopSignInHint)).toHaveCount(0);
+  await expect(inspector.getByText(handoffHint)).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(copilot.getByText(desktopSignInHint)).toHaveCount(0);
   await expect(copilot.getByText(handoffHint)).toHaveCount(0);
+
   claudeDesktop = 'running';
   const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/profiles/refresh');
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await refreshed;
-  await expect(claude.getByText('Desktop is open for this profile.')).toBeVisible();
-  await expect(claude.getByText(desktopSignInHint)).toBeVisible();
-  await expect(claude.getByText(handoffHint)).toBeVisible();
+  await expect(claude.getByRole('group', { name: 'Desktop', exact: true }).getByText('Open', { exact: true })).toBeVisible();
+  inspector = await inspect(page, 'claude-work');
+  await expect(inspector.getByText('Desktop is open for this profile.')).toBeVisible();
+  await expect(inspector.getByText(desktopSignInHint)).toBeVisible();
+  await expect(inspector.getByText(handoffHint)).toBeVisible();
+  await page.keyboard.press('Escape');
   expect(checks).toEqual(available);
 
   claudeDesktop = 'stopped';
@@ -88,8 +110,8 @@ test('visiting Profiles checks each available CLI account once and refreshes cur
   claudeDesktop = 'available';
   result = 'Signed out';
   await page.reload();
-  await expect(claude.getByText(/CLI: Signed out/)).toBeVisible();
-  await expect(copilot.getByText(/CLI: Signed out/)).toBeVisible();
+  await expect(claude.getByText('Signed out', { exact: true })).toBeVisible();
+  await expect(copilot.getByText('Signed out', { exact: true })).toBeVisible();
   await expect(page.getByText('codex@example.test', { exact: false })).toHaveCount(0);
   await expect(claude.getByText('claude@example.test', { exact: false })).toHaveCount(0);
   expect(checks).toEqual([...available, ...available]);
@@ -335,7 +357,7 @@ test('reject create when selected source instructions changed after preview', as
 
 test('compare two setups and inspect all lines of a skill package', async ({ app, page }) => {
   await openProfiles(page);
-  const baseline = page.locator('article').filter({ has: page.getByRole('heading', { name: 'baseline', exact: true }) });
+  const baseline = await inspect(page, 'baseline');
   await baseline.getByRole('link', { name: 'Compare with…' }).click();
   await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'strict-review · Codex' });
   await page.getByRole('button', { name: 'Compare setups', exact: true }).last().click();
@@ -408,11 +430,13 @@ test('Claude creation previews and cancels without launching; selected copy and 
   await expect(access(join(profile.native.configRoot, 'CLAUDE.md'))).rejects.toMatchObject({ code: 'ENOENT' });
   await page.getByRole('link', { name: 'Back to Profiles' }).click();
   const card = page.getByRole('article', { name: 'claude-parts' });
-  await expect(card.getByText('See the Desktop account in the app’s account menu.')).toBeVisible();
+  const details = await inspect(page, 'claude-parts');
+  await expect(details.getByText('See the Desktop account in the app’s account menu.')).toBeVisible();
+  await page.keyboard.press('Escape');
   await expect(card.getByRole('button', { name: 'Open Claude Desktop for claude-parts', exact: true })).toHaveCount(0);
   const signIn = card.getByRole('button', { name: 'Sign in for claude-parts', exact: true });
   const check = card.getByRole('button', { name: 'Check sign-in for claude-parts', exact: true });
-  await expect(card.getByText(/Claude Code · CLI: Signed out/)).toBeVisible();
+  await expect(card.getByText('Signed out', { exact: true })).toBeVisible();
   await expect(signIn).toBeVisible();
   await expect(check).toHaveCount(0);
   expect(await readFile(app.nativeProfileLog, 'utf8')).toBe('--version\nauth status\n');
@@ -422,6 +446,6 @@ test('Claude creation previews and cancels without launching; selected copy and 
     await route.fulfill({ json: { status: 'success', message: 'Fixture terminal opened for claude-parts.' } });
   });
   await card.getByRole('button', { name: 'Open in Terminal (Claude Code) for claude-parts', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('Fixture terminal opened for claude-parts.');
+  await expect(page.getByRole('status').filter({ hasText: 'Fixture terminal opened for claude-parts.' })).toBeVisible();
   expect(opens).toEqual([{ action: 'open-terminal' }]);
 });

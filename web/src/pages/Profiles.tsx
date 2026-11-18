@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useEffectEvent, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
-import { ChevronDown } from 'lucide-react';
+import { CircleCheck, CircleX, Ellipsis, FolderOpen, LogIn, Monitor, PanelRight, Play, ScanLine, Square, Terminal, TriangleAlert } from 'lucide-react';
 import { ApiError, apiGet, apiPost } from '@/api/client';
-import type { ClientAction, ClientActionResult, MenuAction, NativeSigninAttempt, ProfileCard, ProfileClient, ProfilesView, StatusKind } from '@/api/types';
+import type { ClientAction, ClientActionResult, ClientInfo, ClientState, MenuAction, NativeSigninAttempt, ProfileCard, ProfileClient, ProfilesView, StatusKind } from '@/api/types';
 import { setupInspectHref, setupParams } from '@/components/setup-inventory';
 import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
 import { ErrorPanel, SimulatedNote, WarningAlert } from '@/components/notices';
 import { StatusBadge } from '@/components/badges';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog';
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Tooltip } from '@/components/ui/tooltip';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useResource } from '@/lib/useResource';
 
@@ -22,6 +24,21 @@ const clientBusyLabels: Record<string, string> = {
   'open-desktop': 'Opening Desktop…',
   'focus-desktop': 'Showing Desktop…',
   'close-desktop': 'Closing Desktop…',
+};
+
+type SurfaceState = 'open' | 'closed' | 'unknown';
+const surfaceStates: Record<ClientState, SurfaceState> = { running: 'open', 'not-running': 'closed', unknown: 'unknown', unavailable: 'unknown' };
+const surfaceLabels: Record<SurfaceState, string> = { open: 'Open', closed: 'Closed', unknown: 'Unknown' };
+
+type CardActivity = { kind: 'idle' } | { kind: 'checking-account' } | { kind: 'signing-in' } | { kind: 'action'; id: string };
+type CardNotice = { status: StatusKind; text: string };
+type ClientIcons = Partial<Record<ProfileClient, string | null>>;
+const clientInitials: Record<ProfileClient, string> = { codex: 'Cx', 'claude-code': 'Cl', copilot: 'Gh' };
+const cardKey = (profile: ProfileCard) => `${profile.client ?? 'codex'}:${profile.name}`;
+const desktopActions = new Set(['open-desktop', 'focus-desktop', 'close-desktop']);
+const actionIcons: Partial<Record<string, typeof Play>> = {
+  'open-terminal': Play, 'open-desktop': Play, 'show-terminal': Terminal, 'focus-desktop': Monitor,
+  'close-terminal': Square, 'close-desktop': Square, signin: LogIn, check: ScanLine,
 };
 
 type DialogState =
@@ -47,10 +64,15 @@ export function Profiles() {
   const [dialog, setDialog] = useState<DialogState>(null);
   const editTrigger = useRef<HTMLButtonElement | null>(null);
   const [message, setMessage] = useState<{ status: StatusKind; text: string } | null>(null);
+  const [cardNotices, setCardNotices] = useState<Partial<Record<string, CardNotice>>>({});
   const pendingClients = useRef(new Set<string>());
   const [busyClients, setBusyClients] = useState<Record<string, string>>({});
   const checkedOnVisit = useRef(new Set<string>());
   const [checkingAccount, setCheckingAccount] = useState<string | null>(null);
+  const [inspected, setInspected] = useState<string | null>(null);
+  const inspectTrigger = useRef<HTMLButtonElement | null>(null);
+  const [revealing, setRevealing] = useState<string | null>(null);
+  const [icons, setIcons] = useState<ClientIcons>({});
   const { data, loading, reload } = view;
   const clientControls = info?.features.clientControls;
   const finishAccountCheck = useEffectEvent((name: string) => {
@@ -76,15 +98,28 @@ export function Profiles() {
   }, [clientControls, data, loading, signIn, checkingAccount, busyClients]);
 
   useEffect(() => {
+    let current = true;
+    apiGet<ClientIcons>('/api/clients/icons').then(value => { if (current) setIcons(value); }, () => undefined);
+    return () => { current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (inspected && data && !data.profiles.some(profile => cardKey(profile) === inspected)) setInspected(null);
+  }, [inspected, data]);
+
+  useEffect(() => {
     if (params.get('create')) setDialog({ kind: 'create' });
     else if (params.get('add')) setDialog({ kind: 'add' });
   }, [params]);
   const close = () => { setDialog(null); if (params.size) setParams({}, { replace: true }); };
+  const reportCard = (profile: ProfileCard, notice?: CardNotice) =>
+    setCardNotices(current => ({ ...current, [cardKey(profile)]: notice }));
 
   async function runClientAction(profile: ProfileCard, action: ClientAction, heading: HTMLHeadingElement | null) {
     if (pendingClients.current.has(profile.name)) return;
-    if (action.id === 'signin' && profile.client && profile.client !== 'codex') { setSignIn({ profile, heading }); return; }
     if (action.conflict) { setDialog({ kind: 'conflict', profile: profile.name, action }); return; }
+    reportCard(profile);
+    if (action.id === 'signin' && profile.client && profile.client !== 'codex') { setSignIn({ profile, heading }); return; }
     if (action.id === 'check') checkedOnVisit.current.add(profile.name);
     pendingClients.current.add(profile.name);
     setBusyClients(value => ({ ...value, [profile.name]: action.id }));
@@ -94,9 +129,9 @@ export function Profiles() {
         ...(action.appKey ? { appKey: action.appKey } : {}),
         ...(action.runId ? { runId: action.runId } : {}),
       });
-      setMessage({ status: result.status, text: result.message });
+      reportCard(profile, { status: result.status, text: result.message });
       view.reload();
-    } catch (error) { setMessage({ status: 'error', text: (error as Error).message }); }
+    } catch (error) { reportCard(profile, { status: 'error', text: error instanceof Error ? error.message : 'Client action failed.' }); }
     finally {
       pendingClients.current.delete(profile.name);
       setBusyClients(value => { const next = { ...value }; delete next[profile.name]; return next; });
@@ -104,12 +139,30 @@ export function Profiles() {
     }
   }
 
+  async function revealFolder(profile: ProfileCard) {
+    if (revealing) return;
+    reportCard(profile);
+    setRevealing(cardKey(profile));
+    try {
+      const result = await apiPost<ClientActionResult>(`/api/profiles/${encodeURIComponent(profile.name)}/reveal`, { client: profile.client ?? 'codex' });
+      reportCard(profile, { status: result.status, text: result.message });
+    } catch (error) { reportCard(profile, { status: 'error', text: error instanceof Error ? error.message : 'Could not show the folder.' }); }
+    finally { setRevealing(null); }
+  }
+
+  const activityFor = (name: string): CardActivity => {
+    if (signIn?.profile.name === name) return { kind: 'signing-in' };
+    if (checkingAccount === name) return { kind: 'checking-account' };
+    return busyClients[name] ? { kind: 'action', id: busyClients[name] } : { kind: 'idle' };
+  };
+  const inspect = (name: string, trigger: HTMLButtonElement | null) => { inspectTrigger.current = trigger; setInspected(name); };
   const profileCards = view.data?.profiles ?? [];
+  const inspectedProfile = inspected ? profileCards.find(profile => cardKey(profile) === inspected) : undefined;
   const names = profileCards.filter(p => !p.client || p.client === 'codex').map(p => p.name);
   return (
     <Page current="profiles" title="Profiles">
       <PageTitle title="Profiles"
-        subtitle="Codex profiles you create or add share one sign-in across CLI and Desktop. Claude Code and GitHub Copilot require separate sign-ins for CLI and Desktop."
+        subtitle="Profiles grouped by client. Open a profile’s details for sign-in rules and folder information."
         actions={info?.features.profileEdits ? (
           <>
             <Button onClick={() => { editTrigger.current = null; setDialog({ kind: 'add' }); }}>Add an existing Codex folder…</Button>
@@ -135,8 +188,10 @@ export function Profiles() {
             const profiles = profileCards.filter(profile => (profile.client ?? 'codex') === client);
             return profiles.length ? <section key={client} className="profile-client-group" aria-label={`${clientLabels[client]} profiles`}>
               <div className="profile-group-heading"><h2 className="text-heading">{clientLabels[client]}</h2><span className="hint">{profiles.length} {profiles.length === 1 ? 'profile' : 'profiles'}</span></div>
-              <div className="profile-rows">{profiles.map(profile => (
-                <ProfileCardView key={profile.name} profile={profile} busyAction={busyClients[profile.name]} checkingAccount={checkingAccount === profile.name}
+              <div className="profile-grid">{profiles.map(profile => (
+                <ProfileCardView key={profile.name} profile={profile} icon={icons[profile.client ?? 'codex'] ?? null} activity={activityFor(profile.name)}
+                  notice={cardNotices[cardKey(profile)]} revealing={revealing === cardKey(profile)} onReveal={() => void revealFolder(profile)}
+                  onInspect={trigger => inspect(cardKey(profile), trigger)}
                   onClient={(action, heading) => runClientAction(profile, action, heading)} onMenu={(menu, trigger) => {
                     if (menu.id === 'copy') return;
                     editTrigger.current = trigger;
@@ -149,7 +204,16 @@ export function Profiles() {
       ) : null}
       {view.data?.notes.length ? <ul className="hint list-disc pl-5">{view.data.notes.map(note => <li key={note}>{note}</li>)}</ul> : null}
 
-      {signIn ? <SigninDialog profile={signIn.profile} returnFocus={signIn.heading} onClose={() => setSignIn(null)} onRefresh={view.reload} /> : null}
+      <Sheet open={Boolean(inspectedProfile)} onOpenChange={open => { if (!open) setInspected(null); }}>
+        {inspectedProfile ? <SheetContent className="profile-inspector" aria-describedby={undefined}
+          onCloseAutoFocus={event => { event.preventDefault(); if (inspectTrigger.current?.isConnected) inspectTrigger.current.focus(); }}>
+          <ProfileInspector profile={inspectedProfile} notice={cardNotices[cardKey(inspectedProfile)]}
+            revealing={revealing === cardKey(inspectedProfile)} onReveal={() => void revealFolder(inspectedProfile)} />
+        </SheetContent> : null}
+      </Sheet>
+
+      {signIn ? <SigninDialog profile={signIn.profile} returnFocus={signIn.heading} onClose={() => setSignIn(null)} onRefresh={view.reload}
+        onResult={notice => reportCard(signIn.profile, notice)} /> : null}
 
       <ConflictDialog state={dialog?.kind === 'conflict' ? dialog : null} onClose={close}
         onCheck={async name => { await apiPost(`/api/profiles/${encodeURIComponent(name)}/clients`, { action: 'check' }); view.reload(); close(); }} />
@@ -170,8 +234,9 @@ const signinLabels: Record<NativeSigninAttempt['state'], string> = {
   'timed-out': 'Sign-in timed out', uncertain: 'Sign-in could not be verified',
 };
 
-function SigninDialog({ profile, returnFocus, onClose, onRefresh }:
-  { profile: ProfileCard; returnFocus: HTMLHeadingElement | null; onClose: () => void; onRefresh: () => void }) {
+function SigninDialog({ profile, returnFocus, onClose, onRefresh, onResult }:
+  { profile: ProfileCard; returnFocus: HTMLHeadingElement | null; onClose: () => void; onRefresh: () => void;
+    onResult: (notice?: CardNotice) => void }) {
   const [attempt, setAttempt] = useState<NativeSigninAttempt | null>(null);
   const [busy, setBusy] = useState<'starting' | 'cancelling' | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -184,7 +249,11 @@ function SigninDialog({ profile, returnFocus, onClose, onRefresh }:
 
   function receive(next: NativeSigninAttempt) {
     setAttempt(next); setError(null);
-    if (!activeSigninStates.has(next.state)) onRefresh();
+    if (!activeSigninStates.has(next.state)) {
+      if (next.state === 'completed') onResult({ status: 'success', text: signinLabels.completed });
+      else if (next.state !== 'cancelled') onResult({ status: next.state === 'uncertain' ? 'warning' : 'error', text: next.message });
+      onRefresh();
+    }
   }
 
   async function check() {
@@ -207,8 +276,13 @@ function SigninDialog({ profile, returnFocus, onClose, onRefresh }:
   async function start() {
     if (pending.current) return;
     pending.current = true; setBusy('starting'); setError(null);
+    onResult();
     try { receive(await apiPost<NativeSigninAttempt>(`/api/profiles/${encodeURIComponent(profile.name)}/sign-in`)); }
-    catch (failure) { setError(failure instanceof Error ? failure.message : 'Could not start sign-in.'); }
+    catch (failure) {
+      const text = failure instanceof Error ? failure.message : 'Could not start sign-in.';
+      setError(text);
+      onResult({ status: 'error', text });
+    }
     finally { pending.current = false; setBusy(null); }
   }
 
@@ -261,8 +335,43 @@ function SigninDialog({ profile, returnFocus, onClose, onRefresh }:
   </Dialog>;
 }
 
-function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMenu }:
-  { profile: ProfileCard; busyAction?: string; checkingAccount: boolean; onClient: (action: ClientAction, heading: HTMLHeadingElement | null) => void; onMenu: (menu: MenuAction, trigger: HTMLButtonElement | null) => void }) {
+function SurfaceDot({ state }: { state: SurfaceState }) {
+  return <span className="surface-dot" data-state={state} aria-hidden="true" />;
+}
+
+function Spinner() {
+  return <span className="profile-spinner" aria-hidden="true" />;
+}
+
+function surfaceRows(profile: ProfileCard): { label: string; info: ClientInfo; name: string }[] {
+  const codex = (profile.client ?? 'codex') === 'codex';
+  return [
+    { label: 'CLI', info: profile.cli, name: codex ? 'Codex CLI' : profile.client === 'copilot' ? 'Copilot CLI' : clientLabels[profile.client ?? 'codex'] },
+    { label: 'Desktop', info: profile.desktop, name: codex ? 'Codex Desktop' : 'Desktop app' },
+  ];
+}
+
+function accountScope(profile: ProfileCard) {
+  return (profile.client ?? 'codex') === 'codex' && !profile.isDefault ? 'CLI and Desktop account' : 'CLI account';
+}
+
+function warningTitle(profile: ProfileCard) {
+  return profile.state === 'unbound' ? 'No Codex folder bound' : 'Couldn’t read this profile';
+}
+
+function showClaudeHints(profile: ProfileCard, clientControls: boolean | undefined) {
+  const desktop = Boolean(clientControls) && profile.client === 'claude-code'
+    && (profile.desktop.state === 'running' || profile.clientActions.some(action => action.id === 'open-desktop'));
+  return { desktop, handoff: desktop && (profile.cli.state === 'running' || profile.clientActions.some(action => action.id === 'open-terminal')) };
+}
+
+const claudeDesktopSignInHint = 'Quit all other Claude Desktop instances before signing in to this profile. After signing in, quit this profile, open regular Claude Desktop first, then reopen this profile from Xenoflux.';
+const claudeHandoffHint = <>Run <code>/app</code> in Terminal to move your session to Claude Desktop. Xenoflux opens this profile’s Desktop if it’s closed. If prompted, sign in there and retry <code>/app</code>.</>;
+
+function ProfileCardView({ profile, icon, activity, notice, revealing, onClient, onMenu, onInspect, onReveal }:
+  { profile: ProfileCard; icon: string | null; activity: CardActivity; notice?: CardNotice; revealing: boolean; onReveal: () => void;
+    onClient: (action: ClientAction, heading: HTMLHeadingElement | null) => void; onMenu: (menu: MenuAction, trigger: HTMLButtonElement | null) => void;
+    onInspect: (trigger: HTMLButtonElement | null) => void }) {
   const info = useInfo();
   const navigate = useNavigate();
   const titleId = useId();
@@ -273,78 +382,163 @@ function ProfileCardView({ profile, busyAction, checkingAccount, onClient, onMen
     if (button && document.activeElement === button) title.current?.focus();
   }, []);
   const menuTrigger = useRef<HTMLButtonElement | null>(null);
-  const clientLabel = clientLabels[profile.client ?? 'codex'];
-  const cliLabel = profile.client === 'copilot' ? 'Copilot CLI' : clientLabel;
-  const signIn = checkingAccount ? 'Checking sign-in…' : profile.signIn;
-  const showClaudeDesktopSignIn = info?.features.clientControls && profile.client === 'claude-code'
-    && (profile.desktop.state === 'running' || profile.clientActions.some(action => action.id === 'open-desktop'));
-  const showClaudeHandoff = showClaudeDesktopSignIn
-    && (profile.cli.state === 'running' || profile.clientActions.some(action => action.id === 'open-terminal'));
+  const detailsTrigger = useRef<HTMLButtonElement | null>(null);
+  const client = profile.client ?? 'codex';
+  const clientLabel = clientLabels[client];
+  const hints = showClaudeHints(profile, info?.features.clientControls);
+  const busyAction = activity.kind === 'action' ? activity.id : undefined;
+  const working = activity.kind === 'checking-account' ? 'Checking sign-in…'
+    : activity.kind === 'signing-in' ? 'Signing in…'
+    : busyAction === 'signin' ? 'Opening Terminal…'
+    : busyAction === 'check' ? 'Checking sign-in…'
+    : busyAction ? clientBusyLabels[busyAction] ?? 'Working…'
+    : revealing ? 'Showing in Finder…' : null;
+  const problem: CardNotice | undefined = profile.state === 'ready' ? undefined
+    : { status: profile.state === 'unbound' ? 'warning' : 'error', text: warningTitle(profile) };
+  const feedback = notice?.status === 'error' || notice?.status === 'warning' ? notice
+    : problem ?? (working ? { status: 'neutral' as const, text: working } : notice);
+  const showDetails = feedback?.status === 'warning' || feedback?.status === 'error';
+  const NoticeIcon = feedback?.status === 'error' ? CircleX : feedback?.status === 'warning' ? TriangleAlert
+    : feedback?.status === 'success' ? CircleCheck : null;
+  const accountText = profile.account?.label ?? profile.signIn;
   return (
-    <article className="profile-row min-w-0 wrap-anywhere" aria-labelledby={titleId}>
-      <div className="profile-identity">
-        <h3 id={titleId} ref={title} tabIndex={-1} className="text-body font-semibold wrap-anywhere">{profile.name}</h3>
-        <p className="meta">{clientLabel} · {profile.client === 'copilot' || profile.client === 'claude-code' ? `CLI: ${signIn}` : signIn} · {profile.binding}</p>
-        {profile.account ? <p className="text-ui wrap-anywhere">
-          <span className="muted">{(profile.client ?? 'codex') === 'codex' && !profile.isDefault ? 'CLI and Desktop account' : 'CLI account'}</span>
-          {' · '}{profile.account.label}{profile.account.lastChecked ? ' (last checked)' : ''}
-        </p> : null}
-        <p className="text-ui">{profile.summary}</p>
-        {profile.state !== 'ready' ? <WarningAlert title={profile.state === 'unbound' ? 'No Codex folder bound' : 'Couldn’t read this profile'}>{profile.reason}</WarningAlert> : null}
-      </div>
-      <div className="profile-runtime">
-      {(profile.client ?? 'codex') === 'codex' ? <div className="flex flex-col gap-2 text-ui">
-        <dl className="grid gap-x-4 gap-y-1">
-          <dt className="muted">Codex CLI</dt><dd>{profile.cli.text}</dd>
-          <dt className="muted">Codex Desktop</dt><dd>{profile.desktop.text}</dd>
-        </dl>
-        {!profile.isDefault && profile.state === 'ready' ? <p className="profile-account-scope">{sharedSignIn}</p> : null}
-      </div> : <div className="flex flex-col gap-2 text-ui">
-        <dl className="grid gap-x-4 gap-y-1">
-          <dt className="muted">{cliLabel}</dt><dd>{profile.cli.text}</dd>
-          <dt className="muted">Desktop app</dt><dd>{profile.desktop.text}</dd>
-        </dl>
-        <p className="profile-account-scope">{separateSignIns}</p>
-        <p className="hint">See the Desktop account in the app’s account menu.</p>
-        {showClaudeDesktopSignIn ? <p id={desktopSignInHintId} className="hint">
-          Quit all other Claude Desktop instances before signing in to this profile. After signing in, quit this profile, open regular Claude Desktop first, then reopen this profile from Xenoflux.
-        </p> : null}
-        {showClaudeHandoff ? <p id={handoffHintId} className="hint">
-          Run <code>/app</code> in Terminal to move your session to Claude Desktop. Xenoflux opens this profile’s Desktop if it’s closed. If prompted, sign in there and retry <code>/app</code>.
-        </p> : null}
-      </div>}
-      </div>
-      <div className="profile-inspect-actions">
-        <Link to={setupInspectHref({ name: profile.name, client: profile.client ?? 'codex' })}>Inspect setup</Link>
-        <Link to={`/sessions/native?${new URLSearchParams({ profile: profile.name, client: profile.client ?? 'codex' })}`}>Inspect sessions</Link>
-        <Link to={`/compare/setups?${new URLSearchParams(setupParams({ name: profile.name, client: profile.client ?? 'codex' }))}`}>Compare with…</Link>
-        {profile.moreMenu ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild><Button ref={menuTrigger} aria-label={`More actions for ${profile.name}`}>More <ChevronDown size={14} aria-hidden="true" /></Button></DropdownMenuTrigger>
-            <DropdownMenuContent aria-label={`More actions for ${profile.name}`}>
-              {profile.moreMenu.filter(menu => menu.id === 'copy' ? info?.features.copy : info?.features.profileEdits).map(menu => (
-                <DropdownMenuItem key={menu.id} label={menu.label} detail={menu.detail} disabledReason={menu.disabledReason}
-                  onSelect={() => menu.id === 'copy' ? navigate(`/profiles/${encodeURIComponent(profile.name)}/copy`) : onMenu(menu, menuTrigger.current)} />
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null}
-      </div>
-      {info?.features.clientControls && profile.clientActions.length ? (
-        <div className="profile-client-actions" role="group" aria-label={`Client actions for ${profile.name}`}>
-          {profile.clientActions.map(action => (
-            <Button key={action.id === 'check' ? 'signin' : action.id} ref={retainActionFocus}
-              onClick={() => onClient(action, title.current)} disabled={Boolean(busyAction)} aria-disabled={checkingAccount || undefined} busy={busyAction === action.id}
-              busyLabel={action.id === 'signin' ? (profile.client && profile.client !== 'codex' ? 'Starting sign-in…' : 'Opening Terminal…')
-                : clientBusyLabels[action.id] ?? 'Checking…'}
-              aria-describedby={showClaudeHandoff && action.id === 'open-terminal' ? handoffHintId
-                : showClaudeDesktopSignIn && action.id === 'open-desktop' ? desktopSignInHintId : undefined}
-              aria-label={`${action.label.replace(/…$/, '')} for ${profile.name}`}>{action.label}</Button>
-          ))}
+    <article className="profile-card" aria-labelledby={titleId}>
+      <div className="profile-card-header">
+        {icon ? <img className="profile-app-icon" src={icon} alt="" width={32} height={32} />
+          : <span className="profile-app-icon" aria-hidden="true">{clientInitials[client]}</span>}
+        <div className="profile-card-title">
+          <h3 id={titleId} ref={title} tabIndex={-1} title={profile.name} className="text-body font-semibold truncate">{profile.name}</h3>
+          <p className="meta truncate">{clientLabel} · {profile.binding}</p>
         </div>
-      ) : null}
+        <div className="profile-card-tools">
+          {profile.folder && info?.features.clientControls ? <Tooltip content={<>Show in Finder<br />{profile.folder}</>}>
+            <Button size="icon" className="btn-sm" aria-label={`Show ${profile.name} folder in Finder`} aria-busy={revealing || undefined}
+              onClick={() => { if (!revealing) onReveal(); }}><FolderOpen size={16} aria-hidden="true" /></Button>
+          </Tooltip> : null}
+          <Button ref={detailsTrigger} size="icon" className="btn-sm" aria-label={`Details for ${profile.name}`} onClick={() => onInspect(detailsTrigger.current)}>
+            <PanelRight size={16} aria-hidden="true" />
+          </Button>
+          {profile.moreMenu ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild><Button ref={menuTrigger} size="icon" className="btn-sm" aria-label={`More actions for ${profile.name}`}><Ellipsis size={16} aria-hidden="true" /></Button></DropdownMenuTrigger>
+              <DropdownMenuContent aria-label={`More actions for ${profile.name}`}>
+                {profile.moreMenu.filter(menu => menu.id === 'copy' ? info?.features.copy : info?.features.profileEdits).map(menu => (
+                  <DropdownMenuItem key={menu.id} label={menu.label} detail={menu.detail} disabledReason={menu.disabledReason}
+                    onSelect={() => menu.id === 'copy' ? navigate(`/profiles/${encodeURIComponent(profile.name)}/copy`) : onMenu(menu, menuTrigger.current)} />
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+        </div>
+      </div>
+      {feedback ? <div className="profile-card-notice" data-status={feedback.status}>
+        <span className="profile-card-notice-text" role={feedback.status === 'error' ? 'alert' : 'status'}>
+          {NoticeIcon ? <NoticeIcon size={16} aria-hidden="true" /> : working ? <Spinner /> : null}
+          {feedback.text}
+        </span>
+        {showDetails ? <Button variant="ghost-link" className="btn-sm" onClick={event => onInspect(event.currentTarget)}>See details</Button> : null}
+      </div> : null}
+      {hints.desktop ? <p id={desktopSignInHintId} className="sr-only">{claudeDesktopSignInHint}</p> : null}
+      {hints.handoff ? <p id={handoffHintId} className="sr-only">{claudeHandoffHint}</p> : null}
+      <div className="profile-surfaces">
+        {surfaceRows(profile).map(({ label, info: surface }) => {
+          const state = surfaceStates[surface.state];
+          const desktop = label === 'Desktop';
+          const SurfaceIcon = desktop ? Monitor : Terminal;
+          const actions = info?.features.clientControls ? profile.clientActions.filter(action => desktopActions.has(action.id) === desktop) : [];
+          return <div key={label} className="profile-surface" role="group" aria-label={label}>
+            <span className="profile-surface-name"><SurfaceIcon size={16} aria-hidden="true" />{label}</span>
+            <div className="profile-surface-facts">
+              <span className="profile-status-item"><SurfaceDot state={state} />{surfaceLabels[state]}</span>
+              {!desktop ? <span className="profile-status-account">
+                {profile.account && client === 'codex' && !profile.isDefault ? 'Shared account · ' : null}<span>{accountText}</span>
+              </span> : client !== 'codex' && profile.state === 'ready' ? <span className="profile-status-account">Account in Desktop</span> : null}
+            </div>
+            {actions.length ? <div className="profile-client-actions">{actions.map(action => {
+              const ActionIcon = actionIcons[action.id] ?? SurfaceIcon;
+              const busy = busyAction === action.id;
+              const actionLabel = action.label.replace(/…$/, '');
+              return <Tooltip key={action.id === 'check' ? 'signin' : action.id} content={actionLabel}>
+                <Button ref={retainActionFocus} size="icon" className="btn-sm"
+                  data-secondary={action.id === 'close-terminal' || action.id === 'close-desktop' || undefined}
+                  onClick={() => onClient(action, title.current)} disabled={Boolean(busyAction)} busy={busy}
+                  aria-disabled={activity.kind === 'checking-account' || undefined}
+                  aria-describedby={hints.handoff && action.id === 'open-terminal' ? handoffHintId
+                    : hints.desktop && action.id === 'open-desktop' ? desktopSignInHintId : undefined}
+                  aria-label={`${actionLabel} for ${profile.name}`}>{busy ? <Spinner /> : <ActionIcon size={16} aria-hidden="true" />}</Button>
+              </Tooltip>;
+            })}</div> : null}
+          </div>;
+        })}
+      </div>
     </article>
   );
+}
+
+function ProfileInspector({ profile, notice, revealing, onReveal }: { profile: ProfileCard; notice?: CardNotice; revealing: boolean; onReveal: () => void }) {
+  const info = useInfo();
+  const client = profile.client ?? 'codex';
+  const hints = showClaudeHints(profile, info?.features.clientControls);
+  const native = client !== 'codex';
+  const inspectTarget = { name: profile.name, client };
+  return <>
+    <SheetHeader>
+      <SheetTitle>{profile.name}</SheetTitle>
+      <SheetDescription>{clientLabels[client]}</SheetDescription>
+    </SheetHeader>
+    <div className="profile-inspector-body">
+      <section className="profile-inspector-section" aria-labelledby="inspector-status">
+        <h3 id="inspector-status" className="text-ui font-semibold">Status</h3>
+        {notice?.status === 'error' || notice?.status === 'warning' ? <p className={`alert-${notice.status}`}>{notice.text}</p> : null}
+        {profile.state !== 'ready' ? <WarningAlert title={warningTitle(profile)}>{profile.reason}</WarningAlert> : null}
+        <dl className="profile-inspector-facts">
+          {surfaceRows(profile).map(({ name, info: surface }) => {
+            const state = surfaceStates[surface.state];
+            return [
+              <dt key={`${name}-label`} className="muted"><SurfaceDot state={state} /> {name}</dt>,
+              <dd key={`${name}-text`}>{surface.text}</dd>,
+            ];
+          })}
+          <dt className="muted">Sign-in</dt>
+          <dd>{profile.account ? <>
+            <span className="muted">{accountScope(profile)}</span>{' · '}{profile.account.label}{profile.account.lastChecked ? ' (last checked)' : ''}
+          </> : profile.signIn}</dd>
+        </dl>
+      </section>
+      {profile.folder ? <section className="profile-inspector-section" aria-labelledby="inspector-folder">
+        <h3 id="inspector-folder" className="text-ui font-semibold">Folder</h3>
+        <code className="profile-inspector-path select-all">{profile.folder}</code>
+        {info?.features.clientControls ? <div><Button className="btn-sm" aria-label={`Show ${profile.name} folder in Finder`} aria-busy={revealing || undefined}
+          onClick={() => { if (!revealing) onReveal(); }}>{revealing ? <Spinner /> : <FolderOpen size={16} aria-hidden="true" />}Show in Finder</Button></div> : null}
+      </section> : null}
+      <section className="profile-inspector-section" aria-labelledby="inspector-setup">
+        <h3 id="inspector-setup" className="text-ui font-semibold">Setup</h3>
+        <p className="text-ui">{profile.summary}</p>
+        <p className="meta">{profile.binding}</p>
+        {profile.repositories?.length ? <ul className="flex flex-col gap-1">
+          {profile.repositories.map(repository => <li key={repository}><code className="text-ui wrap-anywhere">{repository}</code></li>)}
+        </ul> : null}
+      </section>
+      <section className="profile-inspector-section" aria-labelledby="inspector-signin">
+        <h3 id="inspector-signin" className="text-ui font-semibold">How sign-in works</h3>
+        {!native && !profile.isDefault && profile.state === 'ready' ? <p className="text-ui">{sharedSignIn}</p> : null}
+        {native ? <>
+          <p className="text-ui">{separateSignIns}</p>
+          <p className="hint">See the Desktop account in the app’s account menu.</p>
+        </> : null}
+        {hints.desktop ? <p className="hint">{claudeDesktopSignInHint}</p> : null}
+        {hints.handoff ? <p className="hint">{claudeHandoffHint}</p> : null}
+      </section>
+      <section className="profile-inspector-section" aria-labelledby="inspector-inspect">
+        <h3 id="inspector-inspect" className="text-ui font-semibold">Inspect</h3>
+        <div className="profile-inspect-actions">
+          <Link to={setupInspectHref(inspectTarget)}>Inspect setup</Link>
+          <Link to={`/sessions/native?${new URLSearchParams({ profile: profile.name, client })}`}>Inspect sessions</Link>
+          <Link to={`/compare/setups?${new URLSearchParams(setupParams(inspectTarget))}`}>Compare with…</Link>
+        </div>
+      </section>
+    </div>
+  </>;
 }
 
 function ConflictDialog({ state, onClose, onCheck }: { state: { profile: string; action: ClientAction } | null; onClose: () => void; onCheck: (name: string) => Promise<void> }) {
