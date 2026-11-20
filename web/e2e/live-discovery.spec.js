@@ -162,18 +162,23 @@ test('a local profile removal fences a pending older profile response and immedi
   let release;
   const hold = new Promise(resolve => { release = resolve; });
   let calls = 0;
+  let capturedOlderRead = false;
   await page.route('**/api/profiles/refresh', async route => {
     calls++;
     if (calls === 1) {
       const response = await route.fetch();
       const data = await response.json();
       data.profiles.find(profile => profile.name === 'baseline').name = 'Obsolete removed profile';
+      capturedOlderRead = true;
       await hold;
       await route.fulfill({ response, json: data });
     } else await route.continue();
   });
-  await page.clock.fastForward(5000);
-  await expect.poll(() => calls).toBe(1);
+  await expect.poll(async () => {
+    if (calls === 0) await page.clock.fastForward(5000);
+    return capturedOlderRead;
+  }).toBe(true);
+  expect(calls).toBe(1);
   await page.getByRole('button', { name: 'More actions for baseline', exact: true }).click();
   await page.getByRole('menuitem', { name: /^Remove from Xenoflux/ }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Remove from Xenoflux', exact: true }).click();
