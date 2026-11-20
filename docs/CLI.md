@@ -85,6 +85,8 @@ xfx desktop recover NAME --dry-run
 xfx desktop recover NAME
 ```
 
+Use `xfx profile recover NAME` for an interrupted Codex account check. Use
+`Default` as the name if the check targeted the standard Codex setup.
 Profile apply rechecks a same-host owned lock, absent matching owner and native
 writers before releasing it. Desktop recovery reconciles only its stopped journal
 and reservation. Neither launches, resumes or force-closes clients. Live/reused

@@ -63,6 +63,9 @@ refresh credentials. Report the surface that provides the identity.
 Profile cards may retain an expired account observation as **last checked** while
 its executable and roots still match. Displaying that observation never renews
 account qualification or permits task admission.
+An interrupted Codex account check retains its exclusive reservation. Recover it
+only for the matching local profile or Default after verifying a stopped owner,
+unchanged recorded roots, and idle native resources.
 
 ## Profile creation, copying and Undo
 

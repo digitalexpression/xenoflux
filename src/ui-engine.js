@@ -225,7 +225,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         if (!await exists(join(root, '.run-lock'))) return;
         await privateDirectory(root);
         const owners = await readProfileOwners(root);
-        const nativeRun = owners.find(owner => ['interactive-cli', 'native-home-login', 'native-signin'].includes(owner?.kind)
+        const nativeRun = owners.find(owner => (['interactive-cli', 'native-home-login', 'native-signin'].includes(owner?.kind)
+          || !desktopKind && owner?.kind === 'native-account-status')
           && owner.host === hostname() && Number.isSafeInteger(owner.pid) && owner.pid > 0);
         let stopped = false;
         if (nativeRun) {

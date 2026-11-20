@@ -12,6 +12,10 @@ import { assertNoLegacyAuditLease } from './profile-reservations.js';
 import { probeCodexAccount } from './version-probe.js';
 
 const fileIdentity = info => info && [info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs];
+const rootIdentities = ({ root, home }) => Promise.all([root, home].map(async path => {
+  const { dev, ino } = await lstat(path);
+  return [dev, ino];
+}));
 
 export function createCodexProfileAccounts(store, { defaultUserHome, terminalEnvironment, lockOptions, probe = probeCodexAccount }) {
   const observed = new Map(), active = new Map();
@@ -28,21 +32,21 @@ export function createCodexProfileAccounts(store, { defaultUserHome, terminalEnv
       environmentId: environment.id, userHome: environment.launch.env.HOME };
   }
 
-  const scope = async (profile, binary) => {
-    const root = await lstat(profile.root), home = await lstat(profile.home);
-    return JSON.stringify([profile, binary, root.dev, root.ino, home.dev, home.ino,
-      fileIdentity(await exists(join(profile.home, 'auth.json')))]);
-  };
+  const scope = async (profile, binary, roots = undefined) => JSON.stringify([profile, binary, roots ?? await rootIdentities(profile),
+    fileIdentity(await exists(join(profile.home, 'auth.json')))]);
 
   async function inspect(name) {
     const profile = await select(name);
     const binary = await discoverCodexExecutable(terminalEnvironment);
-    const key = await scope(profile, binary);
+    const executable = await realpath(binary.executable);
+    const roots = await rootIdentities(profile);
+    const key = await scope(profile, binary, roots);
     const guard = action => withProfileOperation(store, profile.id, lockOptions, action);
-    const owner = { kind: 'native-account-status', runId: randomUUID(), host: hostname(),
-      pid: process.pid, storePath: store.directory, profileId: profile.id };
     const lock = join(profile.root, '.run-lock');
     const cwd = await mkdtemp(join(await realpath(tmpdir()), 'xfx-codex-account-'));
+    const owner = { kind: 'native-account-status', runId: randomUUID(), host: hostname(),
+      pid: process.pid, storePath: store.directory, profileId: profile.id,
+      binding: { executable, cwd, root: profile.root, home: profile.home, environmentId: profile.environmentId ?? null, roots } };
     let held = false, preserve = false;
     const checkBinding = async () => {
       const current = await select(profile.id === 'default' ? 'Default' : profile.id);
@@ -67,7 +71,7 @@ export function createCodexProfileAccounts(store, { defaultUserHome, terminalEnv
       preserve = error.code === 'SHUTDOWN_FAILED';
       throw error;
     } finally {
-      if (held && !preserve) await guard(() => release(lock, owner));
+      if (held && !preserve) await release(lock, owner);
       if (!preserve) await rm(cwd, { recursive: true });
     }
   }

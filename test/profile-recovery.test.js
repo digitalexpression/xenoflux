@@ -8,6 +8,8 @@ import { Store } from '../src/profiles.js';
 import { createHome, startHomeSignIn } from '../src/home-create.js';
 import { launchHome } from '../src/launcher.js';
 import { recoverProfileRun } from '../src/profile-recovery.js';
+import { createCodexProfileAccounts } from '../src/codex-profile-accounts.js';
+import { withProfileOperation } from '../src/desktop-instances.js';
 import { acquireCopilotAccount } from '../src/copilot-account-lock.js';
 import { nativeRootIdentity } from '../src/native-participants.js';
 import { acquireNativeParticipant, readProfileOwners } from '../src/profile-reservations.js';
@@ -31,6 +33,68 @@ async function interruptedLogin(f) {
     run: async () => { const error = new Error('shutdown uncertain'); error.code = 'SHUTDOWN_FAILED'; throw error; } }),
   { code: 'SHUTDOWN_FAILED' });
 }
+
+test('recovers interrupted Codex account checks only after their owner and writers stop', async t => {
+  const f = await fixture(t);
+  const defaultUserHome = join(f.root, 'native-default');
+  const defaultHome = join(defaultUserHome, '.codex');
+  await mkdir(defaultHome, { recursive: true, mode: 0o755 });
+  let workingDirectory;
+  const accounts = createCodexProfileAccounts(f.store, { defaultUserHome, terminalEnvironment: f.terminalEnvironment,
+    lockOptions: { lockPath: f.lockPath }, probe: async ({ cwd }) => {
+      workingDirectory = cwd;
+      throw Object.assign(new Error('Shutdown uncertain'), { code: 'SHUTDOWN_FAILED' });
+    } });
+  t.after(() => accounts.close());
+
+  for (const [name, root] of [['Research', f.made.root], ['Default', defaultHome]]) {
+    await assert.rejects(accounts.check(name), { code: 'SHUTDOWN_FAILED' });
+    const cwd = workingDirectory;
+    t.after(() => rm(cwd, { recursive: true, force: true }));
+    const ownerPath = join(root, '.run-lock', 'owner.json');
+    const owner = await readFile(ownerPath, 'utf8');
+    assert.equal((await recoverProfileRun(f.store, name, opts(f))).kind, 'native-account-status');
+    await assert.rejects(recoverProfileRun(f.store, name, opts(f, { apply: true, isAlive: () => true })), /owner may still be live/);
+    await assert.rejects(recoverProfileRun(f.store, name, opts(f, { apply: true,
+      runtime: runtime(async () => { throw new Error('Still in use'); }),
+    })), /Still in use/);
+    assert.equal(await readFile(ownerPath, 'utf8'), owner);
+    let inspected = false;
+    const result = await recoverProfileRun(f.store, name, opts(f, { apply: true, runtime: runtime(async scope => {
+      assert.ok(scope.cliExecutables.includes(f.executable));
+      assert.ok(scope.resourcePaths.includes(root));
+      assert.ok(scope.resourcePaths.includes(cwd));
+      inspected = true;
+    }) }));
+    assert.equal(result.status, 'recovered');
+    assert.equal(inspected, true);
+    await assert.rejects(access(ownerPath), { code: 'ENOENT' });
+  }
+});
+
+test('a finished Codex account check releases its exact reservation while another profile operation holds the guard', async t => {
+  const f = await fixture(t);
+  let finishOtherOperation, otherOperation;
+  const accounts = createCodexProfileAccounts(f.store, { defaultUserHome: f.root, terminalEnvironment: f.terminalEnvironment,
+    lockOptions: { lockPath: f.lockPath }, probe: async () => {
+      const held = new Promise(resolve => {
+        otherOperation = withProfileOperation(f.store, randomUUID(), { lockPath: f.lockPath }, () => {
+          resolve();
+          return new Promise(done => { finishOtherOperation = done; });
+        });
+      });
+      await Promise.race([held, otherOperation]);
+      return { state: 'signed-in' };
+    } });
+  try {
+    assert.deepEqual(await accounts.check('Research'), { state: 'signed-in' });
+    await assert.rejects(access(join(f.made.root, '.run-lock')), { code: 'ENOENT' });
+  } finally {
+    finishOtherOperation?.();
+    await otherOperation;
+    await accounts.close();
+  }
+});
 
 test('recovers stale sign-in, then permits sign-in retry', async t => {
   const f = await fixture(t); await interruptedLogin(f);
