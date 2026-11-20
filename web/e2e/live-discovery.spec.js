@@ -23,7 +23,8 @@ test('expanded discovery observes installation and folder changes without openin
   await showDiscovery(page);
   const executable = join(app.root, 'codex');
   const original = await readFile(executable);
-  const cli = page.getByRole('heading', { name: 'Codex', exact: true }).first().locator('..');
+  const installations = page.getByRole('region', { name: 'Installed clients', exact: true });
+  const cli = installations.getByRole('heading', { name: 'Codex', exact: true }).locator('..');
   await cli.getByRole('button', { name: 'Show Codex CLI details', exact: true }).click();
   const toggle = cli.getByRole('button', { name: 'Hide Codex CLI details', exact: true });
   await toggle.focus();
