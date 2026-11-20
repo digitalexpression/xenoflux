@@ -6,7 +6,6 @@ import { NativeSessions } from './pages/NativeSessions';
 import { ChooseSessions } from './pages/ChooseSessions';
 import { CopyPreview } from './pages/CopyPreview';
 import { Export } from './pages/Export';
-import { Discovery } from './pages/Discovery';
 import { Landing } from './pages/Landing';
 import { OpenSaved } from './pages/OpenSaved';
 import { Profiles } from './pages/Profiles';
@@ -32,7 +31,7 @@ export const routes: RouteObject[] = [
   // The hub lives at /comparisons; the bare origin and older links land there.
   { path: '/', element: <Navigate to="/comparisons" replace /> },
   { path: '/comparisons', element: <Landing /> },
-  { path: '/setup', element: <Discovery /> },
+  { path: '/setup', element: <Navigate to="/profiles" replace /> },
   { path: '/profiles', element: <Profiles /> },
   { path: '/profiles/new', element: <CopyPreview mode="create" /> },
   { path: '/profiles/:name/setup', element: <ProfileSetup /> },

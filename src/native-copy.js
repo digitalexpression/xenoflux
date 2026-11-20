@@ -13,14 +13,13 @@ import { acquire, release, globalLock, privateDirectory, readJSON, record, exist
 import { createDesktopRuntime } from './desktop-runtime.js';
 import { buildAdvancedCopy, copyEndpointFingerprint, selectAdvancedComponents, validateAdvancedSelection, persistAdvancedFiles, validateAdvancedFiles,
   writeAdvanced, matchesAdvanced, snapshotAdvanced, cleanupAdvancedDirectories, matchesAdvancedPackages,
-  applyAdvancedPackageDirectories } from './advanced-copy.js';
+  applyAdvancedPackageDirectories, MAX_PACKAGES, MAX_PACKAGE_ENTRIES } from './advanced-copy.js';
 export { validateAdvancedSelection };
 export { fingerprintAdvancedSelection as fingerprintCopySource } from './advanced-copy.js';
 
 
 export const COPY_COMPONENTS = Object.freeze(['config', 'instructions', 'agents']);
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const MAX_FILES = 64;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const digest = value => hash(JSON.stringify(value));
 const rootPath = store => join(store.directory, 'native-copies');
@@ -37,11 +36,16 @@ function packageResourcePaths(packages = []) {
   return packages.flatMap(pkg => [pkg.path, ...[...(pkg.before?.directories ?? []), ...(pkg.after?.directories ?? [])]
     .map(directory => directory.path)]);
 }
-function clientScope(journal, targetOnly = false) {
-  const homes = targetOnly ? [journal.target?.home] : [journal.source?.home, journal.target?.home];
+function clientScope(journal, targetOnly, sourceSkillPaths) {
   const relativePaths = [...(journal.files ?? []).map(file => file.path), ...packageResourcePaths(journal.packages)];
-  return { resourcePaths: [...new Set(homes.filter(value => typeof value === 'string')
-    .flatMap(home => targetResourcePaths(home, relativePaths)))] };
+  const paths = targetResourcePaths(journal.target.home, relativePaths);
+  if (!targetOnly) {
+    const source = journal.source;
+    if (!source.clientId || source.rootMode !== 'implicit') paths.push(source.home);
+    paths.push(...sourceSkillPaths);
+    for (const file of journal.files) if (!file.path.startsWith('skills/')) paths.push(join(source.home, file.path));
+  }
+  return { resourcePaths: [...new Set(paths)] };
 }
 function selection(include) {
   const list = include === undefined ? [...COPY_COMPONENTS] : typeof include === 'string' ? include.split(',').map(s => s.trim()) : include;
@@ -99,6 +103,7 @@ async function build(store, sourceName, targetName, { include, selection: select
       throw new Error('Source, destination and backup storage must be separate');
     const built = await buildAdvancedCopy(store, sourceName, targetName, selectedItems, copyOptions);
     return { report: built.report, plan: { source, target, components: ['advanced'], selection: selectedItems, sourceFingerprints: built.plan.sourceFingerprints,
+      sourceSkillPaths: built.plan.sourceSkillPaths,
       files: built.plan.files.filter(f => f.before === null || f.after === null || !f.before.equals(f.after) || f.beforeMode !== f.afterMode),
       packages:built.plan.packages??[], createdDirectories: built.plan.createdDirectories ?? [], defaultUserHome } };
   }
@@ -124,7 +129,7 @@ export async function planCopy(store, source, target, options = {}) { return (aw
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
 }
-async function locks(store, journal, preflight, action, { runtime = createDesktopRuntime(), lockPath = globalLock(), isAlive = alive, signal } = {}, recovering = false, targetOnly = false) {
+async function locks(store, journal, preflight, action, { runtime = createDesktopRuntime(), lockPath = globalLock(), isAlive = alive, signal } = {}, recovering = false, targetOnly = false, sourceSkillPaths = []) {
   const owner = { kind: 'native-copy', host: hostname(), pid: process.pid, runId: journal.id, storePath: store.directory };
   const profileLocks = new Set([journal.source.root ?? journal.source.home, journal.target.root ?? journal.target.home]
     .filter(Boolean).map(path => join(path, '.run-lock')));
@@ -151,7 +156,7 @@ async function locks(store, journal, preflight, action, { runtime = createDeskto
     if (signal?.aborted) throw Object.assign(new Error('Settings copy cancelled'), { code: 'CANCELLED' });
     if (needsClients !== false) {
       const cliExecutables = [...new Set([journal.source.executable, journal.target.executable].filter(Boolean))];
-      const scope = clientScope(journal, targetOnly);
+      const scope = clientScope(journal, targetOnly, sourceSkillPaths);
       if (!journal.target.clientId) await runtime.prepareClients?.({ cliExecutables, includeDesktop: true });
       await runtime.assertIdle({ cliExecutables, ...scope });
     }
@@ -217,13 +222,13 @@ async function readJournal(store, id) {
       throw new Error('Unsupported Codex journal field ownership');
   }
   await validateAdvancedFiles(dirname(path), j.files);
-  if(!Array.isArray(j.packages)||j.packages.length>MAX_FILES) throw new Error('Invalid skill package journal');
+  if(!Array.isArray(j.packages)||j.packages.length>MAX_PACKAGES) throw new Error('Invalid skill package journal');
   const packagePaths=new Set();
   for(const p of j.packages) {
     if(typeof p.path!=='string'||!/^skills\/[A-Za-z0-9_-]+$/.test(p.path)||packagePaths.has(p.path)) throw new Error('Invalid skill package journal path');
     packagePaths.add(p.path);
     for(const side of [p.before,p.after]) if(!side||!Array.isArray(side.files)||!Array.isArray(side.directories)
-      ||side.files.length>256||side.directories.length>256
+      ||side.files.length + side.directories.length > MAX_PACKAGE_ENTRIES
       ||new Set(side.files.map(f=>f.path)).size!==side.files.length||new Set(side.directories.map(d=>d.path)).size!==side.directories.length
       ||side.files.some(f=>typeof f.path!=='string'||!f.path.startsWith(p.path+'/')||f.path.split('/').some(part=>!part||part==='.'||part==='..'||!/^[A-Za-z0-9_.-]+$/.test(part))
         ||!/^[a-f0-9]{64}$/.test(f.sha256)||!Number.isInteger(f.mode)||f.mode<0||f.mode>0o777||(f.mode&0o022)!==0)
@@ -288,8 +293,9 @@ export async function applyCopy(store, source, target, options = {}) {
   const packageChanges=(initial.plan.packages??[]).some(p=>JSON.stringify(p.before)!==JSON.stringify(p.after));
   if (!initial.plan.files.length&&!packageChanges) return { ...initial.report, status: 'unchanged' };
   if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
+  const { sourceSkillPaths, ...journalPlan } = initial.plan;
   const j = { schemaVersion: 3, kind: 'native-settings-copy', id: randomUUID(), storePath: store.directory,
-    phase: 'prepared', createdAt: new Date().toISOString(), ...initial.plan };
+    phase: 'prepared', createdAt: new Date().toISOString(), ...journalPlan };
   j.payloadHash = digest(journalPayload(j));
   const verifyInputs = async () => {
     if (await exists(pendingPath(store))) throw new Error('An interrupted settings copy needs copy undo pending');
@@ -343,7 +349,7 @@ export async function applyCopy(store, source, target, options = {}) {
       }
       throw new Error('Copy failed and prior settings were restored. Backup ID: ' + j.id);
     }
-  }, options);
+  }, options, false, false, sourceSkillPaths);
 }
 export async function planUndo(store, id) {
   const { journal: j } = await readJournal(store, id);
@@ -356,7 +362,8 @@ export async function planUndo(store, id) {
     for(const path of new Set([...before.keys(),...after.keys()])) if(before.get(path)!==after.get(path))
       changes.push({path,action:before.has(path)?after.has(path)?'restore-directory-mode':'restore-directory': 'remove-directory'});
   }
-  return { status: 'preview', id: j.id, phase: j.phase, target: { name: j.target.name, home: j.target.home },
+  return { status: 'preview', id: j.id, phase: j.phase, target: { name: j.target.name, home: j.target.home,
+    ...(j.target.clientId && { clientId: j.target.clientId }) },
     hash: digest({ journal: j, current }), changes,
     notes: ['Undo restores copied settings only. Newer edits are preserved by refusing conflicts. History and sign-in remain untouched.'] };
 }

@@ -2,19 +2,20 @@ import { test, expect } from './fixtures.js';
 
 async function signinFixture(page, client) {
   let state = 'waiting-for-browser', profileReads = 0, cancelCalls = 0, terminalCalls = 0, startCalls = 0;
-  let checkOffline = false, cancelOffline = false, cancellationState = 'cancelled';
+  let checkOffline = false, cancelOffline = false, cancellationState = 'cancelled', profileRefresh;
   const profileName = client === 'copilot' ? 'copilot-work' : 'claude-work';
-  const attempt = () => ({ id: 'fixture-signin', client, profileName, accountScope: client === 'copilot' ? 'shared' : 'per-root',
+  const attempt = () => ({ id: 'fixture-signin', client, profileName, accountScope: 'per-root',
     state, browserUrl: client === 'copilot' ? 'https://github.com/login/device' : undefined,
     deviceCode: client === 'copilot' ? 'ABCD-1234' : undefined,
     message: state === 'completed' ? 'Account sign-in verified.' : state === 'verifying' ? 'Checking the native account.' : 'Finish authorization in your browser.' });
-  await page.route('**/api/profiles', route => {
+  await page.route('**/api/profiles/refresh', async route => {
     profileReads++;
-    return route.fulfill({ json: { profiles: [{ name: profileName, client, accountScope: client === 'copilot' ? 'shared' : 'per-root',
+    if (profileRefresh) await profileRefresh;
+    return route.fulfill({ json: { profiles: [{ name: profileName, client, accountScope: 'per-root',
       accountIndependence: 'not verified', isDefault: false, state: 'ready', reason: null,
-      signIn: state === 'completed' ? 'Signed in' : 'Not signed in', binding: 'Fixture folder', summary: 'Separate settings and history.',
+      signIn: state === 'completed' ? 'Signed in' : 'Signed out', binding: 'Fixture folder', summary: 'Separate settings and history.',
       cli: { state: 'not-running', text: 'Not running' }, desktop: { state: 'unavailable', text: 'Not verified' },
-      clientActions: [{ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' }], moreMenu: null }],
+      clientActions: state === 'completed' ? [] : [{ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' }], moreMenu: null }],
       notes: [], simulated: false } });
   });
   await page.route('**/api/profiles/*/clients', route => { terminalCalls++; return route.fulfill({ json: {} }); });
@@ -29,7 +30,13 @@ async function signinFixture(page, client) {
   await page.goto(new URL('/profiles', page.url()).toString());
   const button = page.getByRole('button', { name: `${client === 'copilot' ? 'Sign in with GitHub' : 'Sign in'} for ${profileName}`, exact: true });
   await expect(button).toBeVisible();
-  return { button, profileName, state: value => { state = value; }, offline: value => { checkOffline = value; },
+  const heading = page.getByRole('heading', { name: profileName, exact: true });
+  return { button, heading, profileName, state: value => { state = value; }, offline: value => { checkOffline = value; },
+    holdProfileRefresh() {
+      let release;
+      profileRefresh = new Promise(resolve => { release = resolve; });
+      return release;
+    },
     cancelOffline: value => { cancelOffline = value; }, cancellationState: value => { cancellationState = value; }, get profileReads() { return profileReads; }, get cancelCalls() { return cancelCalls; },
     get terminalCalls() { return terminalCalls; }, get startCalls() { return startCalls; } };
 }
@@ -38,18 +45,23 @@ for (const client of ['claude-code', 'copilot']) {
   test(`${client} signs in through browser and automatically verifies in narrow light and dark layouts`, async ({ page }, testInfo) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const fixture = await signinFixture(page, client);
-    if (client === 'copilot') await expect(page.getByText(/Signing in changes the shared GitHub CLI account/)).toBeVisible();
+    if (client === 'copilot') {
+      await page.getByRole('button', { name: 'Details for copilot-work', exact: true }).click();
+      await expect(page.getByRole('complementary', { name: 'copilot-work', exact: true }).getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
+      await page.keyboard.press('Escape');
+    }
     await fixture.button.focus();
     await page.keyboard.press('Enter');
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByText('Continue in your browser', { exact: true })).toBeVisible();
+    await expect(page.getByText('Signing in…', { exact: true })).toBeVisible();
     const link = dialog.getByRole('link', { name: 'Open sign-in page in browser' });
     if (client === 'copilot') await expect(link).toHaveAttribute('href', 'https://github.com/login/device');
     else await expect(link).toHaveCount(0);
     await expect(dialog.getByRole('textbox')).toHaveCount(0);
     if (client === 'copilot') {
       await expect(dialog.getByText('ABCD-1234')).toBeVisible();
-      await expect(dialog.getByText(/all qualified Copilot profiles and other tools using GitHub CLI/)).toBeVisible();
+      await expect(dialog.getByText(/Sign in to GitHub for this Copilot CLI profile/)).toBeVisible();
     }
     for (const theme of ['light', 'dark']) {
       await page.evaluate(value => document.documentElement.setAttribute('data-theme', value), theme);
@@ -65,10 +77,11 @@ for (const client of ['claude-code', 'copilot']) {
     fixture.state('completed');
     await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
     await expect.poll(() => fixture.profileReads).toBeGreaterThan(reads);
-    await expect(page.getByText(/Signed in · Fixture folder/)).toBeVisible();
     await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
     await expect(dialog).toHaveCount(0);
-    await expect(fixture.button).toBeFocused();
+    await expect(page.getByRole('article', { name: fixture.profileName }).getByText('Signed in', { exact: true })).toBeVisible();
+    await expect(fixture.button).toHaveCount(0);
+    await expect(fixture.heading).toBeFocused();
     expect(fixture.startCalls).toBe(1);
     expect(fixture.terminalCalls).toBe(0);
   });
@@ -85,7 +98,7 @@ test('Escape cancels sign-in before dismissing and returns keyboard focus', asyn
   expect(fixture.terminalCalls).toBe(0);
 });
 
-test('profile checks pause during browser authorization and refresh after verification', async ({ page }) => {
+test('profile checks pause during authorization and publish sign-in with the refreshed account row', async ({ page }) => {
   await page.clock.install();
   const fixture = await signinFixture(page, 'claude-code');
   await fixture.button.click();
@@ -95,12 +108,23 @@ test('profile checks pause during browser authorization and refresh after verifi
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.clock.runFor(5_100);
   expect(fixture.profileReads).toBe(reads);
-  fixture.state('completed');
-  await page.clock.runFor(1_000);
-  await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
-  await expect.poll(() => fixture.profileReads).toBeGreaterThan(reads);
-  await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
-  await expect(fixture.button).toBeFocused();
+  const finishRefresh = fixture.holdProfileRefresh();
+  try {
+    fixture.state('completed');
+    await page.clock.runFor(1_000);
+    await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
+    await expect.poll(() => fixture.profileReads).toBeGreaterThan(reads);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
+    await expect(fixture.heading).toBeFocused();
+    const card = page.getByRole('article', { name: fixture.profileName, exact: true });
+    const cli = card.getByRole('group', { name: 'CLI', exact: true });
+    await expect(card.getByRole('status')).toHaveText('Updating sign-in status…');
+    await expect(cli.getByText('Signed out', { exact: true })).toBeVisible();
+    finishRefresh();
+    await expect(card.getByRole('status')).toHaveText('Sign-in verified');
+    expect(await cli.getByText('Signed in', { exact: true }).isVisible()).toBe(true);
+    await expect(fixture.button).toHaveCount(0);
+  } finally { finishRefresh(); }
 });
 
 test('network and cancellation failures retain the attempt and offer recovery', async ({ page }) => {

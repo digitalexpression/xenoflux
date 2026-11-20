@@ -52,7 +52,7 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
         terminalEnvironment: context.terminalEnvironment ?? process.env, profileResolvers: context.profileResolvers });
     } catch (error) {
       if (error.code === 'copilot-account-unverified')
-        throw new UiError(422, 'Check sign-in on the selected Copilot profile before discovering models.', error.code);
+        throw new UiError(422, 'Open Profiles to verify sign-in for the selected Copilot profile before discovering models.', error.code);
       throw error;
     }
     return { profile, workspace: profile.cwd, requestedWorkspace: repository ?? null, requestedClient: input.client ?? null };

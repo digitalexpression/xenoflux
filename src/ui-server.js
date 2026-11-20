@@ -101,9 +101,12 @@ export function uiRoutes(provider) {
     route('GET', '/api/overview', call('overview', () => ({}))),
     route('GET', '/api/discovery', call('discovery', ({ query }) => ({ fresh: query.get('fresh') === '1' }))),
     route('GET', '/api/profiles', call('profiles', () => ({}))),
+    route('POST', '/api/profiles/refresh', call('refreshProfiles', () => ({})), { bodyLimit: 2048 }),
     route('GET', '/api/setups/options', call('setupChoices', () => ({}))),
     route('GET', '/api/profiles/:name/setup', call('profileSetup', ({ params, query }) => ({ ...q({ query }), name: params.name }))),
-    route('POST', '/api/profiles/:name/clients', call('clientAction', ({ params, body }) => ({ name: params.name, ...body }))),
+    route('POST', '/api/profiles/:name/clients', call('clientAction', ({ params, body }) => ({ ...body, name: params.name }))),
+    route('POST', '/api/profiles/:name/reveal', call('revealProfileFolder', ({ params, body }) => ({ name: params.name, client: body?.client })), { bodyLimit: 2048 }),
+    route('GET', '/api/clients/icons', call('clientIcons', () => ({}))),
     route('POST', '/api/profiles/:name/sign-in', call('startSignin', ({ params }) => ({ name: params.name })), { bodyLimit: 2048 }),
     route('GET', '/api/sign-ins/:id', call('signin', ({ params }) => params)),
     route('POST', '/api/sign-ins/:id/cancel', call('cancelSignin', ({ params }) => params), { bodyLimit: 2048 }),
@@ -115,6 +118,7 @@ export function uiRoutes(provider) {
     route('POST', '/api/profiles/new', call('createApply', ({ body }) => body)),
     route('POST', '/api/profiles/:name/rename', call('renameProfile', ({ params, body }) => ({ name: params.name, ...body }))),
     route('POST', '/api/profiles/:name/binding', call('bindProfile', ({ params, body }) => ({ name: params.name, ...body }))),
+    route('POST', '/api/profiles/:name/unbind', call('unbindProfile', ({ params, body }) => ({ name: params.name, repository: body?.repository }))),
     route('POST', '/api/profiles/:name/remove', call('removeProfile', ({ params, body }) => ({ name: params.name, ...body }))),
     route('GET', '/api/compare/setups', call('setupComparison', q)),
     route('GET', '/api/compare/setups/skills/:skill', call('skillDetail', ({ params, query }) => ({ skill: params.skill, ...q({ query }) }))),
@@ -264,9 +268,15 @@ export async function startUiServer({ provider, staticRoot, port = 0, host = '12
   if (host === '::1') origins = [`http://[::1]:${actualPort}`, `http://localhost:${actualPort}`];
   cookieName = `xfx_ui_${actualPort}`;
   const origin = origins[0];
+  const stopProfileWatch = provider.watchProfileStops?.();
   return {
     origin, port: actualPort,
     launchUrl: `${origin}/#launch=${launchToken}`,
-    close: () => new Promise(done => { server.closeAllConnections?.(); server.close(() => done()); }),
+    async close() {
+      await Promise.all([
+        stopProfileWatch?.(),
+        new Promise(done => { server.closeAllConnections?.(); server.close(() => done()); }),
+      ]);
+    },
   };
 }

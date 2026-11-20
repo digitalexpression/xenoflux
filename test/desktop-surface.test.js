@@ -53,7 +53,18 @@ test('profile holder inspection uses the surface process snapshot without discov
     inspect: async targets => { assert.deepEqual(targets, [join(home, 'config.toml')]); return { clients: [{ pid: 11, command: 'codex-app-server' }] }; } });
   assert.equal(snapshots, 1);
   assert.deepEqual(observed.desktop, { state: 'running', text: 'open' });
-  assert.equal(observed.cli.state, 'unavailable');
+  assert.deepEqual(observed.cli, { state: 'not-running', text: 'not running' });
+});
+
+test('a Desktop session does not hide an unattributed CLI resource holder', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'xfx-surface-holder-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const observed = await observeProfileClients(home, {
+    snapshot: async () => [{ pid: 10, ppid: 1, executable: app.executable }],
+    inspect: async () => ({ clients: [{ pid: 10, command: 'Codex' }, { pid: 11, command: 'foreign' }] }),
+  });
+  assert.deepEqual(observed.desktop, { state: 'running', text: 'open' });
+  assert.deepEqual(observed.cli, { state: 'unknown', text: 'files in use by foreign' });
 });
 
 test('failed surface snapshot preserves unknown client observation', async t => {

@@ -100,6 +100,12 @@ async function packagedHelper(directory, sourceHash, { lstat, readFile }) {
     throw error;
   }
 }
+export async function installedProcessHelper() {
+  const sourceHash = createHash('sha256').update(await nodeReadFile(sourceDefault)).digest('hex');
+  await packagedHelper(prebuiltDirectoryDefault, sourceHash, { lstat: nodeLstat, readFile: nodeReadFile });
+  return join(prebuiltDirectoryDefault, 'XfxProfileLauncher');
+}
+
 async function cachedHelper(sourceHash, storeDirectory, { lstat, realpath, readFile }, cacheKey = sourceHash) {
   const nativeRoot = join(storeDirectory, 'desktop-instances', 'native');
   await requireDirectory(nativeRoot, { lstat, realpath });

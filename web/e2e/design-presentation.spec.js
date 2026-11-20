@@ -5,18 +5,18 @@ for (const theme of ['light', 'dark']) {
     await page.getByRole('combobox', { name: 'Theme' }).selectOption(theme);
     expect((await page.getByRole('combobox', { name: 'Theme' }).boundingBox()).height).toBeGreaterThanOrEqual(40);
     await page.goto(`${app.origin}/compare/setups?a=baseline&b=strict-review`);
+    await page.getByRole('searchbox', { name: 'Find an item' }).fill('model_reasoning_effort');
     await page.getByRole('button', { name: /Different model_reasoning_effort/ }).click();
-    for (const control of await page.getByRole('group', { name: 'Which items to list' }).getByRole('button').all()) {
-      expect((await control.boundingBox()).height).toBeGreaterThanOrEqual(40);
+    for (const control of await page.getByRole('group', { name: 'Filter results' }).getByRole('button').all()) {
+      expect((await control.boundingBox()).height).toBeGreaterThanOrEqual(32);
     }
     const detail = page.getByRole('complementary');
-    const sideColors = await page.locator('.chip .side-a, .chip .side-b').evaluateAll(elements => elements.map(element => getComputedStyle(element).color));
+    const sideColors = await page.locator('.setup-compare-profiles .setup-compare-mark').evaluateAll(elements => elements.map(element => getComputedStyle(element).color));
     await expect(detail.getByText('medium', { exact: true })).toHaveCSS('color', sideColors[0]);
     await expect(detail.getByText('high', { exact: true })).toHaveCSS('color', sideColors[1]);
-    const same = page.getByRole('group', { name: 'Summary', exact: true }).getByRole('button', { name: /Same/ });
+    const same = page.getByRole('group', { name: 'Filter results', exact: true }).getByRole('button', { name: /Same/ });
     await same.click();
     await expect(same).toHaveAttribute('aria-pressed', 'true');
-    await expect(same.getByText(/Selected/, { exact: false })).toBeVisible();
     await page.getByRole('searchbox', { name: 'Find an item' }).fill('cli_auth_credentials_store');
     const muted = await page.locator('.hint').first().evaluate(element => getComputedStyle(element).color);
     await expect(detail.getByText('file', { exact: true }).first()).toHaveCSS('color', muted);

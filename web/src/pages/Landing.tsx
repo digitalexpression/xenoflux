@@ -16,11 +16,6 @@ export function Landing() {
     <Page current="compare" title="Comparisons">
       <PageTitle title="What do you want to compare?" />
       {overview.error ? <LoadError error={overview.error} onRetry={overview.reload} /> : null}
-      <section className="flex flex-col gap-2" aria-labelledby="discovery-entry">
-        <h2 id="discovery-entry" className="text-heading">Start with what is already on this Mac</h2>
-        <p className="muted">Find installed clients and existing profiles before creating another setup.</p>
-        <div><Link className="btn" to="/setup">Discover clients and profiles</Link></div>
-      </section>
         <div className="grid gap-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))' }}>
           <section className="panel flex flex-col gap-4" aria-labelledby="compare-task">
             <div className="flex flex-col gap-1">

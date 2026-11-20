@@ -24,7 +24,7 @@ const insideApp = executable => /\.app\/Contents\//.test(executable ?? '');
  * Classify the holders of one home's files. `desktopRunning` is the named
  * instance journal's observation when there is one. Unknown is never idle.
  */
-export async function observeProfileClients(home, { desktopRunning = null, inspect = inspectNativeResources,
+export async function observeProfileClients(home, { desktopRunning = null, sharedCodexHome = false, inspect = inspectNativeResources,
   desktopSurface = createCodexDesktopSurface(), snapshot = () => desktopSurface.snapshot() } = {}) {
   let holders, rows;
   try {
@@ -43,13 +43,14 @@ export async function observeProfileClients(home, { desktopRunning = null, inspe
     return false;
   };
   const desktopHolders = holders.filter(holder => fromApp(holder.pid));
-  const others = holders.filter(holder => !fromApp(holder.pid));
+  const daemonDirectory = join(home, 'packages', 'app-server-daemon') + '/';
+  const others = holders.filter(holder => !fromApp(holder.pid)
+    && !(sharedCodexHome && byPid.get(holder.pid)?.executable?.startsWith(daemonDirectory)));
   const cliHolders = others.filter(holder => /codex/i.test(basename(byPid.get(holder.pid)?.executable ?? holder.command)));
   const foreign = others.filter(holder => !cliHolders.includes(holder));
   const desktopOpen = desktopRunning === true || desktopHolders.length > 0;
   const cli = cliHolders.length ? { state: 'running', text: `running (PID ${cliHolders.map(h => h.pid).join(', ')})` }
-    : desktopOpen ? { state: 'unavailable', text: 'not available while its Desktop is open' }
-      : foreign.length ? { state: 'unknown', text: `files in use by ${[...new Set(foreign.map(h => h.command))].join(', ')}` }
-        : { state: 'not-running', text: 'not running' };
+    : foreign.length ? { state: 'unknown', text: `files in use by ${[...new Set(foreign.map(h => h.command))].join(', ')}` }
+      : { state: 'not-running', text: 'not running' };
   return { cli, desktop: desktopOpen ? { state: 'running', text: 'open' } : { state: 'not-running', text: 'not running' } };
 }

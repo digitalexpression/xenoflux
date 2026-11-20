@@ -15,7 +15,7 @@ async function put(directory, name, content, mode = 0o600) {
 const text = path => readFile(path, 'utf8');
 const idle = async () => ({ cli: { state: 'not-running', text: 'not running' }, desktop: { state: 'not-running', text: 'not running' } });
 
-async function fixture(t, { observeClients = idle, copyRuntime = () => ({ assertIdle: async () => {} }), resolveClient } = {}) {
+async function fixture(t, { observeClients = idle, copyRuntime = () => ({ assertIdle: async () => {} }), resolveClient, stock = false, openDesktop, desktopSurface } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-setup-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const executable = join(root, 'codex');
@@ -39,13 +39,75 @@ async function fixture(t, { observeClients = idle, copyRuntime = () => ({ assert
   await mkdir(join(defaultUserHome, '.codex'), { recursive: true, mode: 0o700 });
   await put(join(defaultUserHome, '.codex'), 'AGENTS.md', 'Default instructions.\n');
   const calls = [];
-  const clientOps = Object.fromEntries(['openTerminal', 'showTerminal', 'openDefaultDesktop', 'openDesktop', 'focusDesktop']
+  const clientOps = Object.fromEntries(['openTerminal', 'openStockTerminal', 'showTerminal', 'openDefaultDesktop', 'openDesktop', 'focusDesktop']
     .map(name => [name, async (...args) => { calls.push([name, ...args]); }]));
-  const provider = createEngineProvider({ store, defaultUserHome, observeClients, copyRuntime, clientOps,
+  if (openDesktop) clientOps.openDesktop = openDesktop;
+  const provider = createEngineProvider({ store, defaultUserHome, observeClients, copyRuntime, clientOps, desktopSurface,
+    ...(stock ? { runContext: { terminalEnvironment: { PATH: root } }, stockApps: { locations: [], list: async () => [] } } : {}),
     resolveClient: resolveClient ?? (async () => ({ executable, version: '0.153.4' })), profilesBase: join(root, 'profiles'),
     lockOptions: { lockPath: join(root, 'global.lock'), concurrentLockPath: join(root, 'desktop.lock') }, reportsRoot: join(root, 'reports') });
   return { root, store, a, b, provider, calls, defaultUserHome };
 }
+
+test('Profiles keeps unverified managed Desktop status unknown when it cannot see a live holder', async t => {
+  let observation;
+  const desktopSurface = { list: async () => {
+    if (observation === 'unreadable') throw new Error('Desktop journals could not be read');
+    return { instances: [{ profileId, observed: { status: observation } }] };
+  } };
+  const { store, provider } = await fixture(t, { desktopSurface });
+  const profileId = (await store.read()).profiles.find(profile => profile.name === 'baseline').id;
+
+  for (observation of ['unavailable', 'unknown-launch', 'unreadable']) {
+    const { profiles } = await provider.refreshProfiles();
+    const card = profiles.find(profile => profile.name === 'baseline');
+    assert.equal(card.desktop.state, 'unknown', observation);
+  }
+});
+
+test('Desktop open exposes only the names and PIDs of observed resource holders', async t => {
+  const busy = Object.assign(new Error('Profile resources are busy'), { code: 'RESOURCE_BUSY', remainingProcesses: [
+    { pid: 413, executable: '/private/profile/bin/editor' }, { pid: 414, executable: '/private/profile/bin/zsh' },
+  ] });
+  const f = await fixture(t, { openDesktop: async () => { throw new Error(busy.message, { cause: busy }); } });
+  await assert.rejects(f.provider.clientAction({ name: 'baseline', action: 'open-desktop' }), error => {
+    assert.equal(error.code, 'desktop-resources-busy');
+    assert.deepEqual(error.details.processes, ['editor (PID 413)', 'zsh (PID 414)']);
+    assert.match(error.details.guidance, /Save your work and quit.*Activity Monitor/);
+    assert.equal(error.details.command, undefined);
+    return true;
+  });
+});
+
+test('stock setups have separate Default cards and Codex Default opens its normal CLI with Desktop running', async t => {
+  const observeClients = async () => ({ cli: { state: 'not-running', text: 'not running' }, desktop: { state: 'running', text: 'open' } });
+  const f = await fixture(t, { observeClients, stock: true });
+  await mkdir(join(f.defaultUserHome, '.claude'), { mode: 0o700 });
+  await mkdir(join(f.defaultUserHome, '.copilot'), { mode: 0o700 });
+  await put(f.root, 'claude', '#!/bin/sh\nexit 99\n', 0o700);
+  const view = await f.provider.profiles();
+  const defaults = view.profiles.filter(profile => profile.isDefault);
+  assert.deepEqual(defaults.map(profile => [profile.client, profile.name, profile.moreMenu]), [
+    ['codex', 'Default', null], ['claude-code', 'Default', null], ['copilot', 'Default', null],
+  ]);
+  assert.ok(defaults.every(profile => view.copySources[profile.client].includes('Default')));
+  assert.equal(defaults[0].cli.state, 'not-running');
+  assert.equal(defaults[0].desktop.state, 'running');
+  assert.equal(defaults[0].accountFinding.state, 'signed-out');
+  assert.ok(defaults[0].clientActions.some(action => action.id === 'open-terminal'));
+  assert.equal(defaults[1].accountCheck, true);
+  assert.equal(defaults[2].accountCheck, false);
+  assert.ok(defaults[1].clientActions.some(action => action.id === 'open-terminal'));
+  assert.ok(defaults.slice(1).every(card => card.clientActions.every(action => action.id !== 'check')));
+
+  await f.provider.clientAction({ name: 'Default', action: 'open-terminal' });
+  await f.provider.clientAction({ name: 'Default', client: 'claude-code', action: 'open-terminal' });
+  assert.deepEqual(f.calls.map(([operation, binding]) => [operation, binding.executable, binding.cwd, binding.args]), [
+    ['openStockTerminal', join(f.root, 'codex'), f.defaultUserHome, []],
+    ['openStockTerminal', join(f.root, 'claude'), f.defaultUserHome, []],
+  ]);
+  assert.ok(f.calls.every(([, binding]) => binding.env.HOME === f.defaultUserHome && !binding.env.CODEX_HOME && !binding.env.CLAUDE_CONFIG_DIR));
+});
 
 test('setup comparison groups real differences with plain labels and copy links', async t => {
   const f = await fixture(t);
@@ -311,19 +373,25 @@ test('source changes during preparation leave a clear partial creation without c
   await assert.rejects(text(join(profile.native.root, 'codex-home', 'AGENTS.md')), { code: 'ENOENT' });
 });
 
-test('client controls run only on request and refuse a CLI/Desktop conflict', async t => {
+test('Codex client controls open either second surface after the profile saves sign-in', async t => {
   const running = async home => home.includes('native-a')
-    ? { cli: { state: 'running', text: 'running (PID 1)' }, desktop: { state: 'not-running', text: 'not running' } } : idle();
+    ? { cli: { state: 'running', text: 'running (PID 1)' }, desktop: { state: 'not-running', text: 'not running' } }
+    : home.includes('native-b') ? { cli: { state: 'not-running', text: 'not running' }, desktop: { state: 'running', text: 'open' } } : idle();
   const f = await fixture(t, { observeClients: running });
   const cards = (await f.provider.profiles()).profiles;
   assert.equal(f.calls.length, 0, 'listing profiles operates no client');
   const baseline = cards.find(card => card.name === 'baseline');
-  assert.deepEqual(baseline.clientActions.map(action => action.id), ['show-terminal', 'open-desktop']);
-  assert.ok(baseline.clientActions[1].conflict);
+  assert.deepEqual(baseline.clientActions.map(action => action.id), ['show-terminal']);
   await assert.rejects(f.provider.clientAction({ name: 'baseline', action: 'open-desktop' }), error => error.code === 'client-conflict');
   assert.equal(f.calls.length, 0);
+  await put(f.a.home, 'auth.json', 'credential sentinel');
+  const signedIn = (await f.provider.profiles()).profiles;
+  assert.deepEqual(signedIn.find(card => card.name === 'baseline').clientActions.map(action => action.id), ['show-terminal', 'open-desktop']);
+  assert.deepEqual(signedIn.find(card => card.name === 'strict-review').clientActions.map(action => action.id), ['open-terminal', 'focus-desktop']);
+  await f.provider.clientAction({ name: 'baseline', action: 'open-desktop' });
   await f.provider.clientAction({ name: 'strict-review', action: 'open-terminal' });
-  assert.deepEqual(f.calls, [['openTerminal', ['launch', 'strict-review']]]);
+  assert.deepEqual(f.calls, [['openDesktop', 'baseline'], ['openTerminal', ['launch', 'strict-review']]]);
+  await assert.rejects(f.provider.clientAction({ name: 'strict-review', action: 'signin' }), error => error.code === 'client-conflict');
   await f.provider.clientAction({ name: 'baseline', action: 'show-terminal' });
   assert.equal(f.calls.at(-1)[0], 'showTerminal');
   await assert.rejects(f.provider.clientAction({ name: 'baseline', action: 'format-disk' }), error => error.code === 'invalid-action');

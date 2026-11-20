@@ -31,6 +31,42 @@ async function item(store,scope,category,label,defaultUserHome) {
   assert.ok(found,`expected copyable ${category} ${label}`); return found;
 }
 
+test('Codex copies a shared skill once and strips its MCP dependency and tool grants', async t => {
+  const f = await fixture(t);
+  const shared = join(f.defaultUserHome, '.agents/skills/scan'), alias = join(f.source, 'skills/scan');
+  await mkdir(join(shared, 'agents'), { recursive: true, mode: 0o700 });
+  await mkdir(join(f.source, 'skills'), { mode: 0o700 });
+  const header = '---\nname: scan\ndescription: >\n  Scan installed packages.\nmetadata:\n  short-description: Scan packages\n';
+  const instructions = '---\nScan the local files.\n';
+  const original = header + 'allowed-tools: Bash\n' + instructions;
+  await writeFile(join(shared, 'SKILL.md'), original);
+  const metadata = 'interface:\n  display_name: Scan\npolicy:\n  allow_implicit_invocation: false\n';
+  const connected = metadata + 'dependencies:\n  tools:\n    - type: mcp\n      url: https://example.invalid/mcp\n';
+  await writeFile(join(shared, 'agents/openai.yaml'), connected);
+  await symlink('../../.agents/skills/scan', alias);
+  await symlink('../../.agents/skills/scan', join(f.source, 'skills/wrong-name'));
+  const inventory = await inspectProfile(f.store, 'Default', { defaultUserHome: f.defaultUserHome });
+  const skills = inventory.items.filter(entry => entry.category === 'skill' && entry.copyable);
+  assert.deepEqual(skills.map(entry => entry.label), ['scan']);
+  const options = { ...f.options, selection: [skills[0].id] };
+  const preview = await planCopy(f.store, 'Default', 'B', options);
+  assert(!JSON.stringify(preview).includes('example.invalid'));
+  let checkedSharedPackage = false;
+  const runtime = { async assertIdle({ resourcePaths }) {
+    assert(!resourcePaths.includes(alias));
+    checkedSharedPackage ||= resourcePaths.includes(shared);
+  } };
+  const applied = await applyCopy(f.store, 'Default', 'B', { ...options, runtime, expectedHash: preview.hash });
+  assert(checkedSharedPackage);
+  assert.equal(await readFile(join(f.b.home, 'skills/scan/SKILL.md'), 'utf8'), header + instructions);
+  assert.equal(await readFile(join(f.b.home, 'skills/scan/agents/openai.yaml'), 'utf8'), metadata);
+  assert.equal(await readFile(join(shared, 'SKILL.md'), 'utf8'), original);
+  assert.equal(await readFile(join(shared, 'agents/openai.yaml'), 'utf8'), connected);
+  assert.equal((await planCopy(f.store, 'Default', 'B', options)).items[0].status, 'identical');
+  await undoCopy(f.store, applied.id, f.options);
+  await assert.rejects(stat(join(f.b.home, 'skills/scan')), { code: 'ENOENT' });
+});
+
 test('individual config selection merges one key and reports conflicts at key granularity',async t=>{
   const f=await fixture(t); const config=join(f.b.home,'config.toml');
   const original=parse((await read(config)).toString()); original.model='target-model'; original.personality='plain'; original.service_tier='flex';
@@ -45,6 +81,62 @@ test('individual config selection merges one key and reports conflicts at key gr
   const undo=await planUndo(f.store,result.id); await undoCopy(f.store,result.id,{...f.options,expectedHash:undo.hash});
   await undoCopy(f.store,result.id,f.options);
   assert.equal((await read(config)).toString(),originalText);
+});
+
+test('Codex agent copy omits MCP and approval settings and preserves local restrictions', async t => {
+  const f = await fixture(t), path = 'agents/reviewer.toml';
+  const source = join(f.source, path), target = join(f.b.home, path);
+  await mkdir(join(f.source, 'agents'), { recursive: true, mode: 0o700 });
+  await mkdir(join(f.b.home, 'agents'), { recursive: true, mode: 0o700 });
+  const saved = {
+    name: 'reviewer', description: 'Review changes', developer_instructions: 'Trace the changed code.\nKeep edits out of the review.\n',
+    model: 'test-model', model_reasoning_summary: 'concise', sandbox_mode: 'read-only',
+    nickname_candidates: ['Scout'], features: { shell_tool: false },
+    skills: { bundled: { enabled: false }, config: [{ name: 'deploy', enabled: false }] },
+  };
+  const original = stringify({
+    ...saved,
+    approval_policy: 'never', default_permissions: 'unsafe',
+    features: { ...saved.features, apps: true },
+    mcp_servers: { local: { command: 'source-server', env: { API_KEY: 'credential-in-source' } } },
+    permissions: { unsafe: { network: { enabled: true } } },
+  });
+  const before = '# Keep this comment on Undo\n'+stringify({ ...saved, description: 'Original reviewer' });
+  await writeFile(source, original, { mode: 0o640 });
+  await writeFile(target, before, { mode: 0o600 });
+  const agent = await item(f.store, 'Default', 'agent', 'reviewer.toml', f.defaultUserHome);
+  const options = { ...f.options, selection: [agent.id] };
+  const preview = await planCopy(f.store, 'Default', 'B', options);
+  assert.equal(preview.items[0].status, 'conflict');
+  const projected = preview.items[0].changes[0].after;
+  assert.deepEqual(JSON.parse(JSON.stringify(parse(projected))), saved);
+  assert.doesNotMatch(JSON.stringify(preview), /mcp_servers|source-server|credential-in-source|default_permissions/);
+  const copied = await applyCopy(f.store, 'Default', 'B', { ...options, expectedHash: preview.hash });
+  assert.equal(await readFile(target, 'utf8'), projected);
+  assert.equal(await readFile(source, 'utf8'), original);
+  assert.equal((await stat(target)).mode & 0o777, 0o640);
+  const undo = await planUndo(f.store, copied.id);
+  await undoCopy(f.store, copied.id, { ...f.options, expectedHash: undo.hash });
+  assert.equal(await readFile(target, 'utf8'), before);
+  assert.equal((await stat(target)).mode & 0o777, 0o600);
+});
+
+test('Codex agent copy refuses unknown settings, linked skill restrictions and retained credentials', async t => {
+  const f = await fixture(t), agents = join(f.source, 'agents');
+  await mkdir(agents, { recursive: true, mode: 0o700 });
+  const definition = { name: 'reviewer', description: 'Reviewer', developer_instructions: 'Review.' };
+  for (const [file, extra] of [
+    ['unknown', { hooks: 'host-owned' }],
+    ['local-path', { skills: { config: [{ path: '/local/skill/SKILL.md', enabled: false }] } }],
+    ['credential', { developer_instructions: 'API_KEY = private-value' }],
+  ]) {
+    await writeFile(join(agents, file+'.toml'), stringify({ ...definition, ...extra }), { mode: 0o600 });
+  }
+  const inventory = await inspectProfile(f.store, 'Default', f.options);
+  for (const agent of inventory.items.filter(entry => entry.category === 'agent')) {
+    assert.equal(agent.copyable, false);
+    assert.equal(agent.status, 'unsupported');
+  }
 });
 
 test('skill copies exact package assets and executable modes, removes package extras, and undo restores the package',async t=>{

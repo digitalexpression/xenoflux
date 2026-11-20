@@ -29,7 +29,7 @@ export function createUiSignins({ nativeProfiles, select, invalidate = () => {},
     if ([...attempts.values()].filter(attempt => active(attempt.value.state)).length >= 8)
       throw new UiError(409, 'Eight sign-ins are already active. Finish or cancel one before starting another.', 'signin-capacity');
     const attempt = { scope, controller: new AbortController(), value: { id: randomUUID(), client,
-      profileName: selected.name, accountScope: client === 'copilot' ? 'shared' : 'per-root', state: 'starting',
+      profileName: selected.name, accountScope: 'per-root', state: 'starting',
       message: 'Starting browser sign-in…' } };
     attempts.set(attempt.value.id, attempt);
     while (attempts.size > 30) {
@@ -50,7 +50,7 @@ export function createUiSignins({ nativeProfiles, select, invalidate = () => {},
           attempt.value = { ...attempt.value, ...progress, state: 'waiting-for-browser',
             message: client === 'claude-code'
               ? 'Complete sign-in in the browser opened by Claude Code. If no browser opens, cancel and try again. Xenoflux will check it automatically.'
-              : 'Complete sign-in in your browser. Xenoflux will check it automatically.' };
+              : 'Enter the code in your browser and choose the GitHub account for this profile. Xenoflux will check it automatically.' };
           if (client === 'copilot' && progress.browserUrl && !opened.has(progress.browserUrl)) {
             opened.add(progress.browserUrl);
             void browser(progress.browserUrl).catch(() => {
@@ -59,7 +59,7 @@ export function createUiSignins({ nativeProfiles, select, invalidate = () => {},
           }
         } });
         attempt.value = { ...attempt.value, state: 'completed', message: client === 'copilot'
-          ? 'Signed in and verified. This GitHub CLI account is shared by qualified Copilot profiles.'
+          ? 'Copilot CLI sign-in verified for this profile.'
           : 'Signed in and verified for this Claude Code profile.' };
       } catch (error) {
         const state = error.code === 'SHUTDOWN_FAILED' || error.process && error.process.shutdown?.groupTerminated !== true ? 'uncertain'

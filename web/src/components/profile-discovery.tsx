@@ -3,13 +3,13 @@ import { Link } from 'react-router';
 import { apiGet } from '@/api/client';
 import type { DiscoveryView, InstallationObservation, SetupObservation } from '@/api/types';
 import { Disclosure } from '@/components/controls';
-import { Loading, Page, PageTitle } from '@/components/layout';
-import { ErrorPanel, SimulatedNote } from '@/components/notices';
+import { Loading } from '@/components/layout';
+import { ErrorPanel } from '@/components/notices';
 import { Button } from '@/components/ui/button';
 import { useResource } from '@/lib/useResource';
 import { NativeApps } from '@/components/native-apps';
 
-export function Discovery() {
+export function ProfileDiscovery() {
   const view = useResource(({ background }) => apiGet<DiscoveryView>(`/api/discovery${background ? '' : '?fresh=1'}`), 'discovery', { live: true });
   const data = view.data;
   const lastCheck = useRef<DiscoveryView | null>(null);
@@ -31,61 +31,52 @@ export function Discovery() {
     if (snapshot(before) !== snapshot(data)) setChanges(changed.join(' ') || 'Existing setups and profile findings changed.');
   }, [data]);
   const previous = data && (view.loading || view.error);
-  const canContinue = data?.registry.kind === 'readable' && !view.loading && !view.error;
+  const folders = data?.clients.map(client => ({ ...client, setups: client.setups.filter(item => item.kind !== 'found' || !item.inspectHref) }))
+    .filter(client => client.setups.length) ?? [];
   return (
-    <Page current="setup" title="Find clients and profiles">
-      <PageTitle title="Find clients and profiles" subtitle="Start with the clients and setups already on this Mac before creating another profile."
-        actions={<Button disabled={view.loading} onClick={view.reload}>{view.loading ? 'Checking…' : 'Check again'}</Button>} />
-      <div className="discovery-intro">
-      <p className="muted max-w-[72ch]">Checks installation metadata and known folders. Does not start clients, check sign-in or change profiles. Finding a client or folder does not mean it is ready to use.</p>
-      <div className="discovery-check-meta">
-      <p className="hint">Checks automatically every 5 seconds while this page is active.</p>
-      <div role="status" aria-live="polite" className="hint">
-        {previous ? view.loading ? 'Previous check, refreshing…' : 'Previous check, could not refresh.'
-          : view.loading ? 'Looking for clients and profiles…' : data ? 'Discovery check complete.' : 'Discovery could not complete.'}
-      </div>
-      {data ? <p className="hint">Checked {new Date(data.checkedAt).toLocaleString()}</p> : null}
-      </div>
+    <section className="discovery-section" aria-labelledby="profile-discovery-title">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="discovery-intro">
+          <h2 id="profile-discovery-title" className="sr-only">Client discovery</h2>
+          <div className="discovery-check-meta">
+            <p role="status" className="hint">
+              {previous ? view.loading ? 'Previous check, refreshing…' : 'Previous check, could not refresh.'
+                : view.loading ? 'Looking for clients and folders…' : data ? 'Discovery check complete.' : 'Discovery could not complete.'}
+            </p>
+            {data ? <p className="hint">Checked {new Date(data.checkedAt).toLocaleString()}</p> : null}
+          </div>
+        </div>
+        <Button disabled={view.loading} onClick={view.reload}>{view.loading ? 'Checking…' : 'Check again'}</Button>
       </div>
       {changes ? <p className="hint" role="status">{changes}</p> : null}
       {view.error ? <ErrorPanel title="Could not refresh discovery">{view.error.message} {data ? 'Previous findings are shown. ' : ''}Checks retry automatically, or use Check again.</ErrorPanel> : null}
       {view.loading && !data ? <Loading label="Inspecting known locations…" /> : null}
       {data ? <>
-        {data.simulated ? <SimulatedNote /> : null}
         <Disclosure label="Show checked locations" expandedLabel="Hide checked locations">
           <ul className="list-disc pl-5 hint">{data.scope.map(item => <li key={item} className="wrap-anywhere">{item}</li>)}</ul>
         </Disclosure>
         <section className="discovery-section" aria-labelledby="installations">
-          <h2 id="installations" className="text-heading">Installed clients</h2>
-          <p className="hint max-w-[72ch]">Open clients with a selected profile from Profiles. Claude and GitHub Copilot Desktop support separate profile storage; Desktop sign-in and task execution remain unverified.</p>
+          <h3 id="installations" className="text-body font-semibold">Installed clients</h3>
+          <p className="hint max-w-[72ch]">Discovery checks installation metadata and known folders. Use a profile’s CLI and Desktop rows for its current status.</p>
           {data.clients.map(client => <div key={client.client} className="discovery-installation-row">
-            <h3 className="text-body font-semibold">{client.name}</h3>
+            <h4 className="text-body font-semibold">{client.name}</h4>
             <Installation label={`${client.name} CLI`} observation={client.cli} />
             <Installation label={client.client === 'claude-code' ? 'Claude desktop app' : `${client.name} desktop app`} observation={client.desktop} note={client.desktopNote} />
           </div>)}
         </section>
         <NativeApps />
-        <section className="discovery-section" aria-labelledby="existing-setups">
-          <h2 id="existing-setups" className="text-heading">Existing setups and profiles</h2>
+        {data.registry.kind === 'blocked' || folders.length || data.attention.length || data.limits.length ? <section className="discovery-section" aria-labelledby="discovery-folders">
+          <h3 id="discovery-folders" className="text-body font-semibold">Folder and registry findings</h3>
           {data.registry.kind === 'blocked' ? <div className="notice" role="note"><strong>Registry needs attention.</strong> {data.registry.reason} Profile operations remain blocked until the registry passes validation. Original files are unchanged.</div> : null}
-          {data.clients.map(client => <div key={client.client} className="discovery-setup-group">
-            <h3 className="text-body font-semibold">{client.name}</h3>
-            <div>{client.setups.length ? client.setups.map(item => <Setup key={item.key} item={item} />) : <p className="hint">No setups found in the checked locations.</p>}</div>
+          {folders.map(client => <div key={client.client} className="discovery-setup-group">
+            <h4 className="text-body font-semibold">{client.name}</h4>
+            <div>{client.setups.map(item => <Setup key={item.key} item={item} />)}</div>
           </div>)}
-          {data.attention.length ? <div className="flex flex-col gap-2"><h3 className="text-body font-semibold">Needs attention</h3>{data.attention.map(item => <Setup key={item.key} item={item} />)}</div> : null}
-          {data.limits.length ? <div className="notice"><h3 className="font-semibold">Inspection limits</h3><ul className="list-disc pl-5">{data.limits.map(item => <li key={item} className="wrap-anywhere">{item}</li>)}</ul></div> : null}
-        </section>
+          {data.attention.length ? <div className="flex flex-col gap-2"><h4 className="text-body font-semibold">Needs attention</h4>{data.attention.map(item => <Setup key={item.key} item={item} />)}</div> : null}
+          {data.limits.length ? <div className="notice"><h4 className="font-semibold">Inspection limits</h4><ul className="list-disc pl-5">{data.limits.map(item => <li key={item} className="wrap-anywhere">{item}</li>)}</ul></div> : null}
+        </section> : null}
       </> : null}
-      <section className="discovery-next" aria-labelledby="next-step">
-        <h2 id="next-step" className="text-heading">Choose what to do next</h2>
-        <p className="muted max-w-[72ch]">Continue to use an existing profile, create a separate one, or copy selected settings.</p>
-        <div className="flex flex-wrap gap-3">
-          {canContinue ? <Link className="btn btn-primary" to="/profiles">Continue to profiles</Link> : <Button disabled>Continue to profiles</Button>}
-          <Link className="btn" to="/">Continue to comparisons</Link>
-        </div>
-        {!canContinue ? <p className="hint">Complete a successful check with a readable registry before continuing to profile operations.</p> : null}
-      </section>
-    </Page>
+    </section>
   );
 }
 

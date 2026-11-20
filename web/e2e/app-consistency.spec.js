@@ -19,7 +19,7 @@ for (const theme of ['light', 'dark']) {
       ['native-inspection', '/sessions/native', 'sessions'],
       ['session-picker', '/compare/sessions', 'compare'],
       ['native-comparison', '/compare/sessions/native', 'compare'],
-      ['profiles', '/profiles', 'profiles'], ['clients', '/setup', 'setup'],
+      ['profiles', '/profiles', 'profiles'],
       ['setup-inspection', '/profiles/Default/setup?client=codex', 'profiles'],
       ['setup-comparison', '/compare/setups?a=baseline&b=strict-review', 'compare'],
       ['mixed-setups', '/compare/setups?a=Default&b=Default&bClient=claude-code', 'compare'],
@@ -32,7 +32,7 @@ for (const theme of ['light', 'dark']) {
       ['export', '/reports/demo-run/export', 'compare'], ['saved-reports', '/reports/open', 'open'],
       ['not-found', '/missing-page', null],
     ];
-    const navigation = { compare: 'Comparisons', sessions: 'Sessions', profiles: 'Profiles', setup: 'Clients on this Mac', open: 'Saved reports' };
+    const navigation = { compare: 'Comparisons', sessions: 'Sessions', profiles: 'Profiles', open: 'Saved reports' };
     try {
       await page.emulateMedia({ reducedMotion: 'reduce' });
       await page.goto(server.launchUrl);

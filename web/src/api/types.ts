@@ -40,6 +40,9 @@ export interface ClientInfo { state: ClientState; text: string }
 export interface ProfileCard {
   name: string;
   client?: ProfileClient;
+  accountCheck?: boolean;
+  folder: string | null;
+  account?: { label: string; lastChecked: boolean };
   accountScope?: 'per-root' | 'shared' | 'unverified';
   accountIndependence?: 'not verified';
   setup?: { command: string; executable: string; configRoot: string; rootMode: 'explicit'; version: string };
@@ -47,14 +50,16 @@ export interface ProfileCard {
   state: 'ready' | 'unbound' | 'unavailable';
   reason: string | null;
   signIn: string;
+  accountFinding?: { state: 'signed-in' | 'signed-out' | 'saved' | 'unverified' | 'unchecked'; lastChecked: boolean };
   binding: string;
+  repositories?: string[];
   summary: string;
   cli: ClientInfo;
   desktop: ClientInfo;
   clientActions: ClientAction[];
   moreMenu: MenuAction[] | null;
 }
-export interface ClientAction { id: string; label: string; kind?: 'primary' | 'secondary'; conflict?: ClientConflict; appKey?: string }
+export interface ClientAction { id: string; label: string; kind?: 'primary' | 'secondary'; conflict?: ClientConflict; appKey?: string; runId?: string }
 export interface ClientConflict { title: string; body: string }
 export interface MenuAction { id: 'copy' | 'binding' | 'rename' | 'remove'; label: string; detail?: string; disabledReason?: string }
 export interface NativeAppEntry {

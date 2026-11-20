@@ -18,7 +18,7 @@ test('one integration row retains configuration, cache, shared machine source an
   await put(app.homes.strict.home, 'plugins/cache/openai-bundled/code-review/revision/.codex-plugin/plugin.json', '{"name":"code-review","version":"26.1007.30912"}');
   const before = await Promise.all(paths.map(path => readFile(path, 'utf8')));
   await page.goto(`${app.origin}/compare/setups?a=Default&b=strict-review`);
-  await page.getByRole('button', { name: 'Everything', exact: true }).click();
+  await page.getByRole('button', { name: 'All items', exact: true }).click();
   const search = page.getByRole('searchbox', { name: 'Find an item' });
   const detail = page.getByRole('complementary');
   for (const name of ['codebase-memory-mcp', 'codex-security@openai-curated', 'code-review@openai-bundled']) {
@@ -44,10 +44,16 @@ test('one integration row retains configuration, cache, shared machine source an
     }
   }
   await page.setViewportSize({ width: 640, height: 900 });
-  await expect(detail.getByRole('heading', { name: /Cached package/, level: 3 })).toBeVisible();
+  await page.getByRole('button', { name: 'View details', exact: true }).click();
+  const sheet = page.getByRole('dialog', { name: 'Inspector' });
+  await expect(sheet.getByRole('heading', { name: 'code-review@openai-bundled', level: 2 })).toBeVisible();
+  await sheet.getByRole('button', { name: 'Inspect source evidence', exact: true }).click();
+  await expect(sheet.getByRole('heading', { name: /Cached package/, level: 3 })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(sheet).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole('button', { name: 'Swap the two profiles' }).click();
-  await page.getByRole('button', { name: 'Everything', exact: true }).click();
+  await page.getByRole('button', { name: 'All items', exact: true }).click();
   await page.getByRole('searchbox', { name: 'Find an item' }).fill('codebase-memory-mcp');
   await expect(page.locator('li button').filter({ hasText: 'codebase-memory-mcp' })).toHaveCount(1);
   await page.reload();
@@ -74,13 +80,13 @@ CUSTOM_TOKEN = "fixture-env-value"
   }
   const before = await Promise.all(paths.map(path => readFile(path, 'utf8')));
   await page.goto(`${app.origin}/compare/setups?a=baseline&b=strict-review`);
-  await page.getByRole('button', { name: 'Everything', exact: true }).click();
+  await page.getByRole('button', { name: 'All items', exact: true }).click();
   const search = page.getByRole('searchbox', { name: 'Find an item' });
   const detail = page.getByRole('complementary');
   await search.fill('desktop');
   await page.locator('li button').filter({ hasText: 'desktop' }).click();
-  await expect(detail.locator('.edge-a')).toContainText('"notifications": false');
-  await expect(detail.locator('.edge-b')).toContainText('"notifications": true');
+  await expect(detail.locator('.setup-compare-evidence-side[data-side="a"]')).toContainText('"notifications": false');
+  await expect(detail.locator('.setup-compare-evidence-side[data-side="b"]')).toContainText('"notifications": true');
   await expect(detail).not.toContainText('Value not shown');
   await search.fill('custom_provider');
   await page.locator('li button').filter({ hasText: 'custom_provider' }).click();
@@ -94,7 +100,7 @@ CUSTOM_TOKEN = "fixture-env-value"
   await expect(detail).not.toContainText('undisclosed values');
   await detail.getByRole('button', { name: 'Where it’s set and what we know' }).click();
   await expect(detail).toContainText('Not known from setup alone');
-  await page.getByRole('button', { name: 'Show sources', exact: true }).click();
+  await page.getByText('Reading limits', { exact: true }).click();
   const configRow = page.getByRole('row').filter({ hasText: 'Profile config' });
   await expect(configRow).toContainText('Read in full');
   await page.setViewportSize({ width: 640, height: 900 });
@@ -161,7 +167,7 @@ test('shared physical and combined Default roots compare across all profile pair
 
   // Also exercise the rendered comparison page and its paired source labels.
   await page.goto(`${app.origin}/compare/setups?a=Default&b=baseline`);
-  await page.getByRole('button', { name: 'Everything', exact: true }).click();
+  await page.getByRole('button', { name: 'All items', exact: true }).click();
   const search = page.getByRole('searchbox', { name: 'Find an item' });
   const detail = page.getByRole('complementary');
   await search.fill('model');

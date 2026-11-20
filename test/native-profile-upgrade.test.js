@@ -13,9 +13,9 @@ import { resolveProfileExecutionProfile, recheckProfileExecutionProfile } from '
 async function setup(t, client) {
   const root = await realpath(await mkdtemp('/private/tmp/xfx-native-upgrade-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const paths = ['bin', 'managed', 'managed/config', 'managed/workspace', 'stock', 'user'].map(part => join(root, part));
+  const paths = ['bin', 'managed', 'managed/config', 'managed/workspace', 'user'].map(part => join(root, part));
   for (const path of paths) await mkdir(path, { mode: 0o700 });
-  const [bin, reservation, configRoot, workspace, stock, userHome] = paths;
+  const [bin, reservation, configRoot, workspace, userHome] = paths;
   const command = join(bin, client === 'claude-code' ? 'claude' : 'copilot');
   const oldExecutable = join(root, 'native-v1'), currentExecutable = join(root, 'native-v2'), nextExecutable = join(root, 'native-v3');
   for (const [index, executable] of [oldExecutable, currentExecutable, nextExecutable].entries())
@@ -37,8 +37,8 @@ async function setup(t, client) {
   const defaultUserHome = client === 'copilot' ? homedir() : userHome;
   const options = { defaultUserHome, terminalEnvironment, repository: workspace };
   const switchExecutable = async () => { await unlink(command); await symlink(nextExecutable, command); };
-  return { root, store, selected, original, command, currentExecutable, nextExecutable, options, inspect,
-    reservation, configRoot, workspace, stock, switchExecutable };
+  return { root, store, selected, original, currentExecutable, nextExecutable, options,
+    reservation, configRoot, workspace, switchExecutable };
 }
 
 test('managed Claude follows the current CLI while an executable change invalidates its prepared action', async t => {
@@ -66,14 +66,13 @@ test('managed Copilot requalifies the current CLI and runtime without inheriting
   let runtimeVersion = '99.1.0', launches = 0;
   const service = managedNativeProfiles({ store: f.store, profilesBase: join(f.root, 'profiles'), ...f.options,
     lockOptions: { lockPath: join(f.root, 'operation') },
-    resolveStockCopilot: async () => ({ home: f.stock, rootMode: 'implicit', ...await f.inspect(await realpath(f.command)) }),
-    readCopilotAccount: async () => { launches++; return { state: 'signed-in', route: 'gh-cli', version: runtimeVersion, token: 'fixture-account' }; },
+    readCopilotAccount: async () => { launches++; return { state: 'signed-in', route: 'user', version: runtimeVersion, token: 'fixture-account' }; },
   });
   const options = { ...f.options, profileResolvers: { copilot: service.qualifiedCopilot } };
   const selected = { name: f.selected.name, client: 'copilot' };
   await assert.rejects(resolveProfileExecutionProfile(f.store, selected, options), { code: 'copilot-account-unverified' });
   const status = await service.check(f.selected.name, 'copilot');
-  assert.equal(status.accountScope, 'shared');
+  assert.equal(status.accountScope, 'per-root');
   const preview = await resolveProfileExecutionProfile(f.store, selected, options);
   assert.equal(preview.executable, f.currentExecutable);
   assert.equal(preview.version, runtimeVersion);
@@ -90,7 +89,7 @@ test('managed Copilot requalifies the current CLI and runtime without inheriting
   assert.equal(fresh.home, f.configRoot);
   assert.equal(fresh.reservationRoot, f.reservation);
   assert.equal(fresh.rootMode, 'explicit');
-  assert.equal(launches, 4);
+  assert.equal(launches, 2);
   assert.equal(await readFile(f.store.file, 'utf8'), f.original);
 });
 
@@ -98,10 +97,9 @@ test('an executable switch during account checking cannot publish a scope qualif
   const f = await setup(t, 'copilot');
   const service = managedNativeProfiles({ store: f.store, profilesBase: join(f.root, 'profiles'), ...f.options,
     lockOptions: { lockPath: join(f.root, 'operation') },
-    resolveStockCopilot: async () => ({ home: f.stock, rootMode: 'implicit', ...await f.inspect(await realpath(f.command)) }),
-    readCopilotAccount: async () => { await f.switchExecutable(); return { state: 'signed-in', route: 'gh-cli', version: '99.1.0', token: 'fixture-account' }; },
+    readCopilotAccount: async () => { await f.switchExecutable(); return { state: 'signed-in', route: 'user', version: '99.1.0', token: 'fixture-account' }; },
   });
-  await assert.rejects(service.check(f.selected.name, 'copilot'), /Stock Copilot does not match/);
+  await assert.rejects(service.check(f.selected.name, 'copilot'), /native account binding changed/);
   const fresh = await service.resolveProfile('copilot', f.selected);
   assert.equal(await service.observed(fresh), null);
   await assert.rejects(lstat(join(f.reservation, '.run-lock')), { code: 'ENOENT' });

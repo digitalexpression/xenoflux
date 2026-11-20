@@ -33,8 +33,9 @@ xfx pick
 ```
 
 `Default` is the normal native setup and a copy source only. Named profiles use
-separate roots under `~/.xfx/profiles`. Standalone launch/resume needs exclusive
-profile use; app comparisons/reviews use shared execution participants.
+separate roots under `~/.xfx/profiles`. A signed-in named Codex profile can run
+one CLI and one Desktop together. Either can start first. See the [Profiles
+guide](GUIDE.md#create-and-compare-profiles) for supported launch conditions.
 `desktop open` focuses an existing instance; `focus`, `close` and `recover` target
 only the verified profile. Desktop `prepare`/`refresh` is explicit maintenance of
 stopped launcher caches, not a prerequisite to every open.
@@ -55,6 +56,25 @@ Skill replacement includes obsolete package files; unsafe packages/transitions
 are refused. Manual plugin/hook/MCP guidance is conditional and outside Undo.
 Preserve the copy journal/payload while Undo is needed; intervening edits block it.
 
+Use `xfx copy Default Research --advanced` to preview individual agents and
+skills. The destination determines which client's Default is used. Add
+`--apply` to review and copy your selection. Close clients using the selected
+profiles before applying.
+
+Codex, Claude Code and GitHub Copilot CLI each copy eligible standalone definitions
+within the same client. Copy removes MCP bindings and tool pre-approvals and
+preserves supported local restrictions. For new skill resources, preview lists
+each file with its size and SHA-256.
+
+Global installs from `npx skills add -g -a claude-code` normally place packages
+under `~/.agents/skills` and expose them in Claude through links. Xenoflux can
+copy an eligible same-name link into `~/.agents/skills` from any client's
+Default as an independent package. Codex and Copilot can also copy directly
+from that shared skill directory. Updates to the shared installation do not
+update the copy. Use
+`npx skills list -g -a claude-code` to list the installer-managed skills and
+`npx skills check`, `npx skills update` or `npx skills remove` to maintain them.
+
 Preparation, copy, sign-in and Desktop integration are separate. A later failed
 sign-in does not erase completed copying. For a hard-interrupted login/CLI run:
 
@@ -65,6 +85,8 @@ xfx desktop recover NAME --dry-run
 xfx desktop recover NAME
 ```
 
+Use `xfx profile recover NAME` for an interrupted Codex account check. Use
+`Default` as the name if the check targeted the standard Codex setup.
 Profile apply rechecks a same-host owned lock, absent matching owner and native
 writers before releasing it. Desktop recovery reconciles only its stopped journal
 and reservation. Neither launches, resumes or force-closes clients. Live/reused

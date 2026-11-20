@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
 import { parentPort, workerData } from 'node:worker_threads';
 import { promisify } from 'node:util';
 import { getAuditProcessIdentity } from './audit-process.js';
-import { assertCopilotEnvironment, assertCopilotRoots, copilotAccountRootIdentities, copilotAuth, copilotExecutableIdentity, copilotId, qualifiedCopilotRoute, COPILOT_SDK_VERSION } from './copilot-profile.js';
+import { assertCopilotEnvironment, assertCopilotRoots, copilotAccountRootIdentities, copilotAuth, copilotExecutableIdentity, copilotId, managedCopilotEnvironment, qualifiedCopilotRoute, COPILOT_SDK_VERSION } from './copilot-profile.js';
 import { decodeCopilotCatalog, selectCopilotSettings } from './copilot-catalog.js';
 import { readCopilotJournal } from './copilot-transcript-reader.mjs';
 import { copilotDecision } from './copilot-events.js';
@@ -133,11 +133,13 @@ function installSpawn(out, err) {
     const executable = binding.executable.path;
     const expected = ['--log-dir', join(dirname(paths.stdoutPath), 'copilot-logs'), '--headless', '--no-auto-update', '--log-level', 'error', '--stdio'];
     const actual = command === executable ? args : command === process.execPath && args[0] === executable ? args.slice(1) : null;
+    const isolated = binding.rootMode === 'explicit' ? managedCopilotEnvironment(env, binding.roots.config) : env;
     if (child || JSON.stringify(actual) !== JSON.stringify(expected) || options.cwd !== binding.workspace
-      || options.env.COPILOT_HOME !== (binding.rootMode === 'explicit' ? binding.roots.config : undefined))
+      || options.env.COPILOT_HOME !== isolated.COPILOT_HOME || options.env.GH_CONFIG_DIR !== isolated.GH_CONFIG_DIR)
       throw new Error('Unexpected Copilot launch binding.');
     const ambient = { ...options.env };
     delete ambient.COPILOT_HOME;
+    delete ambient.GH_CONFIG_DIR;
     assertCopilotEnvironment(ambient);
     child = originalSpawn(command, args, { ...options, detached: true });
     closed = once(child, 'close');
@@ -186,7 +188,8 @@ async function initialize() {
   const { CopilotClient, RuntimeConnection } = await import(sdkUrl);
   client = new CopilotClient({ connection: RuntimeConnection.forStdio({ path: executable,
     args: ['--log-dir', join(dirname(paths.stdoutPath), 'copilot-logs')] }),
-    workingDirectory: binding.workspace, env, logLevel: 'error',
+    workingDirectory: binding.workspace,
+    env: binding.rootMode === 'explicit' ? managedCopilotEnvironment(env, binding.roots.config) : env, logLevel: 'error',
     ...(binding.rootMode === 'explicit' ? { baseDirectory: binding.roots.config } : {}) });
   await rpc(() => client.start());
   const status = await rpc(() => client.getStatus());
@@ -206,9 +209,11 @@ async function metadata({ status, auth, publicAccount }) {
   let result;
   if (operation === 'account-status') {
     if (auth?.isAuthenticated === false) return { state: 'signed-out', version: status.version };
-    if (auth?.isAuthenticated !== true || auth.authType !== 'gh-cli' || !copilotId(auth.login) || !copilotId(auth.host))
+    if (auth?.isAuthenticated !== true || auth.authType !== (binding.rootMode === 'explicit' ? 'user' : 'gh-cli')
+      || !copilotId(auth.login) || !copilotId(auth.host))
       return { state: 'unverified', version: status.version };
-    return { state: 'signed-in', route: auth.authType, version: status.version, token: accountToken(auth) };
+    const accountLabel = /^[a-z0-9][a-z0-9_-]{0,127}$/i.test(auth.login) ? auth.login : null;
+    return { state: 'signed-in', route: auth.authType, version: status.version, token: accountToken(auth), accountLabel };
   }
   // Bind list-to-read to account metadata without retaining the login or host.
   const token = operation === 'list' || operation === 'journal' ? accountToken(auth) : null;

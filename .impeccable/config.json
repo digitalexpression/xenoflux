@@ -1,3 +1,36 @@
 {
-  "buildPath": "code"
+  "buildPath": "code",
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "web/src/styles/app.css"
+        ],
+        "createdAt": "2026-11-18T10:43:45.654Z",
+        "reason": "Agent: narrow comparison rows use matching Left and Right identity colors and repeat the profile labels for orientation as described in DESIGN.md."
+      },
+      {
+        "rule": "border-accent-on-rounded",
+        "value": "*",
+        "files": [
+          "web/src/styles/app.css"
+        ],
+        "createdAt": "2026-11-18T10:43:45.674Z",
+        "reason": "Agent: paired time and token panels use their assigned Left and Right identity colors in workflow-measurements.tsx, consistent with the comparison orientation roles in DESIGN.md."
+      },
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "playwright-report/trace/defaultSettingsView.C8BeHuxd.css"
+        ],
+        "createdAt": "2026-11-19T18:27:23.444Z",
+        "reason": "Agent: verified byte-for-byte that this ignored test report asset is copied from Playwright’s bundled Trace Viewer; it is outside the Xenoflux UI."
+      }
+    ]
+  }
 }

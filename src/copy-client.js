@@ -2,7 +2,8 @@
 import { relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { discoverAuditProfile } from './audit-discovery.js';
-import { inspectProfile } from './profile-inventory.js';
+import { inspectProfile, inspectSharedCopySkills } from './profile-inventory.js';
+import { resolveSharedSkill } from './copy-skill-source.js';
 import { redactValue } from './redact.js';
 
 export const CLIENT_COPY_SETTINGS = Object.freeze({
@@ -42,8 +43,14 @@ export async function inspectCopyProfile(store, name, options = {}) {
     const path = relative(profile.home, resource.path);
     const owned = ['user', 'profile'].includes(resource.scope) && ['user-home', 'profile-home'].includes(resource.origin)
       && resource.status === 'present' && !resource.canonicalPath;
-    const eligible = owned && clientCopyPath(profile.clientId, path, resource.category);
-    const base = { ...resource, label: resource.name, origin: profile.profileName, copyable: false,
+    const linkedSkill = profile.rootMode === 'implicit'
+      && resource.category === 'skill' && resource.scope === 'user' && Boolean(resource.canonicalPath)
+      && await resolveSharedSkill(profile.userHome, profile.home, resource.path);
+    const eligible = (owned || linkedSkill === resource.canonicalPath && Boolean(linkedSkill)) && clientCopyPath(profile.clientId, path, resource.category);
+    const base = { ...resource, ...(linkedSkill && {
+      id: createHash('sha256').update(resource.id + '\0' + resource.path).digest('hex'),
+      status: 'present',
+    }), label: resource.name, origin: profile.profileName, copyable: false,
       reason: 'Native/manual or unsupported ownership; discovery does not authorize transfer.' };
     if (['plugin', 'hook', 'mcp'].includes(resource.category) && resource.status === 'present') {
       const identity = resource.integrationId ?? resource.provider ?? resource.name;
@@ -67,7 +74,13 @@ export async function inspectCopyProfile(store, name, options = {}) {
       // Retain an explicit kept entry for unselected/unknown settings.
       items.push(base);
     } else items.push(eligible ? { ...base, copyable: true,
-      transfer: { kind: resource.category, path, sourcePath: resource.path } } : base);
+      transfer: { kind: resource.category, path, sourcePath: resource.path, ...(linkedSkill && { linkedSkill }) } } : base);
+  }
+  if (clientId === 'copilot' && profile.rootMode === 'implicit') {
+    const aliases = new Set(items.map(item => item.transfer?.linkedSkill).filter(Boolean));
+    for (const skill of await inspectSharedCopySkills(profile.userHome)) {
+      if (!aliases.has(skill.path)) items.push({ ...skill, name: skill.label, origin: profile.profileName });
+    }
   }
   return { profile: { ...profile, name: profile.profileName }, items,
     limitations: snapshot.warnings, coverage: snapshot.coverage };

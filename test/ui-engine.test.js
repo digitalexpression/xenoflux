@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdtemp, mkdir, lstat, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Store, create } from '../src/profiles.js';
 import { registerHome } from '../src/homes.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { createEngineProvider } from '../src/ui-engine.js';
+import { acquire } from '../src/metadata.js';
 
 const id = number => `00000000-0000-4000-8000-${String(number).padStart(12, '0')}`;
 const record = (type, payload, timestamp = '2026-10-15T08:00:00.000Z') => ({ timestamp, type, payload });
@@ -63,6 +64,40 @@ test('lists real profiles and sessions without reading content or starting clien
   assert.equal((await f.provider.sessions({ profile: 'baseline' })).sessions[0].profile, 'baseline');
   const features = (await f.provider.info()).features;
   assert.deepEqual([features.runs, features.copy, features.clientControls], [true, true, true]);
+});
+
+test('Profiles refresh and edits recover only verified stopped reservations', async t => {
+  const f = await fixture(t);
+  const [stopped, live] = (await f.store.read()).profiles;
+  for (const [profile, pid, number] of [[stopped, 2_000_000_000, 590], [live, process.pid, 591]]) {
+    const { native } = profile, runId = id(number);
+    const runRoot = join(native.root, 'launches', runId);
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
+    await writeFile(join(runRoot, 'report.json'), JSON.stringify({ schemaVersion: 1, kind: 'interactive-cli', runId, profileId: profile.id,
+      environmentId: native.environmentId, home: join(native.root, 'codex-home'), status: 'running' }), { mode: 0o600 });
+    await acquire(join(native.root, '.run-lock'), { kind: 'interactive-cli', host: hostname(), pid, runId });
+  }
+  const checks = [];
+  const provider = createEngineProvider({ store: f.store, defaultUserHome: join(f.root, 'no-default-home'),
+    lockOptions: { lockPath: join(f.root, 'profile-operation') },
+    observeClients: async () => ({ cli: { state: 'not-running' }, desktop: { state: 'not-running' } }),
+    recoveryContext: { runtime: { assertExternal: async () => {}, assertIdle: async ({ resourcePaths }) => { checks.push(resourcePaths[0]); } } },
+  });
+  t.after(() => provider.close());
+  const lock = join(stopped.native.root, '.run-lock');
+  const deadOwner = JSON.parse(await readFile(join(lock, 'owner.json')));
+  await provider.profiles();
+  await lstat(lock);
+  await provider.refreshProfiles();
+  assert.deepEqual(checks, [stopped.native.root]);
+  await assert.rejects(lstat(lock), { code: 'ENOENT' });
+  await lstat(join(live.native.root, '.run-lock'));
+  await provider.bindProfile({ name: stopped.name, repository: f.root });
+  assert.deepEqual((await provider.profiles()).profiles.find(p => p.name === stopped.name).repositories, [f.root]);
+  await acquire(lock, deadOwner);
+  await provider.unbindProfile({ name: stopped.name, repository: f.root });
+  await assert.rejects(lstat(lock), { code: 'ENOENT' });
+  assert.deepEqual((await provider.profiles()).profiles.find(p => p.name === stopped.name).repositories, []);
 });
 
 test('session and report client classification share originator and native index evidence', async t => {
@@ -398,4 +433,15 @@ test('inspected sessions compare retained sides without rereading lost history, 
   const markdown = await readFile(join(exported.folder, exported.files[0]), 'utf8');
   assert.match(markdown, /Recorded comparison: Harness controls differ/);
   assert.match(markdown, /Full historical harness/);
+});
+
+test('profile cards report their folder and reveal rejects profiles the store does not know', async t => {
+  const { provider, root } = await fixture(t);
+  const { profiles } = await provider.profiles();
+  const baseline = profiles.find(card => card.name === 'baseline');
+  assert.equal(baseline.folder, join(root, 'native-a'));
+  await assert.rejects(provider.revealProfileFolder({ name: 'unknown-profile', client: 'codex' }), { status: 404 });
+  await assert.rejects(provider.revealProfileFolder({ name: 'baseline', client: 'claude-code' }), { status: 404 });
+  await assert.rejects(provider.revealProfileFolder({ name: 'baseline', client: 'not-a-client' }), { status: 400 });
+  await provider.close();
 });

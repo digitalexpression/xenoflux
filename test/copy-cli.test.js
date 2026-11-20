@@ -8,6 +8,7 @@ import { Store, create } from '../src/profiles.js';
 import { planCopy } from '../src/native-copy.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome } from '../src/homes.js';
+import { managedNativeProfiles } from '../src/managed-native-profile.js';
 
 const cli = new URL('../bin/xfx.js', import.meta.url).pathname;
 
@@ -202,5 +203,64 @@ exit [lindex $result 3]`;
   assert.match(result.stdout, /source-model/);
   assert.doesNotMatch(result.stdout, /repo-only|state_5\.sqlite|sk-fixture12345678901234567890|Could not build preview/);
   assert.deepEqual(await readFile(join(f.b.home, 'config.toml')), before);
+  await absent(join(f.store.directory, 'native-copies'));
+});
+
+test('advanced Claude copy previews Default agents and skills without writing', async t => {
+  if (spawnSync('/usr/bin/expect', ['-v']).error) return t.skip('expect unavailable');
+  const f = await fixture(t);
+  await writeFile(join(f.root, 'claude'), '#!/bin/sh\nprintf "2.1.325 (Claude Code)\\n"\n', { mode: 0o700 });
+  const source = join(f.root, '.claude');
+  await mkdir(join(source, 'agents'), { recursive: true, mode: 0o700 });
+  await mkdir(join(source, 'skills', 'copy-test-skill'), { recursive: true, mode: 0o700 });
+  const agent = '---\nname: copy-test-agent\ndescription: Copy regression fixture\nmcpServers: [graph]\n---\nFixture agent.\n';
+  const skill = '---\nname: copy-test-skill\ndescription: Copy regression fixture\n---\nFixture skill.\n';
+  await writeFile(join(source, 'agents', 'copy-test-agent.md'), agent, { mode: 0o600 });
+  await writeFile(join(source, 'skills', 'copy-test-skill', 'SKILL.md'), skill, { mode: 0o600 });
+  await writeFile(join(source, 'agents', 'unsafe-agent.md'), '---\nname: unsafe-agent\nhooks: Bash\n---\nUnsafe fixture.\n', { mode: 0o600 });
+  await writeFile(join(source, '.credentials.json'), '{"secret":"fixture-not-for-copy"}', { mode: 0o600 });
+  const environment = { PATH: `${f.root}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: f.root, TERM: 'xterm' };
+  const native = managedNativeProfiles({ store: f.store, profilesBase: join(f.root, 'profiles'), defaultUserHome: f.root, terminalEnvironment: environment });
+  const profile = await native.createProfile('Claude DGX', 'claude-code', await native.binary('claude-code'));
+  const target = profile.native.configRoot;
+  const program = `set timeout 10
+spawn $env(XFX_TEST_NODE) $env(XFX_TEST_CLI) --store $env(XFX_TEST_STORE) copy Default {Claude DGX} --advanced
+expect {
+  -re {Selected: 0} {}
+  timeout { exit 2 }
+}
+send -- "/copy-test-agent\\r\\033\\133B "
+expect {
+  -re {Selected: 1} {}
+  timeout { exit 3 }
+}
+send -- "/"
+send -- [string repeat "\\177" 15]
+send -- "copy-test-skill\\r\\033\\133B "
+expect {
+  -re {Selected: 2} {}
+  timeout { exit 4 }
+}
+send -- "\\r"
+expect {
+  -re {"status": "preview"} {}
+  eof { exit 6 }
+  timeout { exit 5 }
+}
+expect eof
+catch wait result
+exit [lindex $result 3]`;
+  const env = { ...environment, XFX_TEST_NODE: process.execPath, XFX_TEST_CLI: cli, XFX_TEST_STORE: f.store.directory };
+  const result = spawnSync('/usr/bin/expect', ['-c', program], { encoding: 'utf8', timeout: 30000, env });
+  assert.equal(result.status, 0, result.stdout.slice(-4000) + result.stderr);
+  const preview = JSON.parse(result.stdout.slice(result.stdout.lastIndexOf('\n{') + 1));
+  assert.equal(preview.source.clientId, 'claude-code');
+  assert.equal(preview.target.home, target);
+  assert.deepEqual(preview.items.map(({ label, status }) => [label, status]).sort(), [['copy-test-agent.md', 'new'], ['copy-test-skill', 'new']]);
+  assert(!preview.items.find(item => item.label === 'copy-test-agent.md').changes[0].after.includes('mcpServers'));
+  assert.match(result.stdout, /unsafe-agent\.md — unavailable: Excluded by the copy safety checks/);
+  assert.doesNotMatch(result.stdout, /fixture-not-for-copy|Unsafe fixture|Could not build preview/);
+  await absent(join(target, 'agents', 'copy-test-agent.md'));
+  await absent(join(target, 'skills', 'copy-test-skill', 'SKILL.md'));
   await absent(join(f.store.directory, 'native-copies'));
 });

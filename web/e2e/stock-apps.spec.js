@@ -62,8 +62,9 @@ const test = base.extend({
 
 async function openClients(page, app) {
   await page.goto(app.url);
-  await page.getByRole('link', { name: 'Clients on this Mac', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Find clients and profiles', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Profiles', exact: true }).click();
+  await page.getByRole('button', { name: 'Show client discovery', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Client discovery', exact: true })).toBeVisible();
   await expect.poll(() => app.listCalls).toBeGreaterThan(0);
 }
 
@@ -72,7 +73,7 @@ test('app discovery is read-only; explicit stock opening uses its exact app iden
   const section = page.getByRole('region', { name: 'Native apps' });
   await expect(section).toBeVisible();
   await expect(section.getByText(/app with its existing setup/)).toBeVisible();
-  await expect(section.getByText(/Use Profiles for separate Desktop storage/)).toBeVisible();
+  await expect(section.getByText(/Use a profile’s Desktop row for separate storage/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Open GitHub Copilot', exact: true })).toHaveCount(0);
   await expect(section.getByLabel('Copilot app-local session ID', { exact: true })).toHaveCount(0);
   expect(app.openCalls).toEqual([]);
@@ -187,7 +188,7 @@ test.describe('Copilot existing session links', () => {
     await expect(section.getByRole('status')).toContainText('no task was requested');
     expect(app.openCalls.at(-1)).toEqual({ client: 'copilot', appKey: 'b'.repeat(64), sessionId: 'session_123' });
     await page.reload();
-    await expect(page.getByRole('heading', { name: 'Find clients and profiles', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Profiles', exact: true })).toBeVisible();
     expect(app.openCalls).toHaveLength(2);
   });
 });

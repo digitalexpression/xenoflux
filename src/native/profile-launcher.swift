@@ -33,6 +33,77 @@ func processStartSeconds(_ pid: pid_t) -> Int? {
     return seconds
 }
 
+struct HandoffTarget {
+    let pid: pid_t
+    let startSeconds: Int
+    let startMicroseconds: Int
+    let appPath: String
+}
+
+func handoffProcessIdentity(_ target: HandoffTarget) -> NSRunningApplication? {
+    guard target.pid > 0, target.pid != getpid(),
+          let app = NSRunningApplication(processIdentifier: target.pid), !app.isTerminated,
+          let bundleURL = app.bundleURL,
+          resolvedPath(bundleURL) == target.appPath,
+          app.bundleIdentifier == "com.anthropic.claudefordesktop",
+          let executable = app.executableURL,
+          executablePath(target.pid) == resolvedPath(executable),
+          let (seconds, microseconds) = processStartTime(target.pid),
+          seconds == target.startSeconds, microseconds == target.startMicroseconds else { return nil }
+    return app
+}
+
+func processStartTime(_ pid: pid_t) -> (Int, Int)? {
+    var info = proc_bsdinfo()
+    let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+    guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size,
+          info.pbi_uid == getuid(), info.pbi_start_tvsec > 0,
+          let seconds = Int(exactly: info.pbi_start_tvsec),
+          let microseconds = Int(exactly: info.pbi_start_tvusec), microseconds >= 0 else { return nil }
+    return (seconds, microseconds)
+}
+
+func handoffClaude(_ args: [String]) -> Never {
+    guard args.count == 5, args[0] == "--handoff-claude",
+          let pidValue = Int32(args[1]), pidValue > 0,
+          let expectedSeconds = Int(args[2]), expectedSeconds > 0,
+          safeAbsolutePath(args[3]), args[3].hasSuffix(".app"),
+          let session = UUID(uuidString: args[4]), session.uuidString.lowercased() == args[4].lowercased() else {
+        fputs("Invalid Claude handoff request.\n", stderr)
+        exit(EXIT_FAILURE)
+    }
+
+    let appPath = resolvedPath(URL(fileURLWithPath: args[3], isDirectory: true))
+    let pid = pid_t(pidValue)
+    guard let (startSeconds, startMicroseconds) = processStartTime(pid), startSeconds == expectedSeconds else {
+        fputs("The target Claude Desktop process identity changed.\n", stderr)
+        exit(EXIT_FAILURE)
+    }
+    let target = HandoffTarget(pid: pid, startSeconds: startSeconds, startMicroseconds: startMicroseconds, appPath: appPath)
+    guard let app = handoffProcessIdentity(target) else {
+        fputs("The target is not the verified Claude Desktop process.\n", stderr)
+        exit(EXIT_FAILURE)
+    }
+
+    let link = "claude://resume?session=\(session.uuidString.lowercased())"
+    let event = NSAppleEventDescriptor(eventClass: 0x4755524C, eventID: 0x4755524C,
+        targetDescriptor: NSAppleEventDescriptor(processIdentifier: pid), returnID: -1, transactionID: 0)
+    event.setParam(NSAppleEventDescriptor(string: link), forKeyword: 0x2D2D2D2D)
+    do {
+        let reply = try event.sendEvent(options: [.waitForReply, .neverInteract], timeout: 5)
+        let errorNumber = reply.paramDescriptor(forKeyword: 0x6572726E)?.int32Value ?? 0
+        guard errorNumber == 0, handoffProcessIdentity(target) != nil else {
+            fputs("Claude Desktop rejected the session link or changed identity (\(errorNumber)).\n", stderr)
+            exit(EXIT_FAILURE)
+        }
+        _ = app.activate(options: [.activateAllWindows])
+        exit(EXIT_SUCCESS)
+    } catch {
+        fputs("Targeted Claude Desktop event failed, code \((error as NSError).code).\n", stderr)
+        exit(EXIT_FAILURE)
+    }
+}
+
 func accountHome() -> String? {
     guard let account = getpwuid(getuid()), let path = account.pointee.pw_dir else { return nil }
     let home = String(cString: path)
@@ -118,12 +189,16 @@ func openApplicationOneShot(_ args: [String]) -> Never {
     // Verify the kernel executable, including for legacy bootstrap launches.
     let target = TargetIdentity(pid: application.processIdentifier, executable: expectedExecutable,
         startSeconds: startSeconds)
-    // The callback object's AppKit state may lag the live process. Let the
-    // run loop refresh registration until the same bounded identity check passes.
-    while validatedApplication(target) == nil && Date() < deadline {
+    // Let AppKit refresh registration, then use the first complete verification.
+    var verified = false
+    while Date() < deadline {
+        if validatedApplication(target) != nil {
+            verified = true
+            break
+        }
         _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
     }
-    guard validatedApplication(target) != nil else {
+    guard verified else {
         let observedStart = processStartSeconds(target.pid).map(String.init) ?? "unavailable"
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
@@ -224,6 +299,7 @@ func openFromFinder(_ metadata: ProfileMetadata) -> Never {
 }
 
 let arguments = Array(CommandLine.arguments.dropFirst())
+if arguments.first == "--handoff-claude" { handoffClaude(arguments) }
 if arguments.first == "--process-executable" { inspectExecutable(arguments) }
 if arguments.first == "--open-app" || arguments.first == "--open-signed-app" { openApplicationOneShot(arguments) }
 if arguments.first == "--focus-pid" || arguments.first == "--quit-pid" { oneShot(arguments) }

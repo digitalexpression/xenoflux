@@ -61,7 +61,7 @@ async function setup(t, { wrongCwd = false, escapedDescendant = false, defaultRu
         environmentBinding: { roots: { config: defaultRoot, user: defaultUserHome }, workspace: cwd } };
     }
     const profile = await resolveCopilotProfile(options);
-    if (options.selected) profile.accountQualification = { scope: 'shared', authType: 'gh-cli', sdk: '1.0.29',
+    if (options.selected) profile.accountQualification = { scope: 'per-root', authType: 'user', sdk: '1.0.29',
       rootMode: 'explicit', runtimeVersion: '1.0.107', executableIdentity: profile.executableIdentity,
       route: copilotAccountRoute(profile.environmentBinding), expiresAt: Number.MAX_SAFE_INTEGER };
     return profile;
@@ -78,27 +78,11 @@ async function setup(t, { wrongCwd = false, escapedDescendant = false, defaultRu
     }) } : undefined;
   const accessOptions = { inspectResources: async () => [], processSnapshot: async () => [] };
   const fixtureResolvers = productRouting ? {} : { profileResolvers };
-  const fixtureAccounts = new Map();
-  // The explicit status launches use the inert SDK CLI. Substitute only the stock account check.
-  const accountContext = productRouting ? {
-    resolveStockCopilot: async ({ workspace }) => ({ workspace, rootMode: 'implicit', home: defaultRoot, executable,
-      executableIdentity: managed[0].native.executableIdentity }),
-    readCopilotAccount: async options => {
-      if (options.profile.rootMode === 'implicit') {
-        const status = fixtureAccounts.get(options.workspace);
-        fixtureAccounts.delete(options.workspace);
-        return status;
-      }
-      const status = await runtime.accountStatus(options);
-      fixtureAccounts.set(options.workspace, status);
-      return status;
-    },
-  } : undefined;
   const provider = createEngineProvider({ store, defaultUserHome, reportsRoot: base.reportsRoot,
     lockOptions: { lockPath: join(root, 'operation') },
     runContext: { ...base.runContext, terminalEnvironment, ...fixtureResolvers, clientRuntimes },
     reviewContext: { terminalEnvironment, ...fixtureResolvers, accessOptions, clientRuntimes, lockOptions: { lockPath: join(root, 'operation') } },
-    catalogContext: { terminalEnvironment, ...fixtureResolvers }, accountContext });
+    catalogContext: { terminalEnvironment, ...fixtureResolvers } });
   t.after(() => provider.close());
   return { ...base, store, provider, managed, defaultRoot, invocationLog, reservations };
 }
@@ -232,7 +216,7 @@ test('two persisted Copilot profiles reserve the requested repository and launch
   const app = await setup(t, { productRouting: true });
   for (const { name } of app.managed) {
     const account = await app.provider.profileAccount({ name, client: 'copilot' });
-    assert.equal(account.accountScope, 'shared');
+    assert.equal(account.accountScope, 'per-root');
   }
   const launched = async () => (await readFile(app.invocationLog, 'utf8')).trim().split('\n').map(JSON.parse);
   const before = await launched();

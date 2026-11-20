@@ -16,7 +16,7 @@ import { createDesktopRuntime } from '../src/desktop-runtime.js';
 import { createDesktopInstanceRuntime } from '../src/desktop-instance-runtime.js';
 import { createCodexDesktopSurface } from '../src/desktop-surface.js';
 import { assertNoConcurrentDesktops } from '../src/desktop-instance-guard.js';
-import { acquireProfileParticipant, releaseProfileParticipant } from '../src/profile-reservations.js';
+import { acquireProfileParticipant, readProfileOwners, releaseProfileParticipant } from '../src/profile-reservations.js';
 import { installationCommand, restoreHomeLogs } from '../src/installation-command.js';
 import { desktopInstancePlan, openDesktopInstance, prepareDesktopInstance, focusDesktopInstance, closeDesktopInstance,
   recoverDesktopInstance, listDesktopInstances, reconcileDesktopInstance, withProfileOperation } from '../src/desktop-instances.js';
@@ -162,15 +162,118 @@ test('two fixed-home desktops coexist with the original and two simultaneously r
   } finally { releaseCli(); await Promise.all(launches); }
 });
 
-test('reopening focuses one owned instance; same-profile CLI and registry removal remain locked', async t => {
+test('reopening focuses one owned instance; unsigned profile overlap and registry removal remain locked', async t => {
   const f = await fixture(t), a = await f.surface.open('A');
   const again = await f.surface.open('A');
   assert.equal(again.status, 'focused'); assert.equal(again.main.pid, a.main.pid);
   assert.equal(f.calls.filter(call => call.operation === 'open').length, 1);
   await f.surface.focus('A');
-  await assert.rejects(launchHome(f.store, 'A', { terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' }, ramLogs: f.ramLogs, run: async () => { throw new Error('must not launch'); } }), /in use/);
+  await assert.rejects(launchHome(f.store, 'A', { terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' },
+    instanceRuntime: f.runtime, lockOptions: { lockPath: f.options.lockPath },
+    ramLogs: f.ramLogs, run: async () => { throw new Error('must not launch'); } }), /Save your Codex sign-in/);
   await assert.rejects(removeProfile(f.store, 'A', f.options), /unfinished desktop instance/);
   await assert.rejects(unbindNativeHome(f.store, 'A', f.options), /unfinished desktop instance/);
+});
+
+function namedPair(f, name = 'A') {
+  const cliProcess = row(99901, join(f.root, 'codex'), process.pid);
+  const home = f.homes[name];
+  const ready = Promise.withResolvers(), done = Promise.withResolvers();
+  const logCalls = [];
+  f.options.ramLogs.prepareHome = async () => { logCalls.push('prepare'); };
+  f.options.ramLogs.joinHome = async () => { logCalls.push('join'); };
+  f.runtime.assertResourcesIdle = async (paths, { allowedProcesses = [] } = {}) => {
+    const profileApp = f.calls.findLast(call => call.operation === 'open' && call.plan.home === home.home);
+    const processes = f.rows.filter(row => row.pid === cliProcess.pid && paths.includes(home.home)
+      || profileApp && row.executable === profileApp.application.executable && paths.includes(home.desktopData));
+    for (const holder of processes) if (!allowedProcesses.some(row => row.pid === holder.pid
+      && row.startedAt === holder.startedAt && row.uid === holder.uid && row.executable === holder.executable))
+      throw new Error('Unexpected resource holder.');
+    return { idle: true, processes };
+  };
+  const cliOptions = { terminalEnvironment: { PATH: f.root + ':/usr/bin:/bin' },
+    instanceRuntime: f.runtime, lockOptions: { lockPath: f.options.lockPath }, ramLogs: f.options.ramLogs,
+    probe: async () => '0.166.0', probeEmbedded: async () => true };
+  return { logCalls, cliProcess, cliOptions, ready: ready.promise, exit: done.resolve,
+    start: () => launchHome(f.store, name, { ...cliOptions, run: async args => {
+      assert.equal(args.env.CODEX_HOME, home.home);
+      assert.equal(args.env.CODEX_SQLITE_HOME, home.home);
+      assert.ok(args.args.includes('--no-daemon'));
+      f.rows.push(cliProcess);
+      await args.onSpawn(cliProcess.pid);
+      ready.resolve();
+      await done.promise;
+      f.rows.splice(f.rows.indexOf(cliProcess), 1);
+      return { exitCode: 0, shutdown: { groupTerminated: true } };
+    } }).finally(() => ready.resolve()) };
+}
+
+for (const first of ['CLI', 'Desktop']) for (const closeFirst of ['CLI', 'Desktop']) {
+  test(`${first} first shares the same named home and closing ${closeFirst} preserves its running peer`, async t => {
+    const f = await fixture(t);
+    const sibling = await f.surface.open('B');
+    await writeFile(join(f.homes.A.home, 'auth.json'), 'native sign-in fixture', { mode: 0o600 });
+    const pair = namedPair(f);
+    let cliRun;
+    try {
+      if (first === 'Desktop') await f.surface.open('A');
+      cliRun = pair.start();
+      await pair.ready;
+      if (first === 'CLI') await f.surface.open('A');
+      assert.deepEqual(pair.logCalls, ['prepare', 'join']);
+      const owners = () => readProfileOwners(f.homes.A.root);
+      assert.deepEqual(new Set((await owners()).map(owner => owner.kind)), new Set(['interactive-cli', 'desktop-instance']));
+      await assert.rejects(launchHome(f.store, 'A', pair.cliOptions), /in use/);
+      if (closeFirst === 'CLI') {
+        pair.exit();
+        assert.equal((await cliRun).status, 'exited');
+        assert.deepEqual((await owners()).map(owner => owner.kind), ['desktop-instance']);
+        assert.equal((await f.surface.focus('A')).status, 'focused');
+      } else {
+        assert.equal((await closeDesktopInstance(f.store, 'A', f.options)).status, 'closed');
+        assert.deepEqual((await owners()).map(owner => owner.kind), ['interactive-cli']);
+        assert.ok(f.rows.includes(pair.cliProcess));
+        await assert.rejects(removeProfile(f.store, 'A', f.options), /in use|locked/);
+      }
+      assert.ok(f.rows.some(row => row.pid === sibling.main.pid));
+      assert.ok(f.rows.some(row => row.pid === f.original.pid));
+      assert.equal(await readFile(join(f.homes.A.home, 'auth.json'), 'utf8'), 'native sign-in fixture');
+      assert.notEqual(sibling.home, f.homes.A.home);
+    } finally {
+      pair.exit();
+      if (cliRun) assert.equal((await cliRun).status, 'exited');
+      await closeDesktopInstance(f.store, 'A', f.options);
+    }
+    await assert.rejects(access(lockPath(f, 'A')), { code: 'ENOENT' });
+  });
+}
+
+test('a failed read-only route join leaves the already running CLI owner untouched', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.homes.A.home, 'auth.json'), 'native sign-in fixture', { mode: 0o600 });
+  const pair = namedPair(f), cliRun = pair.start();
+  try {
+    await pair.ready;
+    const before = await readProfileOwners(f.homes.A.root);
+    f.options.ramLogs.joinHome = async () => { throw new Error('Unresolved active log route'); };
+    await assert.rejects(f.surface.open('A'), /Unresolved active log route/);
+    assert.deepEqual(await readProfileOwners(f.homes.A.root), before);
+    assert.equal(f.calls.some(call => call.operation === 'open'), false);
+  } finally { pair.exit(); await cliRun; }
+});
+
+test('an installation without the independent runtime leaves an already running Desktop untouched', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.homes.A.home, 'auth.json'), 'native sign-in fixture', { mode: 0o600 });
+  const pair = namedPair(f);
+  await f.surface.open('A');
+  const before = await readProfileOwners(f.homes.A.root);
+  const result = await launchHome(f.store, 'A', { ...pair.cliOptions,
+    probeEmbedded: async () => false, run: async () => assert.fail('The unsupported CLI must not launch.') });
+  assert.equal(result.error, 'CLI_DESKTOP_UNSUPPORTED');
+  assert.deepEqual(await readProfileOwners(f.homes.A.root), before);
+  assert.deepEqual(pair.logCalls, ['prepare']);
+  await closeDesktopInstance(f.store, 'A', f.options);
 });
 
 test('explicit desktop preparation refreshes a closed profile and refuses a running target without touching it', async t => {
@@ -689,7 +792,7 @@ test('resource/preparation failure before launch releases only its own reservati
   assert.equal(f.calls.filter(call => call.operation === 'open').length, 0);
   const foreign = { kind: 'foreign' }; await mkdir(lockPath(f, 'A'), { mode: 0o700 });
   await writeFile(join(lockPath(f, 'A'), 'owner.json'), JSON.stringify(foreign), { mode: 0o600 });
-  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /locked/);
+  await assert.rejects(openDesktopInstance(f.store, 'A', f.options), /in use/);
   assert.deepEqual(JSON.parse(await readFile(join(lockPath(f, 'A'), 'owner.json'))), foreign);
 });
 

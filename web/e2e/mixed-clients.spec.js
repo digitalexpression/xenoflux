@@ -59,11 +59,15 @@ test('profile-bound native sessions and mixed setup inventories remain usable in
     await page.addInitScript(() => localStorage.setItem('xenoflux-theme', 'light'));
     await page.goto(app.url);
     await page.goto(app.origin + '/compare/setups?a=Claude+managed&b=baseline&aClient=claude-code');
-    await expect(page.getByText('Separate setup inventories')).toBeVisible();
-    await expect(page.getByRole('heading', { name: /Claude managed · Claude Code/ }).first()).toBeVisible();
-    await expect(page.getByRole('heading', { name: /baseline · Codex/ }).first()).toBeVisible();
+    const inventories = page.getByRole('region', { name: 'Setup comparison', exact: true });
+    await expect(inventories).toBeVisible();
+    await page.getByText('Reading limits', { exact: true }).click();
+    await expect(page.getByRole('region', { name: 'Claude managed · Claude Code coverage' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'baseline · Codex coverage' })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await page.goto(app.origin + '/compare/setups?a=Claude+managed&b=Default&aClient=claude-code&bClient=claude-code');
     await expect(page.getByRole('link', { name: 'Preview copying selected settings' })).toBeVisible();
+    await page.getByRole('searchbox', { name: 'Find an item' }).fill('settings.json');
     await expect(page.getByRole('button', { name: /Could not compare settings.json/ }).first()).toBeVisible();
     await page.goto(app.origin + '/compare/sessions');
     await page.getByRole('link', { name: 'Choose recent sessions by profile' }).click();

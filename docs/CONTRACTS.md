@@ -51,11 +51,21 @@ never expose raw login output or accept credentials or OAuth callback codes.
 Native exit success alone does not establish sign-in. Revalidate the selected
 installation and roots, then verify through the existing native account check
 before reporting success. Preserve reservations when process shutdown is uncertain.
-Shared GitHub CLI sign-in excludes concurrent Xenoflux Copilot account use across controllers
-and invalidates observations for the shared account scope.
+Managed Copilot uses the selected native CLI account and a profile-local GitHub
+CLI configuration path to exclude the stock fallback. The Desktop app keeps its
+own sign-in. Default Copilot can use its existing stock GitHub CLI account.
+On a Profiles visit, background CLI account checks use the existing native
+verification and ownership guards. A check refused before it obtains the profile
+reservation preserves the previous account observation. Account labels are
+display metadata for the authenticated local Profiles page. Keep them in memory
+and omit them from reports and raw probe logs. Codex account checks do not
+refresh credentials. Report the surface that provides the identity.
 Profile cards may retain an expired account observation as **last checked** while
 its executable and roots still match. Displaying that observation never renews
 account qualification or permits task admission.
+An interrupted Codex account check retains its exclusive reservation. Recover it
+only for the matching local profile or Default after verifying a stopped owner,
+unchanged recorded roots, and idle native resources.
 
 ## Profile creation, copying and Undo
 
@@ -74,6 +84,20 @@ Standalone skill replacement is exact, including supported resources/scripts,
 obsolete package members, directory shape and modes. Explicit conflicts support
 keep/skip/replace. Refuse unsafe paths, ambiguous ownership, unsupported content/type
 transitions or insufficient owner permissions before mutation; never partially overlay.
+An owned same-name link from a Default client's native skill directory into
+`~/.agents/skills` can supply a standalone package. Codex also supports such
+links within its managed profile roots. Copy the verified package as files,
+recheck the source on apply and leave the source link intact. Present a verified
+link and its shared package once per source inventory.
+For Codex, Claude and Copilot agent and skill definitions, preview the copy with
+MCP bindings and tool pre-approvals removed. Preserve supported local restrictions
+when dropping MCP tools from an allowlist, including Copilot's explicit empty
+allowlist. Drop a Claude plan-mode override only when the remaining allowlist
+is limited to Read, Grep and Glob. Preserve Codex skill invocation policy while
+omitting tool dependencies from `agents/openai.yaml`. Omit Graphify's install
+version marker. Referenced Markdown can document manual integration setup.
+For a stock native source, check holders of the selected files and packages.
+Keep the idle-root requirement for managed destinations.
 Project, plugin and built-in resources retain their ownership. Discovery can be wider
 than copying, without making visible unknown configuration freely copyable.
 
@@ -105,8 +129,14 @@ protocol/account/event interpretation. Reuse capture, report projection, atomic 
 metadata and `.run-lock` memberships across controllers. Independent jobs have separate
 sessions, requests, workspaces and cancellation; canonical writable review workspaces
 cannot overlap active/unresolved claims. Capacity defaults to eight per controller.
-Profile mutations and new Desktop startup remain exclusive. Verified managed Codex Desktop
-can participate in comparison/review execution without losing its own reservation.
+Profile mutations and Xenoflux sign-in remain exclusive. A named Codex profile
+uses one native file credential store for CLI and Desktop within its own home.
+After sign-in, an interactive CLI and managed Desktop can hold separate claims on
+that home in either launch order. Admit the second client only with a verified
+peer and identifiable file holders. The CLI runs without a shared daemon for
+this pair. Keep sign-in and log storage preparation out of the join path. Closing
+or recovering one client releases only its own claim. Verified managed Codex
+Desktop can also participate in comparison or review under the task admission rules.
 
 Ordinary review uses the selected profile's normal cwd, sign-in, settings, instructions,
 integrations and permissions, with explicit process-local model/effort overrides only.
@@ -194,26 +224,58 @@ or retry. A deliberate new attempt has a fresh preview/record.
 
 ## Desktop and native helpers
 
-Claude and Copilot Desktop own one durable, exclusive reservation per profile independent of
-the UI server. Before startup, bind the current signed installation, canonical
-profile roots and their identities, persist intent and refuse a conflicting reservation.
-Copilot also refuses an existing vendor app. Claude uses a distinct Desktop data
+Claude and Copilot Desktop own durable profile reservations independent of the UI
+server. A managed Claude or Copilot profile admits one interactive CLI and one
+Desktop in either launch order. Use separate membership records and require an
+exact live peer before joining. Verify allowed holders on shared resources and
+scan Claude Desktop storage separately. For Copilot, require a Desktop holder
+of the profile database even when the CLI also holds it. Recovery or closure
+releases only the stopped owner's membership. Xenoflux sign-in, profile mutations,
+and task admission require an idle profile. Before startup, bind the current signed
+installation and canonical profile roots and their identities. Persist intent and
+refuse conflicting reservations. Copilot Desktop refuses an existing vendor app.
+Claude uses a distinct Desktop data
 folder and allows other instances without controlling them. Require a new exact native process identity and
 positive selected-root storage evidence before reporting profile-bound startup.
 For Claude, that evidence can come from an exact owned descendant holding the
 selected Desktop storage. A configuration environment variable alone is insufficient.
 Do not pass prompts, authentication choices or account overrides. Readonly status
-never releases the reservation. Explicit recovery rechecks the exact stopped
-owner, roots and complete holder observations; uncertain startup, reused process
+never releases the reservation. The Profiles refresh and profile actions may
+reconcile confirmed-stopped ownership using the same guarded checks as explicit
+recovery. The running local controller also checks registered claims in the
+background. Recheck the exact stopped owner, roots and complete holder observations
+before release. Uncertain startup, reused process
 identities and incomplete scans retain ownership. Other Claude instances alone
-do not block recovery of a confirmed-stopped profile. Never broaden shared task
-participant admission to bypass this exclusive claim.
+do not block recovery of a confirmed-stopped profile. Claude and Copilot Desktop
+remain outside shared task admission.
 
 Open/focus/quit verifies the signed vendor app, selected profile routes and exact
 PID/kernel start identity. Preserve signatures/entitlements; never re-sign vendor
 executables/helpers. Stock opening sends no prompt or account/surface selection and
 establishes no managed isolation or historical session identity. Refuse control from
 the target's own invocation ancestry or mismatched/unrelated processes.
+
+A Default CLI open from Profiles dispatches the current vendor executable in
+Terminal with the existing standard home and no prompt. The action establishes
+no Xenoflux ownership or managed runtime. Stock Desktop activity alone does not
+gate this dispatch. Named profile admission retains its existing ownership,
+sign-in, and storage checks.
+
+Profiles can request CLI shutdown for a verified, exact interactive run. The
+browser supplies the recorded run ID and the controller publishes a bounded
+request beside that run’s private report. Only the launcher for that run acts
+on the request through its own process-group cleanup. Repeated requests target
+the same run. Verify shutdown and release only the CLI reservation, preserving
+any Desktop peer. Stock CLI sessions and earlier launches without support
+continue to exit in Terminal.
+
+Managed Claude's `/app` starts the same profile's Desktop if needed, using the
+normal admission checks. It may release only a verified stopped Desktop claim
+before starting a replacement. Send the session ID once to the verified PID.
+Require fresh, matching session evidence from the selected Desktop storage
+after delivery. An unverifiable target, rejected delivery or missing session
+confirmation keeps Terminal open. Never fall back to the stock app or transfer
+either client's sign-in. Verify CLI shutdown before releasing only its reservation.
 
 Ship the prebuilt universal helper with source/binary identities and private binary-keyed
 caches. No install/pack compilation or fallback; damaged helpers need a corrected package.

@@ -13,7 +13,8 @@ import { findHistory, listHistory } from '../src/history.js';
 import { COPY_COMPONENTS, planCopy, applyCopy, planUndo, undoCopy } from '../src/native-copy.js';
 import { pickCopyComponents, confirmCopyAction } from '../src/copy-picker.js';
 import { inspectProfile } from '../src/profile-inventory.js';
-import { selectAdvancedCopy, reviewAdvancedConflicts } from '../src/advanced-command.js';
+import { copyCommandOptions, selectAdvancedCopy, reviewAdvancedConflicts } from '../src/advanced-command.js';
+import { createDesktopInstanceRuntime } from '../src/desktop-instance-runtime.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
 import { confirmClientShutdown } from '../src/client-shutdown.js';
 import { createLogStorage } from '../src/log-storage.js';
@@ -197,9 +198,10 @@ try {
       if (options['--advanced'] && options['--include'] !== undefined) throw new Error('--advanced cannot be combined with --include');
       if (options['--advanced'] && (json || !process.stdin.isTTY || !process.stdout.isTTY))
         throw new Error('Advanced selection requires an interactive terminal; use profile inspect NAME --json for inventory');
+      const bindings = undo ? {} : await copyCommandOptions(store, source, target);
       let include, selection, setupGuidance = [], limitations = [];
       if (options['--advanced']) {
-        const picked = await selectAdvancedCopy(store, source, target);
+        const picked = await selectAdvancedCopy(store, source, target, bindings);
         if (!picked) { result = { status: 'cancelled' }; process.exitCode = 130; }
         else {
           selection = Array.isArray(picked) ? picked : picked.selection;
@@ -219,7 +221,7 @@ try {
         }
       }
       if (!result) {
-        let copyOptions = { ...(selection ? { selection } : { include }), defaultUserHome: homedir() };
+        let copyOptions = { ...bindings, ...(selection ? { selection } : { include }) };
         let preview = undo ? await planUndo(store, target, copyOptions) : await planCopy(store, source, target, copyOptions);
         let skipped = [];
         if (options['--apply'] && !undo && preview.items?.some(item => item.status === 'conflict')) {
@@ -228,7 +230,7 @@ try {
           if (!reviewed) { result = { status: 'cancelled' }; process.exitCode = 130; }
           else {
             skipped = reviewed.skipped;
-            copyOptions = { selection: reviewed.selection, defaultUserHome: copyOptions.defaultUserHome };
+            copyOptions = { ...bindings, selection: reviewed.selection };
             if (reviewed.selection.length) {
               const priorComponents = preview.components;
               preview = await planCopy(store, source, target, copyOptions);
@@ -249,12 +251,16 @@ try {
           for (const signal of signals) process.on(signal, abort);
           try {
             process.stdout.write(`${displayJSON(review)}\n`);
-            process.stdout.write('Applying a copy may require a graceful client shutdown; standalone terminal Codex sessions must be closed manually.\n');
+            process.stdout.write('Close standalone Terminal sessions that use the selected profiles before continuing.\n');
             const action = undo ? 'undo' : 'copy';
             if (!await confirmCopyAction(action, { signal: controller.signal })) { result = { status: 'cancelled' }; process.exitCode = 130; }
             else {
-              const mutationOptions = { expectedHash: preview.hash, defaultUserHome: copyOptions.defaultUserHome,
-                runtime: clientRuntime(controller.signal), signal: controller.signal };
+              const nativeClient = undo ? preview.target?.clientId : bindings.clientId;
+              const instanceRuntime = nativeClient && nativeClient !== 'codex' && createDesktopInstanceRuntime();
+              const runtime = instanceRuntime
+                ? { assertIdle: ({ resourcePaths }) => instanceRuntime.assertResourcesIdle(resourcePaths) }
+                : clientRuntime(controller.signal);
+              const mutationOptions = { expectedHash: preview.hash, runtime, signal: controller.signal };
               result = undo ? await undoCopy(store, target, mutationOptions)
                 : await applyCopy(store, source, target, { ...copyOptions, ...mutationOptions });
               if (!undo) result = { ...result, skipped, ...(options['--advanced'] ? { setup: setupGuidance, limitations } : {}) };

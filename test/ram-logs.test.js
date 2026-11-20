@@ -35,6 +35,28 @@ test('inspection is read-only before first launch and while RAM storage is absen
   assert.equal(f.mounts, 1);
 });
 
+test('joining an active log route never prepares, mounts or replaces diagnostics', async t => {
+  const f = await fixture(t);
+  const source = join(f.home, 'logs_2.sqlite');
+  await writeFile(source, 'stored diagnostics', { mode: 0o600 });
+  const diskOnly = createRamLogs({ mountPath: f.mountPath, registry: f.registry, disk: f.disk, enabled: false });
+  await diskOnly.joinHome(f);
+  await assert.rejects(f.manager.joinHome(f), { code: 'RAM_LOGS_UNAVAILABLE' });
+  assert.equal(f.mounts, 0);
+  assert.equal(await readFile(source, 'utf8'), 'stored diagnostics');
+  await f.manager.prepareHome(f);
+  f.setBusy(true);
+  await f.manager.joinHome(f);
+  await assert.rejects(diskOnly.joinHome(f), { code: 'RAM_LOGS_UNAVAILABLE' });
+  assert.equal(f.mounts, 1);
+  const target = await lstat(f.target);
+  await f.unmount();
+  await assert.rejects(f.manager.joinHome(f));
+  assert.equal(f.mounts, 1);
+  assert.equal(await readlink(source), f.target);
+  assert.equal(target.isFile(), true);
+});
+
 test('Default and named profiles retain separate current-boot logs through repeated preparation', async t => {
   const f = await fixture(t, 'default'), other = join(f.root, 'other'), key = randomUUID();
   await mkdir(other, { mode: 0o700 });

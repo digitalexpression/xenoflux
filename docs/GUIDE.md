@@ -6,20 +6,21 @@ requires that link to establish a browser session. Running `xfx ui` again reopen
 the app; Ctrl+C stops its server. `xfx ui --demo` uses marked synthetic data and
 simulated actions without reading/changing profiles or clients.
 
-The app opens **Comparisons**. Choose **Use existing sessions**, **Run a new task**
-or **Choose two profiles**. The sidebar also opens **Sessions** and **Profiles**,
-with **Saved reports** under Comparisons and **Clients on this Mac** under Profiles.
+The app opens **Profiles**. The sidebar also opens **Sessions** and **Comparisons**.
+In Comparisons, choose **Use existing sessions**, **Run a new task** or
+**Choose two profiles**, or open **Saved reports** from the sidebar.
 **Activity** opens current jobs and recent comparison records. The toolbar keeps
 Back, Forward and the current page's breadcrumb available across these journeys.
+Use the toolbar’s sidebar toggle to switch between icons and full navigation.
 Use **Theme** for System, Light or Dark. The choice is remembered in this browser.
 
 ## Find installed clients and existing profiles
 
-Open **Clients on this Mac** to find clients and profiles before creating another
-profile. Review CLI and desktop findings for Codex, Claude Code and GitHub Copilot,
-then review existing setups. Clients on this Mac and Profiles recheck automatically
-every five seconds while visible and when you return to the window. Use **Check again**
-for an explicit fresh check.
+**Profiles** lists the standard setups and registered profiles Xenoflux can read.
+Expand **Client discovery** at the bottom for CLI and Desktop installation findings,
+known folders that need attention, and stock app controls. Discovery rechecks
+every five seconds while expanded and visible, and when you return to the window.
+Use **Check again** for an explicit fresh check.
 
 Discovery checks the selected PATH, standard client folders, the profile registry
 and direct folders in Xenoflux's managed profile directory. It does not search
@@ -37,39 +38,70 @@ Older readable records remain supported. A profile without a native folder needs
 setup; an unsupported record or registry format needs attention. Discovery leaves
 the original files unchanged and offers no automatic migration. An invalid or
 unsupported registry blocks profile operations without hiding installation findings.
-Continue to **Profiles** when you are ready to create a profile or copy settings.
 
 ## Create and compare profiles
 
-In Profiles, choose **Create profile**, select the client and choose **Empty** or
-**Selected parts of another profile**. Review selected same-client copies before
-creation. Empty means minimal management files, not authenticated or model-ready.
+In the Profiles toolbar, open **Add a profile** and choose **Create profile**. Select the client
+and choose **Empty** or **Selected parts of another profile**. Review selected
+same-client copies before creation. Empty means minimal management files, not
+authenticated or model-ready.
 Creation, native sign-in and opening a client are separate steps; follow the setup
 guidance before starting work. Credentials, conversations and generated memory
 are never copied. Profiles subsequently evolve independently.
 
+Use **Add existing profile folder** in the same menu to register a Codex folder.
+
 | Profile client | CLI | Desktop with the selected profile |
 | --- | --- | --- |
-| Codex | Open in Terminal | Open Codex Desktop, including to sign in |
-| Claude Code | Sign in through the browser; Open in Terminal for interactive work | Separate Desktop startup and storage; authenticated session/model use unverified |
-| GitHub Copilot | Sign in through the browser with the shared GitHub CLI account; Open in Terminal for interactive work | Profile-bound local startup and storage; authenticated session/model use unverified |
+| Codex | Open in Terminal | Open Codex Desktop with the same profile sign-in |
+| Claude Code | Sign in through the browser; Open in Terminal for interactive work | Open Claude Desktop with its own sign-in |
+| GitHub Copilot | Sign in with GitHub for this profile; Open in Terminal for interactive work | Open GitHub Copilot Desktop with its own sign-in |
 
-Profiles groups entries by client. Each entry keeps inspection links separate
-from sign-in and opening actions. **More** contains the available registry edits
-and selected-copy actions.
+Profiles groups entries by client. **Details** highlights the selected card and
+replaces the inspector’s guide with that profile’s information. Each entry
+keeps inspection links separate from sign-in and opening actions. **More** contains
+the available registry edits and selected-copy actions. Profiles shows the email
+or GitHub username reported by the profile’s CLI. A named Codex profile uses the
+same account in CLI and Desktop. Check the account menu in Claude Desktop or
+Copilot Desktop for their separate sign-ins.
 
-For Claude Code or Copilot, choose **Sign in** on the profile entry. Complete
-authorization in your browser. Xenoflux checks sign-in automatically and updates
-the profile when verification finishes. You do not need to run a command or return
-to **Check sign-in**. GitHub may ask you to enter the device code shown in Xenoflux.
-After five minutes, a previous result is labelled **last checked**. It remains
-visible until another check or a change to its native binding invalidates it.
-This display does not renew account qualification for running tasks.
+If Xenoflux finds a vendor’s standard setup, it shows a **Default** card in that
+client’s group. **Open in Terminal** uses the vendor’s normal CLI and existing
+setup. Opening the regular Desktop app and opening the Default CLI are independent
+actions. Xenoflux reports **Unknown** when it cannot attribute a stock process.
 
-Claude signs in to the selected configuration root. Copilot signs in through
-GitHub CLI and shares that account across qualified Copilot profiles and other
-tools using GitHub CLI. Review that shared scope before continuing. Separate
-Copilot settings do not create separate accounts.
+Profiles checks managed CLI and Desktop state while it refreshes. **Unknown**
+means the process could not be verified. **Unavailable** means the client or its
+profile binding was unavailable. Open **Details** for the observation that led to
+the label. The account line describes sign-in separately. **Sign in required**
+appears when no usable sign-in is established, with the exact finding in **Details**.
+
+Each profile offers the sign-in action that matches its status. For a named Codex
+profile, use **Sign in via Terminal** when sign-in is required, or open Codex Desktop
+to sign in there. Each named Codex profile has its own native
+account store. Its CLI and Desktop use the same sign-in, and you can choose a
+different account on another profile. **Sign-in saved** means Xenoflux found the
+profile's `auth.json` file.
+
+After signing in, you can open CLI and Desktop on the same named Codex profile
+in either order. Closing one leaves the other running. Concurrent use requires a
+Codex CLI that supports `--no-daemon` and an existing log storage route both
+clients can use. Close both clients before changing or copying the profile.
+
+When you open Profiles, Xenoflux checks the CLI sign-in status for available
+standard and managed Claude Code and Copilot profiles. It checks again when a
+finding expires or its verification is cleared while Profiles is open. The card
+retains the last checked account while a check is pending. If a managed profile
+is signed out or its sign-in route can’t be verified, choose **Sign in** or
+**Sign in with GitHub** and finish in your browser. GitHub may ask for the device
+code shown in Xenoflux.
+Xenoflux verifies sign-in automatically and hides the sign-in action while the
+result is current. After five minutes, Xenoflux marks the previous result **last
+checked**. Checking again can renew Copilot account qualification for tasks.
+
+Claude Code and Copilot CLI sign in to the selected profile. For existing managed
+Copilot profiles that used the shared GitHub CLI login, choose **Sign in with
+GitHub** to set up a native Copilot CLI account for that profile.
 
 You can cancel a pending sign-in. Cancellation stops Xenoflux's login process;
 it does not undo authorization already completed in your browser. Closing the
@@ -78,7 +110,7 @@ retry from Xenoflux. Xenoflux never asks you to paste a credential or Claude
 authorization code. CLI sign-in does not verify Desktop sign-in.
 
 **Open in Terminal** launches the current selected CLI through Xenoflux with the
-profile's configuration root and an exclusive reservation. A bound project is
+profile's configuration root and a profile reservation. A bound project is
 used when present; otherwise it opens the profile's private workspace. Launching
 a CLI starts no task automatically. Close its Terminal session before changing
 or copying that profile. A native startup can still write its own state or run
@@ -87,22 +119,42 @@ configured hooks.
 For Copilot, choose **Open GitHub Copilot Desktop** on the profile entry. The
 signed installed app opens with that profile's storage. Xenoflux refuses an
 already-running Copilot app or a profile reserved by other work; it never closes
-those clients for you. Desktop sign-in remains inside the vendor app, separate
-from the CLI's shared-account check.
+those clients for you. Sign in to Desktop separately. Different profiles can use
+different GitHub accounts.
 
 For Claude, choose **Open Claude Desktop** on the profile entry. Each profile has
 its own Desktop data folder alongside its Claude Code configuration folder.
-Other Claude Desktop instances can stay open. Xenoflux starts a new instance
-and verifies its selected storage without focusing, closing or changing the
-other instances. Desktop sign-in and its use of Claude Code settings remain
-unverified. The CLI sign-in check does not check Desktop sign-in.
+Xenoflux opens and verifies the profile's own instance. Claude Desktop has a
+separate sign-in from the CLI. Keep only the target Desktop instance running
+during sign-in so macOS delivers the browser's sign-in link to that instance.
 
-Claude and Copilot Desktop keep their profile reservations when the Xenoflux UI stops.
-After you quit the app, choose **Release closed Desktop reservation** before
-reusing the profile in the CLI, copying settings or editing its registry entry.
-Xenoflux releases only confirmed-stopped ownership with no remaining profile
-holders. Uncertain state stays reserved. A missing CLI does not prevent opening
-an otherwise readable Desktop profile.
+1. Quit regular Claude Desktop and any other Claude Desktop profiles.
+2. In Xenoflux, choose **Open Claude Desktop** for the profile you want to sign
+   in to. Complete sign-in and check the account menu in that window.
+3. Quit the profile's Desktop. Open regular Claude Desktop first, then reopen
+   the profile from Xenoflux. Both instances can stay open once signed in.
+
+Run `/app` in a managed Claude Code Terminal session to move the conversation to
+that profile's Claude Desktop. Xenoflux starts the matching Desktop if needed.
+If Desktop asks you to sign in, follow the steps above, then retry `/app` in
+the same Terminal session. Claude Code exits and Xenoflux releases its Terminal
+reservation after it verifies Desktop opened the conversation. If Xenoflux
+cannot confirm the handoff, the conversation stays open in Terminal. If you
+can see the conversation in Desktop, you can close Terminal yourself.
+
+For a Claude Code or Copilot profile, you can start one managed CLI and one
+managed Desktop in either order. Use **Show Desktop** or **Close Desktop** on
+an open managed profile’s card. Use **Close CLI** to stop a terminal session
+launched by the current Xenoflux version. You can also exit the CLI in Terminal
+or quit Desktop normally. Closing either client leaves the other running.
+Finish both clients before changing or copying the profile.
+
+The CLI launcher clears its own reservation after verified shutdown. Xenoflux
+checks for closed Desktop clients in the background while the local app is
+running, even with the Profiles tab closed. Profiles also checks on refresh
+and before profile actions. If the local app was stopped when you quit Desktop,
+the next refresh or profile action clears its verified reservation. Xenoflux
+preserves active or uncertain reservations.
 
 Copy preview lists additions, replacements, removals and kept items. Unselected
 and destination-only state is preserved. Selected standalone skills are replaced
@@ -115,14 +167,15 @@ Other profiles can stay open while you copy. The app checks both copy profiles
 for active reservations and file holders and never closes their clients.
 See [terminal copying and recovery](CLI.md#profiles-copy-and-recovery).
 
-Rename, repository binding and removal affect registry metadata; removing a profile
-leaves its files on disk. Native Open controls submit no task. The separate **Native apps** controls
-under **Clients on this Mac** open stock Claude/Copilot with the app's existing setup; they do not select a managed
-profile. A Copilot session link dispatch does not prove that the target session exists.
+Use the profile’s **More** menu to rename it, add or remove project bindings,
+or remove the profile from Xenoflux. Removing a profile or project binding
+keeps its files on disk. Native Open controls submit no task. Under **Client
+discovery**, **Native apps** opens stock Claude or Copilot using the app’s existing
+setup. A Copilot session link dispatch does not prove that the target session exists.
 
 ## Inspect and compare setups
 
-From **Clients on this Mac** or **Profiles**, choose **Inspect setup** to read one
+In a profile’s **Details**, choose **Inspect setup** to read its
 profile's settings, instructions, agents, skills, hooks, plugins, MCP and memory settings. Inspect
 values, file previews, source locations and reading limits. These are current
 local setup sources, not proof of effective precedence, native loading or session use.
@@ -135,12 +188,17 @@ Use **Refresh setup** to reread the selected scope. Invalid repository paths fai
 explicitly; they do not fall back to a comparison without project context.
 
 Choose **Compare with…** to select another profile from the same or a different
-vendor. Same-vendor comparisons retain **Same**, **Different**, **Could not compare**
-and **Not applicable** within the sources read. Different-vendor comparisons align
-categories for inspection while keeping each vendor's observations separate.
-Same-client count controls filter the result list. The selected filter is labeled
-**Selected**. Choose an item for its detail; when the columns stack, **View details**
-and **Back to selected item** move between the row and detail without changing it.
+vendor. Both views use the same side-by-side columns, search and collapsible
+categories. Use **Reading limits**, **Change profiles**, or **Refresh setups**
+from the comparison toolbar.
+Same-vendor comparisons retain **Same**, **Different**, **Could not compare**
+and **Not applicable** within the sources read. Choose a row to see its full
+content diff, source evidence and available copy actions. In different-vendor
+comparisons, each exact skill name gets a row with source counts for both profiles.
+Use **Name matches** to see names observed in both profiles or **One side observed**
+to focus on items observed on one side. **Not observed** describes the available read.
+The inspector stays beside the results as you scroll. On narrow screens, selecting
+a row opens the inspector in a bottom sheet. Closing it returns focus to the row.
 Matching names or values do not establish equivalent behavior. Missing or unreadable
 evidence remains explicit, and copying between vendors is unavailable.
 Inspection and comparison read files without opening, signing in or activating clients.
@@ -343,6 +401,13 @@ resources are reconciled; uncertain/live ownership stays blocked. Failures remai
 visible after a successful later attempt. Separate terminal recovery commands are
 in [CLI recovery](CLI.md#profiles-copy-and-recovery).
 
+If **Open Desktop** fails, select **See details** on the profile card. When
+processes hold profile files, the inspector lists their names and PIDs. Save your
+work, quit those apps or exit those sessions, then try **Open Desktop** again.
+Use Activity Monitor to look up a PID. If a Xenoflux operation holds the shared
+desktop lock, follow the inspector’s instructions for waiting or recovering the
+recorded profile. A PID recorded for a lock does not verify the running process.
+
 If the launch-link warning appears, run `xfx ui` again and use its printed link.
 If the server is unreachable, restart it and inspect the recorded task state.
 For denied history access, grant the terminal relevant Files and Folders access
@@ -353,20 +418,21 @@ in macOS Privacy & Security settings. Omit `--port` to select a free port.
 The supported platform is local Apple Silicon macOS with Codex, Claude Code and
 GitHub Copilot CLI. Profiles follow current selected installations and capabilities;
 a replaced executable/root after preview requires a new preview, not a version pin.
-Claude's observed account route is per-root/same-account; Copilot's qualified
-`gh-cli` route is shared. Separate roots do not prove separate accounts.
+Managed Claude and Copilot use a native CLI sign-in for each profile.
+Copilot Default can use the stock GitHub CLI account.
 
-Credential refresh, distinct-account independence and shared sign-out isolation
-are unverified. An interrupted shared-account metadata operation keeps its
+Credential refresh and sign-out during concurrent use remain unverified.
+Claude and Copilot sign in separately in CLI and Desktop.
+An interrupted shared-account metadata operation keeps its
 reservation for maintainer recovery. Some native pair/mode combinations, repeated overlap stress,
 controller-kill reviews and copied-setup loading remain deferred. Real Codex
 stale-callback recovery is unobserved; synthetic Desktop fixtures do not establish
 real sign-in, Dock behavior or account isolation. Unreported effort/usage stays
 unknown, and sampled ancestry does not prove escaped descendants stopped.
 
-Claude and Copilot Desktop qualification covers local startup and selected-root storage.
-Desktop authentication, effective session settings, model use and account
-independence remain unverified. Cloud execution,
+Claude and Copilot Desktop qualification covers local startup and selected-root
+storage. Xenoflux does not inspect Desktop accounts. Effective Desktop session
+settings and model use remain unverified. Cloud execution,
 generic configuration editing and cross-client setup copying are outside the
 supported scope. Xenoflux never transfers credentials or grants native trust
 through inspection/copying.
