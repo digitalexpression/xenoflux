@@ -50,6 +50,7 @@ export interface ProfileCard {
   state: 'ready' | 'unbound' | 'unavailable';
   reason: string | null;
   signIn: string;
+  accountFinding?: { state: 'signed-in' | 'signed-out' | 'saved' | 'unverified' | 'unchecked'; lastChecked: boolean };
   binding: string;
   repositories?: string[];
   summary: string;

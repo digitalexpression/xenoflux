@@ -267,11 +267,12 @@ export function managedNativeProfiles({ store, profilesBase, defaultUserHome = h
     }
   }
 
-  async function hasStock(client) {
+  async function stockFolder(client) {
     const path = join(defaultUserHome, STOCK_DIR[client]);
-    try { return (await lstat(path)).isDirectory() && await realpath(path) === path; }
-    catch { return false; }
+    try { return (await lstat(path)).isDirectory() && await realpath(path) === path ? path : null; }
+    catch { return null; }
   }
 
-  return { binary, createProfile, resolveProfile, qualifiedCopilot, setup, check, observed, hasStock, signin, invalidate };
+  const hasStock = async client => Boolean(await stockFolder(client));
+  return { binary, createProfile, resolveProfile, qualifiedCopilot, setup, check, observed, stockFolder, hasStock, signin, invalidate };
 }

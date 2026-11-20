@@ -219,10 +219,20 @@ export async function withProfileOperation(store, id, options, action) {
       if (await exists(guardPath)) {
         await privateDirectory(guardPath);
         const old = await readJSON(join(guardPath, 'owner.json'));
-        if (!options.recovery || old.kind !== owner.kind || old.host !== owner.host || old.storePath !== owner.storePath || old.profileId !== id
-          || old.journalPath !== owner.journalPath || !uuid.test(old.runId ?? '') || !Number.isSafeInteger(old.pid) || old.pid < 1
-          || (options.isAlive ?? alive)(old.pid)) {
-          if (Date.now() >= deadline) throw Object.assign(new Error('Another desktop operation is running or interrupted; preserve it and recover that profile'), { code: 'profile-operation-busy' });
+        const localOwner = old?.kind === owner.kind && old.host === owner.host && uuid.test(old.runId ?? '')
+          && Number.isSafeInteger(old.pid) && old.pid > 0;
+        const canRecover = options.recovery && localOwner && old.storePath === owner.storePath
+          && old.profileId === id && old.journalPath === owner.journalPath;
+        const isAlive = options.isAlive ?? alive;
+        if (!canRecover || isAlive(old.pid)) {
+          if (Date.now() >= deadline) {
+            const profileId = localOwner && old.storePath === owner.storePath && typeof old.profileId === 'string'
+              && uuid.test(old.profileId) && old.journalPath === paths(store, old.profileId).journal ? old.profileId : null;
+            const operationOwner = localOwner ? { profileId, presentPid: canRecover || isAlive(old.pid) ? old.pid : null } : null;
+            throw Object.assign(new Error('Another desktop operation is running or interrupted; preserve it and recover that profile'), {
+              code: 'profile-operation-busy', operationOwner,
+            });
+          }
           await new Promise(resolve => setTimeout(resolve, 25)); continue;
         }
         await release(guardPath, old);
@@ -463,7 +473,9 @@ export async function openDesktopInstance(store, name, {
         await save(store, state, 'closed');
         await releaseInstanceControl(owner, options);
       } else await save(store, state);
-      throw new Error(`${error.message}${launchAttempted ? '\nInstance reservation preserved. Use desktop recover PROFILE after that instance stops.' : ''}`, { cause: error });
+      const failure = new Error(`${error.message}${launchAttempted ? '\nInstance reservation preserved. Use desktop recover PROFILE after that instance stops.' : ''}`, { cause: error });
+      if (launchAttempted) failure.reservationPreserved = true;
+      throw failure;
     }
   });
 }

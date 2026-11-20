@@ -252,6 +252,12 @@ executables/helpers. Stock opening sends no prompt or account/surface selection 
 establishes no managed isolation or historical session identity. Refuse control from
 the target's own invocation ancestry or mismatched/unrelated processes.
 
+A Default CLI open from Profiles dispatches the current vendor executable in
+Terminal with the existing standard home and no prompt. The action establishes
+no Xenoflux ownership or managed runtime. Stock Desktop activity alone does not
+gate this dispatch. Named profile admission retains its existing ownership,
+sign-in, and storage checks.
+
 Profiles can request CLI shutdown for a verified, exact interactive run. The
 browser supplies the recorded run ID and the controller publishes a bounded
 request beside that run’s private report. Only the launcher for that run acts

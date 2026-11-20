@@ -50,8 +50,7 @@ export async function observeProfileClients(home, { desktopRunning = null, share
   const foreign = others.filter(holder => !cliHolders.includes(holder));
   const desktopOpen = desktopRunning === true || desktopHolders.length > 0;
   const cli = cliHolders.length ? { state: 'running', text: `running (PID ${cliHolders.map(h => h.pid).join(', ')})` }
-    : desktopOpen && !sharedCodexHome ? { state: 'unavailable', text: 'not available while its Desktop is open' }
-      : foreign.length ? { state: 'unknown', text: `files in use by ${[...new Set(foreign.map(h => h.command))].join(', ')}` }
-        : { state: 'not-running', text: 'not running' };
+    : foreign.length ? { state: 'unknown', text: `files in use by ${[...new Set(foreign.map(h => h.command))].join(', ')}` }
+      : { state: 'not-running', text: 'not running' };
   return { cli, desktop: desktopOpen ? { state: 'running', text: 'open' } : { state: 'not-running', text: 'not running' } };
 }

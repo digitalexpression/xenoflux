@@ -100,6 +100,32 @@ test('Desktop opens without a CLI, binds selected database and survives controll
   assert.equal(f.opened, 1);
 });
 
+for (const vendor of ['claude', 'copilot']) {
+  test(`${vendor} profile status checks for holders before reporting the CLI closed`, async t => {
+    const f = await fixture(t, vendor);
+    const status = () => f.owner.status(f.profile.id, { installation: f.app, observeCli: true });
+    assert.equal(f.checks, 0);
+    await f.owner.status(f.profile.id, { installation: f.app });
+    assert.equal(f.checks, 0);
+    assert.equal((await status()).cliState, 'not-running');
+    assert.equal(f.checks, 1);
+    f.setBusy(true);
+    const blocked = await status();
+    assert.equal(blocked.state, 'available');
+    assert.equal(blocked.cliState, 'unknown');
+    assert.match(blocked.cliReason, /RESOURCE_BUSY/);
+    await assert.rejects(readProfileOwners(f.root), { code: 'ENOENT' });
+
+    f.setBusy(false);
+    await f.owner.open(f.profile.id, { appKey: f.app.appKey });
+    const before = await readFile(await f.report());
+    const running = await status();
+    assert.equal(running.state, 'running');
+    assert.equal(running.cliState, 'not-running');
+    assert.deepEqual(await readFile(await f.report()), before);
+  });
+}
+
 test('normal quit stays reserved until explicit preview and fresh recovery', async t => {
   const f = await fixture(t);
   await f.owner.open(f.profile.id, { appKey: f.app.appKey });
@@ -641,9 +667,14 @@ for (const [vendor, desktopFirst, closeFromUi] of [
         cliHoldsDesktopStorage = false;
       }
       if (!desktopFirst) {
-        assert.equal((await f.owner.status(f.profile.id, { installation: f.app })).state, 'available');
+        const status = await f.owner.status(f.profile.id, { installation: f.app, observeCli: true });
+        assert.equal(status.state, 'available');
+        assert.equal(status.cliState, 'running');
         assert.equal((await desktop()).state, 'running');
       }
+      const running = await f.owner.status(f.profile.id, { observeCli: true });
+      assert.equal(running.state, 'running');
+      assert.equal(running.cliState, 'running');
       assert.deepEqual((await owners()).map(owner => owner.kind).sort(), [`${vendor}-desktop`, 'interactive-cli']);
       const other = { kind: 'native-signin', runId: randomUUID() };
       await assert.rejects(acquire(join(f.root, '.run-lock'), other, true));

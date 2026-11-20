@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useEffectEvent, useId, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import type { MouseEvent, RefObject } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
-import { CircleCheck, CircleX, Ellipsis, FolderOpen, LogIn, Monitor, PanelRight, Play, ScanLine, Square, Terminal, TriangleAlert } from 'lucide-react';
+import { ChevronDown, CircleCheck, CircleX, Ellipsis, FolderOpen, LogIn, Monitor, PanelRight, Play, Plus, RefreshCw, ScanLine, Square, Terminal, TriangleAlert, X } from 'lucide-react';
 import { ApiError, apiGet, apiPost } from '@/api/client';
 import type { ClientAction, ClientActionResult, ClientInfo, ClientState, MenuAction, NativeSigninAttempt, ProfileCard, ProfileClient, ProfilesView, StatusKind } from '@/api/types';
 import { setupInspectHref, setupParams } from '@/components/setup-inventory';
-import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
+import { Loading, LoadError, Page, useInfo } from '@/components/layout';
 import { ErrorPanel, SimulatedNote, WarningAlert } from '@/components/notices';
+import { ProfileDiscovery } from '@/components/profile-discovery';
 import { StatusBadge } from '@/components/badges';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogClose, DialogContent } from '@/components/ui/dialog';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Tooltip } from '@/components/ui/tooltip';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useResource } from '@/lib/useResource';
@@ -24,21 +25,56 @@ const clientBusyLabels: Record<string, string> = {
   'open-desktop': 'Opening Desktop…',
   'focus-desktop': 'Showing Desktop…',
   'close-desktop': 'Closing Desktop…',
+  'refresh-signin': 'Updating sign-in status…',
 };
 
-type SurfaceState = 'open' | 'closed' | 'unknown';
-const surfaceStates: Record<ClientState, SurfaceState> = { running: 'open', 'not-running': 'closed', unknown: 'unknown', unavailable: 'unknown' };
-const surfaceLabels: Record<SurfaceState, string> = { open: 'Open', closed: 'Closed', unknown: 'Unknown' };
+type SurfaceState = 'open' | 'closed' | 'unknown' | 'unavailable';
+const surfaceStates: Record<ClientState, SurfaceState> = { running: 'open', 'not-running': 'closed', unknown: 'unknown', unavailable: 'unavailable' };
+const surfaceLabels: Record<SurfaceState, string> = { open: 'Open', closed: 'Closed', unknown: 'Unknown', unavailable: 'Unavailable' };
+const accountLabels: Record<NonNullable<ProfileCard['accountFinding']>['state'], string> = {
+  'signed-in': 'Signed in', 'signed-out': 'Sign in required', saved: 'Sign-in saved', unverified: 'Sign in required', unchecked: 'Sign-in not checked',
+};
 
 type CardActivity = { kind: 'idle' } | { kind: 'checking-account' } | { kind: 'signing-in' } | { kind: 'action'; id: string };
-type CardNotice = { status: StatusKind; text: string };
+type DesktopBlocker = { guidance: string; processes: string[]; command?: string };
+type CardNotice = { status: StatusKind; text: string; blocker?: DesktopBlocker };
+
+function readDesktopBlocker(error: unknown): DesktopBlocker | undefined {
+  if (!(error instanceof ApiError) || !['profile-operation-busy', 'desktop-resources-busy'].includes(error.code)) return;
+  const details = error.details;
+  if (!details || typeof details !== 'object' || !('guidance' in details) || typeof details.guidance !== 'string'
+    || !('processes' in details) || !Array.isArray(details.processes)
+    || !details.processes.every((name): name is string => typeof name === 'string')) return;
+  return { guidance: details.guidance, processes: details.processes,
+    ...('command' in details && typeof details.command === 'string' ? { command: details.command } : {}) };
+}
 type ClientIcons = Partial<Record<ProfileClient, string | null>>;
 const clientInitials: Record<ProfileClient, string> = { codex: 'Cx', 'claude-code': 'Cl', copilot: 'Gh' };
 const cardKey = (profile: ProfileCard) => `${profile.client ?? 'codex'}:${profile.name}`;
+function accountFreshness(profile: ProfileCard) {
+  if (!profile.client || profile.client === 'codex') return 'current';
+  if (profile.accountFinding?.lastChecked) return 'stale';
+  return profile.accountFinding?.state === 'unchecked' ? 'unchecked' : 'current';
+}
 const desktopActions = new Set(['open-desktop', 'focus-desktop', 'close-desktop']);
+const primaryClientActions = new Set(['open-terminal', 'show-terminal', 'open-desktop', 'focus-desktop']);
 const actionIcons: Partial<Record<string, typeof Play>> = {
   'open-terminal': Play, 'open-desktop': Play, 'show-terminal': Terminal, 'focus-desktop': Monitor,
-  'close-terminal': Square, 'close-desktop': Square, signin: LogIn, check: ScanLine,
+  'close-terminal': Square, 'close-desktop': Square, signin: LogIn,
+};
+const inspectorDockQuery = '(min-width: 800px)';
+const canDockInspector = () => window.matchMedia(inspectorDockQuery).matches;
+function subscribeInspectorDock(update: () => void) {
+  const query = window.matchMedia(inspectorDockQuery);
+  query.addEventListener('change', update);
+  return () => query.removeEventListener('change', update);
+}
+
+type ProfileSelection = {
+  key: string;
+  trigger: HTMLButtonElement;
+  fallback: HTMLButtonElement | null;
+  focusInspector: boolean;
 };
 
 type DialogState =
@@ -52,6 +88,8 @@ export function Profiles() {
   const info = useInfo();
   const [params, setParams] = useSearchParams();
   const [signIn, setSignIn] = useState<{ profile: ProfileCard; heading: HTMLHeadingElement | null } | null>(null);
+  const [checkingAccount, setCheckingAccount] = useState<string | null>(null);
+  const [busyClients, setBusyClients] = useState<Record<string, string>>({});
   const view = useResource(async () => {
     if (info?.mode === 'engine') {
       try { return await apiPost<ProfilesView>('/api/profiles/refresh'); }
@@ -60,52 +98,65 @@ export function Profiles() {
       }
     }
     return apiGet<ProfilesView>('/api/profiles');
-  }, 'profiles', { live: true, paused: signIn !== null });
+  }, 'profiles', { live: true, paused: signIn !== null || checkingAccount !== null || Object.keys(busyClients).length > 0 });
   const [dialog, setDialog] = useState<DialogState>(null);
+  const pageHeading = useRef<HTMLHeadingElement>(null);
+  const addProfileTrigger = useRef<HTMLButtonElement>(null);
   const editTrigger = useRef<HTMLButtonElement | null>(null);
   const [message, setMessage] = useState<{ status: StatusKind; text: string } | null>(null);
   const [cardNotices, setCardNotices] = useState<Partial<Record<string, CardNotice>>>({});
   const pendingClients = useRef(new Set<string>());
-  const [busyClients, setBusyClients] = useState<Record<string, string>>({});
-  const checkedOnVisit = useRef(new Set<string>());
-  const [checkingAccount, setCheckingAccount] = useState<string | null>(null);
-  const [inspected, setInspected] = useState<string | null>(null);
-  const inspectTrigger = useRef<HTMLButtonElement | null>(null);
+  const checkedOnVisit = useRef(new Map<string, ReturnType<typeof accountFreshness>>());
+  const [selection, setSelection] = useState<ProfileSelection | null>(null);
+  const inspectorId = useId();
+  const inspectorCloseButton = useRef<HTMLButtonElement>(null);
+  const dockInspector = useSyncExternalStore(subscribeInspectorDock, canDockInspector);
   const [revealing, setRevealing] = useState<string | null>(null);
   const [icons, setIcons] = useState<ClientIcons>({});
   const { data, loading, reload } = view;
   const clientControls = info?.features.clientControls;
-  const finishAccountCheck = useEffectEvent((name: string) => {
-    pendingClients.current.delete(name);
-    if (!signIn) reload();
+  const finishAccountCheck = useEffectEvent(async (key: string, checked: boolean) => {
+    if (checked && !signIn) await reload();
+    pendingClients.current.delete(key);
     setCheckingAccount(null);
   });
 
   useEffect(() => {
     if (!clientControls || !data || data.simulated || loading || signIn || checkingAccount || document.hidden) return;
-    const profile = data.profiles.find(({ name, client, clientActions, accountCheck }) => client
-      && (accountCheck ?? (client !== 'codex' && clientActions.some(action => action.id === 'open-terminal')))
-      && !checkedOnVisit.current.has(name) && !pendingClients.current.has(name));
+    for (const profile of data.profiles) {
+      const key = cardKey(profile);
+      if (accountFreshness(profile) === 'current' && checkedOnVisit.current.has(key))
+        checkedOnVisit.current.set(key, 'current');
+    }
+    const profile = data.profiles.find(candidate => candidate.client
+      && (candidate.accountCheck ?? (candidate.client !== 'codex' && candidate.clientActions.some(action => action.id === 'open-terminal')))
+      && checkedOnVisit.current.get(cardKey(candidate)) !== accountFreshness(candidate)
+      && !pendingClients.current.has(cardKey(candidate)));
     if (!profile) return;
 
     const { name, client } = profile;
-    checkedOnVisit.current.add(name);
-    pendingClients.current.add(name);
-    setCheckingAccount(name);
+    const key = cardKey(profile);
+    checkedOnVisit.current.set(key, accountFreshness(profile));
+    pendingClients.current.add(key);
+    setCheckingAccount(key);
     void apiPost(`/api/profiles/${encodeURIComponent(name)}/account`, { client })
-      .catch(() => undefined)
-      .finally(() => finishAccountCheck(name));
+      .then(() => finishAccountCheck(key, true), () => finishAccountCheck(key, false));
   }, [clientControls, data, loading, signIn, checkingAccount, busyClients]);
 
   useEffect(() => {
+    pageHeading.current?.focus();
     let current = true;
     apiGet<ClientIcons>('/api/clients/icons').then(value => { if (current) setIcons(value); }, () => undefined);
     return () => { current = false; };
   }, []);
 
   useEffect(() => {
-    if (inspected && data && !data.profiles.some(profile => cardKey(profile) === inspected)) setInspected(null);
-  }, [inspected, data]);
+    if (selection && data && !data.profiles.some(profile => cardKey(profile) === selection.key)) setSelection(null);
+  }, [selection, data]);
+
+  useLayoutEffect(() => {
+    if (selection?.focusInspector) inspectorCloseButton.current?.focus();
+  }, [selection]);
 
   useEffect(() => {
     if (params.get('create')) setDialog({ kind: 'create' });
@@ -115,27 +166,45 @@ export function Profiles() {
   const reportCard = (profile: ProfileCard, notice?: CardNotice) =>
     setCardNotices(current => ({ ...current, [cardKey(profile)]: notice }));
 
+  async function refreshCardNotice(profile: ProfileCard, notice?: CardNotice) {
+    const updated = await reload();
+    reportCard(profile, !updated && notice?.status === 'success'
+      ? { status: 'warning', text: `${notice.text} Couldn’t refresh the profile status.` } : notice);
+  }
+
+  function finishClientAction(key: string) {
+    pendingClients.current.delete(key);
+    setBusyClients(value => { const next = { ...value }; delete next[key]; return next; });
+  }
+
+  async function refreshAfterSignin(profile: ProfileCard, notice?: CardNotice) {
+    const key = cardKey(profile);
+    pendingClients.current.add(key);
+    setBusyClients(value => ({ ...value, [key]: 'refresh-signin' }));
+    try { await refreshCardNotice(profile, notice); }
+    finally { finishClientAction(key); }
+  }
+
   async function runClientAction(profile: ProfileCard, action: ClientAction, heading: HTMLHeadingElement | null) {
-    if (pendingClients.current.has(profile.name)) return;
+    const key = cardKey(profile);
+    if (pendingClients.current.has(key)) return;
     if (action.conflict) { setDialog({ kind: 'conflict', profile: profile.name, action }); return; }
     reportCard(profile);
     if (action.id === 'signin' && profile.client && profile.client !== 'codex') { setSignIn({ profile, heading }); return; }
-    if (action.id === 'check') checkedOnVisit.current.add(profile.name);
-    pendingClients.current.add(profile.name);
-    setBusyClients(value => ({ ...value, [profile.name]: action.id }));
+    pendingClients.current.add(key);
+    setBusyClients(value => ({ ...value, [key]: action.id }));
     try {
-      const result = await apiPost<ClientActionResult>(`/api/profiles/${encodeURIComponent(profile.name)}/clients`, {
+      const notice = await apiPost<ClientActionResult>(`/api/profiles/${encodeURIComponent(profile.name)}/clients`, {
         action: action.id,
+        ...(profile.isDefault && profile.client ? { client: profile.client } : {}),
         ...(action.appKey ? { appKey: action.appKey } : {}),
         ...(action.runId ? { runId: action.runId } : {}),
-      });
-      reportCard(profile, { status: result.status, text: result.message });
-      view.reload();
-    } catch (error) { reportCard(profile, { status: 'error', text: error instanceof Error ? error.message : 'Client action failed.' }); }
-    finally {
-      pendingClients.current.delete(profile.name);
-      setBusyClients(value => { const next = { ...value }; delete next[profile.name]; return next; });
-      if ((action.id === 'check' || action.id === 'close-terminal') && document.activeElement === document.body) heading?.focus();
+      }).then<CardNotice, CardNotice>(result => ({ status: result.status, text: result.message }),
+        (error: unknown) => ({ status: 'error', text: error instanceof Error ? error.message : 'Client action failed.', blocker: readDesktopBlocker(error) }));
+      await refreshCardNotice(profile, notice);
+    } finally {
+      finishClientAction(key);
+      if (action.id === 'close-terminal' && document.activeElement === document.body) heading?.focus();
     }
   }
 
@@ -150,81 +219,139 @@ export function Profiles() {
     finally { setRevealing(null); }
   }
 
-  const activityFor = (name: string): CardActivity => {
-    if (signIn?.profile.name === name) return { kind: 'signing-in' };
-    if (checkingAccount === name) return { kind: 'checking-account' };
-    return busyClients[name] ? { kind: 'action', id: busyClients[name] } : { kind: 'idle' };
+  const activityFor = (key: string): CardActivity => {
+    if (busyClients[key]) return { kind: 'action', id: busyClients[key] };
+    if (signIn && cardKey(signIn.profile) === key) return { kind: 'signing-in' };
+    if (checkingAccount === key) return { kind: 'checking-account' };
+    return { kind: 'idle' };
   };
-  const inspect = (name: string, trigger: HTMLButtonElement | null) => { inspectTrigger.current = trigger; setInspected(name); };
+  const closeInspector = (returnFocus?: HTMLButtonElement) => {
+    const trigger = selection?.trigger;
+    const fallback = selection?.fallback;
+    setSelection(null);
+    (returnFocus ?? (trigger?.isConnected ? trigger : fallback))?.focus();
+  };
+  const inspect = (key: string, event: MouseEvent<HTMLButtonElement>, fallback: HTMLButtonElement | null = event.currentTarget) => {
+    const trigger = event.currentTarget;
+    if (selection?.key === key && trigger === fallback) closeInspector(trigger);
+    else setSelection({ key, trigger, fallback, focusInspector: event.detail === 0 });
+  };
   const profileCards = view.data?.profiles ?? [];
-  const inspectedProfile = inspected ? profileCards.find(profile => cardKey(profile) === inspected) : undefined;
+  const inspectedProfile = selection ? profileCards.find(profile => cardKey(profile) === selection.key) : undefined;
+  const inspector = inspectedProfile ? <ProfileInspector id={inspectorId} closeButton={inspectorCloseButton} onClose={() => closeInspector()}
+    profile={inspectedProfile} notice={cardNotices[cardKey(inspectedProfile)]} revealing={revealing === cardKey(inspectedProfile)}
+    onReveal={() => void revealFolder(inspectedProfile)} /> : <ProfileGuide canAdd={Boolean(info?.features.profileEdits)} />;
   const names = profileCards.filter(p => !p.client || p.client === 'codex').map(p => p.name);
   return (
-    <Page current="profiles" title="Profiles">
-      <PageTitle title="Profiles"
-        subtitle="Profiles grouped by client. Open a profile’s details for sign-in rules and folder information."
-        actions={info?.features.profileEdits ? (
-          <>
-            <Button onClick={() => { editTrigger.current = null; setDialog({ kind: 'add' }); }}>Add an existing Codex folder…</Button>
-            {info.features.create ? <Button variant="primary" onClick={() => setDialog({ kind: 'create' })}>Create profile…</Button> : null}
-          </>
-        ) : undefined} />
-      <div className="profiles-toolbar"><Link to="/setup">Find clients and existing profiles</Link><span className="hint">Profile findings recheck automatically while this page is visible.</span></div>
+    <Page current="profiles" title="Profiles" toolbarActions={info?.features.profileEdits ? (
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild disabled={!view.data}>
+          <Button ref={addProfileTrigger} variant="primary" className="btn-sm"><Plus size={16} aria-hidden="true" />Add a profile</Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" aria-label="Add a profile"
+          onCloseAutoFocus={event => { if (dialog?.kind === 'create' || dialog?.kind === 'add') event.preventDefault(); }}>
+          {info.features.create ? <DropdownMenuItem label="Create profile" onSelect={() => setDialog({ kind: 'create' })} /> : null}
+          <DropdownMenuItem label="Add existing profile folder" onSelect={() => setDialog({ kind: 'add' })} />
+        </DropdownMenuContent>
+      </DropdownMenu>
+    ) : undefined}>
+      <h1 ref={pageHeading} tabIndex={-1} className="sr-only">Profiles</h1>
       {view.data?.simulated ? <SimulatedNote>Client controls and profile changes are simulated; nothing is opened, closed or written.</SimulatedNote> : null}
       {message ? (
         <div role="status" className={message.status === 'error' ? 'alert-error' : message.status === 'success' ? 'alert-success' : 'notice'}>{message.text}</div>
       ) : null}
-      {view.error ? <><p className="hint">{view.data ? 'Previous profile findings are shown. Could not refresh; checks retry automatically.' : 'Could not read profiles. Checks retry automatically.'}</p><LoadError error={view.error} onRetry={view.reload} /></> : null}
-      {view.loading && !view.data ? <Loading label="Reading profiles…" /> : null}
-      {view.data && view.data.profiles.length === 0 ? (
-        <div className="panel flex flex-col gap-2">
-          <h2 className="text-heading">No profiles yet</h2>
-          <p className="muted">Add an existing Codex folder or create a profile. Your normal Codex setup appears as Default once Xenoflux can read it.</p>
-        </div>
-      ) : null}
-      {view.data ? (
+      <div className="profiles-workspace" data-docked={dockInspector || undefined}
+        onKeyDown={event => {
+          if (event.key !== 'Escape' || event.defaultPrevented || !inspectedProfile || !(event.target instanceof HTMLElement)) return;
+          if (event.target.closest('.profile-inspector') || event.target === selection?.trigger || event.target === selection?.fallback) {
+            event.preventDefault();
+            closeInspector();
+          }
+        }}>
         <div className="profile-inventory">
+          {view.error && !view.data ? <LoadError error={view.error} onRetry={view.reload} /> : null}
+          {view.loading && !view.data ? <Loading label="Reading profiles…" /> : null}
+          {view.data && profileCards.length === 0 ? <div className="panel flex flex-col gap-2">
+            <h2 className="text-heading">No profiles yet</h2>
+            <p className="muted">Your standard setup appears as Default once Xenoflux can read it.</p>
+          </div> : null}
           {(['codex', 'claude-code', 'copilot'] as const).map(client => {
             const profiles = profileCards.filter(profile => (profile.client ?? 'codex') === client);
             return profiles.length ? <section key={client} className="profile-client-group" aria-label={`${clientLabels[client]} profiles`}>
               <div className="profile-group-heading"><h2 className="text-heading">{clientLabels[client]}</h2><span className="hint">{profiles.length} {profiles.length === 1 ? 'profile' : 'profiles'}</span></div>
-              <div className="profile-grid">{profiles.map(profile => (
-                <ProfileCardView key={profile.name} profile={profile} icon={icons[profile.client ?? 'codex'] ?? null} activity={activityFor(profile.name)}
-                  notice={cardNotices[cardKey(profile)]} revealing={revealing === cardKey(profile)} onReveal={() => void revealFolder(profile)}
-                  onInspect={trigger => inspect(cardKey(profile), trigger)}
-                  onClient={(action, heading) => runClientAction(profile, action, heading)} onMenu={(menu, trigger) => {
-                    if (menu.id === 'copy') return;
-                    editTrigger.current = trigger;
-                    setDialog({ kind: menu.id, profile: profile.name });
-                  }} />
-              ))}</div>
+              <div className="profile-grid">{profiles.map(profile => {
+                const key = cardKey(profile);
+                const selected = selection?.key === key;
+                return <Fragment key={key}>
+                  <ProfileCardView profile={profile} icon={icons[client] ?? null} activity={activityFor(key)}
+                    notice={cardNotices[key]} revealing={revealing === key} onReveal={() => void revealFolder(profile)}
+                    inspectorId={selected ? inspectorId : undefined} onInspect={(event, fallback) => inspect(key, event, fallback)}
+                    onClient={(action, heading) => runClientAction(profile, action, heading)} onMenu={(menu, trigger) => {
+                      if (menu.id === 'copy') return;
+                      editTrigger.current = trigger;
+                      setDialog({ kind: menu.id, profile: profile.name });
+                    }} />
+                  {selected && !dockInspector ? inspector : null}
+                </Fragment>;
+              })}</div>
             </section> : null;
           })}
         </div>
-      ) : null}
-      {view.data?.notes.length ? <ul className="hint list-disc pl-5">{view.data.notes.map(note => <li key={note}>{note}</li>)}</ul> : null}
+        {dockInspector || !inspectedProfile ? inspector : null}
+      </div>
+      {view.error && view.data ? <ErrorPanel title="Couldn’t refresh profiles" actions={<Button onClick={view.reload}>Try again</Button>}>
+        <span role="status">Showing previous profile findings.</span> {view.error.message} Checks retry automatically.
+      </ErrorPanel> : null}
+      <ClientDiscoveryCard icons={icons} />
 
-      <Sheet open={Boolean(inspectedProfile)} onOpenChange={open => { if (!open) setInspected(null); }}>
-        {inspectedProfile ? <SheetContent className="profile-inspector" aria-describedby={undefined}
-          onCloseAutoFocus={event => { event.preventDefault(); if (inspectTrigger.current?.isConnected) inspectTrigger.current.focus(); }}>
-          <ProfileInspector profile={inspectedProfile} notice={cardNotices[cardKey(inspectedProfile)]}
-            revealing={revealing === cardKey(inspectedProfile)} onReveal={() => void revealFolder(inspectedProfile)} />
-        </SheetContent> : null}
-      </Sheet>
-
-      {signIn ? <SigninDialog profile={signIn.profile} returnFocus={signIn.heading} onClose={() => setSignIn(null)} onRefresh={view.reload}
+      {signIn ? <SigninDialog profile={signIn.profile} returnFocus={signIn.heading} onClose={() => setSignIn(null)}
+        onRefresh={notice => refreshAfterSignin(signIn.profile, notice)}
         onResult={notice => reportCard(signIn.profile, notice)} /> : null}
 
       <ConflictDialog state={dialog?.kind === 'conflict' ? dialog : null} onClose={close}
         onCheck={async name => { await apiPost(`/api/profiles/${encodeURIComponent(name)}/clients`, { action: 'check' }); view.reload(); close(); }} />
-      <CreateDialog open={dialog?.kind === 'create'} onClose={close} sources={view.data?.copySources ?? { codex: names, 'claude-code': [], copilot: [] }}
+      <CreateDialog open={dialog?.kind === 'create'} onClose={close} returnFocus={addProfileTrigger} sources={view.data?.copySources ?? { codex: names, 'claude-code': [], copilot: [] }}
         onCreated={text => { setMessage({ status: 'success', text }); view.reload(); close(); }} />
       <SimpleEditDialog state={dialog && (dialog.kind === 'rename' || dialog.kind === 'binding' || dialog.kind === 'remove' || dialog.kind === 'add') ? dialog : null}
         repositories={dialog?.kind === 'binding' ? profileCards.find(profile => profile.name === dialog.profile)?.repositories : undefined}
-        returnFocus={editTrigger.current}
+        returnFocus={dialog?.kind === 'add' ? addProfileTrigger.current : editTrigger.current}
         onClose={close} onDone={(text, status) => { setMessage({ status, text }); view.reload(); close(); }} />
     </Page>
   );
+}
+
+function ClientDiscoveryCard({ icons }: { icons: ClientIcons }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return <div className="profile-discovery-card">
+    <button type="button" className="profile-discovery-toggle" aria-label={`${open ? 'Hide' : 'Show'} client discovery`}
+      aria-expanded={open} aria-controls={id} onClick={() => setOpen(value => !value)}>
+      <ScanLine size={16} aria-hidden="true" />
+      <span>Client discovery</span>
+      <span className="profile-discovery-icons" aria-hidden="true">
+        {(['codex', 'claude-code', 'copilot'] as const).map(client => <ProfileClientIcon key={client} client={client} icon={icons[client]} />)}
+      </span>
+      <ChevronDown size={16} className="profile-discovery-chevron" aria-hidden="true" />
+    </button>
+    <div id={id} hidden={!open}>{open ? <ProfileDiscovery /> : null}</div>
+  </div>;
+}
+
+function ProfileGuide({ canAdd }: { canAdd: boolean }) {
+  const id = useId();
+  return <aside className="profile-inspector profile-guide" aria-labelledby={id}>
+    <header className="profile-inspector-header"><h2 id={id} className="text-body font-semibold">Profiles guide</h2></header>
+    <ul className="profile-inspector-body profile-guide-steps">
+      {canAdd ? <li><Plus size={16} aria-hidden="true" /><div><strong>Add a profile</strong><p>Create one or add an existing folder from the toolbar.</p></div></li> : null}
+      <li><Play size={16} aria-hidden="true" /><div><strong>Open a client</strong><p>Use the CLI or Desktop row on a profile.</p></div></li>
+      <li><PanelRight size={16} aria-hidden="true" /><div><strong>Inspect a profile</strong><p>Open Details for accounts, folders, and setup.</p></div></li>
+    </ul>
+  </aside>;
+}
+
+function ProfileClientIcon({ client, icon }: { client: ProfileClient; icon?: string | null }) {
+  return icon ? <img className="profile-app-icon" src={icon} alt="" width={32} height={32} />
+    : <span className="profile-app-icon" aria-hidden="true">{clientInitials[client]}</span>;
 }
 
 const activeSigninStates = new Set<NativeSigninAttempt['state']>(['starting', 'waiting-for-browser', 'verifying']);
@@ -235,7 +362,7 @@ const signinLabels: Record<NativeSigninAttempt['state'], string> = {
 };
 
 function SigninDialog({ profile, returnFocus, onClose, onRefresh, onResult }:
-  { profile: ProfileCard; returnFocus: HTMLHeadingElement | null; onClose: () => void; onRefresh: () => void;
+  { profile: ProfileCard; returnFocus: HTMLHeadingElement | null; onClose: () => void; onRefresh: (notice?: CardNotice) => Promise<void>;
     onResult: (notice?: CardNotice) => void }) {
   const [attempt, setAttempt] = useState<NativeSigninAttempt | null>(null);
   const [busy, setBusy] = useState<'starting' | 'cancelling' | null>(null);
@@ -247,13 +374,12 @@ function SigninDialog({ profile, returnFocus, onClose, onRefresh, onResult }:
   const active = attempt !== null && activeSigninStates.has(attempt.state);
   const clientLabel = clientLabels[profile.client ?? 'codex'];
 
-  function receive(next: NativeSigninAttempt) {
+  async function receive(next: NativeSigninAttempt) {
     setAttempt(next); setError(null);
-    if (!activeSigninStates.has(next.state)) {
-      if (next.state === 'completed') onResult({ status: 'success', text: signinLabels.completed });
-      else if (next.state !== 'cancelled') onResult({ status: next.state === 'uncertain' ? 'warning' : 'error', text: next.message });
-      onRefresh();
-    }
+    if (activeSigninStates.has(next.state)) return;
+    if (next.state === 'completed') await onRefresh({ status: 'success', text: signinLabels.completed });
+    else if (next.state === 'cancelled') await onRefresh();
+    else await onRefresh({ status: next.state === 'uncertain' ? 'warning' : 'error', text: next.message });
   }
 
   async function check() {
@@ -262,7 +388,7 @@ function SigninDialog({ profile, returnFocus, onClose, onRefresh, onResult }:
     const generation = checkGeneration.current;
     try {
       const next = await apiGet<NativeSigninAttempt>(`/api/sign-ins/${encodeURIComponent(attempt.id)}`);
-      if (!pending.current && generation === checkGeneration.current) receive(next);
+      if (!pending.current && generation === checkGeneration.current) await receive(next);
     } catch (failure) { if (!pending.current && generation === checkGeneration.current) setError(failure instanceof Error ? failure.message : 'Could not check sign-in.'); }
     finally { checking.current = false; }
   }
@@ -277,7 +403,7 @@ function SigninDialog({ profile, returnFocus, onClose, onRefresh, onResult }:
     if (pending.current) return;
     pending.current = true; setBusy('starting'); setError(null);
     onResult();
-    try { receive(await apiPost<NativeSigninAttempt>(`/api/profiles/${encodeURIComponent(profile.name)}/sign-in`)); }
+    try { await receive(await apiPost<NativeSigninAttempt>(`/api/profiles/${encodeURIComponent(profile.name)}/sign-in`)); }
     catch (failure) {
       const text = failure instanceof Error ? failure.message : 'Could not start sign-in.';
       setError(text);
@@ -299,7 +425,7 @@ function SigninDialog({ profile, returnFocus, onClose, onRefresh, onResult }:
     pending.current = true; setBusy('cancelling'); checkGeneration.current++;
     try {
       const next = await apiPost<NativeSigninAttempt>(`/api/sign-ins/${encodeURIComponent(attempt.id)}/cancel`);
-      receive(next);
+      await receive(next);
       if (next.state === 'cancelled' || next.state === 'completed') onClose();
       else if (!activeSigninStates.has(next.state)) setError(next.message);
     } catch (failure) { setError(`${failure instanceof Error ? failure.message : 'Could not cancel sign-in.'} Sign-in is still tracked here. Retry the check or cancel again.`); }
@@ -368,10 +494,11 @@ function showClaudeHints(profile: ProfileCard, clientControls: boolean | undefin
 const claudeDesktopSignInHint = 'Quit all other Claude Desktop instances before signing in to this profile. After signing in, quit this profile, open regular Claude Desktop first, then reopen this profile from Xenoflux.';
 const claudeHandoffHint = <>Run <code>/app</code> in Terminal to move your session to Claude Desktop. Xenoflux opens this profile’s Desktop if it’s closed. If prompted, sign in there and retry <code>/app</code>.</>;
 
-function ProfileCardView({ profile, icon, activity, notice, revealing, onClient, onMenu, onInspect, onReveal }:
+function ProfileCardView({ profile, icon, activity, notice, revealing, inspectorId, onClient, onMenu, onInspect, onReveal }:
   { profile: ProfileCard; icon: string | null; activity: CardActivity; notice?: CardNotice; revealing: boolean; onReveal: () => void;
+    inspectorId?: string;
     onClient: (action: ClientAction, heading: HTMLHeadingElement | null) => void; onMenu: (menu: MenuAction, trigger: HTMLButtonElement | null) => void;
-    onInspect: (trigger: HTMLButtonElement | null) => void }) {
+    onInspect: (event: MouseEvent<HTMLButtonElement>, fallback?: HTMLButtonElement | null) => void }) {
   const info = useInfo();
   const navigate = useNavigate();
   const titleId = useId();
@@ -386,26 +513,27 @@ function ProfileCardView({ profile, icon, activity, notice, revealing, onClient,
   const client = profile.client ?? 'codex';
   const clientLabel = clientLabels[client];
   const hints = showClaudeHints(profile, info?.features.clientControls);
+  const checkingAccount = activity.kind === 'checking-account';
   const busyAction = activity.kind === 'action' ? activity.id : undefined;
-  const working = activity.kind === 'checking-account' ? 'Checking sign-in…'
-    : activity.kind === 'signing-in' ? 'Signing in…'
+  const working = activity.kind === 'signing-in' ? 'Signing in…'
     : busyAction === 'signin' ? 'Opening Terminal…'
-    : busyAction === 'check' ? 'Checking sign-in…'
     : busyAction ? clientBusyLabels[busyAction] ?? 'Working…'
     : revealing ? 'Showing in Finder…' : null;
   const problem: CardNotice | undefined = profile.state === 'ready' ? undefined
     : { status: profile.state === 'unbound' ? 'warning' : 'error', text: warningTitle(profile) };
   const feedback = notice?.status === 'error' || notice?.status === 'warning' ? notice
-    : problem ?? (working ? { status: 'neutral' as const, text: working } : notice);
-  const showDetails = feedback?.status === 'warning' || feedback?.status === 'error';
-  const NoticeIcon = feedback?.status === 'error' ? CircleX : feedback?.status === 'warning' ? TriangleAlert
-    : feedback?.status === 'success' ? CircleCheck : null;
-  const accountText = profile.account?.label ?? profile.signIn;
+    : problem ?? notice ?? (working ? { status: 'neutral' as const, text: working } : { status: 'idle' as const, text: 'Auto-checks on' });
+  const showDetails = feedback.status === 'warning' || feedback.status === 'error';
+  const NoticeIcon = feedback.status === 'error' ? CircleX : feedback.status === 'warning' ? TriangleAlert
+    : feedback.status === 'success' ? CircleCheck : feedback.status === 'idle' ? RefreshCw : null;
+  const sharedAccount = client === 'codex' && !profile.isDefault && profile.state === 'ready';
+  const accountText = profile.account?.label ?? (profile.accountFinding ? accountLabels[profile.accountFinding.state] : profile.signIn);
+  const lastChecked = profile.accountFinding?.lastChecked ?? profile.account?.lastChecked;
+  const desktopAccount = sharedAccount ? 'Same account as CLI' : profile.state === 'ready' ? 'Account in Desktop' : 'Account unavailable';
   return (
-    <article className="profile-card" aria-labelledby={titleId}>
+    <article className="profile-card" aria-labelledby={titleId} data-selected={Boolean(inspectorId) || undefined}>
       <div className="profile-card-header">
-        {icon ? <img className="profile-app-icon" src={icon} alt="" width={32} height={32} />
-          : <span className="profile-app-icon" aria-hidden="true">{clientInitials[client]}</span>}
+        <ProfileClientIcon client={client} icon={icon} />
         <div className="profile-card-title">
           <h3 id={titleId} ref={title} tabIndex={-1} title={profile.name} className="text-body font-semibold truncate">{profile.name}</h3>
           <p className="meta truncate">{clientLabel} · {profile.binding}</p>
@@ -415,7 +543,8 @@ function ProfileCardView({ profile, icon, activity, notice, revealing, onClient,
             <Button size="icon" className="btn-sm" aria-label={`Show ${profile.name} folder in Finder`} aria-busy={revealing || undefined}
               onClick={() => { if (!revealing) onReveal(); }}><FolderOpen size={16} aria-hidden="true" /></Button>
           </Tooltip> : null}
-          <Button ref={detailsTrigger} size="icon" className="btn-sm" aria-label={`Details for ${profile.name}`} onClick={() => onInspect(detailsTrigger.current)}>
+          <Button ref={detailsTrigger} size="icon" className="btn-sm profile-card-details" aria-label={`Details for ${profile.name}`}
+            aria-expanded={Boolean(inspectorId)} aria-controls={inspectorId} onClick={event => onInspect(event)}>
             <PanelRight size={16} aria-hidden="true" />
           </Button>
           {profile.moreMenu ? (
@@ -431,13 +560,14 @@ function ProfileCardView({ profile, icon, activity, notice, revealing, onClient,
           ) : null}
         </div>
       </div>
-      {feedback ? <div className="profile-card-notice" data-status={feedback.status}>
+      <div className="profile-card-notice" data-status={feedback.status}>
         <span className="profile-card-notice-text" role={feedback.status === 'error' ? 'alert' : 'status'}>
           {NoticeIcon ? <NoticeIcon size={16} aria-hidden="true" /> : working ? <Spinner /> : null}
-          {feedback.text}
+          <span className="truncate" title={feedback.text}>{feedback.text}</span>
         </span>
-        {showDetails ? <Button variant="ghost-link" className="btn-sm" onClick={event => onInspect(event.currentTarget)}>See details</Button> : null}
-      </div> : null}
+        {showDetails ? <Button variant="ghost-link" className="btn-sm" aria-expanded={Boolean(inspectorId)} aria-controls={inspectorId}
+          onClick={event => onInspect(event, detailsTrigger.current)}>See details</Button> : null}
+      </div>
       {hints.desktop ? <p id={desktopSignInHintId} className="sr-only">{claudeDesktopSignInHint}</p> : null}
       {hints.handoff ? <p id={handoffHintId} className="sr-only">{claudeHandoffHint}</p> : null}
       <div className="profile-surfaces">
@@ -445,29 +575,32 @@ function ProfileCardView({ profile, icon, activity, notice, revealing, onClient,
           const state = surfaceStates[surface.state];
           const desktop = label === 'Desktop';
           const SurfaceIcon = desktop ? Monitor : Terminal;
-          const actions = info?.features.clientControls ? profile.clientActions.filter(action => desktopActions.has(action.id) === desktop) : [];
+          const actions = info?.features.clientControls ? profile.clientActions
+            .filter(action => desktopActions.has(action.id) === desktop)
+            .sort((a, b) => Number(primaryClientActions.has(a.id)) - Number(primaryClientActions.has(b.id))) : [];
           return <div key={label} className="profile-surface" role="group" aria-label={label}>
             <span className="profile-surface-name"><SurfaceIcon size={16} aria-hidden="true" />{label}</span>
-            <div className="profile-surface-facts">
-              <span className="profile-status-item"><SurfaceDot state={state} />{surfaceLabels[state]}</span>
-              {!desktop ? <span className="profile-status-account">
-                {profile.account && client === 'codex' && !profile.isDefault ? 'Shared account · ' : null}<span>{accountText}</span>
-              </span> : client !== 'codex' && profile.state === 'ready' ? <span className="profile-status-account">Account in Desktop</span> : null}
-            </div>
+            <span className="profile-status-item"><SurfaceDot state={state} />{surfaceLabels[state]}</span>
             {actions.length ? <div className="profile-client-actions">{actions.map(action => {
               const ActionIcon = actionIcons[action.id] ?? SurfaceIcon;
               const busy = busyAction === action.id;
               const actionLabel = action.label.replace(/…$/, '');
-              return <Tooltip key={action.id === 'check' ? 'signin' : action.id} content={actionLabel}>
+              return <Tooltip key={action.id} content={checkingAccount ? `${actionLabel} · Checking sign-in…` : actionLabel}>
                 <Button ref={retainActionFocus} size="icon" className="btn-sm"
                   data-secondary={action.id === 'close-terminal' || action.id === 'close-desktop' || undefined}
                   onClick={() => onClient(action, title.current)} disabled={Boolean(busyAction)} busy={busy}
-                  aria-disabled={activity.kind === 'checking-account' || undefined}
+                  aria-disabled={checkingAccount || undefined}
+                  data-account-checking={checkingAccount || undefined}
                   aria-describedby={hints.handoff && action.id === 'open-terminal' ? handoffHintId
                     : hints.desktop && action.id === 'open-desktop' ? desktopSignInHintId : undefined}
                   aria-label={`${actionLabel} for ${profile.name}`}>{busy ? <Spinner /> : <ActionIcon size={16} aria-hidden="true" />}</Button>
               </Tooltip>;
             })}</div> : null}
+            <p className="profile-status-account">
+              {!desktop && profile.account && sharedAccount ? <span>Shared · </span> : null}
+              <span className="truncate" title={desktop ? desktopAccount : accountText}>{desktop ? desktopAccount : accountText}</span>
+              {!desktop && lastChecked ? <span className="profile-account-freshness">Last checked</span> : null}
+            </p>
           </div>;
         })}
       </div>
@@ -475,21 +608,32 @@ function ProfileCardView({ profile, icon, activity, notice, revealing, onClient,
   );
 }
 
-function ProfileInspector({ profile, notice, revealing, onReveal }: { profile: ProfileCard; notice?: CardNotice; revealing: boolean; onReveal: () => void }) {
+function ProfileInspector({ id, profile, notice, revealing, closeButton, onClose, onReveal }:
+  { id: string; profile: ProfileCard; notice?: CardNotice; revealing: boolean; closeButton: RefObject<HTMLButtonElement | null>;
+    onClose: () => void; onReveal: () => void }) {
   const info = useInfo();
   const client = profile.client ?? 'codex';
   const hints = showClaudeHints(profile, info?.features.clientControls);
   const native = client !== 'codex';
   const inspectTarget = { name: profile.name, client };
-  return <>
-    <SheetHeader>
-      <SheetTitle>{profile.name}</SheetTitle>
-      <SheetDescription>{clientLabels[client]}</SheetDescription>
-    </SheetHeader>
+  return <aside id={id} className="profile-inspector" aria-labelledby={`${id}-title`}>
+    <header className="profile-inspector-header">
+      <div><h2 id={`${id}-title`} className="text-heading wrap-anywhere">{profile.name}</h2><p className="meta">{clientLabels[client]}</p></div>
+      <Button ref={closeButton} size="icon" className="btn-sm" aria-label="Close profile details" onClick={onClose}><X size={16} aria-hidden="true" /></Button>
+    </header>
     <div className="profile-inspector-body">
+      {notice?.blocker ? <section className="profile-inspector-section wrap-anywhere" aria-labelledby={`${id}-blocker`}>
+        <h3 id={`${id}-blocker`} className="text-ui font-semibold">Desktop blocker</h3>
+        <p className="alert-error">{notice.text}</p>
+        {notice.blocker.processes.length ? <ul className="list-disc ps-5">
+          {notice.blocker.processes.map(process => <li key={process}>{process}</li>)}
+        </ul> : null}
+        <p>{notice.blocker.guidance}</p>
+        {notice.blocker.command ? <code className="profile-inspector-path select-all">{notice.blocker.command}</code> : null}
+      </section> : null}
       <section className="profile-inspector-section" aria-labelledby="inspector-status">
-        <h3 id="inspector-status" className="text-ui font-semibold">Status</h3>
-        {notice?.status === 'error' || notice?.status === 'warning' ? <p className={`alert-${notice.status}`}>{notice.text}</p> : null}
+        <h3 id="inspector-status" className="text-ui font-semibold">Status and accounts</h3>
+        {notice && !notice.blocker ? <p className={notice.status === 'neutral' ? 'notice' : `alert-${notice.status}`}>{notice.text}</p> : null}
         {profile.state !== 'ready' ? <WarningAlert title={warningTitle(profile)}>{profile.reason}</WarningAlert> : null}
         <dl className="profile-inspector-facts">
           {surfaceRows(profile).map(({ name, info: surface }) => {
@@ -538,7 +682,7 @@ function ProfileInspector({ profile, notice, revealing, onReveal }: { profile: P
         </div>
       </section>
     </div>
-  </>;
+  </aside>;
 }
 
 function ConflictDialog({ state, onClose, onCheck }: { state: { profile: string; action: ClientAction } | null; onClose: () => void; onCheck: (name: string) => Promise<void> }) {
@@ -558,7 +702,8 @@ function ConflictDialog({ state, onClose, onCheck }: { state: { profile: string;
   );
 }
 
-function CreateDialog({ open, onClose, sources, onCreated }: { open: boolean; onClose: () => void; sources: Record<ProfileClient, string[]>; onCreated: (text: string) => void }) {
+function CreateDialog({ open, onClose, returnFocus, sources, onCreated }: { open: boolean; onClose: () => void;
+  returnFocus: RefObject<HTMLButtonElement | null>; sources: Record<ProfileClient, string[]>; onCreated: (text: string) => void }) {
   const navigate = useNavigate();
   const [name, setName] = useState('');
   const [client, setClient] = useState<ProfileClient>('codex');
@@ -592,7 +737,9 @@ function CreateDialog({ open, onClose, sources, onCreated }: { open: boolean; on
   return (
     <Dialog open={open} onOpenChange={value => { if (!value) onClose(); }}>
       {open ? (
-        <DialogContent title="Create a profile">
+        <DialogContent title="Create a profile" onCloseAutoFocus={event => {
+          if (returnFocus.current?.isConnected) { event.preventDefault(); returnFocus.current.focus(); }
+        }}>
           <form className="flex flex-col gap-4" onSubmit={submit} noValidate>
             <div>
               <label htmlFor={nameId} className="field-label">Name</label>
@@ -646,7 +793,7 @@ function CreateDialog({ open, onClose, sources, onCreated }: { open: boolean; on
 }
 
 const EDIT_COPY = {
-  add: { title: 'Add an existing Codex folder', field: 'Profile name', second: 'Codex folder', action: 'Add folder', path: '/api/profiles/new', note: 'Xenoflux registers the folder as a profile. It doesn’t move or change its files.' },
+  add: { title: 'Add existing profile folder', field: 'Profile name', second: 'Codex folder', action: 'Add folder', path: '/api/profiles/new', note: 'Xenoflux registers the folder as a profile. It doesn’t move or change its files.' },
   rename: { title: 'Rename profile', field: 'New name', second: null, action: 'Rename', path: 'rename', note: 'Renaming changes how Xenoflux lists the profile. Its files, sign-in and history stay as they are.' },
   binding: { title: 'Change project binding', field: 'Project folder', second: null, action: 'Save binding', path: 'binding', note: 'Bindings point to project folders. Removing a binding keeps the folder and its files.' },
   remove: { title: 'Remove from Xenoflux', field: null, second: null, action: 'Remove from Xenoflux', path: 'remove', note: 'Keeps the profile’s files on disk.' },

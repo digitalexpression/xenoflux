@@ -39,7 +39,7 @@ export async function runUi({ store, provider, demo = false, port = 0, openBrows
   const stateFile = join(store.directory, demo ? 'ui-demo-server.json' : 'ui-server.json');
   const existing = await readState(stateFile);
   if (existing && existing.pid !== process.pid && alive(existing.pid) && await answers(existing.port)) {
-    const url = `http://127.0.0.1:${existing.port}/setup#launch=${existing.launchToken}`;
+    const url = `http://127.0.0.1:${existing.port}/profiles#launch=${existing.launchToken}`;
     out(`Xenoflux is already running at http://127.0.0.1:${existing.port}/\n`);
     if (openBrowser) await open(url);
     return { url, reused: true, closed: Promise.resolve() };
@@ -77,7 +77,7 @@ export async function runUi({ store, provider, demo = false, port = 0, openBrows
   out(`Xenoflux${demo ? ' (demo data)' : ''} is running at ${server.origin}/\n`
     + 'Keep this window open while you use the app. Press Ctrl+C to stop it; running tasks keep their own records.\n');
   const url = new URL(server.launchUrl);
-  url.pathname = '/setup';
+  url.pathname = '/profiles';
   const launchUrl = url.href;
   if (openBrowser) await open(launchUrl).catch(() => out(`Open this link in your browser: ${launchUrl}\n`));
   else out(`Open this link in your browser: ${launchUrl}\n`);

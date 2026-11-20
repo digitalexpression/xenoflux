@@ -18,6 +18,7 @@
   --color-link-focus: #15181d;
   --color-selected: #e6e9ee;
   --color-on-selected: #15181d;
+  --color-profile-selection: #11796e;
   --color-checked: #15181d;
   --color-on-checked: #ffffff;
   --color-info-surface: #eef1f5;
@@ -131,6 +132,7 @@
     --color-link-focus: #e6e8eb;
     --color-selected: #242a34;
     --color-on-selected: #ffffff;
+    --color-profile-selection: #64c8bc;
     --color-checked: #e6e8eb;
     --color-on-checked: #0b0d10;
     --color-info-surface: #181c23;
@@ -176,6 +178,7 @@
   --color-link-focus: #e6e8eb;
   --color-selected: #242a34;
   --color-on-selected: #ffffff;
+  --color-profile-selection: #64c8bc;
   --color-checked: #e6e8eb;
   --color-on-checked: #0b0d10;
   --color-info-surface: #181c23;

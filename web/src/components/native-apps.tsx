@@ -32,8 +32,8 @@ export function NativeApps() {
 
   if (!available.length && !apps.error && !message) return null;
   return <section className="native-apps flex flex-col gap-3" aria-labelledby="native-apps-heading">
-    <h2 id="native-apps-heading" className="text-heading">Native apps</h2>
-    <p className="text-ui">These controls open an app with its existing setup. Use Profiles for separate Desktop storage. Desktop sign-in and task execution remain unverified.</p>
+    <h3 id="native-apps-heading" className="text-body font-semibold">Native apps</h3>
+    <p className="text-ui">These controls open an app with its existing setup. Use a profile’s Desktop row for separate storage. Desktop sign-in and task execution remain unverified.</p>
     {available.length ? <ul className="native-app-list">
       {available.map(app => <li key={app.client} className="flex min-w-0 flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">

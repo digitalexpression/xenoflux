@@ -76,15 +76,18 @@ test('inspector carries its first choice and repository into mixed categories, s
   await expect(page.getByRole('textbox', { name: 'Repository scope (optional)' })).toHaveValue(repo);
   await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'Claude source · Claude Code' });
   await page.getByRole('button', { name: 'Compare setups', exact: true }).click();
-  await expect(page.getByText('Separate setup inventories', { exact: true })).toBeVisible();
-  await expect(page.getByRole('group', { name: 'Summary', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Setup comparison', exact: true })).toBeVisible();
+  await expect(page.getByRole('group', { name: 'Filter results' }).getByRole('button', { name: 'Different', exact: true })).toHaveCount(0);
   await expect(page.getByRole('link', { name: /Copy from|Preview copying/ })).toHaveCount(0);
   const category = page.getByRole('region', { name: 'Instructions, agents and rules', exact: true });
-  const claude = category.getByRole('region', { name: 'Claude source · Claude Code Instructions, agents and rules', exact: true });
-  const projectSource = claude.getByRole('listitem').filter({ hasText: join(repo, 'CLAUDE.md') }).first();
-  await projectSource.getByRole('button', { name: 'Inspect CLAUDE.md source', exact: true }).click();
-  await expect(claude).toContainText('Project Claude inspection instruction.');
-  await expect(claude).toContainText('Project');
+  const instructions = category.getByRole('button', { name: /^Instructions, agents and rules/ });
+  await expect(instructions).toHaveAttribute('aria-expanded', 'false');
+  await instructions.press('Enter');
+  await category.getByRole('button', { name: 'Source record CLAUDE.md Project', exact: true }).click();
+  const sourceDetails = page.getByRole('complementary', { name: 'Inspector', exact: true });
+  await expect(sourceDetails).toContainText(join(repo, 'CLAUDE.md'));
+  await sourceDetails.getByRole('button', { name: 'Inspect CLAUDE.md source', exact: true }).click();
+  await expect(sourceDetails).toContainText('Project Claude inspection instruction.');
   await page.getByRole('button', { name: 'Swap the two profiles', exact: true }).click();
   await expect(page).toHaveURL(/a=Claude\+source/);
   expect(new URL(page.url()).searchParams.get('repo')).toBe(repo);
@@ -97,6 +100,52 @@ test('inspector carries its first choice and repository into mixed categories, s
   expect(new URL(page.url()).searchParams.get('repo')).toBe(repo);
 });
 
+test('mixed setups align exact skill names and keep per-profile source evidence on refresh', async ({ app, page }) => {
+  const { repository: repo, nativeRoots } = app.setupSources;
+  const claude = nativeRoots['claude-code'];
+  for (const [root, name, description] of [
+    [app.homes.baseline.home, 'source-helper', 'Codex source helper.'],
+    [join(repo, '.claude'), 'source-helper', 'Project source helper.'],
+    [claude, 'Review-helper', 'Case-variant Claude skill.'],
+  ]) {
+    const directory = join(root, 'skills', name);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n${description}\n`);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${app.origin}/compare/setups?${new URLSearchParams({ a: 'baseline', b: 'Claude source', bClient: 'claude-code', repo })}`);
+  const skills = page.getByRole('region', { name: 'Skills', exact: true });
+  const skill = skills.getByRole('button', { name: 'Name match source-helper', exact: true });
+  await expect(skill).toContainText('1 source');
+  await expect(skill).toContainText('2 sources');
+  const caseVariant = skills.getByRole('button', { name: 'Seen on one side Review-helper', exact: true });
+  await expect(caseVariant).toContainText('Not observed');
+  await page.getByRole('button', { name: 'Name matches', exact: true }).click();
+  await expect(skills.getByRole('listitem')).toHaveCount(1);
+  await skill.press('Enter');
+  const inspector = page.getByRole('dialog', { name: 'Inspector' });
+  await expect(inspector.getByRole('heading', { name: 'source-helper' })).toBeFocused();
+  await expect(inspector).toContainText(join(repo, '.claude', 'skills', 'source-helper'));
+  await expect(inspector).toContainText(join(claude, 'skills', 'source-helper'));
+  await page.keyboard.press('Escape');
+  await expect(skill).toBeFocused();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+
+  await page.getByRole('button', { name: 'One side observed', exact: true }).click();
+  await expect(skill).toHaveCount(0);
+  const search = page.getByRole('searchbox', { name: 'Find an item' });
+  await search.fill('review-helper');
+  await expect(skills.getByRole('listitem')).toHaveCount(2);
+  await search.fill('no-such-skill');
+  await expect(page.getByRole('status')).toHaveText('0 items');
+  await rm(join(claude, 'skills', 'Review-helper'), { recursive: true });
+  await search.fill('review-helper');
+  await page.getByRole('button', { name: 'Refresh setups', exact: true }).click();
+  await expect(skills.getByRole('listitem')).toHaveCount(1);
+  await expect(caseVariant).toHaveCount(0);
+  await expect(readFile(app.nativeProfileLog, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
 test('qualified Default choices and colon profile names stay distinct without parsing names', async ({ app, page }) => {
   await inspect(page, app, 'codex:with:colon');
   await expect(await openSource(page, 'AGENTS.md')).toContainText('Colon profile inspection instruction.');
@@ -106,7 +155,7 @@ test('qualified Default choices and colon profile names stay distinct without pa
   for (const label of ['Default · Codex', 'Default · Claude Code', 'Default · GitHub Copilot']) await expect(left.getByRole('option', { name: label, exact: true })).toHaveCount(1);
   await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'Default · Claude Code' });
   await page.getByRole('button', { name: 'Compare setups', exact: true }).click();
-  await expect(page.getByText('Separate setup inventories', { exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Setup comparison', exact: true })).toBeVisible();
   expect(new URL(page.url()).searchParams.get('a')).toBe('codex:with:colon');
   expect(new URL(page.url()).searchParams.get('aClient')).toBeNull();
 });

@@ -207,11 +207,11 @@ test('the authenticated UI starts browser sign-in and publishes only automatical
     const cards = await (await fetch(server.origin + '/api/profiles', { headers })).json();
     const card = cards.profiles.find(row => row.name === 'Claude fixture');
     assert.equal(card.signIn, signIn);
+    assert.equal(card.accountCheck, true);
     assert.deepEqual(card.clientActions.filter(action => ['check', 'signin'].includes(action.id)), actions);
   };
-  const checkAction = { id: 'check', label: 'Check sign-in' };
-  await assertAccountCard('Sign-in not checked', [checkAction]);
-  const checked = await post('/api/profiles/Claude%20fixture/clients', { action: 'check' });
+  await assertAccountCard('Sign-in not checked', []);
+  const checked = await post('/api/profiles/Claude%20fixture/account', { client: 'claude-code' });
   assert.equal(checked.status, 200);
   await assertAccountCard('Signed out', [{ id: 'signin', label: 'Sign in' }]);
   const response = await post('/api/profiles/Claude%20fixture/sign-in', { executable: '/bin/false', command: 'ignored' });
@@ -227,7 +227,7 @@ test('the authenticated UI starts browser sign-in and publishes only automatical
   await assertAccountCard('Signed in', []);
   const checkedAt = Date.now();
   t.mock.method(Date, 'now', () => checkedAt + 6 * 60 * 1000);
-  await assertAccountCard('Signed in (last checked)', [checkAction]);
+  await assertAccountCard('Signed in (last checked)', []);
   assert.equal(JSON.stringify(result).includes('oauth'), false);
 });
 

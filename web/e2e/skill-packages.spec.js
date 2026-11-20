@@ -12,8 +12,10 @@ async function put(root, path, content) {
 async function showAll(page, origin, a, b) {
   await page.goto(`${origin}/compare/setups?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`);
   await expect(page.getByRole('searchbox', { name: 'Find an item' })).toBeVisible();
-  const everything = page.getByRole('button', { name: 'Everything', exact: true });
+  const everything = page.getByRole('button', { name: 'All items', exact: true });
   if (await everything.count()) await everything.click();
+  const skills = page.getByRole('region', { name: 'Skills', exact: true }).getByRole('button', { name: /^Skills/ });
+  if (await skills.getAttribute('aria-expanded') === 'false') await skills.click();
 }
 
 test('all three pairs compare large and binary package files, retain true unknowns and follow the selected owner', async ({ app, page }) => {
@@ -43,7 +45,7 @@ test('all three pairs compare large and binary package files, retain true unknow
   const before = await Promise.all(paths.map(path => readFile(path)));
   for (const [a, b, same] of [['Default', 'baseline', true], ['Default', 'strict-review', false], ['baseline', 'strict-review', false]]) {
     await showAll(page, app.origin, a, b);
-    const row = page.locator('section[aria-labelledby="group-skills"] li button').filter({ hasText: 'full-package' }).filter({ has: page.getByText('Profile', { exact: true }) });
+    const row = page.getByRole('region', { name: 'Skills', exact: true }).locator('li button').filter({ hasText: 'full-package' }).filter({ has: page.getByText('Profile', { exact: true }) });
     await expect(row).toHaveCount(1);
     await expect(row).toContainText(same ? 'Same' : 'Different');
     await row.click();
@@ -55,14 +57,14 @@ test('all three pairs compare large and binary package files, retain true unknow
       await expect(file).toContainText(same ? 'Full file bytes and file permissions match' : 'Full file contents differ');
     }
     await showAll(page, app.origin, a, b);
-    const versioned = page.locator('section[aria-labelledby="group-skills"] li button').filter({ hasText: 'versioned-skill' });
+    const versioned = page.getByRole('region', { name: 'Skills', exact: true }).locator('li button').filter({ hasText: 'versioned-skill' });
     await expect(versioned).toHaveCount(1);
     await expect(versioned).toContainText('Same');
-    const unknown = page.locator('section[aria-labelledby="group-skills"] li button').filter({ hasText: 'unsafe-source' }).filter({ has: page.getByText('Profile', { exact: true }) });
+    const unknown = page.getByRole('region', { name: 'Skills', exact: true }).locator('li button').filter({ hasText: 'unsafe-source' }).filter({ has: page.getByText('Profile', { exact: true }) });
     await expect(unknown).toContainText('Could not compare');
   }
   await showAll(page, app.origin, 'baseline', 'strict-review');
-  const owner = page.locator('section[aria-labelledby="group-skills"] li button').filter({ hasText: 'shared-tool' }).filter({ hasText: 'owner-b@market' });
+  const owner = page.getByRole('region', { name: 'Skills', exact: true }).locator('li button').filter({ hasText: 'shared-tool' }).filter({ hasText: 'owner-b@market' });
   await expect(owner).toHaveCount(1);
   await owner.click();
   await page.getByRole('complementary').getByRole('link', { name: 'Open package files' }).click();

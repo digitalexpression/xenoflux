@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { archiveRuntimeDependency, assertInstallHooks, buildBundledPackage, bundledManifest, hasReadCorroboration, manifestFor, packageInventory, parseArguments, preservesFrozenAuditFields, smokeLocalApp } from '../scripts/local-release.mjs';
 
-test('local app smoke accepts the discovery-first setup launch URL and checks served assets and API security', async t => {
+test('local app smoke accepts the Profiles launch URL and checks served assets and API security', async t => {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'xfx-local-app-smoke-')));
   t.after(() => rm(directory, { recursive: true, force: true }));
   await smokeLocalApp(fileURLToPath(new URL('../bin/xfx.js', import.meta.url)), join(directory, 'store'), directory);

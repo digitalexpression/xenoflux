@@ -38,6 +38,7 @@ Use semantic roles rather than raw colors in components. Both themes preserve th
 | Link / focus | `#15181d` | `#e6e8eb` | `--color-link-focus` | Neutral; links are told apart by their underline |
 | Selected background | `#e6e9ee` | `#242a34` | `--color-selected` | Selected rows, tabs, controls |
 | Selected foreground | `#15181d` | `#ffffff` | `--color-on-selected` | Selected text |
+| Profile selection border | `#11796e` | `#64c8bc` | `--color-profile-selection` | Teal border for the profile open in Details |
 | Checked control fill | `#15181d` | `#e6e8eb` | `--color-checked` | Visible checkbox selection |
 | Checked control mark | `#ffffff` | `#0b0d10` | `--color-on-checked` | Checkmark on selected checkbox |
 | Informational surface | `#eef1f5` | `#181c23` | `--color-info-surface` | Neutral fill for informational notices |
@@ -191,8 +192,7 @@ Let content determine height. Dense tables may reduce padding, but retain readab
 
 ### Comparison hub
 
-The app opens on Comparisons. Keep discovery as a separate introductory action,
-then give Compare a task and Compare setups equal panel weight. Within the task
+Give Compare a task and Compare setups equal panel weight. Within the task
 panel, use equal underlined links, descriptions and availability summaries for
 Use existing sessions and Run a new task. Separate these choices with ruled
 spacing rather than nested cards. Recent work follows as flat rows.
@@ -281,35 +281,49 @@ tooltip includes the full path, which also appears in Details.
 
 CLI and Desktop have separate rows with a status dot, text label and the
 actions available for that surface. Open uses the success color, Closed a solid
-neutral and Unknown a hollow ring. Show the observed account on the CLI row
-and identify it as shared for a managed Codex profile. Point Claude and Copilot
-users to the Desktop app for its account. Icon actions have a tooltip and an
-accessible name. Keep Close visually secondary to Show.
+neutral, and Unknown and Unavailable use a hollow ring with distinct labels.
+Reserve one account line in each row. Show
+the observed CLI account and its freshness, and show **Same account as CLI**
+on Desktop for a managed Codex profile. Point Claude and Copilot users to the
+Desktop app for its account. Truncate the account value and show it in full in
+Details. Icon actions have a tooltip and an accessible name. Align the primary
+action to the right and keep Close visually secondary to Show.
+Show **Sign in required** when a usable account has not been established. Keep
+the exact sign-in finding in Details and display the freshness label separately.
 
-An inset notice above the rows shows progress, success or a problem for that
-profile. A quiet card omits the notice. Warnings and errors include **See
-details**, which opens the profile inspector and returns focus to the notice
-action when dismissed.
+Reserve one inset notice line above the rows. A quiet card shows **Auto-checks
+on**, and background sign-in checks keep the last observed account visible.
+Explicit actions show progress in the notice line and publish their outcome with
+the refreshed client rows. Warnings and errors include **See details** for the
+full message. Dismissing the inspector returns
+focus to **See details** when present, or to the permanent **Details** button.
+Failed refreshes mark retained findings and show the error and retry action below
+the inventory so the cards stay in place.
 
-Details open a right-side inspector per profile. It holds what the card omits:
-full status and CLI/Desktop sentences, the account with its scope, the full folder
-path, the setup summary and bound folders, how sign-in works, and the inspection
-links. Closing it returns focus to the profile's Details button.
+Details highlight the inspected card with a 1px teal border and selected header.
+At 800px and above, the inspector stays docked beside the inventory. It shows a
+short guide when no profile is selected. At narrower widths, the guide follows
+the inventory and the selected inspector opens below its card. Other cards stay
+visible and usable.
+The inspector shows the full client status, account and scope, folder path, setup,
+bound folders, sign-in guidance and inspection links. Keyboard activation moves
+focus to the inspector. Closing it returns focus to the control that opened it.
 
 Separate inspection links from client actions. When Profiles opens, check
 available CLI accounts in the background and reconcile confirmed-stopped clients.
 Show the normal Open action after reconciliation. Sign-in, opening and closing
 clients require explicit actions. Keep registry edits and selected copying in the
-named More menu. Creation is the page's primary action. Preserve card identity, open
-dialogs and focus across automatic checks. Closing an edit dialog opened from More
+named More menu. **Add a profile** in the toolbar opens a menu with **Create profile** and
+**Add existing profile folder**. Preserve card identity, open dialogs and focus
+across automatic checks. Closing an edit dialog opened from More
 returns focus to that profile's More button while it remains present.
 
-Clients on this Mac keeps installation observations and existing setup findings
-in flat aligned rows. Group check scope, freshness and automatic-check timing
-compactly; failed refreshes retain their previous findings and explanation. Paths
-and detailed reasons stay in disclosures. Stock Native apps controls live here,
-separate from profile-bound opening, with their existing-setup scope visible.
-Stack all inventory columns below 800px without hiding actions or evidence limits.
+Profiles has no visible page heading or subtitle. Its full-width client discovery
+card sits below the inventory and inspector. When expanded it shows
+installation observations, folder and registry findings, and stock app controls.
+Group check scope and freshness compactly. Retain previous findings after a failed
+refresh and keep paths and detailed reasons in disclosures. Label stock app
+controls with their existing-setup scope. Stack inventory columns below 800px.
 
 ### Setup inspection and selected copying
 
@@ -320,9 +334,12 @@ source facts in place. Refresh is explicit; browsing source evidence does not
 reread or mutate the setup. Mixed-client inventories keep independent labels and
 coverage under aligned category headings, without equality counts or copy actions.
 
-Use compact count controls for same-client setup comparisons, followed by reading
-limits and the searchable list/detail workspace. Group related rows with dividers,
-keeping the selected result and its exact state visible.
+Use the same compact comparison frame for both modes, with aligned profile
+columns, search and filters, and icon-labeled collapsible categories. Keep the
+breadcrumb, reading limits, profile selection and refresh in the toolbar. The
+results and docked inspector scroll independently. On narrow screens, opening
+a row shows a bottom sheet and closing it returns focus to that row. Keep the
+exact state, content diff and eligible copy actions in the same-client inspector.
 
 Selected copying pairs the file preview with a destination and selection summary.
 The summary names every checked item and the apply action names the destination.
@@ -438,7 +455,11 @@ Use product evidence and diagrams only when they explain the current task. Avoid
 
 Use a sidebar for the destinations (Sessions, Comparisons, Profiles), running activity and the theme choice, and a toolbar above the page for back, forward and the breadcrumb. Sidebar and toolbar sit on the surface color; pages sit on the canvas. The current destination has the selected fill and 600 weight. Below 1100px the sidebar stacks above the content. Keep ordinary reading blocks around 65–75 characters wide; paired evidence and tables can use the wider available space.
 
-The app opens on Comparisons. Breadcrumbs use Comparisons for that destination,
+The toolbar toggle switches between icons with labels and an icon rail. The rail
+stays beside wide layouts and runs across the top at narrow widths. The browser
+remembers the choice. The toolbar keeps page actions available in either state.
+
+The app opens on Profiles. Breadcrumbs use Comparisons for that destination,
 matching its sidebar label. Secondary pages keep their owning destination selected;
 export keeps Sessions for a retained session and Comparisons for a comparison.
 
@@ -447,8 +468,7 @@ export keeps Sessions for a retained session and Comparisons for a comparison.
 | Sessions | Session library, choose by profile and retained session inspection |
 | Comparisons | Comparison hub, session picker, setup comparison, new-task preparation, reports and reviews |
 | Saved reports | Secondary destination under Comparisons for recent locations, JSON reopening and transcript imports |
-| Profiles | Registry entries, setup inspection, profile creation and selected copying |
-| Clients on this Mac | Secondary destination under Profiles for installation observations, existing setups and stock Native apps |
+| Profiles | Registry entries, client discovery, setup inspection, profile creation and selected copying |
 | Activity | Sidebar link for current jobs, recent records, progress and recovery |
 
 The component sections above own each page's composition. Keep the hub's peer

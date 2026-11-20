@@ -9,6 +9,7 @@ import { nativeClient } from '../src/profile-command.js';
 import { createEngineProvider } from '../src/ui-engine.js';
 import { startUiServer } from '../src/ui-server.js';
 import { createDesktopRuntime } from '../src/desktop-runtime.js';
+import { createCodexDesktopSurface } from '../src/desktop-surface.js';
 import { prepareNativeHome } from './native-home-fixture.js';
 
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -101,7 +102,7 @@ export async function createUiBrowserFixture({ staticRoot = join(process.cwd(), 
     await symlink(await realpath(process.execPath), join(root, 'node'));
     const nativeProfileLog = join(root, 'claude-launches.log');
     await writeFile(claudeExecutable, `#!/bin/sh
-printf '%s\\n' "$*" >> "${nativeProfileLog}"
+printf '%s\\t%s\\n' "$*" "\${CLAUDE_CONFIG_DIR:-Default}" >> "${nativeProfileLog}"
 case "$*" in
   --version) printf '2.1.319 (Claude Code)\\n' ;;
   'auth status') printf '{"loggedIn":false,"authMethod":"none"}\\n'; exit 1 ;;
@@ -148,7 +149,9 @@ esac
     const reportsRoot = join(root, 'reports');
     const serverLogs = [];
     const terminalEnvironment = { PATH: root + ':/usr/bin:/bin', HOME: process.env.HOME, USER: process.env.USER, LOGNAME: process.env.LOGNAME };
+    const lockOptions = { lockPath: join(root, 'global.lock'), concurrentLockPath: join(root, 'desktop.lock') };
     const provider = createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'),
+      desktopSurface: createCodexDesktopSurface(store, lockOptions),
       resolveClient: signal => nativeClient(store, { '--codex': executable }, signal),
       stockApps: { list: async () => [], open: async () => { throw new Error('No fixture stock app is installed'); } },
       discoveryContext: { inspectDesktop: async () => { throw new Error('No fixture desktop app is installed'); } },
@@ -156,7 +159,7 @@ esac
       reviewContext: { terminalEnvironment },
       catalogContext: { terminalEnvironment },
       accountContext: { terminalEnvironment },
-      lockOptions: { lockPath: join(root, 'global.lock'), concurrentLockPath: join(root, 'desktop.lock') },
+      lockOptions,
       // Isolate only OS process discovery to this fixture's empty process table.
       // Real DesktopRuntime idle guards still run; no client-control operation is called.
       copyRuntime: () => createDesktopRuntime({ concurrentLockPath: join(root, 'desktop.lock'),

@@ -5,7 +5,7 @@ import { createProfileDiscovery } from './profile-discovery.js';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
-import { homedir, hostname, tmpdir } from 'node:os';
+import { homedir, hostname, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareAuditProfiles, compareAuditSessions } from './audit.js';
@@ -36,6 +36,8 @@ import { listHomes, registerHome } from './homes.js';
 import { createCodexDesktopSurface } from './desktop-surface.js';
 import { applyCopy, planCopy, planUndo, resolveNativeSettingsHome, undoCopy, validateAdvancedSelection } from './native-copy.js';
 import { observeProfileClients } from './ui-clients.js';
+import { discoverCodexExecutable } from './launcher.js';
+import { nativePath } from './node-runtime.js';
 import { UiError } from './ui-server.js';
 import { createUiRuns } from './ui-runs.js';
 import { createUiReviewTasks } from './ui-review-tasks.js';
@@ -63,6 +65,14 @@ function decodeRef(ref) {
 }
 const displayAccount = observation => observation?.accountLabel
   ? { account: { label: observation.accountLabel, lastChecked: observation.stale === true } } : {};
+const accountFinding = (observation, fallback = 'unchecked') => ({ state: observation?.state ?? fallback, lastChecked: observation?.stale === true });
+function nativeSignInText(observation) {
+  const status = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state];
+  return status ? status + (observation.stale ? ' (last checked)' : '') : 'Sign-in not checked';
+}
+const accountCheckFeedback = (name, result) => result.state === 'signed-in'
+  ? { status: 'success', message: `${name}: Signed in.` }
+  : { status: 'neutral', message: `${name}: Sign in required.` };
 const tilde = path => path?.startsWith(homedir()) ? `~${path.slice(homedir().length)}` : path;
 const profileArg = id => id === 'default' ? 'Default' : id;
 
@@ -133,8 +143,12 @@ async function clientIcon(client) {
 /** Explicit client operations, each started by a person in the app. Replaceable in tests. */
 export function defaultClientOps(store, desktopSurface = createCodexDesktopSurface(store)) {
   const xfx = args => [process.execPath, XFX, '--store', store.directory, ...args].map(shellQuote).join(' ');
+  const terminal = command => run('/usr/bin/osascript', ['-e', `tell application "Terminal" to do script ${appleString(command)}`, '-e', 'tell application "Terminal" to activate']);
   return {
-    openTerminal: args => run('/usr/bin/osascript', ['-e', `tell application "Terminal" to do script ${appleString(xfx(args))}`, '-e', 'tell application "Terminal" to activate']),
+    openTerminal: args => terminal(xfx(args)),
+    openStockTerminal: ({ executable, cwd, env, args }) => terminal(`cd ${shellQuote(cwd)} && exec ${[
+      '/usr/bin/env', '-i', ...Object.entries(env).map(([key, value]) => `${key}=${value}`), executable, ...args,
+    ].map(shellQuote).join(' ')}`),
     showTerminal: () => run('/usr/bin/open', ['-a', 'Terminal']),
     openDefaultDesktop: () => desktopSurface.openDefault(),
     openDesktop: name => desktopSurface.open(name),
@@ -144,6 +158,36 @@ export function defaultClientOps(store, desktopSurface = createCodexDesktopSurfa
 }
 
 const CLIENT_BLOCKED = /DESKTOP_RUNNING|CLI_RUNNING|RESOURCE_BUSY|running|in use/i;
+function desktopOpenBlocker(error, { profiles, name, selected, storePath }) {
+  const notice = (code, message, guidance, processes = [], command) =>
+    new UiError(409, message, code, { guidance, processes, ...(command ? { command } : {}) });
+  const recoverCommand = profile => `xfx --store=${shellQuote(storePath)} desktop recover ${shellQuote(profile.name.startsWith('--') ? profile.id : profile.name)}`;
+  if (error.code === 'profile-operation-busy') {
+    const owner = error.operationOwner;
+    const profile = profiles.find(profile => profile.id === owner?.profileId);
+    const operation = profile ? `The Xenoflux operation for ${profile.name}` : 'Another Xenoflux operation';
+    if (!owner) return notice(error.code, 'The shared desktop lock is busy.',
+      'Xenoflux couldn’t verify the owner. Check the instance of Xenoflux that started the operation before trying again.');
+    if (owner.presentPid === null) return notice(error.code, `${operation} was interrupted.`,
+      profile ? 'The recorded owner has stopped. Run the recovery command in Terminal, then try Open Desktop again.'
+        : 'The recorded owner has stopped. Recover the profile from the Xenoflux store that started the operation, then try Open Desktop again.',
+      [], profile ? recoverCommand(profile) : undefined);
+    return notice(error.code, `${operation} is holding the shared desktop lock.`,
+      'Let the operation finish, then try Open Desktop again. If you started the operation in Terminal and need to stop it, use that session. The recorded PID alone doesn’t verify the current process.',
+      [`Recorded Xenoflux owner (PID ${owner.presentPid})`]);
+  }
+  const busy = error.code === 'RESOURCE_BUSY' ? error : error.cause;
+  if (busy?.code === 'RESOURCE_BUSY' && busy.remainingProcesses?.length) {
+    const processes = busy.remainingProcesses.map(row => `${basename(row.executable)} (PID ${row.pid})`);
+    const quit = 'Save your work and quit the apps or exit the sessions listed here. Use Activity Monitor to match each PID to its app or session.';
+    const command = error.reservationPreserved && selected ? recoverCommand(selected) : undefined;
+    return notice('desktop-resources-busy', `Processes are using ${name}’s profile files.`,
+      command ? `${quit} If this profile’s Desktop opened, quit it too. Recover the profile in Terminal, then try Open Desktop again.`
+        : `${quit} Then try Open Desktop again.`, processes,
+      command);
+  }
+}
+
 function copyError(error) {
   const message = String(error?.message ?? error);
   if (CLIENT_BLOCKED.test(String(error?.code ?? '')) || /DESKTOP_RUNNING|CLI_RUNNING|RESOURCE_BUSY/.test(message))
@@ -209,6 +253,18 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     terminalEnvironment: runContext.terminalEnvironment ?? process.env, probe: accountContext.probeCodexAccount });
   const nativeProfiles = managedNativeProfiles({ terminalEnvironment: runContext.terminalEnvironment ?? process.env,
     ...accountContext, store, profilesBase, defaultUserHome, copilotRuntime, lockOptions });
+  const terminalEnvironment = runContext.terminalEnvironment ?? process.env;
+  async function stockTerminalBinding(client) {
+    const username = userInfo().username;
+    const env = { PATH: nativePath(terminalEnvironment), HOME: defaultUserHome, USER: username, LOGNAME: username, TERM: 'xterm-256color' };
+    if (client === 'codex') {
+      await resolveNativeSettingsHome(store, 'Default', { defaultUserHome });
+      return { ...await discoverCodexExecutable(terminalEnvironment), env, cwd: defaultUserHome, args: [] };
+    }
+    const profile = await nativeProfiles.resolveProfile(client, null);
+    return { executable: profile.executable, executableIdentity: profile.executableIdentity, home: profile.home,
+      env, cwd: defaultUserHome, args: client === 'copilot' ? ['--no-auto-update'] : [] };
+  }
   const resolvers = context => ({ copilot: nativeProfiles.qualifiedCopilot, ...context.profileResolvers });
   runContext = { ...runContext, profileResolvers: resolvers(runContext) };
   reviewContext = { ...reviewContext, profileResolvers: resolvers(reviewContext) };
@@ -666,10 +722,12 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     return { status: 'applied', title: `Added ${name.trim()}`, changes: [], note: 'Xenoflux registered the folder as a profile. Its files weren’t moved or changed.', undo: null };
   }
 
-  function clientActionsFor(name, clients, signIn, named, ownedDesktop) {
+  function clientActionsFor(name, clients, signIn, named, ownedDesktop, stock = false) {
     const terminal = { id: 'open-terminal', label: 'Open in Terminal (Codex CLI)…' };
     const desktop = { id: 'open-desktop', label: 'Open Codex Desktop' };
     const signin = { id: 'signin', label: 'Sign in via Terminal…' };
+    if (stock) return [clients.cli.state === 'running' ? { id: 'show-terminal', label: 'Show Terminal' } : terminal,
+      clients.desktop.state === 'running' ? { id: 'focus-desktop', label: 'Show Codex Desktop' } : desktop];
     if (named) {
       const cliOpen = clients.cli.state === 'running';
       const desktopOpen = clients.desktop.state === 'running';
@@ -843,22 +901,24 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         for (const profile of profiles) await reconcileProfile(profile.id, { managedDesktopClaim: false });
       }
       const { homes, data, defaultHome } = await profileRecords();
+      const defaults = await Promise.all(['claude-code', 'copilot'].map(async client => ({ client, folder: await nativeProfiles.stockFolder(client) })));
       let desktopInstallations = [];
-      if (data.profiles.some(profile => ['copilot', 'claude-code'].includes(profile.client))) {
+      if (defaults.some(({ folder }) => folder) || data.profiles.some(profile => ['copilot', 'claude-code'].includes(profile.client))) {
         try { desktopInstallations = (await discovery.apps())?.apps ?? []; }
         catch { /* Missing or unreadable installation stays unavailable. */ }
       }
-      let instances = [];
-      try { instances = (await desktopSurface.list({ ...lockOptions, observe: reconcile })).instances; } catch { /* reported as unknown below */ }
+      let instances;
+      try { instances = (await desktopSurface.list({ ...lockOptions, observe: reconcile })).instances; } catch {}
       const byId = new Map(data.profiles.map(profile => [profile.id, profile]));
       const card = async ({ name, isDefault, home, root, state, reason, profile }) => {
         const named = Boolean(profile?.native);
-        const instance = instances.find(item => item.profileId === profile?.id);
-        const clients = state === 'ready' && home ? await observeClients(home, { sharedCodexHome: named, desktopRunning: instance?.observed?.status === 'running' ? true
-            : instance?.observed?.status === 'stopped' ? false : null })
+        const instance = instances?.find(item => item.profileId === profile?.id);
+        const desktopStatus = instance?.observed?.status;
+        const desktopRunning = desktopStatus === 'running' ? true : desktopStatus === 'stopped' ? false : null;
+        const clients = state === 'ready' && home ? await observeClients(home, { sharedCodexHome: named, desktopRunning })
           : { cli: { state: 'unknown', text: 'unknown' }, desktop: { state: 'unknown', text: 'unknown' } };
-        if (instance && !instance.observed && clients.desktop.state !== 'running')
-          clients.desktop = { state: 'unknown', text: 'unknown (Desktop journal has not been checked)' };
+        if (clients.desktop.state !== 'running' && (instance && desktopRunning === null || named && !instances))
+          clients.desktop = { state: 'unknown', text: 'Desktop ownership could not be verified.' };
         const closeRunId = named && await cliCloseRunId(store, profile, cliRuntime);
         if (closeRunId) clients.cli = { state: 'running', text: 'The CLI is using this profile in Terminal.' };
         let signIn = 'Sign-in unknown';
@@ -870,10 +930,11 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         const repositories = profile?.repositories ?? [];
         return { name, client: 'codex', folder: (isDefault ? home : root ?? home) ?? null, isDefault, state, reason, signIn, accountCheck, ...displayAccount(account),
           binding: isDefault ? 'your standard Codex setup' : repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
-          repositories: repositories.map(row => row.path),
+          repositories: repositories.map(row => row.path), accountFinding: accountFinding(account,
+            signIn === 'No sign-in saved' ? 'signed-out' : signIn === 'Sign-in saved' ? 'saved' : 'unchecked'),
           summary: isDefault ? 'Your normal Codex setup. Other profiles can copy from it; nothing is copied into it.' : profile?.description || `Codex folder ${tilde(root ?? home ?? '')}`,
           cli: clients.cli, desktop: clients.desktop, clientActions: state === 'ready'
-            ? [...clientActionsFor(name, clients, signIn, named, instance?.observed?.status === 'running' && !instance.observed.orphaned),
+            ? [...clientActionsFor(name, clients, signIn, named, desktopRunning === true && !instance.observed.orphaned, isDefault),
               ...(closeRunId ? [closeCliAction(closeRunId)] : [])] : [],
           moreMenu: isDefault ? null : [
             { id: 'copy', label: 'Copy settings from another profile…', detail: `Choose items, see exactly what changes in ${name}, undo later` },
@@ -887,6 +948,28 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         ...(defaultHome ? [card({ name: 'Default', isDefault: true, home: defaultHome, state: 'ready', reason: null })] : []),
         ...homes.map(home => card({ name: home.name, isDefault: false, home: home.home, root: home.root, state: home.state, reason: home.reason, profile: byId.get(home.id) })),
       ]);
+      for (const { client, folder } of defaults) {
+        if (!folder) continue;
+        const vendor = client === 'claude-code' ? 'claude' : client;
+        const desktopName = STOCK_DESKTOP_APPS[vendor].name;
+        const app = desktopInstallations.find(item => item.client === vendor && item.status === 'available');
+        let cli, observation;
+        try {
+          cli = await nativeProfiles.resolveProfile(client, null);
+          observation = await nativeProfiles.observed(cli, { forDisplay: true });
+        } catch { /* A readable standard folder can still be inspected without a CLI. */ }
+        cards.push({ name: 'Default', client, folder, isDefault: true, state: 'ready', reason: null,
+          binding: `your standard ${PROFILE_CLIENT_NAMES[client]} setup`, summary: 'This is the vendor’s existing setup.',
+          signIn: nativeSignInText(observation), accountCheck: Boolean(cli), accountFinding: accountFinding(observation), ...displayAccount(observation),
+          cli: cli ? { state: 'unknown', text: 'Xenoflux has not verified a Terminal process for this standard setup.' }
+            : { state: 'unavailable', text: 'The selected CLI installation or configuration could not be verified.' },
+          desktop: app ? { state: 'unknown', text: 'Xenoflux has not verified a Desktop process for this standard setup.' }
+            : { state: 'unavailable', text: `${desktopName} Desktop is unavailable in the selected installation.` },
+          clientActions: [
+            ...(cli ? [{ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})` }] : []),
+            ...(app ? [{ id: 'open-desktop', label: `Open regular ${desktopName} Desktop`, appKey: app.appKey }] : []),
+          ], moreMenu: null });
+      }
       for (const selected of data.profiles.filter(profile => profile.client && profile.client !== 'codex')) {
         const client = selected.client;
         let profile, setup, observation;
@@ -898,10 +981,10 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         const ready = Boolean(setup);
         const desktopName = client === 'claude-code' ? 'Claude' : 'GitHub Copilot';
         const installation = desktopInstallations.find(app => app.client === (client === 'claude-code' ? 'claude' : 'copilot'));
-        let desktopStatus = await managedDesktop.status(selected.id, { installation });
+        let desktopStatus = await managedDesktop.status(selected.id, { installation, observeCli: true });
         if (reconcile && desktopStatus?.state === 'recoverable-stopped') {
           await reconcileProfile(selected.id);
-          desktopStatus = await managedDesktop.status(selected.id, { installation });
+          desktopStatus = await managedDesktop.status(selected.id, { installation, observeCli: true });
         }
         const desktopReady = desktopStatus && ['available', 'running', 'recoverable-stopped'].includes(desktopStatus.state);
         const desktop = !desktopStatus ? { state: 'unavailable', text: 'Desktop observation is unavailable.' }
@@ -915,31 +998,30 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
             ? [{ id: 'open-desktop', label: `Open ${desktopName} Desktop`, appKey: desktopStatus.appKey ?? installation?.appKey }] : [];
         const desktopClaimed = desktopStatus && !['available', 'unavailable'].includes(desktopStatus.state);
         const accountScope = client === 'claude-code' ? 'per-root' : observation?.qualification?.scope ?? 'unverified';
-        const accountState = ({ 'signed-in': 'Signed in', 'signed-out': 'Signed out', unverified: 'Sign-in route unverified' })[observation?.state];
-        const signIn = accountState ? accountState + (observation.stale ? ' (last checked)' : '') : 'Sign-in not checked';
+        const signIn = nativeSignInText(observation);
         const cliActions = [];
         const closeRunId = await cliCloseRunId(store, selected, cliRuntime);
         const cliReserved = desktopStatus?.cliReserved === true || Boolean(closeRunId);
         const cliRunning = desktopStatus?.cliRunning === true || Boolean(closeRunId);
+        const cliState = cliRunning ? 'running' : ready ? desktopStatus?.cliState ?? 'unknown' : 'unavailable';
         if (cliRunning) cliActions.push({ id: 'show-terminal', label: 'Show Terminal' });
         if (closeRunId) cliActions.push(closeCliAction(closeRunId));
         if (ready && !cliReserved && (!desktopClaimed || desktopStatus?.state === 'running'
           || client === 'claude-code' && desktopStatus?.state === 'recoverable-stopped'))
           cliActions.push({ id: 'open-terminal', label: `Open in Terminal (${PROFILE_CLIENT_NAMES[client]})…` });
-        if (ready && !desktopClaimed && !cliReserved) {
-          if (!observation || observation.stale) cliActions.push({ id: 'check', label: 'Check sign-in' });
-          else if (observation.state !== 'signed-in') cliActions.push({ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' });
-        }
+        if (ready && !desktopClaimed && !cliReserved && observation && !observation.stale && observation.state !== 'signed-in')
+          cliActions.push({ id: 'signin', label: client === 'copilot' ? 'Sign in with GitHub' : 'Sign in' });
         const repositories = selected.repositories;
         cards.push({ name: selected.name, client, folder: selected.native?.configRoot ?? null, isDefault: false, state: ready || desktopReady ? 'ready' : 'unavailable',
           reason: ready || desktopReady ? null : 'The native root or executable no longer matches this binding.',
-          signIn, accountCheck: ready && !desktopClaimed && !cliReserved, accountScope, accountIndependence: 'not verified', setup, ...displayAccount(observation),
+          signIn, accountCheck: ready && !desktopClaimed && !cliReserved, accountScope, accountIndependence: 'not verified', setup,
+          accountFinding: accountFinding(observation), ...displayAccount(observation),
           binding: repositories.length === 0 ? 'no project' : repositories.length === 1 ? `bound to ${basename(repositories[0].path)}` : `bound to ${repositories.length} projects`,
           repositories: repositories.map(row => row.path),
           summary: selected.description || `${PROFILE_CLIENT_NAMES[client]} folder ${tilde(selected.native?.configRoot ?? '')}`,
-          cli: { state: cliRunning ? 'running' : ready ? 'unknown' : 'unavailable',
-            text: cliRunning ? 'The CLI is using this profile in Terminal.'
-              : cliReserved ? 'A Terminal reservation is still held for this profile.' : ready ? 'Open in Terminal with this profile. Process state not checked.' : 'CLI or profile root unavailable' },
+          cli: { state: cliState, text: cliState === 'running' ? 'The CLI is using this profile in Terminal.'
+            : cliState === 'not-running' ? 'No CLI process holds this managed profile.'
+              : ready ? desktopStatus?.cliReason ?? 'The CLI process could not be verified.' : 'CLI or profile root unavailable' },
           desktop,
           clientActions: [...cliActions, ...desktopActions],
           moreMenu: [
@@ -949,11 +1031,11 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
             { id: 'remove', label: 'Remove from Xenoflux…', detail: 'Keeps the profile’s files on disk.' },
           ].map(item => desktopClaimed || cliReserved ? { ...item, disabledReason: 'Profile changes are available once Xenoflux verifies that its clients have stopped.' } : item) });
       }
-      const copySources = Object.fromEntries(await Promise.all(PROFILE_CLIENTS.map(async client => [client, [
-        ...((client === 'codex' ? !!defaultHome : await nativeProfiles.hasStock(client)) ? ['Default'] : []),
+      const copySources = Object.fromEntries(PROFILE_CLIENTS.map(client => [client, [
+        ...(cards.some(card => card.client === client && card.isDefault) ? ['Default'] : []),
         ...cards.filter(card => card.client === client && card.state === 'ready' && !card.isDefault
           && (client === 'codex' || card.setup)).map(card => card.name),
-      ]])));
+      ]]));
       return { profiles: cards, copySources, simulated: false,
         notes: ['Named Codex profiles share one sign-in between CLI and Desktop. Sign in from either client, then open the other.'] };
     },
@@ -1290,7 +1372,8 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       if (client === 'codex') {
         if (name === 'Default') folder = defaultHome;
         else { const home = homes.find(item => item.name === name); folder = home ? home.root ?? home.home : null; }
-      } else folder = data.profiles.find(profile => profile.name === name && profile.client === client)?.native?.configRoot ?? null;
+      } else folder = name === 'Default' ? await nativeProfiles.stockFolder(client)
+        : data.profiles.find(profile => profile.name === name && profile.client === client)?.native?.configRoot ?? null;
       if (!folder) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
       try { await run('/usr/bin/open', ['-R', folder]); }
       catch { throw new UiError(422, `Finder could not show ${tilde(folder)}. Check that the folder still exists.`, 'reveal-failed'); }
@@ -1358,8 +1441,29 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       return { status: 'success', message: `Removed ${name} from Xenoflux. Its files are still on disk.` };
     },
 
-    async clientAction({ name, action, session, appKey, runId }) {
-      const selected = (await store.read()).profiles.find(profile => profile.name === name);
+    async clientAction({ name, client: requestedClient, action, session, appKey, runId }) {
+      if (name === 'Default') {
+        const client = requestedClient ?? 'codex';
+        if (!PROFILE_CLIENTS.includes(client)) throw new UiError(400, 'Choose a client for Default.', 'invalid-selection');
+        if (client !== 'codex' && !await nativeProfiles.stockFolder(client)) throw new UiError(404, 'The standard profile folder is unavailable.', 'not-found');
+        if (action === 'open-terminal') {
+          try { await clientOps.openStockTerminal(await stockTerminalBinding(client)); }
+          catch (error) { throw new UiError(422, `Could not open ${PROFILE_CLIENT_NAMES[client]} in Terminal: ${error.message}`, 'client-failed'); }
+          return { status: 'success', message: `Opened Terminal for ${PROFILE_CLIENT_NAMES[client]} Default.` };
+        }
+        if (client !== 'codex') {
+          if (action === 'open-desktop') {
+            const result = await this.openApp({ client: client === 'claude-code' ? 'claude' : client, appKey });
+            return { status: 'success', message: result.message };
+          }
+          if (action === 'check') {
+            return accountCheckFeedback(name, await this.profileAccount({ name, client }));
+          }
+          throw new UiError(400, 'This action requires a managed profile.', 'invalid-action');
+        }
+      }
+      const { profiles } = await store.read();
+      const selected = profiles.find(profile => profile.name === name);
       if (action === 'close-terminal') {
         if (!selected?.native || !UUID.test(runId ?? '')) throw new UiError(400, 'Choose a managed CLI run to close.', 'invalid-selection');
         try {
@@ -1381,7 +1485,13 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
             const success = result.state === (action === 'close-desktop' ? 'closed' : 'running');
             return { status: success ? 'success' : 'neutral', message: success ? messages[action]
               : result.reason ?? 'Couldn’t verify the managed Desktop state. Check the profile again.' };
-          } catch (error) { throw new UiError(409, error.message, 'managed-desktop-failed'); }
+          } catch (error) {
+            if (action === 'open-desktop') {
+              const blocker = desktopOpenBlocker(error, { profiles, name, selected, storePath: store.directory });
+              if (blocker) throw blocker;
+            }
+            throw new UiError(409, error.message, 'managed-desktop-failed');
+          }
         }
         if (action === 'show-terminal') {
           await clientOps.showTerminal();
@@ -1396,9 +1506,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
           return { status: 'success', message: `Opened a Terminal window for ${name}.` };
         }
         if (action !== 'check') throw new UiError(400, 'This client does not support that profile action.', 'invalid-action');
-        const result = await this.profileAccount({ name, client: selected.client });
-        const text = result.state === 'signed-in' ? 'Signed in' : result.state === 'signed-out' ? 'Signed out' : 'Sign-in route unverified';
-        return { status: 'success', message: `${name}: ${text}.` };
+        return accountCheckFeedback(name, await this.profileAccount({ name, client: selected.client }));
       }
       const card = (await this.profiles()).profiles.find(profile => profile.name === name);
       if (!card) throw new UiError(404, `Profile not found: ${name}`, 'not-found');
@@ -1407,7 +1515,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       const named = Boolean(selected?.native);
       const sharedSignIn = named && card.signIn === 'Sign-in saved';
       const cliOpen = card.cli.state === 'running', desktopOpen = card.desktop.state === 'running';
-      if (cliOpen && !sharedSignIn && (action === 'open-desktop' || !named && action === 'focus-desktop'))
+      if (!isDefault && cliOpen && !sharedSignIn && (action === 'open-desktop' || !named && action === 'focus-desktop'))
         throw new UiError(409, named ? `Complete ${name}’s sign-in in Codex CLI before opening Desktop.`
           : `Close ${name}’s Terminal session before opening Codex Desktop.`, 'client-conflict');
       if (desktopOpen && !sharedSignIn && ['open-terminal', 'resume'].includes(action))
@@ -1426,6 +1534,10 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
         else throw new UiError(400, 'Unknown client action.', 'invalid-action');
       } catch (error) {
         if (error instanceof UiError) throw error;
+        if (action === 'open-desktop') {
+          const blocker = desktopOpenBlocker(error, { profiles, name, selected, storePath: store.directory });
+          if (blocker) throw blocker;
+        }
         throw new UiError(422, `Couldn’t ${action.replace('-', ' ')} for ${name}: ${error.message}`, 'client-failed');
       }
       const done = { 'open-terminal': `Opened a Terminal window for ${name}.`, signin: `Opened a Terminal window to sign in to ${name}.`, resume: `Opened the session in a Terminal window for ${name}.`,

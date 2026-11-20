@@ -9,22 +9,25 @@ async function openProfiles(page) {
 
 async function inspect(page, name) {
   await page.getByRole('button', { name: `Details for ${name}`, exact: true }).click();
-  const inspector = page.getByRole('dialog', { name, exact: true });
+  const inspector = page.getByRole('complementary', { name, exact: true });
   await expect(inspector).toBeVisible();
   return inspector;
 }
 
 async function createDialog(page, name) {
-  await page.getByRole('button', { name: 'Create profile…' }).click();
+  await page.getByRole('button', { name: 'Add a profile', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Create profile', exact: true }).click();
   await page.getByRole('textbox', { name: 'Name' }).fill(name);
 }
 
-test('visiting Profiles checks each available CLI account once and refreshes current results on revisit', async ({ page }) => {
+test('Profiles checks available CLI accounts on visits and after changes to native findings', async ({ page }) => {
   const checks = [];
   const profiles = [
     { name: 'codex-work', client: 'codex', signIn: 'Sign-in saved', accountCheck: true },
     { name: 'claude-work', client: 'claude-code', signIn: 'Sign-in not checked' },
     { name: 'copilot-work', client: 'copilot', signIn: 'Signed in' },
+    { name: 'Default', client: 'claude-code', isDefault: true, signIn: 'Sign-in not checked', accountCheck: true },
+    { name: 'Default', client: 'copilot', isDefault: true, signIn: 'Sign-in not checked', accountCheck: true },
     { name: 'desktop-in-use', client: 'claude-code', signIn: 'Sign-in not checked', accountCheck: false },
   ];
   let result = 'Signed in';
@@ -49,25 +52,33 @@ test('visiting Profiles checks each available CLI account once and refreshes cur
       }), notes: [], simulated: false,
     } });
   });
-  await page.route('**/api/profiles/*/account', route => {
+  await page.route('**/api/profiles/*/account', async route => {
     const name = new URL(route.request().url()).pathname.split('/')[3];
     const { client } = route.request().postDataJSON();
     checks.push([name, client]);
-    const profile = profiles.find(profile => profile.name === name);
+    if (checks.length === 1) {
+      const card = page.getByRole('article', { name, exact: true });
+      await expect(card.getByRole('status')).toHaveText('Auto-checks on');
+    }
+    const profile = profiles.find(profile => profile.name === name && profile.client === client);
     if (client !== 'codex') profile.signIn = result;
-    const label = { codex: 'codex@example.test', 'claude-code': 'claude@example.test', copilot: 'copilot-work' }[client];
+    delete profile.accountFinding;
+    const label = profile.isDefault ? `stock-${client}` : { codex: 'codex@example.test', 'claude-code': 'claude@example.test', copilot: 'copilot-work' }[client];
     profile.account = result === 'Signed in' ? { label, lastChecked: false } : undefined;
     return route.fulfill({ json: {} });
   });
 
   const claude = page.getByRole('article', { name: 'claude-work' });
   const copilot = page.getByRole('article', { name: 'copilot-work' });
-  const available = [['codex-work', 'codex'], ['claude-work', 'claude-code'], ['copilot-work', 'copilot']];
+  const available = [['codex-work', 'codex'], ['claude-work', 'claude-code'], ['copilot-work', 'copilot'], ['Default', 'claude-code'], ['Default', 'copilot']];
   await openProfiles(page);
   await expect(claude.getByText('claude@example.test', { exact: true })).toBeVisible();
   await expect.poll(() => checks).toEqual(available);
   await expect(page.getByRole('article', { name: 'codex-work' }).getByText('codex@example.test', { exact: true })).toBeVisible();
   await expect(copilot.getByRole('group', { name: 'CLI', exact: true }).getByText('copilot-work', { exact: true })).toBeVisible();
+  await expect(page.getByRole('article', { name: 'Default', exact: true }).getByText('stock-claude-code', { exact: true })).toBeVisible();
+  await expect(page.getByRole('article', { name: 'Default', exact: true }).getByText('stock-copilot', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Check sign-in for / })).toHaveCount(0);
   const desktopSignInHint = /Quit all other Claude Desktop instances before signing in to this profile.*open regular Claude Desktop first, then reopen this profile/;
   const claudeDesktopAction = claude.getByRole('button', { name: 'Open Claude Desktop for claude-work' });
   await expect(claudeDesktopAction).toHaveAccessibleDescription(desktopSignInHint);
@@ -107,14 +118,31 @@ test('visiting Profiles checks each available CLI account once and refreshes cur
   await expect(claude.getByRole('button', { name: 'Open Claude Desktop for claude-work' })).toBeVisible();
   await expect(claudeTerminal).toHaveAccessibleDescription(handoffHint);
 
+  const expired = ['copilot-work', 'copilot'];
+  const copilotProfile = profiles.find(profile => profile.name === expired[0]);
+  copilotProfile.account = { label: 'old-account', lastChecked: true };
+  copilotProfile.accountFinding = { state: 'signed-in', lastChecked: true };
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect.poll(() => checks).toEqual([...available, expired]);
+  await expect(copilot.getByRole('group', { name: 'CLI', exact: true }).getByText('copilot-work', { exact: true })).toBeVisible();
+
+  const invalidated = ['claude-work', 'claude-code'];
+  const claudeProfile = profiles.find(profile => profile.name === invalidated[0]);
+  delete claudeProfile.account;
+  claudeProfile.accountFinding = { state: 'unchecked', lastChecked: false };
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect.poll(() => checks).toEqual([...available, expired, invalidated]);
+  await expect(claude.getByText('claude@example.test', { exact: true })).toBeVisible();
+
   claudeDesktop = 'available';
   result = 'Signed out';
   await page.reload();
   await expect(claude.getByText('Signed out', { exact: true })).toBeVisible();
   await expect(copilot.getByText('Signed out', { exact: true })).toBeVisible();
+  await expect(page.getByRole('article', { name: 'Default', exact: true }).getByText('Signed out', { exact: true })).toHaveCount(2);
   await expect(page.getByText('codex@example.test', { exact: false })).toHaveCount(0);
   await expect(claude.getByText('claude@example.test', { exact: false })).toHaveCount(0);
-  expect(checks).toEqual([...available, ...available]);
+  expect(checks).toEqual([...available, expired, invalidated, ...available]);
 });
 
 async function chooseSourceAndPreview(page, name, source = 'baseline') {
@@ -363,29 +391,36 @@ test('compare two setups and inspect all lines of a skill package', async ({ app
   await page.getByRole('button', { name: 'Compare setups', exact: true }).last().click();
   await expect(page.getByRole('heading', { name: 'Compare setups', exact: true })).toBeVisible();
 
-  const setting = page.getByRole('button').filter({ hasText: 'model_reasoning_effort' });
+  const comparisonSearch = page.getByRole('searchbox', { name: 'Find an item' });
+  await comparisonSearch.fill('model_reasoning_effort');
+  const setting = page.getByRole('button', { name: /^Different model_reasoning_effort / });
   await setting.click();
   const detail = page.getByRole('complementary');
-  await expect(detail.locator('.edge-a')).toContainText('baseline');
-  await expect(detail.locator('.edge-a').getByText('medium', { exact: true })).toBeVisible();
-  await expect(detail.locator('.edge-b')).toContainText('strict-review');
-  await expect(detail.locator('.edge-b').getByText('high', { exact: true })).toBeVisible();
+  await expect(detail.locator('.setup-compare-evidence-side[data-side="a"]')).toContainText('baseline');
+  await expect(detail.locator('.setup-compare-evidence-side[data-side="a"]').getByText('medium', { exact: true })).toBeVisible();
+  await expect(detail.locator('.setup-compare-evidence-side[data-side="b"]')).toContainText('strict-review');
+  await expect(detail.locator('.setup-compare-evidence-side[data-side="b"]').getByText('high', { exact: true })).toBeVisible();
   await detail.getByRole('button', { name: 'Where it’s set and what we know' }).click();
   await expect(detail.getByText(/config\.toml/).first()).toBeVisible();
   await expect(detail.locator('p.meta')).toContainText(/profile/i);
-  const unknownFilter = page.getByRole('group', { name: 'Summary' }).getByRole('button', { name: /Could not compare/ });
+  const unknownFilter = page.getByRole('group', { name: 'Filter results' }).getByRole('button', { name: 'Could not compare', exact: true });
   await expect(unknownFilter).toBeVisible();
-  await page.getByRole('button', { name: 'Show sources' }).click();
-  await expect(page.getByText('Reading limits', { exact: true })).toBeVisible();
-  await expect(page.getByRole('table').getByText(/couldn’t be read|partial evidence/i).first()).toBeVisible();
-  await page.getByRole('button', { name: 'Everything', exact: true }).click();
-  const sourceItem = page.getByRole('button').filter({ hasText: 'allow_symlinked_codex_home' });
+  const readingLimits = page.getByText('Reading limits', { exact: true });
+  await readingLimits.click();
+  await expect(page.getByRole('table', { name: 'Source coverage' }).getByText(/couldn’t be read|partial evidence/i).first()).toBeVisible();
+  await readingLimits.click();
+  await page.getByRole('button', { name: 'All items', exact: true }).click();
+  await comparisonSearch.fill('allow_symlinked_codex_home');
+  const sourceItem = page.getByRole('button', { name: /^Same allow_symlinked_codex_home / });
   await expect(sourceItem).toBeVisible();
   await sourceItem.click();
   const sourceDetail = page.getByRole('complementary');
   await expect(sourceDetail.getByText('Same within what was read', { exact: true })).toBeVisible();
   await expect(sourceDetail.getByText('true', { exact: true })).toHaveCount(2);
   await expect(sourceDetail).not.toContainText('Value not shown');
+  await comparisonSearch.clear();
+  const skills = page.getByRole('region', { name: 'Skills', exact: true }).getByRole('button', { name: /^Skills/ });
+  if (await skills.getAttribute('aria-expanded') === 'false') await skills.click();
   for (const name of app.longSkillNames) {
     const row = page.getByRole('button').filter({ hasText: name });
     await expect(row).toHaveCount(1);
@@ -403,13 +438,18 @@ test('compare two setups and inspect all lines of a skill package', async ({ app
 });
 
 test('Claude creation previews and cancels without launching; selected copy and Undo preserve the profile', async ({ app, page }) => {
+  const stockCheck = 'auth status\tDefault';
+  const nativeCalls = async () => (await readFile(app.nativeProfileLog, 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return '';
+    throw error;
+  })).trim().split('\n').filter(Boolean);
   await page.setViewportSize({ width: 390, height: 850 });
   await openProfiles(page);
   await createDialog(page, 'claude-cancelled');
   await page.getByLabel('Client', { exact: true }).selectOption('claude-code');
   await page.getByRole('button', { name: 'Review profile' }).click();
   await expect(page.getByText('Claude Code executable:', { exact: false })).toBeVisible();
-  await expect(access(app.nativeProfileLog)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect((await nativeCalls()).filter(call => call !== stockCheck)).toEqual([]);
   await page.getByRole('link', { name: 'Cancel', exact: true }).click();
   expect((await app.store.read()).profiles.some(p => p.name === 'claude-cancelled')).toBe(false);
 
@@ -436,10 +476,15 @@ test('Claude creation previews and cancels without launching; selected copy and 
   await expect(card.getByRole('button', { name: 'Open Claude Desktop for claude-parts', exact: true })).toHaveCount(0);
   const signIn = card.getByRole('button', { name: 'Sign in for claude-parts', exact: true });
   const check = card.getByRole('button', { name: 'Check sign-in for claude-parts', exact: true });
-  await expect(card.getByText('Signed out', { exact: true })).toBeVisible();
+  await expect(card.getByText('Sign in required', { exact: true })).toBeVisible();
   await expect(signIn).toBeVisible();
   await expect(check).toHaveCount(0);
-  expect(await readFile(app.nativeProfileLog, 'utf8')).toBe('--version\nauth status\n');
+  const calls = await nativeCalls();
+  expect(calls).toContain(stockCheck);
+  expect(calls.filter(call => call !== stockCheck)).toEqual([
+    `--version\t${profile.native.configRoot}`,
+    `auth status\t${profile.native.configRoot}`,
+  ]);
   const opens = [];
   await page.route('**/api/profiles/claude-parts/clients', async route => {
     opens.push(route.request().postDataJSON());

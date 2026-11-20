@@ -1,5 +1,9 @@
 # Xenoflux development
 
+Use the installed `poteto-mode` skill by default for Xenoflux tasks. For UI
+design, implementation, and review, also use the installed `impeccable` and
+`ui-taste` skills.
+
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for source ownership/checks and the relevant
 [contracts](docs/CONTRACTS.md) before changing behavior. [PRODUCT.md](PRODUCT.md)
 owns product intent and priorities. The [guide](docs/GUIDE.md) owns the user journey

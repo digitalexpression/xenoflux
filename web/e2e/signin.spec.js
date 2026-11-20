@@ -2,14 +2,15 @@ import { test, expect } from './fixtures.js';
 
 async function signinFixture(page, client) {
   let state = 'waiting-for-browser', profileReads = 0, cancelCalls = 0, terminalCalls = 0, startCalls = 0;
-  let checkOffline = false, cancelOffline = false, cancellationState = 'cancelled';
+  let checkOffline = false, cancelOffline = false, cancellationState = 'cancelled', profileRefresh;
   const profileName = client === 'copilot' ? 'copilot-work' : 'claude-work';
   const attempt = () => ({ id: 'fixture-signin', client, profileName, accountScope: 'per-root',
     state, browserUrl: client === 'copilot' ? 'https://github.com/login/device' : undefined,
     deviceCode: client === 'copilot' ? 'ABCD-1234' : undefined,
     message: state === 'completed' ? 'Account sign-in verified.' : state === 'verifying' ? 'Checking the native account.' : 'Finish authorization in your browser.' });
-  await page.route('**/api/profiles/refresh', route => {
+  await page.route('**/api/profiles/refresh', async route => {
     profileReads++;
+    if (profileRefresh) await profileRefresh;
     return route.fulfill({ json: { profiles: [{ name: profileName, client, accountScope: 'per-root',
       accountIndependence: 'not verified', isDefault: false, state: 'ready', reason: null,
       signIn: state === 'completed' ? 'Signed in' : 'Signed out', binding: 'Fixture folder', summary: 'Separate settings and history.',
@@ -31,6 +32,11 @@ async function signinFixture(page, client) {
   await expect(button).toBeVisible();
   const heading = page.getByRole('heading', { name: profileName, exact: true });
   return { button, heading, profileName, state: value => { state = value; }, offline: value => { checkOffline = value; },
+    holdProfileRefresh() {
+      let release;
+      profileRefresh = new Promise(resolve => { release = resolve; });
+      return release;
+    },
     cancelOffline: value => { cancelOffline = value; }, cancellationState: value => { cancellationState = value; }, get profileReads() { return profileReads; }, get cancelCalls() { return cancelCalls; },
     get terminalCalls() { return terminalCalls; }, get startCalls() { return startCalls; } };
 }
@@ -41,7 +47,7 @@ for (const client of ['claude-code', 'copilot']) {
     const fixture = await signinFixture(page, client);
     if (client === 'copilot') {
       await page.getByRole('button', { name: 'Details for copilot-work', exact: true }).click();
-      await expect(page.getByRole('dialog', { name: 'copilot-work', exact: true }).getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
+      await expect(page.getByRole('complementary', { name: 'copilot-work', exact: true }).getByText('Sign in separately to CLI and Desktop for this profile.')).toBeVisible();
       await page.keyboard.press('Escape');
     }
     await fixture.button.focus();
@@ -92,7 +98,7 @@ test('Escape cancels sign-in before dismissing and returns keyboard focus', asyn
   expect(fixture.terminalCalls).toBe(0);
 });
 
-test('profile checks pause during browser authorization and refresh after verification', async ({ page }) => {
+test('profile checks pause during authorization and publish sign-in with the refreshed account row', async ({ page }) => {
   await page.clock.install();
   const fixture = await signinFixture(page, 'claude-code');
   await fixture.button.click();
@@ -102,12 +108,23 @@ test('profile checks pause during browser authorization and refresh after verifi
   await page.evaluate(() => window.dispatchEvent(new Event('focus')));
   await page.clock.runFor(5_100);
   expect(fixture.profileReads).toBe(reads);
-  fixture.state('completed');
-  await page.clock.runFor(1_000);
-  await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
-  await expect.poll(() => fixture.profileReads).toBeGreaterThan(reads);
-  await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
-  await expect(fixture.heading).toBeFocused();
+  const finishRefresh = fixture.holdProfileRefresh();
+  try {
+    fixture.state('completed');
+    await page.clock.runFor(1_000);
+    await expect(dialog.getByText('Sign-in verified', { exact: true })).toBeVisible();
+    await expect.poll(() => fixture.profileReads).toBeGreaterThan(reads);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).last().click();
+    await expect(fixture.heading).toBeFocused();
+    const card = page.getByRole('article', { name: fixture.profileName, exact: true });
+    const cli = card.getByRole('group', { name: 'CLI', exact: true });
+    await expect(card.getByRole('status')).toHaveText('Updating sign-in status…');
+    await expect(cli.getByText('Signed out', { exact: true })).toBeVisible();
+    finishRefresh();
+    await expect(card.getByRole('status')).toHaveText('Sign-in verified');
+    expect(await cli.getByText('Signed in', { exact: true }).isVisible()).toBe(true);
+    await expect(fixture.button).toHaveCount(0);
+  } finally { finishRefresh(); }
 });
 
 test('network and cancellation failures retain the attempt and offer recovery', async ({ page }) => {

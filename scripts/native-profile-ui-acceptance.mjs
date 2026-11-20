@@ -298,7 +298,8 @@ export async function runAcceptance({ manifest, repo, testFixture = null }) {
     if (new URL(page.url()).pathname !== '/profiles') fail('UI did not route directly to Profiles with the launch token.');
     await page.getByRole('heading', { name: 'Profiles', exact: true }).waitFor();
     await ensureOpen(deadline);
-    await page.getByRole('button', { name: 'Create profile…' }).click();
+    await page.getByRole('button', { name: 'Add a profile', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Create profile', exact: true }).click();
     await page.getByRole('textbox', { name: 'Name' }).fill('XFX UI Copy Source');
     await ensureOpen(deadline);
     await page.getByRole('button', { name: 'Create profile', exact: true }).click();
@@ -318,7 +319,8 @@ export async function runAcceptance({ manifest, repo, testFixture = null }) {
     await seed(sourceHome, 'skills/xfx-copy-fixture/source-only.txt', 'synthetic source asset\n', deadline, admitMutation);
     await record('phase-source-seeded.json', { profile: source.name, paths: ['AGENTS.md', 'config.toml', 'skills/xfx-copy-fixture/SKILL.md', 'skills/xfx-copy-fixture/source-only.txt'] });
     await ensureOpen(deadline);
-    await page.getByRole('button', { name: 'Create profile…' }).click();
+    await page.getByRole('button', { name: 'Add a profile', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Create profile', exact: true }).click();
     await page.getByRole('textbox', { name: 'Name' }).fill('XFX UI Copy Target');
     await page.getByRole('radio', { name: /Selected parts of another profile/ }).check();
     await page.getByLabel('Copy parts from').selectOption({ label: 'XFX UI Copy Source' });

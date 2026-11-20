@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Link, useLocation, useNavigate } from 'react-router';
-import { ArrowLeft, ArrowLeftRight, ArrowRight, Columns2, History, Users, X, type LucideIcon } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowLeftRight, ArrowRight, Bookmark, Columns2, History, PanelLeftClose, PanelLeftOpen, Users, X, type LucideIcon } from 'lucide-react';
 import type { Info } from '@/api/types';
 import { host } from '@/host';
 import { setTheme, storedTheme, type ThemeChoice } from '@/lib/theme';
@@ -10,49 +10,60 @@ import { swapTray, toggleTray, trayFull, useTray } from '@/lib/tray';
 import { ErrorPanel } from './notices';
 import { Button } from './ui/button';
 
-export type NavKey = 'setup' | 'compare' | 'profiles' | 'sessions' | 'open' | 'activity' | null;
+export type NavKey = 'compare' | 'profiles' | 'sessions' | 'open' | 'activity' | null;
 
 export const InfoContext = createContext<Info | null>(null);
 export const useInfo = () => useContext(InfoContext);
 
 /** Where the current page's breadcrumb renders: the shell toolbar. */
 const CrumbSlotContext = createContext<HTMLElement | null>(null);
+const SIDEBAR_ID = 'app-sidebar';
+const SIDEBAR_STORAGE_KEY = 'xenoflux-sidebar-collapsed';
 
-type NavItem = { key: Exclude<NavKey, null>; label: string; to: string };
+type NavItem = { key: Exclude<NavKey, null>; label: string; to: string; icon: LucideIcon };
 // Three destinations, one per object people work with. A destination stays
 // marked while one of its secondary pages is open.
-const NAV: (NavItem & { icon: LucideIcon; children: NavItem[] })[] = [
+const NAV: (NavItem & { children: NavItem[] })[] = [
   { key: 'sessions', label: 'Sessions', to: '/sessions', icon: History, children: [] },
-  { key: 'compare', label: 'Comparisons', to: '/comparisons', icon: Columns2, children: [{ key: 'open', label: 'Saved reports', to: '/reports/open' }] },
-  { key: 'profiles', label: 'Profiles', to: '/profiles', icon: Users, children: [{ key: 'setup', label: 'Clients on this Mac', to: '/setup' }] },
+  { key: 'compare', label: 'Comparisons', to: '/comparisons', icon: Columns2, children: [{ key: 'open', label: 'Saved reports', to: '/reports/open', icon: Bookmark }] },
+  { key: 'profiles', label: 'Profiles', to: '/profiles', icon: Users, children: [] },
 ];
 
-export function AppSidebar({ current }: { current: NavKey }) {
+export function AppSidebar({ current, collapsed }: { current: NavKey; collapsed: boolean }) {
   const info = useInfo();
   const jobs = info?.activeJobs ?? (info?.activeRun ? [{ ...info.activeRun, kind: 'comparison' }] : []);
   return (
-    <header className="app-sidebar">
-      <Link to="/comparisons" className="app-brand" aria-label="Xenoflux home">
+    <header id={SIDEBAR_ID} className="app-sidebar">
+      <Link to="/comparisons" className="app-brand" aria-label="Xenoflux home" title={collapsed ? 'Xenoflux home' : undefined}>
         <span aria-hidden="true" className="app-brand-mark" />
-        <span>Xenoflux</span>
+        <span hidden={collapsed}>Xenoflux</span>
       </Link>
       <nav aria-label="Primary" className="app-nav">
         {NAV.map(({ icon: Icon, children, ...item }) => (
           <div key={item.key} className="app-nav-group">
             <Link to={item.to} className="nav-link" aria-current={current === item.key ? 'page' : undefined}
+              aria-label={collapsed ? item.label : undefined} title={collapsed ? item.label : undefined}
               data-active={children.some(child => child.key === current) || undefined}>
-              <Icon size={16} aria-hidden="true" />{item.label}
+              <Icon size={16} aria-hidden="true" /><span hidden={collapsed}>{item.label}</span>
             </Link>
-            {children.map(child => (
-              <Link key={child.key} to={child.to} className="nav-link nav-sub" aria-current={current === child.key ? 'page' : undefined}>{child.label}</Link>
+            {children.map(({ icon: ChildIcon, ...child }) => (
+              <Link key={child.key} to={child.to} className="nav-link nav-sub" aria-current={current === child.key ? 'page' : undefined}
+                aria-label={collapsed ? child.label : undefined} title={collapsed ? child.label : undefined}>
+                <ChildIcon size={16} aria-hidden="true" /><span hidden={collapsed}>{child.label}</span>
+              </Link>
             ))}
           </div>
         ))}
       </nav>
-      <ComparisonTray />
+      <ComparisonTray collapsed={collapsed} />
       <section className="app-activity" aria-labelledby="activity-title">
-        <h2 id="activity-title" className="meta font-medium"><Link to="/activity" aria-current={current === 'activity' ? 'page' : undefined}>Activity</Link></h2>
-        {jobs.length ? (
+        <h2 id="activity-title" className="meta font-medium">
+          <Link to="/activity" className={collapsed ? 'nav-link' : undefined} aria-current={current === 'activity' ? 'page' : undefined}
+            aria-label={collapsed ? 'Activity' : undefined} title={collapsed ? 'Activity' : undefined}>
+            <Activity size={16} aria-hidden="true" /><span hidden={collapsed}>Activity</span>
+          </Link>
+        </h2>
+        {!collapsed && (jobs.length ? (
           <>
             <p className="text-ui font-semibold">{jobs.length} {jobs.length === 1 ? 'job' : 'jobs'} in progress{info?.maxActiveJobs ? ` · capacity ${info.maxActiveJobs}` : ''}</p>
             <ul className="list-none p-0 flex flex-col gap-1">
@@ -61,9 +72,9 @@ export function AppSidebar({ current }: { current: NavKey }) {
               </Link></li>)}
             </ul>
           </>
-        ) : <div className="meta">No jobs running.</div>}
+        ) : <div className="meta">No jobs running.</div>)}
       </section>
-      <div className="app-sidebar-foot">
+      <div className="app-sidebar-foot" hidden={collapsed}>
         <ThemeSelect />
         <span className="meta">{info?.mode === 'demo' ? 'Demo data · nothing on this Mac is read or changed' : 'Local app · this Mac only'}</span>
       </div>
@@ -76,14 +87,17 @@ export function AppSidebar({ current }: { current: NavKey }) {
  * session is picked. The picker page shows the same pair in full, so the tray
  * steps aside there.
  */
-function ComparisonTray() {
+function ComparisonTray({ collapsed }: { collapsed: boolean }) {
   const tray = useTray();
   const { pathname } = useLocation();
   if ((!tray.left && !tray.right) || pathname === '/compare/sessions') return null;
+  if (collapsed) return <Link to="/compare/sessions" className="nav-link" aria-label="Comparison tray" title="Comparison tray">
+    <ArrowLeftRight size={16} aria-hidden="true" />
+  </Link>;
   const full = trayFull(tray);
   return (
     <section className="app-tray" aria-labelledby="tray-title">
-      <h2 id="tray-title" className="meta font-medium">Comparison</h2>
+      <h2 id="tray-title" className="meta font-medium flex items-center gap-2"><ArrowLeftRight size={16} aria-hidden="true" />Comparison</h2>
       <ul className="list-none p-0 flex flex-col gap-2">
         {(['a', 'b'] as const).map(side => {
           const row = side === 'a' ? tray.left : tray.right;
@@ -111,16 +125,28 @@ function ComparisonTray() {
   );
 }
 
-/** History controls and the page's breadcrumb; no browser toolbar is assumed. */
-function AppToolbar({ setCrumbSlot }: { setCrumbSlot: (element: HTMLElement | null) => void }) {
+function AppToolbar({ setCrumbSlot, sidebarCollapsed, onSidebarToggle, actions }: {
+  setCrumbSlot: (element: HTMLElement | null) => void;
+  sidebarCollapsed: boolean;
+  onSidebarToggle: () => void;
+  actions?: ReactNode;
+}) {
   const navigate = useNavigate();
+  const SidebarIcon = sidebarCollapsed ? PanelLeftOpen : PanelLeftClose;
+  const sidebarLabel = sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar';
   return (
     <div className="app-toolbar">
       <div className="flex gap-1">
+        <Button size="icon" variant="ghost-link" className="app-toolbar-button app-sidebar-toggle"
+          aria-label={sidebarLabel} title={sidebarLabel} aria-controls={SIDEBAR_ID}
+          aria-expanded={!sidebarCollapsed} onClick={onSidebarToggle}>
+          <SidebarIcon size={16} aria-hidden="true" />
+        </Button>
         <Button size="icon" variant="ghost-link" className="app-toolbar-button" aria-label="Go back" onClick={() => navigate(-1)}><ArrowLeft size={16} aria-hidden="true" /></Button>
         <Button size="icon" variant="ghost-link" className="app-toolbar-button" aria-label="Go forward" onClick={() => navigate(1)}><ArrowRight size={16} aria-hidden="true" /></Button>
       </div>
       <div ref={setCrumbSlot} className="min-w-0 flex-1" />
+      {actions}
     </div>
   );
 }
@@ -142,8 +168,8 @@ function ThemeSelect() {
 
 export interface Crumb { label: string; to?: string }
 
-export function PageTitle({ breadcrumb, title, subtitle, actions, titleClassName }:
-  { breadcrumb?: Crumb[]; title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; titleClassName?: string }) {
+export function PageTitle({ breadcrumb, title, subtitle, actions, titleClassName, compact = false }:
+  { breadcrumb?: Crumb[]; title: ReactNode; subtitle?: ReactNode; actions?: ReactNode; titleClassName?: string; compact?: boolean }) {
   const heading = useRef<HTMLHeadingElement>(null);
   const slot = useContext(CrumbSlotContext);
   const trail = breadcrumb?.length ? (
@@ -160,10 +186,12 @@ export function PageTitle({ breadcrumb, title, subtitle, actions, titleClassName
   ) : null;
   // Page titles can arrive after an asynchronous read. Focus when the title
   // mounts, without moving focus again for filters or evidence selections.
-  useEffect(() => { heading.current?.focus(); }, []);
+  useEffect(() => { heading.current?.focus({ preventScroll: compact }); }, [compact]);
+  const breadcrumbContent = trail ? (slot ? createPortal(trail, slot) : trail) : null;
+  if (compact) return <>{breadcrumbContent}<h1 ref={heading} tabIndex={-1} className="sr-only">{title}</h1></>;
   return (
     <div className="flex flex-col gap-2">
-      {trail ? (slot ? createPortal(trail, slot) : trail) : null}
+      {breadcrumbContent}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <h1 ref={heading} tabIndex={-1} className={cn('text-title wrap-anywhere', titleClassName)}>{title}</h1>
         {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
@@ -173,15 +201,35 @@ export function PageTitle({ breadcrumb, title, subtitle, actions, titleClassName
   );
 }
 
-export function Page({ current, children, reading = false, title }: { current: NavKey; children: ReactNode; reading?: boolean; title: string }) {
+export function Page({ current, children, reading = false, title, toolbarActions, workspace = false }: {
+  current: NavKey;
+  children: ReactNode;
+  reading?: boolean;
+  title: string;
+  toolbarActions?: ReactNode;
+  workspace?: boolean;
+}) {
   const [crumbSlot, setCrumbSlot] = useState<HTMLElement | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true'; }
+    catch { return false; }
+  });
   useEffect(() => { host.setTitle(`${title} · Xenoflux`); }, [title]);
+
+  function toggleSidebar() {
+    const collapsed = !sidebarCollapsed;
+    setSidebarCollapsed(collapsed);
+    try { localStorage.setItem(SIDEBAR_STORAGE_KEY, String(collapsed)); }
+    catch { /* The toolbar still works if browser storage is unavailable. */ }
+  }
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-sidebar-collapsed={sidebarCollapsed || undefined} data-workspace={workspace || undefined}>
       <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:m-2 btn">Skip to content</a>
-      <AppSidebar current={current} />
+      <AppSidebar current={current} collapsed={sidebarCollapsed} />
       <div className="app-main">
-        <AppToolbar setCrumbSlot={setCrumbSlot} />
+        <AppToolbar setCrumbSlot={setCrumbSlot} sidebarCollapsed={sidebarCollapsed}
+          onSidebarToggle={toggleSidebar} actions={toolbarActions} />
         <CrumbSlotContext.Provider value={crumbSlot}>
           <main id="main" tabIndex={-1} className={cn('page', reading && 'page-reading')}>{children}</main>
         </CrumbSlotContext.Provider>

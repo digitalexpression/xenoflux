@@ -199,20 +199,38 @@ export function createManagedDesktop(store, {
       || (await scopedCrashpads(current, saved.app, stopped)).length) return uncertain('Desktop processes changed during the stopped check; preserve its reservation');
     return { state: 'recoverable-stopped', runId: claim.owner.runId, ...cliState };
   }
-  async function status(name, { installation } = {}) {
+  async function observeIdleCli(current) {
+    try {
+      await runtime.assertResourcesIdle([current.value.root]);
+      await assertBinding(current);
+      const { owner, cli, blocked } = await reservations(current);
+      if (owner || cli || blocked) throw new Error('Profile ownership changed during the CLI check.');
+      return { cliState: 'not-running' };
+    } catch (error) { return { cliState: 'unknown', cliReason: error.message }; }
+  }
+  async function status(name, { installation, observeCli = false } = {}) {
     try {
       const current = await binding(name);
       const { owner, cli, blocked } = await reservations(current);
       if (blocked) throw new Error('Profile has a foreign or unresolved reservation');
       if (owner) {
-        const { processes, ...state } = await observe(current, await readClaim(current));
-        return cli ? { cliReserved: true, ...state } : state;
+        const { processes, ...observation } = await observe(current, await readClaim(current));
+        const result = cli ? { cliReserved: true, ...observation } : observation;
+        if (!observeCli) return result;
+        if (result.cliRunning) return { ...result, cliState: 'running' };
+        if (!result.cliReserved && ['running', 'recoverable-stopped'].includes(result.state))
+          return { ...result, cliState: 'not-running' };
+        return { ...result, cliState: 'unknown', cliReason: result.reason ?? 'A Terminal reservation is still held for this profile.' };
       }
       await cliProcesses(current, cli, true);
+      const cliStatus = cli ? { cliReserved: true, cliRunning: true, ...(observeCli ? { cliState: 'running' } : {}) }
+        : observeCli ? await observeIdleCli(current) : {};
       return installation?.status === 'available' && /^[a-f0-9]{64}$/.test(installation.appKey ?? '')
-        ? { state: 'available', appKey: installation.appKey, ...(cli ? { cliReserved: true, cliRunning: true } : {}) }
-        : { state: 'unavailable', reason: `${current.vendor === 'claude' ? 'Claude' : 'GitHub Copilot'} Desktop is unavailable in the selected installation`, ...(cli ? { cliReserved: true, cliRunning: true } : {}) };
-    } catch (error) { return { state: 'blocked', reason: error.message }; }
+        ? { state: 'available', appKey: installation.appKey, ...cliStatus }
+        : { state: 'unavailable', reason: `${current.vendor === 'claude' ? 'Claude' : 'GitHub Copilot'} Desktop is unavailable in the selected installation`, ...cliStatus };
+    } catch (error) {
+      return { state: 'blocked', reason: error.message, ...(observeCli ? { cliState: 'unknown', cliReason: error.message } : {}) };
+    }
   }
   async function open(name, { appKey } = {}) {
     const initial = await binding(name);

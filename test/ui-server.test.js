@@ -188,7 +188,7 @@ test('discovery GET uses the authenticated read boundary and demo stays syntheti
   assert.equal((await call(server.port, { method: 'POST', path: '/api/discovery', headers: { ...api, cookie, origin, 'content-type': 'application/json' }, body: {} })).status, 404);
 });
 
-test('ordinary UI launch enters setup and reuse preserves its exact token without changing server launch URLs', async t => {
+test('ordinary UI launch and reuse open Profiles with launch tokens', async t => {
   const root = await mkdtemp(join(tmpdir(), 'xfx-ui-launch-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const opened = [];
@@ -197,7 +197,7 @@ test('ordinary UI launch enters setup and reuse preserves its exact token withou
     signals: false, open: async url => opened.push(url), out: () => {} });
   t.after(app.stop);
   const first = new URL(app.url);
-  assert.equal(first.pathname, '/setup');
+  assert.equal(first.pathname, '/profiles');
   assert.ok(first.hash.startsWith('#launch='));
   assert.equal(opened[0], app.url);
   const token = 'reuse-exact-token_123';
@@ -206,8 +206,9 @@ test('ordinary UI launch enters setup and reuse preserves its exact token withou
     signals: false, open: async url => opened.push(url), out: () => {} });
   if (!reused.reused) t.after(reused.stop);
   assert.equal(reused.reused, true);
-  assert.equal(new URL(reused.url).pathname, '/setup');
+  assert.equal(new URL(reused.url).pathname, '/profiles');
   assert.equal(new URL(reused.url).hash, `#launch=${token}`);
+  assert.equal(opened[1], reused.url);
 });
 
 
