@@ -170,7 +170,8 @@ test('offline browser journey creates, previews, applies and undoes through Prof
     assert.equal(acceptance.versionProbeUpperBound, 2);
     assert.equal(acceptance.versionProbesObserved, 2);
     assert.equal(acceptance.admissionChecks, app.mutationAdmissionCount());
-    assert.equal(acceptance.admissionChecks, 22);
+    assert.ok(acceptance.backgroundProfileChecks > 0);
+    assert.equal(acceptance.admissionChecks - acceptance.backgroundProfileChecks, 22);
     assert.ok((await readFile(join(receipts, 'undone.png'))).length > 0);
     assert.ok((await readFile(join(receipts, 'trace.zip'))).length > 0);
     assert.ok((await stat(join(app.root, 'browser-profile'))).isDirectory());

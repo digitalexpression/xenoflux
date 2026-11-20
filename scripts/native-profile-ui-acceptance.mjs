@@ -234,7 +234,7 @@ const unrelatedSkill = '---\nname: xfx-copy-unrelated\ndescription: Preserve thi
 export async function runAcceptance({ manifest, repo, testFixture = null }) {
   if (!testFixture) await admission(manifest);
   const root = manifest.root, deadline = Date.now() + manifest.mutationWindowMs;
-  let mutationAdmissionChecks = 0;
+  let mutationAdmissionChecks = 0, backgroundProfileChecks = 0;
   const readOnlyAdmission = async () => {
     if (testFixture) await testFixture.admitMutation(); else await admission(manifest);
     mutationAdmissionChecks++;
@@ -282,8 +282,10 @@ export async function runAcceptance({ manifest, repo, testFixture = null }) {
       const isProfileMutation = request.method() === 'POST' && (url.pathname.startsWith('/api/profiles/') || url.pathname.startsWith('/api/copies/'));
       if (request.method() === 'POST' && url.pathname.startsWith('/api/runs')) modelRunRequests++;
       if (isProfileMutation) {
-        try { await admitMutation(); }
-        catch (error) { admissionFailures.push(String(error?.message ?? error)); await route.abort(); return; }
+        try {
+          await admitMutation();
+          if (url.pathname === '/api/profiles/refresh' || /^\/api\/profiles\/[^/]+\/account$/.test(url.pathname)) backgroundProfileChecks++;
+        } catch (error) { admissionFailures.push(String(error?.message ?? error)); await route.abort(); return; }
       }
       if (request.method() === 'POST' && url.pathname === '/api/profiles/new') profileCreationRequests++;
       if (isProfileMutation) mutationTracker.track(request);
@@ -522,7 +524,7 @@ export async function runAcceptance({ manifest, repo, testFixture = null }) {
   const result = { result: passed ? 'passed' : functionalPass ? 'incomplete' : 'failed', completedAt: new Date().toISOString(),
     functionalPass, artifactsComplete, screenshotComplete, traceComplete, browserClosed, serverStopped, serverShutdown,
     mutationAmbiguous, admissionChecks: mutationAdmissionChecks,
-    admissionFailures, artifactErrors, failure: runFailure?.message ?? null, ...(functionalResult ?? {}) };
+    backgroundProfileChecks, admissionFailures, artifactErrors, failure: runFailure?.message ?? null, ...(functionalResult ?? {}) };
   if (!passed && runFailure) {
     try { await record('failure.json', { message: runFailure.message, at: new Date().toISOString(), output, errors, artifactErrors, admissionFailures }); }
     catch (error) { artifactErrors.push(`failure receipt: ${error.message}`); }

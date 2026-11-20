@@ -12,7 +12,7 @@ export async function createNativeProfileUiAcceptanceFixture({ staticRoot = join
   const versionLog = join(root, 'version-probes.log');
   let server, admissionChecks = 0;
   try {
-    const executable = join(root, 'fake-codex');
+    const executable = join(root, 'codex');
     await writeFile(executable, `#!/bin/sh\nif [ "$1" = "--version" ]; then printf 'probe\\n' >> '${versionLog}'; printf "codex 0.153.4\\n"; exit 0; fi\nexit 99\n`, { mode: 0o700 });
     const controller = join(root, 'controller'); await mkdir(controller, { mode: 0o700 });
     const store = new Store(controller), serverLogs = [];
@@ -20,6 +20,8 @@ export async function createNativeProfileUiAcceptanceFixture({ staticRoot = join
     await mkdir(join(defaultUserHome, '.codex'), { recursive: true, mode: 0o700 });
     const provider = createEngineProvider({ store, reportsRoot, defaultUserHome, profilesBase: join(root, 'profiles'),
       lockOptions: { lockPath: join(root, 'global.lock'), concurrentLockPath: join(root, 'desktop.lock') },
+      runContext: { terminalEnvironment: { PATH: root + ':/usr/bin:/bin' } },
+      accountContext: { probeCodexAccount: async () => ({ state: 'signed-out' }) },
       copyRuntime: () => createDesktopRuntime({ concurrentLockPath: join(root, 'desktop.lock'),
         processSnapshot: async () => [{ pid: process.pid, ppid: 1, uid: process.getuid(), startedAt: 'fixture', executable: process.execPath }] }),
       resolveClient: signal => nativeClient(store, { '--codex': executable }, signal),
