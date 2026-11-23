@@ -617,7 +617,7 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       return { profiles: [{ name: A, readiness: 'Signed in · ready', ready: true }, { name: B, readiness: 'Signed in · ready', ready: true }, { name: 'Default', readiness: 'Signed in · ready', ready: true },
         { name: 'docs-only', readiness: 'Sign-in unknown · it can’t run until you sign in from Codex', ready: false }],
       repositories: [{ path: '[PROJECT FOLDER]', commit: 'main' }],
-      defaults: { timeMinutes: 15, access: 'Codex can edit only its copy, no network', outputCap: '8 MiB', outputMiB: 8, program: '' }, simulated: true };
+      defaults: { timeMinutes: 15, access: 'Codex can edit its copy with network access', outputCap: '8 MiB', outputMiB: 8, program: '' }, simulated: true };
     },
     async runPreview(request) {
       const { a, b, task = '', checks = [] } = request;
@@ -631,7 +631,7 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       const setup = advanced?.setup ?? [];
       const previewToken = blocked ? null : randomUUID();
       const result = { ready: !blocked, blocked, previewToken, simulated: true,
-        summary: `2 model runs, one after the other · up to ${timeMinutes * 2 + 2} min`, limit: `Each run stops after ${timeMinutes} minutes; the whole task after ${timeMinutes * 2 + 2}.`,
+        summary: `2 parallel model runs · up to ${timeMinutes + 2} min`, limit: `${timeMinutes} minutes per side and ${timeMinutes + 2} minutes overall.`,
         task, files: request.files ?? '',
         runs: [{ side: 'a', profile: a, text: 'left side of the report · its usual Codex CLI · its own settings · ready' },
           { side: 'b', profile: b, text: 'right side of the report · its usual Codex CLI · its own settings · ready',
@@ -639,8 +639,13 @@ export function createDemoProvider({ version = 'demo' } = {}) {
         where: [`Each profile gets its own copy of ${request.repository || '[repository]'} at ${request.commit || '[COMMIT]'}.`, 'Uncommitted edits and untracked or ignored files aren’t included. You have 3 uncommitted files.',
           'Preparing the copies leaves your folder and its Git index untouched.', 'That doesn’t limit what commands run during the task, or your checks, can affect outside the copy.'],
         checks: valid.map(check => `${check.name || 'Check'}: ${check.command}`),
-        limits: [`Each run stops after ${timeMinutes} minutes; the whole task after ${timeMinutes * 2 + 2}.`, `Left permissions: ${request.execution?.a?.permissionMode ?? 'workspace-write'}; right permissions: ${request.execution?.b?.permissionMode ?? 'workspace-write'}. Output cap ${outputMiB} MiB per program.`, `Codex program: ${advanced?.program || 'profile default'}; reasoning effort: ${advanced?.reasoningEffort || 'profile default'}.`, 'A run that stops early is reported as stopped. Runs aren’t retried.', ...(setup.length ? [`Runs ${setup.length} setup command${setup.length === 1 ? '' : 's'} before the task.`] : [])],
-        willDo: ['Run 2 model tasks, one after the other, using each profile’s sign-in', ...(setup.length ? [`Run setup commands: ${setup.map(item => item.name || '(unnamed)').join(', ')}`] : []), 'Save the evidence and open the comparison report'],
+        limits: [`${timeMinutes} minutes per side and ${timeMinutes + 2} minutes overall.`, `Left permissions ${request.execution?.a?.permissionMode ?? 'workspace-write'} · right permissions ${request.execution?.b?.permissionMode ?? 'workspace-write'}. Output cap ${outputMiB} MiB per program.`,
+          `Codex network access ${advanced?.networkAccess === false ? 'disabled' : 'enabled'}.`,
+          advanced?.autonomous ? 'Codex runs without approval prompts in its sandbox.' : advanced?.approvalsReviewer === 'user'
+            ? 'Codex asks you for approval.' : advanced?.approvalsReviewer === 'auto_review'
+              ? 'Codex uses native automatic review.' : 'Codex uses the profile’s approval policy and reviewer.',
+          ...(setup.length ? [`Runs ${setup.length} setup command${setup.length === 1 ? '' : 's'} before the task.`] : [])],
+        willDo: ['Run both tasks concurrently using each profile’s sign-in', ...(setup.length ? [`Run setup commands: ${setup.map(item => item.name || '(unnamed)').join(', ')}`] : []), 'Save the evidence and open the comparison report'],
         never: ['Changes, copies or activates profile settings', 'Signs in, or swaps in another profile if one fails', 'Closes your Codex windows'],
         cliCommand: 'xfx audit run --spec experiment.json' };
       if (result.ready) runPreviews.set(previewToken, { request: structuredClone(request), preview: result, created: Date.now(), runId: null });
@@ -663,8 +668,8 @@ export function createDemoProvider({ version = 'demo' } = {}) {
       if (!run) throw new UiError(404, 'This run isn’t known to the app. Runs started in the demo are forgotten when it stops.', 'not-found');
       // The simulation advances one step every few seconds.
       const elapsed = Math.floor((Date.now() - run.started) / 1000);
-      const step = Math.min(8, Math.floor(elapsed / 3));
-      if (run.state === 'running' && step >= 8) run.state = 'finished';
+      const step = Math.min(5, Math.floor(elapsed / 3));
+      if (run.state === 'running' && step >= 5) run.state = 'finished';
       const steps = offset => [
         { text: 'Copy of the project prepared', state: step > offset ? 'done' : step === offset ? 'active' : 'waiting' },
         { text: step > offset + 1 ? 'Task finished · 4 turns' : 'Working on the task', state: step > offset + 1 ? 'done' : step === offset + 1 ? 'active' : 'waiting' },
@@ -672,16 +677,15 @@ export function createDemoProvider({ version = 'demo' } = {}) {
         { text: 'Evidence saved', state: step > offset + 3 ? 'done' : step === offset + 3 ? 'active' : 'waiting' },
       ];
       const stateText = { running: 'Running', finished: 'Finished', cancelled: 'Cancelled', interrupted: 'Interrupted', 'time-limit': 'Time limit reached', 'check-failed': 'A check failed', 'cannot-tidy': 'Can’t tidy up yet' }[run.state];
-      const working = step < 4 ? run.a : run.b;
       if (run.state === 'interrupted' && !recoveryPreviews.has(id)) recoveryPreviews.set(id, randomUUID());
-      return { id, task: run.task, meta: `${run.a}, then ${run.b} · each in its own copy of [COMMIT] · run ID ${id.slice(0, 8)}`,
+      return { id, task: run.task, meta: `${run.a} and ${run.b} · each in its own copy of [COMMIT] · run ID ${id.slice(0, 8)}`,
         state: run.state, stateText,
-        headline: run.state === 'running' ? `Profile ${step < 4 ? 1 : 2} of 2 is working` : run.state === 'finished' ? 'Both profiles finished the task'
-          : run.state === 'cancelled' ? `You cancelled during ${working}’s task` : `Xenoflux stopped while ${run.b} was working`,
-        elapsed: `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} so far · stops by 32:00 at the latest`,
-        timeUsed: Math.min(1, elapsed / 1920),
+        headline: run.state === 'running' ? 'Running the two sides in parallel' : run.state === 'finished' ? 'Both profiles finished the task'
+          : run.state === 'cancelled' ? 'You cancelled the comparison' : 'Xenoflux stopped during the comparison',
+        elapsed: `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')} so far`,
+        timeUsed: Math.min(1, elapsed / 1020),
         columns: [{ side: 'a', profile: run.a, state: step >= 4 ? 'Done' : 'Working', steps: steps(0) },
-          { side: 'b', profile: run.b, state: step >= 8 ? 'Done' : step >= 4 ? 'Working' : 'Waiting', steps: steps(4) }],
+          { side: 'b', profile: run.b, state: step >= 5 ? 'Done' : 'Working', steps: steps(1) }],
         sofar: `So far: ${step * 3} recorded events, ${step} tool uses. Messages and command output aren’t shown here.`,
         reportHref: ['finished', 'cancelled', 'time-limit', 'check-failed'].includes(run.state) ? '/reports/demo-run' : null,
         recovery: run.state === 'interrupted' ? { facts: [`${run.b}’s work has stopped (confirmed)`, 'Keep what was recorded up to turn 3, marked partial', `Free ${run.b} for other use; nothing else is touched`], previewToken: recoveryPreviews.get(id) } : null,

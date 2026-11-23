@@ -15,10 +15,11 @@ import { launchPlan, discoverCodexExecutable } from './launcher.js';
 import { resolveHome } from './homes.js';
 import { nativePath } from './node-runtime.js';
 import { privateDirectory, readJSON } from './metadata.js';
-import { createDesktopInstanceRuntime } from './desktop-instance-runtime.js';
+import { createDesktopInstanceRuntime, matchesProcessIdentity, processIdentity } from './desktop-instance-runtime.js';
 import { hostname } from 'node:os';
 import { observeAuditProcess } from './audit-process.js';
-import { profileOwners } from './profile-reservations.js';
+import { isNativeCliParticipant, profileOwners } from './profile-reservations.js';
+import { observeCodexCli, observeManagedCli, readCliReport } from './native-participants.js';
 import { probeAuditVersion } from './audit-native-version.js';
 import { validateAuditNativeConfig } from './audit-spec.js';
 import { createEnvironmentBinding, assertEnvironmentBinding } from './client-contracts.js';
@@ -56,11 +57,14 @@ async function canonicalDirectory(path, label, { privateOnly = false } = {}) {
   return info;
 }
 
-async function safeConfig(home) {
+async function safeConfig(home, { allowMissing = false } = {}) {
   const path = join(home, 'config.toml');
   let handle;
   try { handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-  catch { throw new Error('Codex configuration is unavailable or unsafe'); }
+  catch (error) {
+    if (allowMissing && error.code === 'ENOENT') return {};
+    throw new Error('Codex configuration is unavailable or unsafe');
+  }
   try {
     const before = await handle.stat();
     if (!before.isFile() || before.nlink !== 1 || before.uid !== process.getuid() || (before.mode & 0o022)
@@ -91,7 +95,7 @@ async function executableInfo(path) {
 /** Recheck the selected executable's file identity before an audit task starts. */
 export async function inspectAuditExecutable(path) { return executableInfo(path); }
 
-async function defaultProfile(name, { repository, defaultUserHome }) {
+async function defaultProfile(name, { repository, defaultUserHome, allowUntrustedRepository }) {
   const userHome = resolve(defaultUserHome);
   await canonicalDirectory(userHome, 'Default user home');
   const home = join(userHome, '.codex');
@@ -99,8 +103,8 @@ async function defaultProfile(name, { repository, defaultUserHome }) {
   if (typeof repository !== 'string' || !repository.trim()) throw new Error('Default profile audit requires a selected repository');
   const bindingRepository = await realpath(repository);
   await canonicalDirectory(bindingRepository, 'Audit repository');
-  const config = await safeConfig(home);
-  if (config.projects?.[bindingRepository]?.trust_level !== 'trusted')
+  const config = await safeConfig(home, { allowMissing: allowUntrustedRepository });
+  if (!allowUntrustedRepository && config.projects?.[bindingRepository]?.trust_level !== 'trusted')
     throw new Error('Default profile audit requires an existing trusted repository entry in config.toml');
   return { profileId: 'default', profileName: 'Default', home, userHome, nativeRoot: null,
     reservationRoot: home, environmentId: null, bindingRepository };
@@ -128,8 +132,7 @@ async function resolveNonCodexProfile(selection, { client, selected }, options) 
     throw Object.assign(new Error('The selected Copilot root has no verified account scope.'), { code: 'copilot-account-unverified' });
   profile.settingsSnapshot = await snapshotAuditProfileSettings(profile);
   profile.settingsIdentity = auditSettingsIdentity(profile.settingsSnapshot);
-  if (!profile.settingsIdentity)
-    throw Object.assign(new Error('Selected profile settings could not be safely inspected'), { code: 'profile-settings-unavailable' });
+  if (!profile.settingsIdentity) throw settingsInspectionError(profile.settingsSnapshot.reason);
   profile.environmentBinding = createEnvironmentBinding({
     client, surface: profile.surface, executionLocation: profile.executionLocation, profileId: profile.profileId, rootMode: profile.rootMode,
     roots: { config: profile.home, runtime: profile.nativeRoot ? profile.home : null,
@@ -142,22 +145,16 @@ async function resolveNonCodexProfile(selection, { client, selected }, options) 
 
 /** Resolve one explicit profile to a launch-ready, credential-minimal environment. */
 export async function resolveAuditExecutionProfile(store, input, { repository, defaultUserHome = homedir(), probe = probeAuditVersion,
-  terminalEnvironment = process.env, profileResolvers } = {}) {
+  terminalEnvironment = process.env, profileResolvers, allowUntrustedRepository = false } = {}) {
   const selection = selectionOf(input);
   const route = await selectedClient(store, selection);
   if (route.client !== 'codex') return resolveNonCodexProfile(selection, route,
     { repository, defaultUserHome, terminalEnvironment, profileResolvers, sessionOnly: false });
   const isDefault = selection.name.trim().toLowerCase() === 'default';
   let profile;
-  if (isDefault) profile = await defaultProfile(selection.name, { repository, defaultUserHome });
+  if (isDefault) profile = await defaultProfile(selection.name, { repository, defaultUserHome, allowUntrustedRepository });
   else {
-    let plan;
-    try { plan = await launchPlan(store, selection.name, terminalEnvironment, { repository }); }
-    catch (error) {
-      if (error.message === 'Bind this repository to the profile before launching it')
-        throw Object.assign(new Error('The selected repository is not already bound to this profile'), { code: 'profile-repository-unbound' });
-      throw error;
-    }
+    const plan = await launchPlan(store, selection.name, terminalEnvironment, { repository });
     const resolved = await resolveHome(store, selection.name);
     profile = { profileId: plan.profileId, profileName: plan.name, home: plan.home,
       userHome: resolved.environment.launch.env.HOME, nativeRoot: plan.nativeRoot,
@@ -212,7 +209,7 @@ export async function resolveAuditExecutionProfile(store, input, { repository, d
 
 /** Resolve ordinary native execution without probing the executable or changing profile settings. */
 export async function resolveProfileExecutionProfile(store, input, {
-  repository, defaultUserHome = homedir(), terminalEnvironment = process.env, profileResolvers, sessionOnly = false,
+  repository, defaultUserHome = homedir(), terminalEnvironment = process.env, profileResolvers, sessionOnly = false, allowUntrustedRepository = false,
 } = {}) {
   const selection = typeof input === 'string' ? { name: input } : input;
   if (!selection || typeof selection !== 'object' || Array.isArray(selection)
@@ -225,7 +222,7 @@ export async function resolveProfileExecutionProfile(store, input, {
   const isDefault = selection.name.trim().toLowerCase() === 'default';
   let profile;
   if (isDefault) {
-    profile = await defaultProfile(selection.name, { repository, defaultUserHome });
+    profile = await defaultProfile(selection.name, { repository, defaultUserHome, allowUntrustedRepository });
     const binary = await discoverCodexExecutable(terminalEnvironment);
     profile.executable = binary.executable;
     profile.executableIdentity = binary.executableIdentity;
@@ -235,13 +232,7 @@ export async function resolveProfileExecutionProfile(store, input, {
     profile.cwd = profile.bindingRepository;
     profile.env = { PATH: nativePath(terminalEnvironment), HOME: profile.userHome, CODEX_HOME: profile.home };
   } else {
-    let plan;
-    try { plan = await launchPlan(store, selection.name, terminalEnvironment, { repository }); }
-    catch (error) {
-      if (error.message === 'Bind this repository to the profile before launching it')
-        throw Object.assign(new Error('The selected repository is not already bound to this profile'), { code: 'profile-repository-unbound' });
-      throw error;
-    }
+    const plan = await launchPlan(store, selection.name, terminalEnvironment, { repository });
     profile = { profileId: plan.profileId, profileName: plan.name, home: plan.home,
       userHome: plan.env.HOME, nativeRoot: plan.nativeRoot, reservationRoot: plan.nativeRoot,
       environmentId: plan.environmentId, executable: plan.executable,
@@ -252,12 +243,7 @@ export async function resolveProfileExecutionProfile(store, input, {
   profile.executionMode = 'profile';
   if (!isDefault) profile.launchArgs = ['-c', `sqlite_home=${JSON.stringify(profile.home)}`];
   profile.settingsSnapshot = await snapshotAuditProfileSettings(profile);
-  if (profile.settingsSnapshot.status !== 'ready') {
-    const workspaceUnavailable = profile.settingsSnapshot.reason === 'workspace-unavailable';
-    throw Object.assign(new Error(workspaceUnavailable ? 'Selected workspace is unavailable or unsafe'
-      : 'Selected profile settings could not be safely inspected'),
-    { code: workspaceUnavailable ? 'profile-workspace-unavailable' : 'profile-settings-unavailable' });
-  }
+  if (profile.settingsSnapshot.status !== 'ready') throw settingsInspectionError(profile.settingsSnapshot.reason);
   profile.settingsIdentity = auditSettingsIdentity(profile.settingsSnapshot);
   profile.client = 'codex';
   profile.surface = 'cli';
@@ -464,8 +450,27 @@ async function readDesktopJournal(profile, owner) {
   } catch { return null; }
 }
 
-/** Read-only preflight for running Codex homes. It accepts ordinary open resources and
- * only trusts an existing reservation when the exact running desktop journal owns it. */
+async function readAuditParticipantJournal(profile, owner) {
+  const catalog = owner.kind === 'catalog-probe', review = owner.kind === 'review-task';
+  if (typeof owner.storePath !== 'string' || !isAbsolute(owner.storePath) || resolve(owner.storePath) !== owner.storePath)
+    return null;
+  const parent = join(owner.storePath, catalog ? 'catalog-probes' : review ? 'review-tasks' : 'audits');
+  const directory = join(parent, owner.runId);
+  try {
+    await privateDirectory(owner.storePath);
+    await privateDirectory(parent);
+    await privateDirectory(directory);
+    const journal = await readJSON(join(directory, catalog ? 'probe.json' : review ? 'task.json' : 'state.json'));
+    const reservation = catalog ? journal : journal.reservation;
+    if (journal.id !== owner.runId || reservation?.root !== profile.reservationRoot
+      || !isDeepStrictEqual(reservation.owner, owner)
+      || catalog && (journal.kind !== 'xfx-catalog-probe' || journal.schemaVersion !== 1 || journal.released
+        || journal.environmentBinding?.roots?.reservation !== reservation.root)) return null;
+    return journal;
+  } catch { return null; }
+}
+
+/** Read-only preflight for native homes, including verified shared execution reservations. */
 export async function observeAuditProfileAccess(profile, options = {}) {
   // SQLite sidecars and short-lived native helpers can change during inspection.
   // Admit only after a complete fresh observation succeeds.
@@ -477,10 +482,10 @@ export async function observeAuditProfileAccess(profile, options = {}) {
   }
 }
 
-async function inspectAuditProfileAccess(profile, { expectedClients = [], inspectResources = inspectNativeResourcesDefault,
-  processSnapshot = () => createDesktopInstanceRuntime().snapshot() } = {}) {
+async function inspectAuditProfileAccess(profile, { allowInteractivePeers = false, expectedClients = [], inspectResources = inspectNativeResourcesDefault,
+  processSnapshot = () => createDesktopInstanceRuntime().snapshot(), observeParticipantProcess = observeAuditProcess } = {}) {
   if (!profile || typeof profile.home !== 'string' || typeof profile.reservationRoot !== 'string'
-    || typeof inspectResources !== 'function' || typeof processSnapshot !== 'function')
+    || typeof inspectResources !== 'function' || typeof processSnapshot !== 'function' || typeof observeParticipantProcess !== 'function')
     return { status: 'unavailable', reason: 'invalid-profile-selection', clients: [], sourceReservation: null };
   try {
     // The built-in ~/.codex directory is commonly mode 0755; the existing
@@ -496,32 +501,40 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
     } else if (profile.reservationRoot !== profile.home) throw new Error('Selected default home identity is inconsistent');
     void homeInfo;
     const lockPath = join(profile.reservationRoot, '.run-lock');
-    let sourceReservation = null, trustedOwner = null, participants = [];
+    const client = profile.client ?? 'codex';
+    let sourceReservation = null, desktopOwner = null, cliOwner = null, cliReport = null, participants = [];
+    const foreign = { status: 'blocked', reason: 'profile-reservation-foreign', clients: [], sourceReservation: { status: 'foreign' } };
     try {
       const lock = await lstat(lockPath);
       if (lock.isSymbolicLink() || !lock.isDirectory() || lock.uid !== process.getuid() || (lock.mode & 0o077))
         return { status: 'blocked', reason: 'profile-reservation-untrusted', clients: [], sourceReservation: { status: 'untrusted' } };
-      let owner;
       try {
         await privateDirectory(lockPath);
         const ownerPath = join(lockPath, 'owner.json');
         if (await realpath(ownerPath) !== ownerPath) throw new Error('unsafe');
         const owners = profileOwners(await readJSON(ownerPath));
-        owner = owners.find(value => value?.kind === 'desktop-instance');
-        participants = owners.filter(value => value !== owner);
-        if (participants.some(value => !['audit-experiment', 'review-task'].includes(value?.kind)
-          || value.home !== profile.home || value.host !== hostname()
-          || !/^[a-f0-9-]{36}$/i.test(value.runId ?? '')))
-          return { status: 'blocked', reason: 'profile-reservation-foreign', clients: [], sourceReservation: { status: 'foreign' } };
+        desktopOwner = owners.find(value => value?.kind === 'desktop-instance');
+        cliOwner = allowInteractivePeers ? owners.find(value => isNativeCliParticipant(value, client)) : undefined;
+        participants = owners.filter(value => value !== desktopOwner && value !== cliOwner);
+        if (participants.some(value => !['audit-experiment', 'review-task', 'catalog-probe'].includes(value?.kind)
+          || value.home !== profile.home || value.host !== hostname() || !/^[a-f0-9-]{36}$/i.test(value.runId ?? '')
+          || value.kind === 'catalog-probe' && value.membershipVersion !== 1)) return foreign;
       } catch {
         return { status: 'blocked', reason: 'profile-reservation-untrusted', clients: [], sourceReservation: { status: 'untrusted' } };
       }
-      if (owner) {
-        const journal = codex && await readDesktopJournal(profile, owner);
-        if (!journal) return { status: 'blocked', reason: 'profile-reservation-foreign', clients: [], sourceReservation: { status: 'foreign' } };
-        trustedOwner = owner;
-        sourceReservation = { kind: 'desktop-instance', runId: owner.runId, profileId: owner.profileId,
-          host: owner.host, journalPath: owner.journalPath, phase: 'running' };
+      if (desktopOwner) {
+        if (!codex || !await readDesktopJournal(profile, desktopOwner)) return foreign;
+        const { kind, runId, profileId, host, journalPath } = desktopOwner;
+        sourceReservation = { kind, runId, profileId, host, journalPath, phase: 'running' };
+      }
+      if (cliOwner) {
+        if (!profile.nativeRoot) return foreign;
+        try {
+          await privateDirectory(cliOwner.storePath);
+          cliReport = await readCliReport({ directory: cliOwner.storePath }, profile, cliOwner, client);
+        } catch { return foreign; }
+        const { kind, runId, profileId, host, reportPath } = cliOwner;
+        sourceReservation ??= { kind, runId, profileId, host, reportPath, phase: 'running' };
       }
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
@@ -547,84 +560,97 @@ async function inspectAuditProfileAccess(profile, { expectedClients = [], inspec
     if (!Array.isArray(observed) && observed.partial && observed.records > 0) throw new Error('Partial resource observation');
     if (!Array.isArray(expectedClients) || expectedClients.some(row => !validProcessIdentity(row)))
       throw new Error('Invalid expected client identities');
-    const initialJournal = sourceReservation ? await readDesktopJournal(profile, trustedOwner) : null;
-    if (sourceReservation && !initialJournal) throw new Error('Desktop journal changed during inspection');
+    const initialJournal = desktopOwner ? await readDesktopJournal(profile, desktopOwner) : null;
+    if (desktopOwner && !initialJournal) throw new Error('Desktop journal changed during inspection');
     const trackedPids = new Set([...pids, ...expectedClients.map(row => row.pid),
       ...(initialJournal ? [initialJournal.state.main, ...initialJournal.state.processes].map(row => row.pid) : [])]);
-    const rows = trackedPids.size ? await processSnapshot() : [];
+    const rows = trackedPids.size || cliOwner ? await processSnapshot() : [];
     if (!Array.isArray(rows)) throw new Error('Invalid process snapshot');
+    const runtime = createDesktopInstanceRuntime({ processSnapshot: async () => rows });
+    const observe = (main, options) => runtime.observe(main, { ...options, allowAncestor: allowInteractivePeers });
     const byPid = new Map(rows.filter(validProcessIdentity).map(row => [row.pid, row]));
+    let cliProcesses = [];
+    if (cliOwner) {
+      const controller = { directory: cliOwner.storePath }, observeCli = codex ? observeCodexCli : observeManagedCli;
+      try {
+        cliProcesses = (await observeCli(controller, profile, cliOwner, { observe }, { joining: true, resolveExecutable: true })).processes;
+        if (!isDeepStrictEqual(cliReport, await readCliReport(controller, profile, cliOwner, client)))
+          throw new Error('Terminal journal changed during inspection');
+      } catch {
+        return { status: 'blocked', reason: 'cli-process-identity-unverified', clients: [], sourceReservation };
+      }
+      for (const row of cliProcesses) byPid.set(row.pid, row);
+    }
     const holders = pids.map(pid => byPid.get(pid));
     if (holders.some(client => !client)) throw new Error('Resource holder identity unavailable');
     const ownedPids = new Set();
-    if (holders.length) for (const member of participants) {
-      const review = member.kind === 'review-task';
-      if (typeof member.storePath !== 'string' || !isAbsolute(member.storePath)) continue;
-      const parent = join(member.storePath, review ? 'review-tasks' : 'audits');
-      const directory = join(parent, member.runId);
-      try {
-        await privateDirectory(member.storePath);
-        await privateDirectory(parent);
-        await privateDirectory(directory);
-        const journal = await readJSON(join(directory, review ? 'task.json' : 'state.json'));
-        if (journal.id !== member.runId || journal.reservation?.root !== profile.reservationRoot
-          || !isDeepStrictEqual(journal.reservation?.owner, member)) continue;
-        const expected = journal.process?.processIdentity, current = byPid.get(expected?.pid);
-        if (!current || (await observeAuditProcess(expected)).status !== 'running') continue;
-        ownedPids.add(current.pid);
-        // Only current descendants of the verified process can be attributed.
-        let previous;
-        do {
-          previous = ownedPids.size;
-          for (const row of byPid.values()) if (ownedPids.has(row.ppid)) ownedPids.add(row.pid);
-        } while (ownedPids.size !== previous);
-      } catch { /* Preserve the member. Unverified holders remain external. */ }
+    for (const member of participants) {
+      const catalog = member.kind === 'catalog-probe';
+      if (!holders.length && !catalog) continue;
+      const journal = await readAuditParticipantJournal(profile, member);
+      if (!journal && catalog) return foreign;
+      const expected = journal?.process?.processIdentity, current = byPid.get(expected?.pid);
+      const running = expected && (current || catalog) && (await observeParticipantProcess(expected)).status === 'running';
+      if (catalog && journal.shutdown?.groupTerminated !== true) {
+        if (!['prepared', 'starting', 'running'].includes(journal.status) || journal.status === 'running' && !running
+          || member.coordinatorIdentity?.pid !== member.pid || (await observeParticipantProcess(member.coordinatorIdentity)).status !== 'running')
+          return foreign;
+      }
+      if (!current || !running || Date.parse(current.startedAt) !== Date.parse(expected.started)) continue;
+      ownedPids.add(current.pid);
+      // Only current descendants of the verified process can be attributed.
+      let previous;
+      do {
+        previous = ownedPids.size;
+        for (const row of byPid.values()) if (ownedPids.has(row.ppid)) ownedPids.add(row.pid);
+      } while (ownedPids.size !== previous);
     }
     const externalHolders = holders.filter(row => !ownedPids.has(row.pid));
     const liveExpected = expectedClients.map(expected => byPid.get(expected.pid)).filter(Boolean);
     const liveJournal = initialJournal ? [initialJournal.state.main, ...initialJournal.state.processes]
-      .map(expected => ({ expected, current: byPid.get(expected.pid) })).filter(({ expected, current }) => current && current
-        .startedAt === expected.startedAt && current.uid === expected.uid && current.executable === expected.executable)
+      .map(expected => ({ expected, current: byPid.get(expected.pid) })).filter(({ expected, current }) => matchesProcessIdentity(current, expected))
       .map(({ current }) => current) : [];
-    const uniqueClients = [...new Map([...externalHolders, ...liveExpected, ...liveJournal]
-      .map(row => [`${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`, row])).values()];
-    if (sourceReservation) {
-      const lock = await lstat(lockPath);
-      if (lock.isSymbolicLink() || !lock.isDirectory() || lock.uid !== process.getuid() || (lock.mode & 0o077)
-        || !profileOwners(await readJSON(join(lockPath, 'owner.json'))).some(owner => isDeepStrictEqual(owner, trustedOwner)))
-        throw new Error('Desktop reservation changed during inspection');
-      const journal = await readDesktopJournal(profile, trustedOwner);
+    const cliMain = cliReport ? [byPid.get(cliReport.processIdentity.pid)] : [];
+    const uniqueClients = [...new Map([...externalHolders, ...liveExpected, ...liveJournal, ...cliMain]
+      .map(row => [processIdentity(row), row])).values()];
+    const nativeOwners = [desktopOwner, cliOwner].filter(Boolean);
+    if (nativeOwners.length) {
+      await privateDirectory(lockPath);
+      const current = profileOwners(await readJSON(join(lockPath, 'owner.json')))
+        .filter(owner => !['audit-experiment', 'review-task', 'catalog-probe'].includes(owner?.kind));
+      if (current.length !== nativeOwners.length || nativeOwners.some(expected => !current.some(owner => isDeepStrictEqual(owner, expected))))
+        throw new Error('Native reservation changed during inspection');
+    }
+    let desktopProcesses = [];
+    if (desktopOwner) {
+      const journal = await readDesktopJournal(profile, desktopOwner);
       if (!journal) throw new Error('Desktop ownership journal changed during inspection');
       if (!sameJournalProcessIdentitySet(initialJournal.state, journal.state))
         throw new Error('Desktop process ownership changed during inspection');
       const state = journal.state;
       const liveMain = byPid.get(state.main.pid);
       const journalProcesses = [state.main, ...state.processes];
-      const exactLiveOwned = journalProcesses.filter(expected => {
-        const current = byPid.get(expected.pid);
-        return current && current.startedAt === expected.startedAt && current.uid === expected.uid
-          && current.executable === expected.executable;
-      });
-      const mainIsLive = liveMain && liveMain.startedAt === state.main.startedAt && liveMain.uid === state.main.uid
-        && liveMain.executable === state.main.executable;
-      if (!mainIsLive) {
+      if (!matchesProcessIdentity(liveMain, state.main)) {
         // A valid but stale desktop journal can be observed without taking its
         // reservation when every recorded process is absent/reused and no
         // process currently holds profile resources. The lock and journal are
         // preserved byte-for-byte; any live helper or resource holder blocks.
-        if (exactLiveOwned.length || externalHolders.length)
+        if (journalProcesses.some(expected => matchesProcessIdentity(byPid.get(expected.pid), expected)) || externalHolders.length || cliOwner)
           return { status: 'blocked', reason: 'desktop-main-not-live', clients: uniqueClients, sourceReservation };
-        return { status: 'ready', clients: [], sourceReservation: { ...sourceReservation, phase: 'stopped-owner-observed' } };
+        return { status: 'ready', clients: [], sourceReservation: { ...sourceReservation, phase: 'stopped-owner-observed' }, nativeOwners: [] };
       }
-      const runtime = createDesktopInstanceRuntime({ processSnapshot: async () => rows });
-      const current = await runtime.observe(state.main, { trackedProcesses: state.processes });
+      const current = await observe(state.main, { trackedProcesses: state.processes });
       if (current.status !== 'running' || current.orphaned)
         return { status: 'blocked', reason: 'desktop-process-identity-changed', clients: uniqueClients, sourceReservation };
-      const owned = new Set(current.processes.map(row => `${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`));
-      if (externalHolders.some(row => !owned.has(`${row.pid}:${row.startedAt}:${row.uid}:${row.executable}`)))
+      desktopProcesses = current.processes;
+    }
+    if (nativeOwners.length) {
+      const owned = new Set([...desktopProcesses, ...cliProcesses].map(processIdentity));
+      if (externalHolders.some(row => !owned.has(processIdentity(row))))
         return { status: 'blocked', reason: 'unattributed-native-client', clients: uniqueClients, sourceReservation };
     }
-    return { status: 'ready', clients: uniqueClients, overlap: participants.map(({ kind, runId, experimentId }) => ({ kind, runId, experimentId })), sourceReservation, ...(trustedOwner ? { desktopOwner: trustedOwner } : {}) };
+    const overlap = participants.map(({ kind, runId, experimentId }) => ({ kind, runId, experimentId }));
+    return { status: 'ready', clients: uniqueClients, overlap, sourceReservation, nativeOwners, ...(desktopOwner ? { desktopOwner } : {}) };
   } catch (error) {
     return { status: 'unavailable', reason: 'profile-access-inspection-failed', clients: [], sourceReservation: null,
       retryable: error.code === 'ENOENT' || ['Partial resource observation', 'Resource holder identity unavailable'].includes(error.message) };
@@ -674,13 +700,13 @@ function withinOrEqual(path, root) { return path === root || insideRoot(path, ro
 
 const NATIVE_SYNC_BUCKET = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}_(?:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|unbound)$/i;
 const SYNC_MANIFEST_RECORD = 'native-sync-manifest-content-v1';
-const syncStatIdentity = info => JSON.stringify([info.dev, info.ino, info.uid, info.nlink,
+const metadataFileIdentity = info => JSON.stringify([info.dev, info.ino, info.uid, info.nlink,
   info.mode, info.size, info.mtimeMs, info.ctimeMs]);
-async function safeSyncFile(path, maxBytes) {
+async function safeMetadataFile(path, maxBytes) {
   const info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid() || info.nlink !== 1
     || info.mode & 0o022 || info.size > maxBytes || await realpath(path) !== path)
-    throw new Error('Native sync metadata is unsafe');
+    throw new Error('Native settings metadata is unsafe');
   return info;
 }
 
@@ -692,7 +718,7 @@ async function nativeSyncContainer(profile, absolute, info) {
   if (!info.isDirectory() || await realpath(absolute) !== absolute)
     throw new Error('Native sync container is unsafe');
   const marker = join(resolve(absolute, '..'), `.bucket-${parts[2]}`);
-  try { await safeSyncFile(marker, 0); }
+  try { await safeMetadataFile(marker, 0); }
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
   try {
     await lstat(join(absolute, 'SKILL.md'));
@@ -701,32 +727,51 @@ async function nativeSyncContainer(profile, absolute, info) {
   return true;
 }
 
-async function syncManifestFingerprint(path) {
-  const before = await safeSyncFile(path, MAX_CONFIG_BYTES);
+async function readSettingsMetadata(path) {
+  const before = await safeMetadataFile(path, MAX_CONFIG_BYTES);
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    if (syncStatIdentity(await handle.stat()) !== syncStatIdentity(before))
-      throw new Error('Native sync manifest changed while reading');
+    const identity = metadataFileIdentity(before);
+    if (metadataFileIdentity(await handle.stat()) !== identity)
+      throw new Error('Native settings metadata changed while reading');
     const bytes = Buffer.alloc(before.size);
     let offset = 0;
     while (offset < bytes.length) {
       const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (!bytesRead) throw new Error('Native sync manifest changed while reading');
+      if (!bytesRead) throw new Error('Native settings metadata changed while reading');
       offset += bytesRead;
     }
-    if (syncStatIdentity(await handle.stat()) !== syncStatIdentity(before)
-      || syncStatIdentity(await safeSyncFile(path, MAX_CONFIG_BYTES)) !== syncStatIdentity(before))
-      throw new Error('Native sync manifest changed while reading');
-    const manifest = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)
-      || manifest.skills !== undefined && !Array.isArray(manifest.skills)
-      || manifest.lastUpdated !== undefined && !Number.isFinite(manifest.lastUpdated)
-      || ['staleDirs', 'pendingClaims'].some(key => manifest[key] !== undefined
-        && (!Array.isArray(manifest[key]) || manifest[key].some(value => typeof value !== 'string'))))
-      throw new Error('Native sync manifest is malformed');
-    // Preserve every byte, including unknown activation/attribution fields.
-    return JSON.stringify([SYNC_MANIFEST_RECORD, before.mode & 0o777, createHash('sha256').update(bytes).digest('hex')]);
+    if (metadataFileIdentity(await handle.stat()) !== identity
+      || metadataFileIdentity(await safeMetadataFile(path, MAX_CONFIG_BYTES)) !== identity)
+      throw new Error('Native settings metadata changed while reading');
+    return { bytes, mode: before.mode & 0o777, value: JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) };
   } finally { await handle.close(); }
+}
+
+async function syncManifestFingerprint(path) {
+  const { bytes, mode, value: manifest } = await readSettingsMetadata(path);
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)
+    || manifest.skills !== undefined && !Array.isArray(manifest.skills)
+    || manifest.lastUpdated !== undefined && !Number.isFinite(manifest.lastUpdated)
+    || ['staleDirs', 'pendingClaims'].some(key => manifest[key] !== undefined
+      && (!Array.isArray(manifest[key]) || manifest[key].some(value => typeof value !== 'string'))))
+    throw new Error('Native sync manifest is malformed');
+  // Preserve every byte, including unknown activation/attribution fields.
+  return JSON.stringify([SYNC_MANIFEST_RECORD, mode, createHash('sha256').update(bytes).digest('hex')]);
+}
+
+async function marketplaceFingerprint(path) {
+  const { mode, value } = await readSettingsMetadata(path);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Claude marketplace metadata is malformed');
+  for (const marketplace of Object.values(value)) {
+    if (!marketplace || typeof marketplace !== 'object' || Array.isArray(marketplace))
+      throw new Error('Claude marketplace record is malformed');
+    // A native refresh rewrites lastUpdated without changing the marketplace source.
+    if (typeof marketplace.lastUpdated === 'string' && Number.isFinite(Date.parse(marketplace.lastUpdated))) delete marketplace.lastUpdated;
+  }
+  const canonical = JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+  return JSON.stringify(['claude-marketplace-content-v1', mode, createHash('sha256').update(canonical).digest('hex')]);
 }
 
 async function collectSettingMetadata(roots, profile) {
@@ -737,7 +782,7 @@ async function collectSettingMetadata(roots, profile) {
   const fail = (message, auditReason = 'settings-source-unavailable') => { throw Object.assign(new Error(message), { auditReason }); };
   const walk = async (root, absolute, logical, depth = 0, ancestors = new Set(),
     { observational = false, skillSource = false, packageBoundary = null } = {}) => {
-    if (depth > MAX_SETTINGS_DEPTH) throw new Error('Settings source exceeds the directory depth limit');
+    if (depth > MAX_SETTINGS_DEPTH) fail('Settings source exceeds the directory depth limit', 'settings-inspection-limit');
     let info;
     try { info = await lstat(absolute); }
     catch (error) { if (error.code === 'ENOENT') { records.set(logical, 'missing'); return; } throw error; }
@@ -773,7 +818,7 @@ async function collectSettingMetadata(roots, profile) {
           { observational: true, skillSource, packageBoundary: nextPackageBoundary });
       } else {
         files += 1;
-        if (files > MAX_SETTINGS_FILES) throw new Error('Settings source exceeds the file limit');
+        if (files > MAX_SETTINGS_FILES) fail('Settings source exceeds the file limit', 'settings-inspection-limit');
       }
       return;
     }
@@ -783,8 +828,10 @@ async function collectSettingMetadata(roots, profile) {
       if ((!observational && (info.nlink !== 1 || info.uid !== process.getuid())) || (info.mode & 0o022))
         throw new Error('Settings source file is unsafe');
       files += 1;
-      if (files > MAX_SETTINGS_FILES) throw new Error('Settings source exceeds the file limit');
-      records.set(logical, JSON.stringify([info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode & 0o777]));
+      if (files > MAX_SETTINGS_FILES) fail('Settings source exceeds the file limit', 'settings-inspection-limit');
+      records.set(logical, profile.client === CLAUDE_CLIENT && logical === '$CLAUDE_CONFIG/plugins/known_marketplaces.json'
+        ? await marketplaceFingerprint(absolute)
+        : JSON.stringify([info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, info.mode & 0o777]));
       return;
     }
     if (!info.isDirectory() || await realpath(absolute) !== absolute
@@ -797,14 +844,14 @@ async function collectSettingMetadata(roots, profile) {
     const dir = await opendir(absolute), entries = [];
     for await (const entry of dir) entries.push(entry.name);
     entries.sort();
-    if (entries.length > MAX_SETTINGS_FILES) throw new Error('Settings source exceeds the directory limit');
+    if (entries.length > MAX_SETTINGS_FILES) fail('Settings source exceeds the directory limit', 'settings-inspection-limit');
     for (const name of entries) {
       if (syncContainer && name === '.last-complete-round') {
-        await safeSyncFile(join(absolute, name), 1024);
+        await safeMetadataFile(join(absolute, name), 1024);
         continue; // Native sync reuse stamp, not a selected skill input.
       }
       if (syncContainer && name === 'manifest.json') {
-        if (++files > MAX_SETTINGS_FILES) throw new Error('Settings source exceeds the file limit');
+        if (++files > MAX_SETTINGS_FILES) fail('Settings source exceeds the file limit', 'settings-inspection-limit');
         records.set(`${logical}/${name}`, await syncManifestFingerprint(join(absolute, name)));
         continue;
       }
@@ -820,8 +867,12 @@ async function collectSettingMetadata(roots, profile) {
     if (profile.client === CLAUDE_CLIENT) {
       if (descriptor.workspace || descriptor.workspaceAncestor) {
         for (const name of ['CLAUDE.md', 'CLAUDE.local.md', '.mcp.json']) await walk(root, join(root, name), `${label}/${name}`);
-        for (const name of ['settings.json', 'settings.local.json', 'CLAUDE.md', 'rules', 'agents', 'skills', 'commands'])
-          await walk(root, join(root, '.claude', name), `${label}/.claude/${name}`, 0, new Set(), { skillSource: name === 'skills' });
+        // HOME can be a workspace ancestor, but ~/.claude is the stock personal
+        // configuration root. The selected personal root is captured separately.
+        if (descriptor.workspace || root !== profile.userHome) {
+          for (const name of ['settings.json', 'settings.local.json', 'CLAUDE.md', 'rules', 'agents', 'skills', 'commands'])
+            await walk(root, join(root, '.claude', name), `${label}/.claude/${name}`, 0, new Set(), { skillSource: name === 'skills' });
+        }
       } else if (label === '$CLAUDE_CONFIG') {
         for (const name of ['settings.json', 'CLAUDE.md', 'rules', 'agents', 'skills', 'commands', 'plugins/installed_plugins.json', 'plugins/known_marketplaces.json'])
           await walk(root, join(root, name), `${label}/${name}`, 0, new Set(), { skillSource: name === 'skills' });
@@ -848,7 +899,21 @@ async function collectSettingMetadata(roots, profile) {
   return records;
 }
 
-/** Capture private settings identities; only validated native sync manifests use content hashes.
+function settingsInspectionError(reason) {
+  if (reason === 'workspace-unavailable') return Object.assign(new Error('Selected workspace is unavailable or unsafe'),
+    { code: 'profile-workspace-unavailable' });
+  const guidance = {
+    'settings-inspection-limit': 'The selected settings exceed the inspection limit. Reduce the number or depth of profile and project settings files, then try again.',
+    'settings-symlink-cycle': 'The selected settings contain a link cycle. Fix links in the profile or project settings, then try again.',
+    'settings-symlink-outside-authorized-roots': 'The selected settings link to an unsupported location. Use links within the selected profile or workspace, or link to a skill package.',
+    'settings-symlink-target-unsafe': 'A selected settings link does not point to a safe file or directory. Check its target and permissions, then try again.',
+  };
+  return Object.assign(new Error(guidance[reason]
+    ?? 'Selected profile settings could not be safely inspected. Check that the profile and project settings are readable and cannot be written by other users.'),
+  { code: 'profile-settings-unavailable' });
+}
+
+/** Capture private settings identities; bounded native metadata may use content hashes.
  * Credential/account stores and ordinary configuration/instruction bodies are never opened here.
  */
 export async function snapshotAuditProfileSettings(profile) {

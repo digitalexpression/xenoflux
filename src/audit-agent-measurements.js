@@ -1,5 +1,6 @@
 import { projectRunRecordedUsage } from './audit-recorded-usage.js';
 import { summarizeWorkflowUsage } from './audit-usage.js';
+import { replaySpanTimestamps } from './audit-session-replay.js';
 
 const emptyCounters = () => ({ input: null, cachedInput: null, output: null, reasoning: null, total: null });
 const safeCounter = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -28,14 +29,16 @@ function observedSpan(session, turns, id) {
   const events = Array.isArray(session?.events) ? session.events : null;
   const missing = reason => turnSpan(turns, id) ?? { durationMs: null, timingNote: reason };
   if (!events?.length) return missing('No recorded replay events for this session.');
-  const timestamps = events.map(event => Date.parse(event?.timestamp)).filter(Number.isFinite);
-  if (timestamps.length < 2) return missing(timestamps.length
-    ? 'Elapsed span needs at least two timestamped events.' : 'Replay events have no usable timestamps.');
+  const { timestamps, receipt, missing: untimed, otherClock } = replaySpanTimestamps(events);
+  if (timestamps.length < 2) return missing(timestamps.length || otherClock
+    ? 'Elapsed span needs at least two timestamped events from the same clock.' : 'Replay events have no usable timestamps.');
   const durationMs = Math.max(...timestamps) - Math.min(...timestamps);
   if (!Number.isSafeInteger(durationMs) || durationMs < 0)
     return { durationMs: null, timingNote: 'A valid elapsed span could not be derived from event timestamps.' };
-  const gapNote = timestamps.length === events.length ? '' : ` Only ${timestamps.length} of ${events.length} events had usable timestamps.`;
-  return { durationMs, timingNote: `First to last recorded replay event; not active working time.${gapNote}` };
+  const firstToLast = receipt ? 'First to last replay event as observed by Xenoflux' : 'First to last recorded replay event';
+  const gapNote = untimed ? ` Only ${events.length - untimed} of ${events.length} events had usable timestamps.` : '';
+  const clockNote = otherClock ? ` ${otherClock} event${otherClock === 1 ? ' uses' : 's use'} a different clock.` : '';
+  return { durationMs, timingNote: `${firstToLast}; not active working time.${gapNote}${clockNote}` };
 }
 
 function countersFromSource(source) {

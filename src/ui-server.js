@@ -117,7 +117,7 @@ export function uiRoutes(provider) {
     route('GET', '/api/profiles/new', call('createPlan', q)),
     route('POST', '/api/profiles/new', call('createApply', ({ body }) => body)),
     route('POST', '/api/profiles/:name/rename', call('renameProfile', ({ params, body }) => ({ name: params.name, ...body }))),
-    route('POST', '/api/profiles/:name/binding', call('bindProfile', ({ params, body }) => ({ name: params.name, ...body }))),
+    route('POST', '/api/profiles/:name/binding', call('bindProfile', ({ params, body }) => ({ name: params.name, repository: body?.repository, ensure: body?.ensure }))),
     route('POST', '/api/profiles/:name/unbind', call('unbindProfile', ({ params, body }) => ({ name: params.name, repository: body?.repository }))),
     route('POST', '/api/profiles/:name/remove', call('removeProfile', ({ params, body }) => ({ name: params.name, ...body }))),
     route('GET', '/api/compare/setups', call('setupComparison', q)),

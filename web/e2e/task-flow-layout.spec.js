@@ -43,7 +43,9 @@ for (const theme of ['light', 'dark']) {
       await expect(task).not.toHaveAttribute('aria-invalid', 'true');
       await expect(validation).toHaveCount(0);
       await expect(task).not.toHaveCSS('border-color', errorColor);
-      await page.getByRole('textbox', { name: /Files it may change/ }).fill('src/date.js');
+      const files = page.getByRole('textbox', { name: /Files it may change/ });
+      const requestedFiles = 'src/date.js\nsrc/parsers/**/*.js';
+      await files.fill(requestedFiles);
       await page.getByRole('navigation', { name: 'Preparation stages' }).getByRole('link', { name: 'Two setups' }).click();
       await expect(task).toHaveValue('Compare the date parser with the same committed source.');
       await page.getByRole('navigation', { name: 'Preparation stages' }).getByRole('link', { name: 'Task and source' }).click();
@@ -51,6 +53,9 @@ for (const theme of ['light', 'dark']) {
       await page.getByRole('button', { name: 'Review before starting' }).click();
       await expect(page.getByRole('region', { name: /Ready to start Profiles/ })).toBeVisible();
       await expect(page.locator('blockquote')).toHaveText('Compare the date parser with the same committed source.');
+      const scope = page.getByRole('region', { name: 'Task and pinned source', exact: true });
+      await expect(scope).toContainText('src/date.js');
+      await expect(scope).toContainText('src/parsers/**/*.js');
       await expect(page.getByText(/Uncommitted edits and untracked or ignored files/)).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath(`review-${theme}.png`), fullPage: true });
       await page.setViewportSize({ width: 320, height: 900 });
@@ -58,7 +63,7 @@ for (const theme of ['light', 'dark']) {
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.getByRole('link', { name: 'Edit the two setups', exact: true }).click();
       await expect(task).toHaveValue('Compare the date parser with the same committed source.');
-      await expect(page.getByRole('textbox', { name: /Files it may change/ })).toHaveValue('src/date.js');
+      await expect(files).toHaveValue(requestedFiles);
       await page.getByRole('navigation', { name: 'Preparation stages' }).getByRole('link', { name: 'Checks and limits' }).click();
       await expect(page.getByText('No verification checks selected.', { exact: true })).toBeVisible();
       for (const width of [1280, 320]) {

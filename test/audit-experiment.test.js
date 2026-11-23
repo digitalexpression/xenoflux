@@ -38,13 +38,14 @@ async function git(root, ...args) {
 }
 
 function appServer(counterPath, protocolErrorsPath, pauseOnTurnStartMarker = null,
-  nativeVersion = version, contextSource = null) {
+  nativeVersion = version, contextSource = null, turnNetworkAccess = false) {
   return `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
 const VERSION = ${JSON.stringify(nativeVersion)};
 const CONTEXT_SOURCE = ${JSON.stringify(contextSource)};
 const PAUSE_ON_TURN_START = ${JSON.stringify(pauseOnTurnStartMarker)};
+const turnNetworkAccess = ${turnNetworkAccess};
 const { createServer } = require('node:http');
 if (process.argv.includes('--version')) { process.stdout.write('codex-cli ' + VERSION + '\\n'); process.exit(0); }
 const configArgs = process.argv.slice(2);
@@ -76,6 +77,7 @@ async function sendTelemetry() {
 
 fs.appendFileSync(${JSON.stringify(counterPath)}, 'app-server\\n');
 let buffer = '';
+let sandboxType;
 const reply = (id, result) => process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,result}) + '\\n');
 const notify = (method, params) => process.stdout.write(JSON.stringify({jsonrpc:'2.0',method,params}) + '\\n');
 const reject = (id, message) => { fs.appendFileSync(${JSON.stringify(protocolErrorsPath)}, message + '\\n'); process.stdout.write(JSON.stringify({jsonrpc:'2.0',id,error:{code:-32602,message:'invalid fixture request'}}) + '\\n'); };
@@ -108,15 +110,19 @@ async function respond(message) {
   }
   if (method === 'thread/start') {
     if (!only(params,['ephemeral','experimentalRawEvents','sandbox','approvalPolicy','historyMode']) || !path.isAbsolute(process.cwd())
-      || params.ephemeral !== false || params.experimentalRawEvents !== false || params.sandbox !== 'workspace-write'
+      || params.ephemeral !== false || params.experimentalRawEvents !== false || !['workspace-write','read-only'].includes(params.sandbox)
       || params.approvalPolicy !== 'never' || params.historyMode !== 'paginated') return fail(id,'thread-start-schema');
+    sandboxType = params.sandbox === 'read-only' ? 'readOnly' : 'workspaceWrite';
     return reply(id,{cwd:process.cwd(),thread:{id:'11111111-1111-4111-8111-111111111111',sessionId:'root-session',cwd:process.cwd()},
       ...(CONTEXT_SOURCE ? {instructionSources:[CONTEXT_SOURCE==='workspace' ? path.join(process.cwd(),'AGENTS.md') : CONTEXT_SOURCE]} : {}),
+      sandbox:{type:sandboxType,networkAccess:sandboxType==='workspaceWrite'
+        && (configValues.includes('sandbox_workspace_write.network_access=true')
+          || !configValues.includes('sandbox_workspace_write.network_access=false') && !turnNetworkAccess)},
       model:(fs.readFileSync(path.join(process.env.CODEX_HOME,'config.toml'),'utf8').match(/^model\\s*=\\s*"([^"]+)"/m)||[])[1],reasoningEffort:'medium'});
   }
   if (method === 'command/exec') {
     if (JSON.stringify(params.command) !== JSON.stringify(['/usr/bin/true']) || params.cwd !== process.cwd()
-      || params.sandboxPolicy?.type !== 'workspaceWrite' || params.sandboxPolicy?.networkAccess !== false) return fail(id,'command-probe-schema');
+      || params.sandboxPolicy?.type !== sandboxType || params.sandboxPolicy?.networkAccess !== turnNetworkAccess) return fail(id,'command-probe-schema');
     return reply(id,{exitCode:0,stdout:'',stderr:''});
   }
   if (method === 'thread/loaded/list') return reply(id,{data:['11111111-1111-4111-8111-111111111111'],nextCursor:null});
@@ -125,10 +131,11 @@ async function respond(message) {
     if (!only(params,['threadId','cwd','sandboxPolicy','approvalPolicy','input']) || params.threadId !== '11111111-1111-4111-8111-111111111111'
       || params.cwd !== process.cwd() || params.approvalPolicy !== 'never' || params.sandbox !== undefined
       || !Array.isArray(params.input) || !params.input.some(item => item.type === 'text')
-      || !policy || policy.type !== 'workspaceWrite' || JSON.stringify(policy.writableRoots) !== JSON.stringify([params.cwd])
-      || policy.networkAccess !== false || policy.excludeTmpdirEnvVar !== false || policy.excludeSlashTmp !== false) return fail(id,'turn-start-schema');
+      || !policy || policy.type !== sandboxType || policy.networkAccess !== turnNetworkAccess
+      || sandboxType==='workspaceWrite' && (JSON.stringify(policy.writableRoots) !== JSON.stringify([params.cwd])
+        || policy.excludeTmpdirEnvVar !== false || policy.excludeSlashTmp !== false)) return fail(id,'turn-start-schema');
     const model=(fs.readFileSync(path.join(process.env.CODEX_HOME,'config.toml'),'utf8').match(/^model\\s*=\\s*"([^"]+)"/m)||[])[1] ?? 'unknown';
-    fs.writeFileSync(path.join(params.cwd,'result.txt'), 'model=' + model + '\\n', {mode:0o600});
+    if (sandboxType==='workspaceWrite') fs.writeFileSync(path.join(params.cwd,'result.txt'), 'model=' + model + '\\n', {mode:0o600});
     if (PAUSE_ON_TURN_START) {
       const ready = PAUSE_ON_TURN_START + '.ready-' + process.pid;
       fs.writeFileSync(ready, JSON.stringify({pid:process.pid}), {flag:'wx',mode:0o600});
@@ -184,7 +191,7 @@ async function runObserveAccessFixture(profile, options = {}) {
 }
 
 async function fixture(t, { pauseOnTurnStartMarker = null,
-  nativeVersion = version, contextSource = null } = {}) {
+  nativeVersion = version, contextSource = null, turnNetworkAccess = false } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-audit-experiment-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, 'source'); await mkdir(repo, { mode: 0o700 });
@@ -204,7 +211,7 @@ async function fixture(t, { pauseOnTurnStartMarker = null,
   const counter = join(root, 'app-server-launches.txt'), protocolErrors = join(root, 'protocol-errors.txt'), telemetry = `${counter}.telemetry`;
   const executable = join(root, 'fake-codex');
   await writeFile(executable, appServer(counter, protocolErrors, pauseOnTurnStartMarker,
-    nativeVersion, contextSource === 'source' ? join(repo, 'AGENTS.md') : contextSource), { mode: 0o700 });
+    nativeVersion, contextSource === 'source' ? join(repo, 'AGENTS.md') : contextSource, turnNetworkAccess), { mode: 0o700 });
   await symlink(executable, join(root, 'codex'));
   const terminalEnvironment = { PATH: root + ':' + dirname(process.execPath) + ':/usr/bin:/bin' };
   const resolveProfile = (store, selection, options) => resolveAuditExecutionProfile(store, selection, { ...options, terminalEnvironment });
@@ -236,6 +243,38 @@ async function launchCount(path) {
   try { return (await readFile(path, 'utf8')).trim().split('\n').filter(Boolean).length; }
   catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
 }
+
+test('Codex comparison confirms network-disabled workspace writes before either task', async t => {
+  const f = await fixture(t);
+  const input = { ...f.spec, checks: [], profiles: f.spec.profiles.map(profile => ({ ...profile,
+    execution: { permissionMode: 'workspace-write' } })) };
+  const report = await runAuditExperiment(f.store, input, { resolveProfile: f.resolveProfile });
+  assert.equal(report.runs.length, 2);
+  for (const leg of report.runs) {
+    const { report: saved } = await readAuditRecord(f.store, leg.id);
+    assert.equal(saved.capture.settingsEvidence.confirmed.permissionMode?.value, 'workspace-write', saved.reason);
+    assert.equal(saved.outcome.task.status, 'passed');
+  }
+  assert.deepEqual(await Promise.all(f.native.map(profile => readFile(join(profile.home, 'config.toml')))), f.savedConfigs);
+});
+
+test('Codex compares workspace-write and read-only with network access in both turns', async t => {
+  const f = await fixture(t, { turnNetworkAccess: true });
+  const modes = ['workspace-write', 'read-only'];
+  const input = { ...f.spec, networkAccess: true, checks: [], profiles: f.spec.profiles.map((profile, index) => ({ ...profile,
+    execution: { permissionMode: modes[index] } })) };
+  const report = await runAuditExperiment(f.store, input, { resolveProfile: f.resolveProfile });
+  assert.equal(report.runs.length, 2);
+  for (const [index, leg] of report.runs.entries()) {
+    const { report: saved } = await readAuditRecord(f.store, leg.id);
+    const evidence = saved.capture.settingsEvidence;
+    assert.equal(evidence.confirmed.permissionMode?.value, modes[index], saved.reason);
+    assert.equal(evidence.confirmed.networkAccess?.value, index === 0);
+    assert.deepEqual(evidence.sent.networkAccess, { value: true, source: 'turn/start' });
+    assert.equal(saved.outcome.task.status, 'passed');
+  }
+  assert.deepEqual(await Promise.all(f.native.map(profile => readFile(join(profile.home, 'config.toml')))), f.savedConfigs);
+});
 
 test('relocated experiments require reported workspace context and persist denial without model work or checks', async t => {
   for (const contextSource of ['workspace', 'source']) await t.test(contextSource, async t => {

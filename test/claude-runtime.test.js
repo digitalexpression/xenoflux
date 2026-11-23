@@ -66,6 +66,14 @@ test('pinned SDK waits for process and session checkpoints, preserves absent nat
   assert.equal(result.capture.settingsEvidence.sent.reasoningEffort, 'low');
   assert.equal(result.capture.settingsEvidence.observed.reasoningEffort, null);
   assert.equal(result.run.usage.observations[0].values.input_tokens, 11);
+  const [turn] = result.run.turns, [replaySession] = result.run.sessionReplay.sessions;
+  assert.ok(Number.isFinite(Date.parse(turn.observedStartedAt)));
+  assert.ok(Date.parse(turn.observedCompletedAt) >= Date.parse(turn.observedStartedAt));
+  assert.ok(result.run.events.every(event => event.timestampSource === 'observed' && Number.isFinite(Date.parse(event.recordedAt))));
+  assert.deepEqual(replaySession.events.map(event => [event.kind, event.timestampSource]), [
+    ['message', 'observed'], ['message', 'observed'], ['session', 'observed'],
+  ]);
+  assert.equal(result.run.replayCapture.boundary, 'owned-native-sdk-stream');
   assert.equal(result.process.shutdown.groupTerminated, true);
   assert.equal(result.process.shutdown.mainCloseJoined, true);
   assert.equal(result.capture.shutdown.sdkIteratorJoined, true);
@@ -73,6 +81,62 @@ test('pinned SDK waits for process and session checkpoints, preserves absent nat
   assert.equal(result.capture.shutdown.pendingApprovals, 0);
   assert.deepEqual(checkpoints, ['spawn', 'initialized', 'launch-bound', 'session', 'turn', 'final']);
   assert.doesNotMatch(await f.stdout('completion-usage'), /private-fixture|control_response/);
+});
+
+test('Claude replay freezes the matching owned root transcript with linked tool results and clock provenance', async t => {
+  const f = await fixture(t), result = await f.capture('native-replay');
+  assert.equal(result.failure, null, JSON.stringify(result.failure));
+  const [session] = result.run.sessionReplay.sessions;
+  assert.equal(result.run.replayCapture.boundary, 'finalized-native-history-snapshot');
+  assert.equal(result.run.replayCapture.sourceFingerprint, session.source.fingerprint);
+  assert.equal(session.status, 'ready');
+  assert.equal(result.run.replayCapture.status, 'ready');
+  assert.deepEqual(session.events.map(event => [event.kind, event.timestampSource]), [
+    ['message', 'native'], ['tool-call', 'native'], ['tool-result', 'native'], ['message', 'native'], ['session', 'observed'],
+  ]);
+  const [prompt, call, output, answer] = session.events;
+  assert.equal(prompt.body, 'native-replay');
+  assert.equal(prompt.role, 'user');
+  assert.equal(prompt.timestamp, '2026-11-21T11:00:00.000Z');
+  assert.equal(call.timestamp, '2026-11-21T11:00:02.000Z');
+  assert.equal(output.relatedEventId, call.id);
+  assert.equal(call.relatedEventId, output.id);
+  assert.equal(output.timestamp, '2026-11-21T11:00:03.000Z');
+  assert.deepEqual(JSON.parse(call.body), { file_path: 'fixture.txt' });
+  assert.equal(output.body, 'fixture output');
+  assert.equal(output.contentOmitted, true);
+  assert.equal(answer.body, result.response.text);
+  assert.doesNotMatch(JSON.stringify(session.events), /opaque (?:private|nested|image) value/);
+});
+
+test('Claude replay falls back to SDK receipt times when the retained prompt fails ownership checks', async t => {
+  const f = await fixture(t), result = await f.capture('native-replay-unbound');
+  assert.equal(result.failure, null, JSON.stringify(result.failure));
+  assert.equal(result.run.replayCapture.boundary, 'owned-native-sdk-stream');
+  const [session] = result.run.sessionReplay.sessions;
+  assert.equal(session.status, 'partial');
+  assert.equal(session.events[0].body, 'native-replay-unbound');
+  assert.ok(session.events.every(event => event.timestampSource === 'observed' && Number.isFinite(Date.parse(event.timestamp))));
+  const [call, output] = session.events.slice(1, 3);
+  assert.equal(output.relatedEventId, call.id);
+  assert.equal(output.body, 'fixture output');
+  assert.doesNotMatch(JSON.stringify(session.events), /foreign prompt|opaque (?:private|nested|image) value/);
+});
+
+test('Claude native replay retains gaps in tool pairs and timestamps', async t => {
+  const f = await fixture(t);
+  const openCall = await f.capture('native-replay-open-call'), missingClock = await f.capture('native-replay-no-time');
+  for (const result of [openCall, missingClock]) {
+    assert.equal(result.failure, null, JSON.stringify(result.failure));
+    assert.equal(result.run.replayCapture.boundary, 'finalized-native-history-snapshot');
+    assert.equal(result.run.replayCapture.status, 'partial');
+  }
+  const call = openCall.run.sessionReplay.sessions[0].events.find(event => event.kind === 'tool-call');
+  assert.equal(call.linkStatus, 'result-not-found');
+  assert.equal(call.relatedEventId, undefined);
+  const reply = missingClock.run.sessionReplay.sessions[0].events.find(event => event.role === 'assistant');
+  assert.equal(reply.timestamp, null);
+  assert.equal(reply.timestampSource, undefined);
 });
 
 test('catalog never submits a prompt and keeps absent effort capabilities unknown', async t => {
@@ -287,6 +351,38 @@ test('pinned SDK binds several queued approvals to exact current actions and ret
   assert.equal(result.run.events.find(row => row.kind === 'claude-advisory-tool-progress').executionProven, false);
   const wrong = await f.capture('mismatch', { onNativeRequest() { assert.fail('unmatched action was offered'); } });
   assert.match(wrong.failure.message, /exact tool action/);
+});
+
+test('comparison uses named native approval behavior before dispatch with native network settings', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.home, 'fixture-comparison-approval'), '');
+  for (const [permissionMode, choice] of [['default', { approvalsReviewer: 'user' }],
+    ['auto', { approvalsReviewer: 'auto_review' }], ['dontAsk', { autonomous: true }]]) {
+    const result = await f.capture(`approval-${permissionMode}`, { executionMode: 'audit', networkAccess: true, ...choice });
+    assert.equal(result.failure, null, JSON.stringify(result.failure));
+    assert.equal(result.capture.observer.networkAccess, 'native-profile-policy');
+    assert.equal(result.capture.settingsEvidence.confirmed.permissionMode, permissionMode);
+    assert.equal(result.run.outcome.nativeTurnStatus, 'completed');
+  }
+  await writeFile(join(f.home, 'fixture-reject-approval-mode'), '');
+  const refused = await f.capture('approval-refused', { executionMode: 'audit', approvalsReviewer: 'auto_review' });
+  assert.equal(refused.failure.code, 'requested-approval-reviewer-unconfirmed');
+  assert.equal(refused.run.turns.length, 0);
+  assert.equal(refused.run.source, null);
+});
+
+test('comparison session approval uses only the offered scoped Claude rule', async t => {
+  const f = await fixture(t);
+  for (const name of ['session-allow', 'session-suppressed', 'session-wide']) {
+    const result = await f.capture(name, { executionMode: 'audit', onNativeRequest(request) {
+      const allowed = name === 'session-allow';
+      assert.deepEqual(request.params.availableDecisions, allowed ? ['accept', 'acceptForSession', 'decline'] : ['accept', 'decline']);
+      assert.deepEqual(request.params.sessionRules, allowed ? [{ toolName: 'Bash', ruleContent: 'printf fixture-0' }] : undefined);
+      return { decision: allowed ? 'acceptForSession' : 'accept' };
+    } });
+    assert.equal(result.failure, null, JSON.stringify(result.failure));
+    assert.equal(result.run.toolInvocations[0].status, 'completed');
+  }
 });
 
 for (const mode of ['pending-cancel', 'running-cancel']) test(`${mode} invalidates the answer and joins owned work while the companion completes`, async t => {

@@ -6,7 +6,7 @@ import { isAbsolute, join, relative, sep } from 'node:path';
 import { acquire, exists, globalLock, privateDirectory, readJSON, record, release } from './metadata.js';
 
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const taskKinds = new Set(['audit-experiment', 'review-task']);
+const taskKinds = new Set(['audit-experiment', 'review-task', 'catalog-probe']);
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 const memberKinds = new Set([...taskKinds, 'desktop-instance', 'interactive-cli', 'claude-desktop', 'copilot-desktop']);
 const validMember = owner => memberKinds.has(owner?.kind) && typeof owner.profileId === 'string'
@@ -29,11 +29,12 @@ export function profileOwners(value) {
   if (value?.kind === 'execution-participants') {
     const owners = value.participants;
     if (value.schemaVersion !== 1 || !Array.isArray(owners) || owners.length < 2
-      || owners.some(owner => !validMember(owner)) || new Set(owners.map(owner => owner.runId)).size !== owners.length
-      || owners.filter(owner => owner.kind === 'desktop-instance').length > 1
-      || owners.some(owner => ['interactive-cli', 'claude-desktop', 'copilot-desktop'].includes(owner.kind)) && (owners.length !== 2
-        || !(nativePair(owners[0], owners[1]) || nativePair(owners[1], owners[0]))))
+      || owners.some(owner => !validMember(owner)) || new Set(owners.map(owner => owner.runId)).size !== owners.length)
       throw new Error('Invalid execution participant set; preserving it');
+    const native = owners.filter(owner => !taskKinds.has(owner.kind));
+    if (native.length > 2 || native.length === 2 && !(nativePair(native[0], native[1]) || nativePair(native[1], native[0]))
+      || native.some(owner => owner.kind === 'interactive-cli' && !isCodexCliParticipant(owner) && !managedCli(owner)))
+      throw new Error('Invalid native participant set; preserving it');
     return owners;
   }
   if (value?.kind !== 'desktop-review') return [value];
@@ -59,15 +60,19 @@ export async function readProfileOwners(root) {
 const writeOwners = (path, owners) => record(join(path, 'owner.json'), owners.length === 1 ? owners[0]
   : { schemaVersion: 1, kind: 'execution-participants', participants: owners });
 
-export async function acquireProfileParticipant(root, owner, desktopOwner) {
+export async function acquireProfileParticipant(root, owner, verifiedNativeOwners) {
   const path = join(root, '.run-lock');
   if (!validMember(owner) || !taskKinds.has(owner.kind)) throw new Error('Invalid execution participant');
-  if (!await exists(path)) return acquire(path, owner, true);
+  const native = Array.isArray(verifiedNativeOwners) ? verifiedNativeOwners : verifiedNativeOwners ? [verifiedNativeOwners] : [];
+  if (!await exists(path)) {
+    if (native.length) throw new Error('Native profile reservation changed during admission');
+    return acquire(path, owner, true);
+  }
   const owners = await readProfileOwners(root);
   if (owners.some(current => !validMember(current)
-    || !taskKinds.has(current.kind) && current.kind !== 'desktop-instance'
-    || (current.kind === 'desktop-instance' ? !equal(current, desktopOwner)
-      : current.home !== owner.home || current.membershipVersion !== 1 && current.kind !== 'review-task')))
+    || (!taskKinds.has(current.kind) ? !native.some(peer => equal(current, peer)) || (current.home !== undefined && current.home !== owner.home)
+      : current.home !== owner.home || current.membershipVersion !== 1 && current.kind !== 'review-task'))
+    || native.some(peer => !owners.some(current => equal(current, peer))))
     throw new Error('Profile has an exclusive or unverified reservation');
   if (owners.some(current => current.runId === owner.runId)) throw new Error('Execution participant already exists');
   await writeOwners(path, [...owners, owner]);

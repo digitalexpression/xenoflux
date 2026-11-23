@@ -18,7 +18,7 @@ const test = base.extend({
   },
   page: async ({ page, app }, use, testInfo) => {
     await page.goto(app.url);
-    await page.getByRole('heading', { name: 'What do you want to compare?', level: 1 }).waitFor();
+    await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
     await use(page);
     if (testInfo.status !== testInfo.expectedStatus && app.serverLogs.length) {
       await testInfo.attach('ui-server.log', { body: app.serverLogs.join('\n'), contentType: 'text/plain' });
@@ -51,6 +51,30 @@ async function startRun(page) {
   await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/);
 }
 
+test('review discloses parallel execution, approval routing, and network access', async ({ page, app }) => {
+  await page.getByRole('link', { name: 'Run a new task' }).click();
+  await page.getByRole('textbox', { name: 'What should both profiles do?' }).fill('Inspect the disposable fixture.');
+  const approvals = page.getByRole('combobox', { name: 'Approvals', exact: true });
+  const network = page.getByRole('checkbox', { name: 'Allow network access', exact: true });
+  await expect(approvals.getByRole('option')).toHaveText(['Profile default', 'Ask me', 'Automatic review', 'Autonomous']);
+  await expect(network).toBeChecked();
+  await approvals.selectOption({ label: 'Automatic review' });
+  await network.uncheck();
+  await page.getByRole('button', { name: 'Review before starting' }).click();
+  await expect(page.getByText(/2 parallel model runs/)).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Execution limits' }).getByText(/native automatic review/)).toBeVisible();
+  await expect(page.getByText(/Codex uses .* with network access disabled/)).toHaveCount(2);
+  await page.getByRole('link', { name: 'Edit checks and limits' }).click();
+  await expect(approvals).toHaveValue('auto_review');
+  await expect(network).not.toBeChecked();
+  await approvals.selectOption({ label: 'Autonomous' });
+  await network.check();
+  await page.getByRole('button', { name: 'Review before starting' }).click();
+  await expect(page.getByRole('region', { name: 'Execution limits' }).getByText(/run without approval prompts/)).toBeVisible();
+  await expect(page.getByText(/Codex uses .* with network access enabled/)).toHaveCount(2);
+  expect(app.calls.captures).toEqual([]);
+});
+
 for (const side of ['first', 'second']) test(`preserves the ${side} profile chosen on the earliest form frame`, async ({ page, app }) => {
   const chosen = side === 'first' ? 'strict-review' : 'baseline';
   await page.evaluate(({ side, chosen }) => {
@@ -67,7 +91,7 @@ for (const side of ['first', 'second']) test(`preserves the ${side} profile chos
     observer.observe(document, { subtree: true, childList: true });
   }, { side, chosen });
   await page.getByRole('link', { name: 'Run a new task' }).click();
-  const profile = page.getByLabel(side === 'first' ? /left side of the report/i : /right side of the report/i);
+  const profile = page.getByRole('combobox', { name: side === 'first' ? /First · left side/ : /Second · right side/ });
   await expect(profile).toHaveValue(chosen);
   expect(await page.evaluate(() => window.profileInitProbe)).toEqual({ before: '', chosen });
   await page.getByLabel('What should both profiles do?').fill('Preserve the explicitly selected fixture profile.');
@@ -137,10 +161,12 @@ test('pins the reviewed commit, runs both profiles, then exports and reopens the
 
   await startRun(page);
   await expect(page.getByRole('region', { name: 'Finished' })).toBeVisible({ timeout: 15000 });
-  expect(app.calls.captures).toEqual(['baseline', 'strict-review']);
+  expect(app.calls.captures.toSorted()).toEqual(['baseline', 'strict-review']);
   await page.getByRole('link', { name: 'Open the report' }).click();
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Export report' }).first()).toBeVisible();
   await page.getByRole('link', { name: 'Export report' }).first().click();
   await page.getByRole('button', { name: 'Export', exact: true }).click();
@@ -174,7 +200,7 @@ test('reports a failed verification command as a failed check after both tasks',
   await expect(page.getByText('Ready to start')).toBeVisible();
   await startRun(page);
   await expect(page.getByRole('region', { name: 'A check failed' })).toBeVisible({ timeout: 15000 });
-  expect(app.calls.captures).toEqual(['baseline', 'strict-review']);
+  expect(app.calls.captures.toSorted()).toEqual(['baseline', 'strict-review']);
   expect(app.calls.checks).toHaveLength(2);
   await expect(page.getByRole('link', { name: 'Open the report' })).toBeVisible();
 });
@@ -192,9 +218,10 @@ test('check assessment output retention inspects safely, navigates, and exports 
   await expect(page.getByText('Ready to start')).toBeVisible();
   await startRun(page);
   await expect(page.getByRole('region', { name: 'Finished' })).toBeVisible({ timeout: 15000 });
-  expect(app.calls.captures).toEqual(['baseline', 'strict-review']);
+  expect(app.calls.captures.toSorted()).toEqual(['baseline', 'strict-review']);
   expect(app.calls.checks).toHaveLength(4);
   await page.getByRole('link', { name: 'Open the report' }).click();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
 
   const table = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(table.locator('tbody tr')).toHaveCount(2);
@@ -277,7 +304,8 @@ test('successful partial capture preserves task completion, validation and recor
   expect(app.calls.checks).toHaveLength(2);
   await page.getByRole('link', { name: 'Open the report', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Compared profiles' }).getByText('Model task completed', { exact: true })).toHaveCount(2);
-  const measurements = page.locator('section[aria-labelledby="time"]');
+  await page.locator('summary').filter({ hasText: /^Time and tokens$/ }).click();
+  const measurements = page.getByRole('region', { name: 'Time and tokens evidence' });
   await expect(measurements.getByRole('table', { name: 'Time and tokens comparison' })).toHaveCount(0);
   await expect(measurements.getByRole('list', { name: 'Token bar legend' }).getByRole('listitem')).toHaveCount(4);
   const leftMeasurements = measurements.locator('[aria-label="baseline time and tokens"]');
@@ -292,6 +320,7 @@ test('successful partial capture preserves task completion, validation and recor
   await expect(leftRows.nth(0).getByRole('img')).toHaveCount(0);
   await leftRows.nth(0).locator('summary').click();
   await expect(leftRows.nth(0)).toContainText('Workflow mix withheld until its accounting is validated');
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   const assessment = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(assessment.locator('tbody tr')).toHaveCount(1);
   await expect(assessment.getByRole('button', { name: 'Inspect baseline result for smoke' })).toBeVisible();
@@ -309,9 +338,9 @@ test('successful partial capture preserves task completion, validation and recor
   await page.setViewportSize({ width: 1280, height: 800 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.setViewportSize({ width: 1280, height: 800 });
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
-  await expect(page.locator('section[aria-labelledby="time"]').getByRole('list', { name: 'Token bar legend' })).toHaveCount(1);
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await page.getByRole('link', { name: 'Export report' }).first().click();
   await page.getByRole('button', { name: 'Export', exact: true }).click();
   await expect(page.getByRole('status', { name: 'Report saved' })).toBeVisible();
@@ -324,6 +353,7 @@ test('successful partial capture preserves task completion, validation and recor
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedJson);
   await page.getByRole('link', { name: 'View report' }).click();
   await expect(page.getByText('Shown exactly as saved')).toBeVisible();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   const reopenedOutcome = page.getByRole('table', { name: 'Outcome comparison', exact: true });
   const reopenedCounts = reopenedOutcome.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'File-change result' }) }).getByRole('cell');
   await expect(reopenedCounts.nth(0)).toContainText('1 tracked file · 0 ignored files or artifacts');
@@ -335,10 +365,11 @@ test('successful partial capture preserves task completion, validation and recor
   const reopenedAssessment = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(reopenedAssessment.locator('tbody tr')).toHaveCount(1);
   await expect(reopenedAssessment.getByRole('button', { name: 'Inspect baseline result for smoke' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   expect(await readFile(savedJson, 'utf8')).toBe(original);
-  expect(app.calls.captures).toEqual(['baseline', 'strict-review']);
+  expect(app.calls.captures.toSorted()).toEqual(['baseline', 'strict-review']);
 });
 
 test('native sandbox preflight failure is clear in progress and the reopened frozen report', async ({ page, app }) => {
@@ -358,6 +389,7 @@ test('native sandbox preflight failure is clear in progress and the reopened fro
   await page.getByRole('link', { name: 'Open the partial report' }).click();
   await expect(page.getByText('Neither model task started', { exact: true })).toBeVisible();
   await expect(page.getByRole('group', { name: 'Compared profiles' }).getByText(/The native command sandbox could not be verified, so the model task did not start\./)).toHaveCount(2);
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   const assessment = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(assessment.locator('tbody tr')).toHaveCount(1);
   const assessmentRow = assessment.locator('tbody tr');
@@ -375,6 +407,7 @@ test('native sandbox preflight failure is clear in progress and the reopened fro
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedJson);
   await page.getByRole('link', { name: 'View report' }).click();
   await expect(page.getByRole('group', { name: 'Compared profiles' }).getByText(/The native command sandbox could not be verified, so the model task did not start\./)).toHaveCount(2);
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   const reopenedAssessment = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(reopenedAssessment.locator('tbody tr')).toHaveCount(1);
   const reopenedRow = reopenedAssessment.locator('tbody tr');
@@ -383,22 +416,22 @@ test('native sandbox preflight failure is clear in progress and the reopened fro
   await expect(reopenedRow.getByRole('cell').nth(1)).toContainText('not run');
 });
 
-test('cancellation keeps a partial record and stops the second profile from starting', async ({ page, app }) => {
+test('cancellation stops both active sides and keeps a partial record', async ({ page, app }) => {
   await prepareRun(page);
   await startRun(page);
   await expect(page.getByRole('button', { name: 'Cancel the run…' })).toBeVisible();
-  await expect.poll(() => app.calls.captures.length).toBe(1);
+  await expect.poll(() => app.calls.captures.length).toBe(2);
   await page.getByRole('button', { name: 'Cancel the run…' }).click();
   await page.getByRole('button', { name: 'Cancel the run', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Cancelled' })).toBeVisible({ timeout: 15000 });
-  expect(app.calls.captures).toHaveLength(1);
+  expect(app.calls.captures).toHaveLength(2);
   await expect(page.getByRole('link', { name: 'Open the partial report' })).toBeVisible();
 });
 
 test('server restart shows interrupted progress without repeating the model task', async ({ page, app }) => {
   await prepareRun(page);
   await startRun(page);
-  await expect.poll(() => app.calls.captures.length).toBe(1);
+  await expect.poll(() => app.calls.captures.length).toBe(2);
   const id = new URL(page.url()).pathname.split('/').at(-1);
   const server = await app.restartServer();
   const progress = new URL(server.url);
@@ -406,13 +439,13 @@ test('server restart shows interrupted progress without repeating the model task
   await page.goto(progress.href);
   await expect(page.getByRole('region', { name: 'Interrupted' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Open the partial report' })).toBeVisible();
-  expect(app.calls.captures).toEqual(['baseline']);
+  expect(app.calls.captures.toSorted()).toEqual(['baseline', 'strict-review']);
 });
 
 test('cancellation stays terminal when an older manual progress retry returns afterward', async ({ page, app }) => {
   await prepareRun(page);
   await startRun(page);
-  await expect.poll(() => app.calls.captures.length).toBe(1);
+  await expect.poll(() => app.calls.captures.length).toBe(2);
   const progressPath = new URL(page.url()).pathname;
   await page.route(`**/api${progressPath}`, async route => {
     await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { message: 'Fixture read unavailable', code: 'fixture-offline' } }) });
@@ -449,11 +482,11 @@ test('rejects a commit that changed after review without starting a task', async
   expect(app.calls.captures).toHaveLength(0);
 });
 
-test('reviews and applies recovery for stopped runs opened from Recent', async ({ page, app }) => {
+test('reviews and applies recovery for stopped runs opened from Recent comparisons', async ({ page, app }) => {
   await app.seedStoppedRun();
   await page.reload();
-  await page.getByRole('heading', { name: 'Recent' }).waitFor();
-  await page.getByRole('link', { name: 'Task comparison' }).click();
+  const recent = page.getByRole('region', { name: 'Recent comparisons', exact: true });
+  await recent.getByRole('link', { name: 'Task comparison', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Interrupted' })).toBeVisible();
   const progress = page.getByRole('region', { name: 'Interrupted' });
   await expect(progress.getByText('Before changing anything')).toBeVisible();
@@ -468,21 +501,35 @@ test('reviews and applies recovery for stopped runs opened from Recent', async (
   expect(app.calls.captures).toHaveLength(0);
 });
 
-test('one profile can use separate model settings on both sides of a comparison', async ({ page }) => {
+test('one profile can use separate model settings on both sides of a comparison', async ({ page, app }) => {
+  await page.evaluate(() => sessionStorage.setItem('xenoflux-run-auto-load-models', 'false'));
   await page.getByRole('link', { name: 'Run a new task' }).click();
   await page.getByRole('textbox', { name: 'What should both profiles do?' }).fill('Compare the two fixture settings.');
-  await page.getByLabel(/right side of the report/i).selectOption('baseline');
-  await page.getByRole('button', { name: 'Refresh models', exact: true }).nth(0).click();
+  await page.getByRole('combobox', { name: /Second · right side/ }).selectOption('baseline');
+  const catalog = page.getByRole('region', { name: 'Left model catalog', exact: true });
+  await catalog.getByText('Catalog details', { exact: true }).click();
+  await catalog.getByRole('button', { name: 'Refresh models', exact: true }).click();
   await expect(page.getByLabel('Model ID').nth(0).getByRole('option', { name: /fixture-left/ })).toHaveCount(1);
   await page.getByLabel('Model ID').nth(0).selectOption('fixture-left');
-  await page.getByRole('button', { name: 'Refresh models', exact: true }).nth(1).click();
   await expect(page.getByLabel('Model ID').nth(1).getByRole('option', { name: /fixture-right/ })).toHaveCount(1);
   await page.getByLabel('Model ID').nth(1).selectOption('fixture-right');
   await page.getByLabel('Reasoning effort').nth(0).selectOption('low');
   await page.getByLabel('Reasoning effort').nth(1).selectOption('high');
+  expect(app.calls.catalogs).toHaveLength(1);
   await page.getByRole('button', { name: 'Review before starting' }).click();
-  await expect(page.getByText(/Model: fixture-left · Effort: low/)).toBeVisible();
-  await expect(page.getByText(/Model: fixture-right · Effort: high/)).toBeVisible();
+  const differences = page.getByRole('region', { name: 'Setup differences', exact: true });
+  const row = name => differences.getByRole('row').filter({ has: page.getByRole('rowheader', { name, exact: true }) });
+  await expect(row('Model').getByRole('cell').nth(0).getByText('fixture-left', { exact: true })).toBeVisible();
+  await expect(row('Model').getByRole('cell').nth(1).getByText('fixture-right', { exact: true })).toBeVisible();
+  await expect(row('Reasoning effort').getByRole('cell').nth(0).getByText('low', { exact: true })).toBeVisible();
+  await expect(row('Reasoning effort').getByRole('cell').nth(1).getByText('high', { exact: true })).toBeVisible();
+  await expect(row('Profile').getByText('Same', { exact: true })).toBeVisible();
+  await differences.getByRole('checkbox', { name: 'Hide matches', exact: true }).check();
+  await expect(row('Profile')).toHaveCount(0);
+  await expect(row('Model').getByText('Different', { exact: true })).toBeVisible();
+  await expect(row('Reasoning effort').getByText('Different', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Start 2 model runs', exact: true })).toHaveCount(1);
+  expect(app.calls.captures).toEqual([]);
   await startRun(page);
   await page.getByRole('link', { name: 'Open the report' }).click({ timeout: 20000 });
   await expect(page.locator('details.comparison-side-details > summary')).toHaveCount(2);

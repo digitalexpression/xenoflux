@@ -193,7 +193,7 @@ test('captured marker shapes reach normalized replay and a verified root task-en
   const rows = result.run.sessionReplay.sessions[0].events;
   const response = rows.find(row => row.label === 'Assistant final answer');
   assert.equal(response.body, 'Marker created.');
-  assert.equal(response.turnId, null, 'Opaque native turn IDs are not converted into replay UUIDs.');
+  assert.equal(response.turnId, result.response.turnId, 'Replay preserves the opaque native turn ID.');
   assert.equal(rows.at(-1).kind, 'session');
   assert.equal(rows.at(-1).status, 'completed');
   assert.ok(rows.indexOf(response) < rows.length - 1);

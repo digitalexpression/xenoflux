@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { test as base, expect } from '@playwright/test';
 import { createUiRunsFixture } from '../../test-support/ui-runs-fixture.js';
@@ -70,6 +71,7 @@ test('explicit Copilot import guards duplicate reads and freezes private-safe ev
     await page.screenshot({ path: testInfo.outputPath(`copilot-import-${theme}-320.png`), fullPage: true });
   }
   await page.getByRole('link', { name: 'View report', exact: true }).click();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Session replay', exact: true })).toBeVisible();
   const ref = decodeURIComponent(new URL(page.url()).pathname.split('/reports/')[1]);
   const presented = await app.provider.report({ ref });
@@ -77,7 +79,7 @@ test('explicit Copilot import guards duplicate reads and freezes private-safe ev
   expect(publicReport).toContain('First public assistant answer');
   for (const secret of secrets) expect(publicReport).not.toContain(secret);
   const exported = await app.provider.exportReport({ ref });
-  const path = join(exported.folder, exported.files.find(file => file.endsWith('.audit.json')));
+  const path = join(exported.folder.replace(/^~(?=\/|$)/, homedir()), exported.files.find(file => file.endsWith('.audit.json')));
   const frozen = await readFile(path, 'utf8');
   for (const secret of secrets) expect(frozen).not.toContain(secret);
   for (const run of [JSON.parse(frozen).left, JSON.parse(frozen).right]) expect(run.source.kind).toBe('copilot-sdk-persisted-import');
@@ -86,6 +88,7 @@ test('explicit Copilot import guards duplicate reads and freezes private-safe ev
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Saved reports', exact: true }).click();
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(path);
   await page.getByRole('link', { name: 'View report', exact: true }).click();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Session replay', exact: true })).toBeVisible();
   expect(app.copilotReads).toEqual([LEFT, RIGHT]); expect(posts).toHaveLength(1); expect(app.calls.captures).toEqual([]);
 });

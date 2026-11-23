@@ -17,6 +17,20 @@ const row = (sourceLine, type, payload, timestamp = '2026-10-28T12:00:00.000Z') 
 const msg = (role, text, turnId = turnA) => ({ type: 'message', role,
   content: [{ type: role === 'user' ? 'input_text' : 'output_text', text }], turn_id: turnId });
 
+test('frozen replay preserves vendor turn identities and clock provenance', () => {
+  const replay = projectSessionReplay([{ id: sessionA, sourceFingerprint: fingerprint,
+    records: [row(1, 'response_item', msg('user', 'Open README')), row(2, 'response_item', msg('assistant', 'Found it'))] }]);
+  const [message, response] = replay.sessions[0].events;
+  Object.assign(message, { turnId: 'copilot-turn.1', timestampSource: 'native' });
+  Object.assign(response, { turnId: message.turnId, timestampSource: 'observed' });
+  assert.deepEqual(normalizeSessionReplay(replay), replay);
+  for (const invalid of [{ timestamp: null }, { timestampSource: 'estimated' }, { turnId: '' }, { turnId: 'turn\u200b-1' }]) {
+    const malformed = structuredClone(replay);
+    Object.assign(malformed.sessions[0].events[0], invalid);
+    assert.throws(() => normalizeSessionReplay(malformed), /invalid event/);
+  }
+});
+
 test('replay captures only the owned native session header workspace', () => {
   const childHeader = { id: sessionB, session_id: sessionA, parent_thread_id: sessionA,
     source: { subagent: { thread_spawn: { parent_thread_id: sessionA } } }, forked_from_id: sessionA,

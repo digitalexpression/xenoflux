@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquire, readJSON } from '../src/metadata.js';
-import { acquireProfileParticipant, profileOwners, readProfileOwners, releaseProfileParticipant } from '../src/profile-reservations.js';
+import { acquireNativeParticipant, acquireProfileParticipant, profileOwners, readProfileOwners, releaseProfileParticipant } from '../src/profile-reservations.js';
 
 async function fixture(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-profile-reservation-')));
@@ -51,6 +51,24 @@ test('exact Desktop owner and multiple task participants coexist and release ind
   assert.deepEqual(await readProfileOwners(f.root), [desktop, review, other, audit]);
   await releaseProfileParticipant(f.root, review);
   assert.deepEqual(await readProfileOwners(f.root), [desktop, other, audit]);
+});
+
+test('catalog and comparison leases preserve both verified native owners', async t => {
+  const f = await fixture(t), profileId = randomUUID(), home = '/fixture/home';
+  const desktop = { ...desktopOwner('/tmp/store', profileId), host: 'fixture', home };
+  const cli = { ...desktop, kind: 'interactive-cli', client: 'codex', membershipVersion: 1,
+    runId: randomUUID(), environmentId: randomUUID(), reportPath: '/tmp/store/report.json', pid: 42 };
+  const audit = { ...reviewOwner('/tmp/store', profileId), kind: 'audit-experiment' };
+  const catalog = { ...audit, runId: randomUUID(), kind: 'catalog-probe' };
+  await acquire(f.lock, desktop);
+  await acquireNativeParticipant(f.root, cli, desktop);
+  await assert.rejects(acquireProfileParticipant(f.root, audit, [desktop]), /unverified/);
+  await acquireProfileParticipant(f.root, audit, [desktop, cli]);
+  await acquireProfileParticipant(f.root, catalog, [cli, desktop]);
+  assert.deepEqual(await readProfileOwners(f.root), [desktop, cli, audit, catalog]);
+  await releaseProfileParticipant(f.root, catalog);
+  await releaseProfileParticipant(f.root, audit);
+  assert.deepEqual(await readProfileOwners(f.root), [desktop, cli]);
 });
 
 test('legacy Desktop and review membership can be read and expanded', async t => {

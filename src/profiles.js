@@ -187,9 +187,12 @@ export async function canonical(path) {
   if (!(await stat(resolved)).isDirectory()) throw new Error('Repository path must be a directory');
   return resolved;
 }
-export async function bind(data, name, path) {
+export async function bind(data, name, path, { ensure = false } = {}) {
   const profile = find(data, name), resolved = await canonical(path);
-  if (profile.repositories.some(r => r.path === resolved)) throw new Error(`Repository already bound: ${resolved}`);
+  if (profile.repositories.some(r => r.path === resolved)) {
+    if (ensure) return profile;
+    throw new Error(`Repository already bound: ${resolved}`);
+  }
   profile.repositories.push({ path: resolved });
   return revised(profile);
 }

@@ -192,10 +192,11 @@ Let content determine height. Dense tables may reduce padding, but retain readab
 
 ### Comparison hub
 
-Give Compare a task and Compare setups equal panel weight. Within the task
-panel, use equal underlined links, descriptions and availability summaries for
-Use existing sessions and Run a new task. Separate these choices with ruled
-spacing rather than nested cards. Recent work follows as flat rows.
+Give Compare a task and Compare setups equal panel weight. Use an icon in each
+header and full-width action links with an icon, a short description and a trailing
+chevron. Keep availability with its workflow and separate links with dividers.
+Stack the panels when their contents need more width. Recent comparisons follow
+as flat links with aligned metadata. Keep Open saved report beside the list title.
 
 ### Primary action button
 
@@ -253,23 +254,23 @@ components without changing their interpretation.
 
 ### Comparison report
 
-Use the chosen Counts lead composition at desktop widths of 1280 CSS pixels and
-above. Narrow comparison-report layouts are not a support target. Preserve the
-other pages' existing reflow behavior.
+Use Grouped evidence and Session replay at desktop widths of 1280 CSS pixels and above.
+Preserve the other pages' existing reflow behavior.
 
 Keep compact Left/Right identities and recorded session details above section
 navigation. Put supporting provenance in each side's native Details disclosure;
-keep task status and evidence limits visible. Four tiles lead the report: Different, Same, Could not compare and
-Checks selected. The first three count the engine's recorded findings, not condition
-rows or quality scores. Use the secondary count size (28px), with a stronger neutral
-boundary on Different. An unavailable check count stays unknown.
+keep task status visible. Align the recorded model, task and capture time, tools
+and tracked file changes in Run facts. Keep related evidence in icon-labeled
+disclosures. An unavailable check count stays unknown.
 
-A paired recorded-activity card follows, then the conditions card. Stops open
-their retained source event in the existing inspector. Each lane uses its own
-clock. Use recorded order and a dotted line when stop timestamps cannot establish
-an ordered scale. Only retained parent relationships identify delegated lanes.
-Turn stops remain hollow while per-turn token totals are unavailable; session
-totals never imply a per-turn allocation. Keep scoped usage in Time and tokens.
+Stack the profiles' event maps in Session replay and give each retained session a
+lane. Use recorded parent links to identify subagent lanes. Stops open their source
+event in the existing inspector. Elapsed time uses a separate clock for each side.
+Use a dotted lane for recorded order or events outside the elapsed-time scale.
+Keep the paired conversations below the maps. Compact shows event rows. Chat adds
+message bubbles. Both views share the same selection, search and inspector.
+Show available counters side by side in Time and tokens, with the measurement
+scope under each profile. Keep workflow and per-session accounting in the details.
 
 ### Profiles and clients
 
@@ -328,15 +329,18 @@ controls with their existing-setup scope. Stack inventory columns below 800px.
 ### Setup inspection and selected copying
 
 Keep the selected setup and optional repository scope above the current read.
-Pair source search, category selection and reading coverage with one flat source
-inventory. Keep each category's limits visible and disclose values, files and
-source facts in place. Refresh is explicit; browsing source evidence does not
-reread or mutate the setup. Mixed-client inventories keep independent labels and
-coverage under aligned category headings, without equality counts or copy actions.
+Use the comparison view's icon-labeled collapsible categories for the compact
+source inventory. Keep source search above the rows and open matching categories
+while searching. The Inspector stays beside the list on wide screens and above it
+on narrow screens. Give the list and inspector independent scrolling. Select a row
+to see values, source locations, file previews and category coverage. Keep reading
+limits, setup selection and refresh in the toolbar. Refresh is explicit. Browsing
+source evidence uses the current read.
 
-Use the same compact comparison frame for both modes, with aligned profile
-columns, search and filters, and icon-labeled collapsible categories. Keep the
-breadcrumb, reading limits, profile selection and refresh in the toolbar. The
+Use one compact frame for same-client and mixed-client comparisons, with aligned
+profile columns, search, filters and icon-labeled collapsible categories. Mixed-client
+inventories keep independent labels and coverage under aligned category headings.
+Keep the breadcrumb, reading limits, profile selection and refresh in the toolbar. The
 results and docked inspector scroll independently. On narrow screens, opening
 a row shows a bottom sheet and closing it returns focus to that row. Keep the
 exact state, content diff and eligible copy actions in the same-client inspector.
@@ -352,14 +356,19 @@ refusal. On narrow windows, the summary follows the preview in reading order.
 Organize preparation as Task and source, Two setups, Checks and limits, then
 Review and start. Keep the first three sections mounted and directly addressable;
 stage links move within the form without discarding values. Place source exclusions
-beside repository selection, model/effort/permission controls beside each profile,
-and command effects beside the optional commands. A compact This run summary holds
-the review action; it follows the form at narrower widths and never covers fields.
+beside repository selection and command effects beside the optional commands.
+Align Left and Right profile, model, effort and permission controls in the same rows.
+Show which requested values differ and keep unresolved values explicit. Put model
+catalog status and the tab's automatic loading control beneath the fields. Disclose
+native discovery effects beside the control. Use saved projects as optional suggestions.
+Give each allowed file path or pattern its own line in the
+source textarea. The form ends with one Review before starting action.
 
-Review leads with the engine's readiness and side order, the no-checks consequence
-and the explicit start action. Keep exact task, pinned source, controls and limits
-inspectable, with edit links returning to the corresponding preparation section.
-Use neutral dividers and paired columns rather than nested colored cards.
+Review leads with the engine's readiness and execution schedule, the no-checks consequence
+and the verification status. Show the exact task and pinned source above the paired
+settings, with an option to hide matches. Keep limits and command effects above one
+explicit start action. List any native trust writes beside that action with the exact
+paths and profiles. Edit links return to the corresponding preparation section.
 
 Activity separates current jobs from recent comparison records. Job links lead to
 their existing progress and native requests; the list does not infer completion or

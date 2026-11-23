@@ -11,6 +11,7 @@ test('prepare an export-bound review packet, import a citation, and reopen sourc
   await page.getByRole('checkbox', { name: 'I say these are the same task' }).check();
   await page.getByRole('textbox', { name: 'Task name' }).fill('Fix the date test');
   await page.getByRole('button', { name: 'Compare sessions' }).click();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   await page.getByRole('link', { name: 'Not reviewed' }).click();
   await page.getByRole('link', { name: 'Prepare packet for external review' }).click();
   const before = await readdir(`${app.store.directory}/audits`).catch(() => []);
@@ -87,6 +88,9 @@ test('prepare an export-bound review packet, import a citation, and reopen sourc
   await page.getByRole('link', { name: `${sideName}: ${citedEvent.label}` }).click();
   const inspector = page.getByRole('dialog', { name: 'Event inspector' });
   await expect(inspector).toContainText(citedEvent.label);
+  await page.keyboard.press('Escape');
+  await page.getByRole('link', { name: 'Grouped evidence', exact: true }).click();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   await page.getByRole('link', { name: /reviews? attached/ }).click();
 
   const revision = { ...submission, reviews: [{ ...submission.reviews[0], id: 'fixture-human-v2',
@@ -121,6 +125,7 @@ test('prepare an export-bound review packet, import a citation, and reopen sourc
   await page.goto(`${app.origin}/reports/open`);
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(finalJson);
   await page.getByRole('link', { name: 'View report' }).click();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   await page.getByRole('link', { name: /reviews? attached/ }).click();
   await expect(page.getByText('Fixture reviewer', { exact: true })).toBeVisible();
 });

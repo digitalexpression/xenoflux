@@ -49,7 +49,6 @@ async function nativeLaunchPlan(selected, terminalEnvironment, { repository, res
   if (repository !== undefined) {
     if (typeof repository !== 'string' || !repository.trim() || /[\x00-\x1f\x7f]/.test(repository)) throw new Error('Invalid repository path');
     cwd = await realpath(repository);
-    if (!selected.repositories.some(row => row.path === cwd)) throw new Error('Bind this repository to the profile before launching it');
   }
   if (await realpath(cwd) !== cwd || !(await stat(cwd)).isDirectory()) throw new Error('The saved workspace is no longer available at its canonical path');
   const resolver = selected.client === 'claude-code' ? resolveClaudeProfile : resolveCopilotProfile;
@@ -76,7 +75,6 @@ export async function launchPlan(store, name, terminalEnvironment = process.env,
   if (repository !== undefined) {
     if (typeof repository !== 'string' || !repository.trim() || /[\x00-\x1f\x7f]/.test(repository)) throw new Error('Invalid repository path');
     cwd = await realpath(repository);
-    if (!profile.repositories.some(r => r.path === cwd)) throw new Error('Bind this repository to the profile before launching it');
   }
   if (resumeId !== undefined) {
     const { findHistory } = await import('./history.js');
@@ -84,9 +82,9 @@ export async function launchPlan(store, name, terminalEnvironment = process.env,
     if (!entry || entry.archived) throw new Error('Task is unavailable in this home or is archived');
     if (entry.home !== environment.home || entry.environmentId !== environment.id || !entry.rolloutPath)
       throw new Error('The saved task transcript is unavailable in its original home');
-    if (entry.cwd !== environment.cwd && !profile.repositories.some(r => r.path === entry.cwd))
-      throw new Error('Bind the task repository to this profile before resuming it');
     if (repository !== undefined && cwd !== entry.cwd) throw new Error('Selected repository differs from the saved task workspace');
+    if (repository === undefined && entry.cwd !== environment.cwd && !profile.repositories.some(r => r.path === entry.cwd))
+      throw new Error('Choose the saved task workspace explicitly with --repo to resume it');
     cwd = entry.cwd;
   }
   if (typeof cwd !== 'string' || /[\x00-\x1f\x7f]/.test(cwd) || await realpath(cwd) !== cwd || !(await stat(cwd)).isDirectory())

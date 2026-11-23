@@ -5,6 +5,20 @@ import { redactText } from './redact.js';
 export const REPLAY_LIMITS = Object.freeze({ sourceBytes: 32 * 1024 * 1024,
   bodyBytes: 1024 * 1024, totalBodyBytes: 16 * 1024 * 1024, records: 10000 });
 
+/** Prefer the native clock when it can establish an elapsed span. */
+export function replaySpanTimestamps(events) {
+  const native = [], observed = [];
+  let missing = 0;
+  for (const event of events) {
+    const time = Date.parse(event?.timestamp);
+    if (!Number.isFinite(time)) { missing++; continue; }
+    (event.timestampSource === 'observed' ? observed : native).push(time);
+  }
+  const receipt = native.length < 2 && observed.length >= 2;
+  return { timestamps: receipt ? observed : native, receipt, missing,
+    otherClock: receipt ? native.length : observed.length };
+}
+
 const boundedText = (value, max = 500) => typeof value === 'string' && value.length <= max
   && !/[\x00-\x1f\x7f-\x9f]/.test(value);
 const uuid = value => typeof value === 'string'
@@ -32,10 +46,10 @@ function textBody(value) {
 }
 
 const PRIVATE_CONTENT_TYPES = new Set(['analysis', 'reasoning', 'private_reasoning', 'chain_of_thought',
-  'encrypted_content', 'redacted_reasoning']);
+  'encrypted_content', 'redacted_reasoning', 'thinking', 'redacted_thinking']);
 const PRIVATE_CONTENT_KEYS = new Set(['private_reasoning', 'chain_of_thought',
-  'encrypted_content', 'encryptedcontent', 'redacted_reasoning']);
-const EXPLICIT_PRIVATE_KEY = /["']?(?:private_reasoning|privateReasoning|chain_of_thought|chainOfThought|encrypted_content|encryptedContent|redacted_reasoning)["']?\s*:/i;
+  'encrypted_content', 'encryptedcontent', 'redacted_reasoning', 'redacted_thinking']);
+const EXPLICIT_PRIVATE_KEY = /["']?(?:private_reasoning|privateReasoning|chain_of_thought|chainOfThought|encrypted_content|encryptedContent|redacted_reasoning|redacted_thinking)["']?\s*:/i;
 
 function sanitizeNativeBody(value, state = { omitted: false, nodes: 0 }, depth = 0, seen = new WeakSet()) {
   if (typeof value === 'string') {
@@ -121,6 +135,11 @@ function bodyProjection(value, budget) {
   const body = text.slice(0, end);
   budget.remaining -= used;
   return { body, bodyStatus: 'truncated', bodyReason: bytes > REPLAY_LIMITS.bodyBytes ? 'event-body-limit' : 'total-body-limit', bodyBytes: bytes };
+}
+
+export function projectReplayBody(value, budget) {
+  const sanitized = sanitizeNativeBody(value);
+  return { ...bodyProjection(sanitized.value, budget), ...(sanitized.omitted ? { contentOmitted: true } : {}) };
 }
 
 function blockText(blocks) {
@@ -381,9 +400,7 @@ function replayEvent(row, line, sessionId, fingerprint, budget) {
   if (status) event.status = status;
   if (phase) event.phase = phase;
   if (bodyValue !== undefined) {
-    const sanitized = sanitizeNativeBody(bodyValue);
-    Object.assign(event, bodyProjection(sanitized.value, budget));
-    if (sanitized.omitted) event.contentOmitted = true;
+    Object.assign(event, projectReplayBody(bodyValue, budget));
   } else if (kind === 'message') event.bodyReason = 'missing-body';
   return { event, relatedKey, nativeRecordType: record.type, selfContained };
 }
@@ -553,14 +570,16 @@ export function normalizeSessionReplay(replay, { includeBodies = true } = {}) {
     if (session.reason !== undefined) safeSession.reason = session.reason;
     if (session.cwd !== undefined) safeSession.cwd = session.cwd;
     for (const event of session.events) {
-      onlyKeys(event, new Set(['id','sessionId','turnId','kind','label','timestamp','sourceLine','body','bodyStatus',
+      onlyKeys(event, new Set(['id','sessionId','turnId','kind','label','timestamp','timestampSource','sourceLine','body','bodyStatus',
         'bodyReason','bodyBytes','callId','relatedEventId','itemId','role','status','phase','linkStatus',
         'childSessionIds','parentSessionId','sourceLines','contentOmitted']), 'event');
       if (event.sessionId !== session.id || typeof event.id !== 'string' || !Number.isSafeInteger(event.sourceLine)
         || event.sourceLine < 1 || event.id !== `${session.id}:${session.source.fingerprint}:${event.sourceLine}`
-        || (event.turnId !== null && !uuid(event.turnId))
+        || (event.turnId !== null && (!safeString(event.turnId, 256) || !event.turnId.trim()
+          || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(event.turnId)))
         || !['message','tool-call','tool-result','command','file-change','delegation','hook','turn','error','session','compaction','unsupported'].includes(event.kind)
         || !safeString(event.label, 200) || (event.timestamp !== null && isoTimestamp(event.timestamp) !== event.timestamp)
+        || (event.timestampSource !== undefined && (event.timestamp === null || !['native', 'observed'].includes(event.timestampSource)))
         || !['included','omitted','truncated','unavailable'].includes(event.bodyStatus)
         || (event.body !== null && typeof event.body !== 'string')
         || (event.bodyReason !== undefined && !safeString(event.bodyReason, 120))

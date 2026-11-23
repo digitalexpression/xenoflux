@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { isNamedAuditAction, AUDIT_ACTION_KINDS, AUDIT_ACTION_NAMES, AUDIT_ACTION_SUBJECTS, AUDIT_ACTION_RESULT_SCOPES } from './audit-actions.js';
 import { projectAuditSessionEvidence } from './audit-session-evidence.js';
+import { isAuditEvidencePath, matchAuditFileGlobs, readAuditFileGlobs, readAuditFilePaths } from './audit-file-scope.js';
 
 const list = value => Array.isArray(value) ? value : [];
 const obj = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -12,8 +13,9 @@ const label = value => typeof value === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} ._
 const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const line = value => Number.isSafeInteger(value) && value > 0 ? value : null;
 const fingerprint = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : null;
-const relative = value => typeof value === 'string' && value.length <= 300 && !path.isAbsolute(value)
-  && !value.includes('\\') && value.split('/').every(part => part && part !== '.' && part !== '..' && /^[\p{L}\p{N}_. -]+$/u.test(part)) ? value : null;
+const relative = value => isAuditEvidencePath(value) ? value : null;
+const legacyRelative = value => typeof value === 'string' && value.length <= 300 && !path.isAbsolute(value)
+  && value.split('/').every(part => part && part !== '.' && part !== '..' && /^[\p{L}\p{N}_. -]+$/u.test(part)) ? value : null;
 const states = new Set(['ready', 'complete', 'observed', 'none-recorded', 'partial', 'unknown', 'unavailable', 'not-found']);
 const state = value => states.has(value) ? value : 'unknown';
 const status = value => label(value) ?? 'unknown';
@@ -74,8 +76,11 @@ export function canonicalAuditChecks(run) {
 
 function conditions(value) {
   if (value?.schemaVersion !== 1) return { schemaVersion: 1, status: value == null ? 'unknown' : 'unsupported-version' };
+  const editableFiles = value.editableFileGlobs !== undefined ? readAuditFilePaths(value.editableFiles)?.sort() ?? null
+    : Array.isArray(value.editableFiles) ? unique(value.editableFiles.map(legacyRelative).filter(Boolean)).sort().slice(0, 64) : null;
   return { schemaVersion: 1, status: 'recorded', taskFingerprint: fingerprint(value.taskFingerprint), taskId: id(value.taskId),
-    editableFiles: Array.isArray(value.editableFiles) ? unique(value.editableFiles.map(relative).filter(Boolean)).sort().slice(0, 64) : null,
+    editableFiles,
+    ...(value.editableFileGlobs !== undefined ? { editableFileGlobs: readAuditFileGlobs(value.editableFileGlobs)?.sort() ?? null } : {}),
     checkRecipes: list(value.checkRecipes).slice(0, 20).map(row => ({ name: label(row?.name), fingerprint: fingerprint(row?.fingerprint) })),
     qualityFingerprint: fingerprint(value.qualityFingerprint), setupFingerprint: fingerprint(value.setupFingerprint),
     variables: Array.isArray(value.variables) && value.variables.every(label) && value.variables.length <= 20 ? value.variables : null,
@@ -170,7 +175,7 @@ function safeCore(core) {
   if (!keys(core, ['schemaVersion', 'status', 'binding', 'conditions', 'sourceAttestation', 'actors', 'turns', 'observedControls', 'nativeControls', 'actions', 'namedActions', 'coverage', 'omissions', 'verification', 'changes', 'measurements', 'fingerprint'])
     || !keys(core.binding, ['runId', 'profileId', 'sourceIdentity', 'baseline']) || !keys(core.binding.baseline, ['commit', 'tree'])
     || !Array.isArray(core.actors) || !Array.isArray(core.turns) || !Array.isArray(core.actions) || core.namedActions !== undefined && !Array.isArray(core.namedActions)
-    || !keys(core.conditions, ['schemaVersion', 'status', 'taskFingerprint', 'taskId', 'editableFiles', 'checkRecipes', 'qualityFingerprint', 'setupFingerprint', 'variables', 'selectedSkills', 'profileOrder', 'trialIndex', 'environment', 'baseline'])
+    || !keys(core.conditions, ['schemaVersion', 'status', 'taskFingerprint', 'taskId', 'editableFiles', 'editableFileGlobs', 'checkRecipes', 'qualityFingerprint', 'setupFingerprint', 'variables', 'selectedSkills', 'profileOrder', 'trialIndex', 'environment', 'baseline'])
     || !keys(core.conditions.environment ?? {}, ['platform', 'architecture', 'nodeVersion', 'settings', 'cache', 'integrations', 'epoch'])
     || !keys(core.conditions.baseline ?? {}, ['commit', 'tree']) || list(core.conditions.checkRecipes).some(row => !keys(row, ['name', 'fingerprint']))
     || !keys(core.observedControls, ['nativeVersion', 'models', 'efforts', 'complete', 'rootId'])
@@ -245,7 +250,8 @@ function safeCore(core) {
     schemaVersion: value => value === 1, status: value => value === 'recorded', fingerprint: value => Boolean(fingerprint(value)),
     binding: { runId: text, profileId: text, sourceIdentity: text, baseline: baselineShape },
     conditions: { schemaVersion: value => value === 1, status: text, taskFingerprint: optional(text), taskId: optional(text),
-      editableFiles: optional(value => value === null || Array.isArray(value) && value.every(item => Boolean(relative(item)))),
+      editableFiles: optional(value => value === null || Boolean(readAuditFilePaths(value))),
+      editableFileGlobs: optional(value => value === null || Boolean(readAuditFileGlobs(value))),
       checkRecipes: optional(value => shape(value, [{ name: text, fingerprint: text }])), qualityFingerprint: optional(text), setupFingerprint: optional(text),
       variables: optional(value => value === null || shape(value, [text])), selectedSkills: optional(value => value === null || shape(value, [text])), profileOrder: optional(value => shape(value, [text])), trialIndex: optional(numeric),
       environment: optional(value => shape(value, Object.fromEntries(['platform', 'architecture', 'nodeVersion', 'settings', 'cache', 'integrations', 'epoch'].map(key => [key, text])))),
@@ -262,7 +268,7 @@ function safeCore(core) {
     actions: [{ kind: value => ['file-change', 'read', 'resource-read', 'resource-invocation', 'tool'].includes(value), agentId: text, turnId: text,
       itemId: text, observationId: text, sourceId: text, sourceLine: numeric, actorState: value => ['owned', 'unknown'].includes(value), role: text,
       order: { basis: text, sourceId: optional(text), position: optional(numeric) }, status: text, exitCode: numeric,
-      path: optional(text), target: optional(value => value === null), resource: maybeShape({ id: text, origin: text, name: text }),
+      path: optional(value => value === null || isAuditEvidencePath(value)), target: optional(value => value === null), resource: maybeShape({ id: text, origin: text, name: text }),
       corroboration: optional(text), tool: maybeShape({ kind: text, toolName: text, serverName: text, pluginId: text }), id: text }],
     namedActions: optional(value => Array.isArray(value) && value.length <= MAX_ACTIONS && value.every(row => shape(row, {
       id: text, kind: value => AUDIT_ACTION_KINDS.includes(value), name: value => AUDIT_ACTION_NAMES.includes(value), targets: [text], subjects: [text],
@@ -463,6 +469,12 @@ export function compareAuditConditions(left, right, { taskAssociation, declaredV
   const rows = Object.keys(av).map(key => ({ key, left: av[key] ?? null, right: bv[key] ?? null,
     status: av[key] == null || bv[key] == null || Array.isArray(av[key]) && !av[key].length || Array.isArray(bv[key]) && !bv[key].length ? 'unknown'
       : JSON.stringify(av[key]) === JSON.stringify(bv[key]) ? 'match' : 'different' }));
+  if ([a, b].some(core => core.conditions.editableFileGlobs === null || core.conditions.editableFileGlobs?.length)) {
+    const globs = ({ conditions: item }) => item.editableFileGlobs === undefined && item.editableFiles ? [] : item.editableFileGlobs ?? null;
+    const left = globs(a), right = globs(b);
+    rows.push({ key: 'editableFileGlobs', left, right, status: left === null || right === null ? 'unknown'
+      : JSON.stringify(left) === JSON.stringify(right) ? 'match' : 'different' });
+  }
   const observedPair = recordedTask(left, a) && recordedTask(right, b);
   const sameTaskEligible = observedPair && ['recorded', 'user-declared'].includes(association.status);
   const baselineComparable = Boolean(av.commit && av.tree && bv.commit && bv.tree && av.commit === bv.commit && av.tree === bv.tree);
@@ -533,20 +545,26 @@ export function buildAuditExplanation(left, right, options = {}) {
       unknown: category === 'inconclusive' || !observedPair ? 1 : 0 } });
   const scopeSide = (core, run) => {
     const supplied = projectAuditSessionEvidence(run)?.taskContract;
-    const side = sideFinding(core, 'file-change'), allowed = core.conditions.editableFiles ?? supplied?.editableFiles;
+    const globs = core.conditions.editableFileGlobs;
+    const fromAttachment = globs === undefined && core.conditions.editableFiles == null ? supplied : null;
+    const side = sideFinding(core, 'file-change'), allowed = core.conditions.editableFiles ?? fromAttachment?.editableFiles;
+    const matchesGlob = globs?.length ? matchAuditFileGlobs(globs) : null;
+    const hasBoundary = Array.isArray(allowed) && globs !== null && (allowed.length || globs?.length);
     const edits = core.actions.filter(row => row.kind === 'file-change' && row.actorState === 'owned');
     const located = edits.filter(row => row.path);
-    const outside = allowed?.length ? located.filter(row => !allowed.includes(row.path)) : [];
-    return { ...side, assertion: !allowed?.length ? 'editable-boundary-unknown' : outside.length ? 'outside-boundary-edit-observed'
+    const outside = hasBoundary ? located.filter(row => !allowed.includes(row.path) && !matchesGlob?.(row.path)) : [];
+    return { ...side, assertion: !hasBoundary ? 'editable-boundary-unknown' : outside.length ? 'outside-boundary-edit-observed'
       : located.length && located.length === edits.length ? 'in-boundary-edit-observed'
         : side.state === 'none-recorded' ? 'no-file-change-records' : 'edit-scope-unknown',
       outsideRefs: outside.map(row => row.id), boundary: allowed ?? null,
-      ...(supplied && !core.conditions.editableFiles ? { boundaryOrigin: 'supplied-session-evidence',
+      ...(globs?.length ? { boundaryGlobs: globs } : {}),
+      ...(fromAttachment ? { boundaryOrigin: 'supplied-session-evidence',
         evidenceRefs: [...side.evidenceRefs, `session-evidence:${run.id}`] } : {}) };
   };
   const x = scopeSide(a, left), y = scopeSide(b, right);
   const known = [x, y].every(side => ['outside-boundary-edit-observed', 'in-boundary-edit-observed', 'no-file-change-records'].includes(side.assertion) && !side.omissions.actions && !side.omissions.actors);
-  const sameBoundary = x.boundary?.length && JSON.stringify(x.boundary) === JSON.stringify(y.boundary);
+  const sameBoundary = (x.boundary?.length || x.boundaryGlobs?.length)
+    && JSON.stringify([x.boundary, x.boundaryGlobs ?? []]) === JSON.stringify([y.boundary, y.boundaryGlobs ?? []]);
   add('editable-file-boundary', 'Observed editing scope', x, y, known && sameBoundary ? x.assertion === y.assertion ? 'similar' : 'different' : 'inconclusive',
     'A recorded in-boundary edit does not prove all changes were in scope; missing or partial edits remain unknown.');
   const readSide = core => {

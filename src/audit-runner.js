@@ -1,10 +1,10 @@
-// Controlled, sequential multi-profile experiment orchestration. Native profile
+// Controlled multi-profile experiment orchestration. Native profile
 // state is observed and reserved; workspaces and process logs stay private.
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { CODEX_PERMISSION_MODES, selectionKey, validateAuditSpec } from './audit-spec.js';
+import { CODEX_PERMISSION_MODES, comparisonPermissionMode, selectionKey, validateAuditSpec } from './audit-spec.js';
 import { inspectAuditRepository, authorizeAuditWorkspaceParent, createAuditWorkspace,
   snapshotAuditWorkspace, setAuditWorkspaceActive } from './audit-workspace.js';
 import { createExperiment, createExperimentRun, writeAuditState, finalizeAuditRecord,
@@ -46,11 +46,12 @@ const SAFE_ERROR_TEXT = {
   'profile-repository-unbound': 'The selected repository is not already bound to this profile; no binding was changed.',
   'profile-access-blocked': 'A selected profile has an untrusted or mutating reservation.',
   'profile-access-unavailable': 'Safe access to a selected profile could not be verified.',
-  'profile-clients-changed': 'An existing profile client or native reservation changed; remaining runs stopped.',
+  'profile-clients-changed': 'An existing profile client or native reservation changed during the experiment.',
   'native-request-failed': 'The native approval or input request could not be handled. The comparison leg stopped.',
+  'comparison-approval-mode-conflict': 'The side’s Permission mode conflicts with Approvals. Change Approvals or let the side use its profile default.',
   'requested-execution-unconfirmed': 'Codex did not confirm the requested model or reasoning effort. The model turn did not start.',
-  'requested-approval-reviewer-unconfirmed': 'Codex did not confirm user approval routing. The model turn did not start.',
-  'requested-approval-reviewer-unsupported': 'User approval routing is available only for Codex comparisons.',
+  'requested-permission-unconfirmed': 'The native client did not confirm the requested permissions. The model turn did not start.',
+  'requested-approval-reviewer-unconfirmed': 'The native client did not confirm the requested approval mode. The model turn did not start.',
   'profile-reservation-failed': 'A selected profile could not be reserved.',
   'profile-settings-changed': 'Profile settings changed or became unverifiable.',
   'profile-settings-unavailable': 'Profile settings could not be safely fingerprinted.',
@@ -99,7 +100,7 @@ function dependencies(context) {
     inspectRepository: context.inspectRepository ?? inspectAuditRepository,
     resolveProfile: context.resolveProfile ?? resolveAuditExecutionProfile,
     inspectExecutable: context.inspectExecutable ?? inspectAuditExecutable,
-    observeAccess: context.observeAccess ?? observeAuditProfileAccess,
+    observeAccess: (profile, options) => (context.observeAccess ?? observeAuditProfileAccess)(profile, { ...options, allowInteractivePeers: true }),
     snapshotSettings: context.snapshotSettings ?? snapshotAuditProfileSettings,
     compareSettings: context.compareSettings ?? compareAuditProfileSettings,
     probeVersion: context.probeVersion ?? probeAuditVersion,
@@ -125,19 +126,18 @@ function dependencies(context) {
 
 /** Freeze a bounded native replay beside the finalized run report. */
 export async function captureFrozenSessionReplay(deps, store, profile, capturedRun, runDirectory, capturedAt = now()) {
-  if (profile.client === 'claude-code' && capturedRun?.sessionReplay && capturedRun?.source?.fingerprint)
-    return { sessionReplay: capturedRun.sessionReplay,
-      replayCapture: { status: 'partial', capturedAt, sourceFingerprint: capturedRun.source.fingerprint,
-        boundary: 'owned-native-sdk-stream' }, coverage: capturedRun.coverage, childDiscovery: undefined };
   const { client, sessionId: id, nativeReference: reference } = retainedNativeReference(capturedRun, profile,
     capturedRun?.id, capturedRun?.source?.threadId) ?? {};
   const validId = typeof id === 'string' && (client === 'codex'
     ? /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(id)
     : id.trim().length > 0 && id.length <= 1024 && !/[\p{Cc}\p{Cf}]/u.test(id));
-  if (validId && client === 'copilot' && capturedRun.replayCapture?.boundary === 'owned-copilot-live-message-projection') {
+  const capturedBoundary = capturedRun?.replayCapture?.boundary;
+  const ownsCapturedReplay = client === 'copilot' && capturedBoundary === 'owned-copilot-live-message-projection'
+    || client === 'claude-code' && ['finalized-native-history-snapshot', 'owned-native-sdk-stream'].includes(capturedBoundary);
+  if (validId && ownsCapturedReplay) {
     const sessionReplay = normalizeSessionReplay(capturedRun.sessionReplay);
     const [root] = sessionReplay.sessions;
-    if (sessionReplay.sessions.length === 1 && root.id === id && root.parentId === null
+    if (sessionReplay.sessions.length === 1 && root.id === id && root.parentId === null && root.source.fingerprint
       && root.source.fingerprint === capturedRun.replayCapture.sourceFingerprint)
       return { sessionReplay, replayCapture: capturedRun.replayCapture };
   }
@@ -235,6 +235,12 @@ function selectionProfile(spec, profile) {
   return spec.profiles.find(item => selectionKey(item) === (profile?.sideId ?? profile?.profileName?.toLowerCase())) ?? {};
 }
 
+function comparisonLimits(spec) {
+  return { ...spec.limits, sandbox: spec.sandbox, ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
+    ...(spec.parallel ? { parallel: true } : {}), ...(spec.networkAccess !== undefined ? { networkAccess: spec.networkAccess } : {}),
+    ...(spec.autonomous ? { autonomous: true } : {}) };
+}
+
 /** Read-only preflight. It does not reserve profiles, create records or workspaces. */
 export async function previewAuditExperiment(store, input, context = {}) {
   const spec = validateAuditSpec(input), deps = dependencies(context);
@@ -259,9 +265,8 @@ export async function previewAuditExperiment(store, input, context = {}) {
         throw new Error('The selected client does not support this execution override');
       if (!codex && spec.captureRequirements?.context)
         throw new Error('The selected client does not support Codex context verification');
+      comparisonPermissionMode(profile.client, spec, requested.execution?.permissionMode);
       const checks = [];
-      if (spec.approvalsReviewer && (profile.client ?? 'codex') !== 'codex')
-        throw Object.assign(new Error(SAFE_ERROR_TEXT['requested-approval-reviewer-unsupported']), { code: 'requested-approval-reviewer-unsupported' });
       if (!profile.profileId || !profile.home || !profile.reservationRoot || !profile.executable)
         throw new Error('Profile executable or home is unavailable');
       if (requested.executable && profile.executable !== requested.executable)
@@ -319,7 +324,7 @@ export async function previewAuditExperiment(store, input, context = {}) {
     repository: repository ? { path: repository.repository, commit: repository.commit, tree: repository.tree,
       files: repository.files, bytes: repository.bytes, clean: repository.clean } : null,
     profiles, taskCount: spec.profiles.length, executionOrder: spec.profiles.map(p => p.sideId ?? p.name),
-    limits: { ...spec.limits, sandbox: spec.sandbox, ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}) }, failures, warnings,
+    limits: comparisonLimits(spec), failures, warnings,
     ...(spec.captureRequirements ? { captureRequirements: spec.captureRequirements } : {}),
     capture: { status: 'partial', capabilities: { appServerV2: 'pending', skillsList: 'pending', skillUseObservability: 'native-otel-best-effort' },
       errors: [{ code: 'exhaustive-skill-use-unverified' }] },
@@ -331,16 +336,18 @@ function requireProfileAccess(access) {
     { code: access?.status === 'blocked' ? 'profile-access-blocked' : 'profile-access-unavailable' });
 }
 
-function compareProfileAccess(before, after, experimentId) {
+function compareProfileAccess(before, after, experimentId, concurrentRunId) {
   const identity = client => JSON.stringify([client.pid, client.startedAt, client.uid, client.executable]);
   const observed = new Set((after?.clients ?? []).map(identity));
   const original = before?.clients ?? [];
   const missing = original.filter(client => !observed.has(identity(client)));
   const expected = new Set(original.map(identity));
   const added = before?.sourceReservation ? [] : (after?.clients ?? []).filter(client => !expected.has(identity(client)));
-  const reservationUnchanged = JSON.stringify(before?.sourceReservation ?? null) === JSON.stringify(after?.sourceReservation ?? null);
+  const reservationUnchanged = JSON.stringify(before?.sourceReservation ?? null) === JSON.stringify(after?.sourceReservation ?? null)
+    && JSON.stringify(before?.nativeOwners ?? []) === JSON.stringify(after?.nativeOwners ?? []);
   return { status: after?.status !== 'ready' ? 'unavailable' : missing.length || added.length || !reservationUnchanged ? 'changed' : 'unchanged',
-    overlap: [...new Map([...(before?.overlap ?? []), ...(after?.overlap ?? [])].filter(row => row.experimentId !== experimentId || row.kind !== 'audit-experiment').map(row => [row.runId, row])).values()],
+    overlap: [...new Map([...(before?.overlap ?? []), ...(after?.overlap ?? [])].filter(row => row.kind !== 'audit-experiment'
+      || row.experimentId !== experimentId || concurrentRunId && row.runId !== concurrentRunId).map(row => [row.runId, row])).values()],
     before: original, after: after?.clients ?? [], missing, added, reservationUnchanged,
     sourceReservation: before?.sourceReservation ?? null };
 }
@@ -384,10 +391,10 @@ function captureComplete(captured) {
     && captured?.run?.coverage?.skills === 'complete';
 }
 
-/** Execute the validated paired experiment sequentially and persist recovery state. */
+/** Execute the validated experiment and persist recovery state. */
 export async function runAuditExperiment(store, input, context = {}) {
   const spec = validateAuditSpec(input);
-  if (spec.approvalsReviewer && typeof context.onNativeRequest !== 'function')
+  if (spec.approvalsReviewer === 'user' && typeof context.onNativeRequest !== 'function')
     throw new TypeError('User approval routing requires an interactive comparison request handler');
   const deps = dependencies(context), preview = await previewAuditExperiment(store, spec, context);
   if (preview.status !== 'ready') return { ...preview, exitCode: auditExitCode(preview) };
@@ -428,13 +435,13 @@ export async function runAuditExperiment(store, input, context = {}) {
         profile: safeProfile(profile), baseline: { repository: repository.repository, commit: repository.commit,
           tree: repository.tree, settingsStatus: beforeSettings?.status ?? 'unavailable' } });
       const owner = reservationOwner(experiment.id, runRecord.id, profile, store);
-      const reference = { runRecord, profile, owner, beforeSettings, reservationAttempted: false };
+      const reference = { runRecord, profile, owner, beforeSettings, beforeAccess, failures: [], reservationAttempted: false };
       runReferences.push(reference);
       await deps.writeState(store, runRecord.id, { status: 'prepared', phase: 'reservation', coordinator: await coordinatorIdentity(),
         reservation: { root: profile.reservationRoot, owner, status: 'acquiring' }, process: null, workspace: null });
       try {
         reference.reservationAttempted = true;
-        await deps.reserve({ root: profile.reservationRoot, owner, desktopOwner: beforeAccess.desktopOwner });
+        await deps.reserve({ root: profile.reservationRoot, owner, desktopOwner: beforeAccess.desktopOwner, nativeOwners: beforeAccess.nativeOwners });
         reservations.push({ profile, owner });
         await deps.writeState(store, runRecord.id, { reservation: { root: profile.reservationRoot, owner, status: 'held' } });
       } catch (error) {
@@ -442,7 +449,7 @@ export async function runAuditExperiment(store, input, context = {}) {
           error: { code: errorCode(error), message: errorText(error) } });
         throw Object.assign(new Error(`Could not reserve profile ${profile.profileName}; no model task was started.`), { code: 'profile-reservation-failed' });
       }
-      bySelection.set(selectionKey(selection), { profile, beforeSettings, beforeAccess, runRecord, owner });
+      bySelection.set(selectionKey(selection), reference);
     }
     // Recheck access and the original clients before launching any model work.
     for (const selection of spec.profiles) {
@@ -474,13 +481,14 @@ export async function runAuditExperiment(store, input, context = {}) {
     }
     await deps.writeState(store, experiment.id, { status: 'running', phase: 'workspace', startedAt: now(),
       coordinator: await coordinatorIdentity(), runs: runReferences.map(({ runRecord, profile }) => ({ id: runRecord.id, profileId: profile.profileId, status: 'prepared' })) });
-    for (let index = 0; index < spec.profiles.length; index++) {
-      const selection = spec.profiles[index], prepared = bySelection.get(selectionKey(selection));
+    const runLeg = async (selection, prepared) => {
       if (controller.signal.aborted || (experimentDeadline !== null && Date.now() >= experimentDeadline)) {
         runs.push({ id: prepared.runRecord.id, profile: safeProfile(prepared.profile), status: 'cancelled', phase: 'not-started', reason: controller.signal.reason === 'experiment-timeout' ? 'experiment-timeout' : 'cancelled' });
-        continue;
+        return;
       }
-      const { profile, beforeSettings, beforeAccess, runRecord, owner } = prepared;
+      const { profile, beforeSettings, beforeAccess, runRecord, owner, failures } = prepared;
+      const codex = (profile.client ?? 'codex') === 'codex';
+      const concurrentRunId = spec.parallel ? runRecord.id : undefined;
       const phaseStart = Date.now(), runDeadline = [experimentDeadline,
         spec.limits.runMs === null ? null : phaseStart + spec.limits.runMs].filter(value => value !== null).reduce((a, b) => a === null ? b : Math.min(a, b), null);
       const dirs = await ensureDirs(runRecord.directory);
@@ -525,7 +533,7 @@ export async function runAuditExperiment(store, input, context = {}) {
             signal: controller.signal, outputBytes: spec.limits.outputBytes, owner });
           runResult.setup.push(result);
           if (result.status === 'recovery-required') {
-            recoveryRequired = true;
+            prepared.recoveryRequired = true;
             runResult.recovery = { pid: result.pid ?? null, process: result.process ?? null, host: hostname(), reason: 'Setup process group could not be confirmed stopped.' };
             setupFailed = true; break;
           }
@@ -582,8 +590,10 @@ export async function runAuditExperiment(store, input, context = {}) {
             process: { pid: info.pid ?? null, processIdentity: info.processIdentity ?? null, host: hostname(), ...(info.nativeAncestry ? { nativeAncestry: info.nativeAncestry } : {}) },
             workspace: { ...workspaceIntent, active: true } }) },
           limits: { id: runRecord.id },
-          sandbox: (profile.client ?? 'codex') === 'codex' ? selection.execution?.permissionMode ?? spec.sandbox : spec.sandbox,
+          sandbox: codex ? selection.execution?.permissionMode ?? spec.sandbox : spec.sandbox,
           ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
+          ...(spec.autonomous ? { autonomous: true } : {}),
+          ...(spec.networkAccess !== undefined ? { networkAccess: spec.networkAccess } : {}),
           onPhase: async phase => captureState({ phase }),
           onTaskEnd: async evidence => {
             if (!capturing) return;
@@ -631,7 +641,7 @@ export async function runAuditExperiment(store, input, context = {}) {
             if (profile.client === 'copilot') {
               if (error.process?.shutdown?.groupTerminated === true)
                 await deps.writeState(store, runRecord.id, { process: null, nativeShutdownPending: false });
-              else recoveryRequired = true;
+              else prepared.recoveryRequired = true;
             }
             throw error;
           }).finally(() => { capturing = false; });
@@ -676,11 +686,11 @@ export async function runAuditExperiment(store, input, context = {}) {
         }
         const processResult = captured?.process;
         if (taskProcessUnsafe || processResult?.shutdown?.groupTerminated === false || processResult?.status === 'shutdown-failed') {
-          recoveryRequired = true; runResult.status = 'recovery-required'; runResult.phase = 'process-shutdown';
+          prepared.recoveryRequired = true; runResult.status = 'recovery-required'; runResult.phase = 'process-shutdown';
           runResult.recovery = { process: processResult.processIdentity ?? null, pid: processResult.pid ?? null, host: hostname(),
             reason: 'Process group termination could not be confirmed; workspace and profile reservation remain active.' };
           runs.push(runResult); await deps.writeState(store, runRecord.id, { status: runResult.status, phase: runResult.phase, recovery: runResult.recovery });
-          break;
+          return;
         }
         runResult.coverage.skills = runResult.normalized.coverage?.skills ?? 'unavailable';
         runResult.coverage.agents = runResult.normalized.coverage?.agents ?? 'unavailable';
@@ -704,6 +714,8 @@ export async function runAuditExperiment(store, input, context = {}) {
         }
         if (captured?.capture?.errors?.some(error => error.code === 'requested-execution-unconfirmed'))
           throw Object.assign(new Error(SAFE_ERROR_TEXT['requested-execution-unconfirmed']), { code: 'requested-execution-unconfirmed' });
+        if (captured?.capture?.errors?.some(error => error.code === 'requested-permission-unconfirmed'))
+          throw Object.assign(new Error(SAFE_ERROR_TEXT['requested-permission-unconfirmed']), { code: 'requested-permission-unconfirmed' });
         if (captured?.capture?.errors?.some(error => error.code === 'requested-approval-reviewer-unconfirmed'))
           throw Object.assign(new Error(SAFE_ERROR_TEXT['requested-approval-reviewer-unconfirmed']), { code: 'requested-approval-reviewer-unconfirmed' });
         if (captured?.capture?.errors?.some(error => error?.code === 'native-request-failed'))
@@ -734,7 +746,11 @@ export async function runAuditExperiment(store, input, context = {}) {
             signal: controller.signal, outputBytes: spec.limits.outputBytes, owner });
           const required = context.checkRequired?.(spec.checks[cmd].name) ?? true;
           runResult.checks.push({ ...result, ...(context.checkRequired ? { required } : {}) });
-          if (result.status === 'recovery-required' || (result.status !== 'passed' && required)) break;
+          if (result.status === 'recovery-required') {
+            prepared.recoveryRequired = true;
+            throw Object.assign(new Error(SAFE_ERROR_TEXT['process-shutdown-failed']), { code: 'process-shutdown-failed' });
+          }
+          if (result.status !== 'passed' && required) break;
         }
         runResult.checkEvidence = buildAuditCheckEvidence({ checks: spec.checks, results: runResult.checks,
           workspaceFingerprint: taskEndSnapshot?.fingerprint ?? null,
@@ -766,20 +782,20 @@ export async function runAuditExperiment(store, input, context = {}) {
           taskEndWorkspace: runResult.taskEnd, finalWorkspace: runResult.finalWorkspace };
         // Coverage describes whether the declared checks were evaluated, not
         // whether they passed or whether skill consumption is exhaustive.
-        runResult.coverage.outcome = spec.checks.length === 0 ? 'unavailable'
+        runResult.coverage.outcome = spec.checks.length === 0 ? 'not-applicable'
           : runResult.checks.length === spec.checks.length
             && runResult.checks.every(check => ['passed', 'failed'].includes(check.status)) ? 'complete' : 'partial';
         const afterSettings = await deps.snapshotSettings(profile), settings = deps.compareSettings(beforeSettings, afterSettings);
         settingsChecked = true;
         runResult.profileSettings = { status: settings.status, changedPaths: settings.changedPaths ?? [] };
         const afterAccess = await deps.observeAccess(profile, { store, expectedClients: beforeAccess.clients });
-        runResult.runningClients = compareProfileAccess(beforeAccess, afterAccess, experiment.id);
+        runResult.runningClients = compareProfileAccess(beforeAccess, afterAccess, experiment.id, concurrentRunId);
         runResult.coverage.runningClients = runResult.runningClients.status;
         clientsChecked = true;
         if (settings.status !== 'unchanged' || runResult.runningClients.status !== 'unchanged') {
           runResult.status = 'partial'; runResult.phase = 'preservation-check';
           if (settings.status !== 'unchanged') failures.push({ code: 'profile-settings-changed', profile: profile.profileName,
-            changedPaths: settings.changedPaths ?? [], message: 'Profile settings changed or became unverifiable during execution; remaining runs stopped.' });
+            changedPaths: settings.changedPaths ?? [], message: 'Profile settings changed or became unverifiable during execution.' });
           if (runResult.runningClients.status !== 'unchanged') failures.push({ code: 'profile-clients-changed', profile: profile.profileName,
             message: SAFE_ERROR_TEXT['profile-clients-changed'] });
           runResult.timestamps.completedAt = now(); runResult.metrics.totalMs = duration(phaseStart);
@@ -800,7 +816,7 @@ export async function runAuditExperiment(store, input, context = {}) {
             execution: runResult.execution, capture: runResult.capture, captureProtocol: runResult.captureProtocol, workspace: runResult.workspace,
             artifacts: runResult.artifacts, setup: runResult.setup, checks: runResult.checks, checkEvidence: runResult.checkEvidence,
             coverage: runResult.coverage, warnings: runResult.warnings });
-          break;
+          return;
         }
         const captureAcceptance = evaluateCaptureRequirements(runResult.normalized, spec.captureRequirements,
           { protocolReady: runResult.captureProtocol.status === 'ready' });
@@ -851,7 +867,7 @@ export async function runAuditExperiment(store, input, context = {}) {
           const processState = (await import('./audit-experiment-store.js')).readAuditRecord;
           const persisted = await processState(store, runRecord.id).catch(() => null);
           const processInfo = persisted?.state?.process;
-          if ((profile.client === 'copilot' && recoveryRequired) || processInfo?.pid) { recoveryRequired = true; runResult.status = 'recovery-required'; }
+          if (prepared.recoveryRequired || processInfo?.pid) { prepared.recoveryRequired = true; runResult.status = 'recovery-required'; }
           else {
             // Preserve a final state for cleanup even when setup failed before
             // the task-end checkpoint. This is explicitly not task-end evidence.
@@ -885,13 +901,13 @@ export async function runAuditExperiment(store, input, context = {}) {
           // unless absence is positively established; recovery can inspect it.
           try {
             await lstat(workspaceIntent.directory);
-            recoveryRequired = true;
+            prepared.recoveryRequired = true;
             runResult.status = 'recovery-required';
             runResult.phase = 'workspace-creation';
             persistedWorkspace = workspaceIntent;
           } catch (statError) {
             if (statError?.code !== 'ENOENT') {
-              recoveryRequired = true;
+              prepared.recoveryRequired = true;
               runResult.status = 'recovery-required';
               runResult.phase = 'workspace-creation';
               persistedWorkspace = workspaceIntent;
@@ -909,12 +925,12 @@ export async function runAuditExperiment(store, input, context = {}) {
         }
         if (!clientsChecked) {
           const access = await deps.observeAccess(profile, { store, expectedClients: beforeAccess.clients }).catch(() => null);
-          runResult.runningClients = compareProfileAccess(beforeAccess, access, experiment.id);
+          runResult.runningClients = compareProfileAccess(beforeAccess, access, experiment.id, concurrentRunId);
           if (runResult.runningClients.status !== 'unchanged') failures.push({ code: 'profile-clients-changed',
             profile: profile.profileName, message: SAFE_ERROR_TEXT['profile-clients-changed'] });
         }
         await deps.writeState(store, runRecord.id, { status: runResult.status, phase: runResult.phase,
-          completedAt: runResult.timestamps.completedAt, error: runResult.error, process: recoveryRequired ? undefined : null,
+          completedAt: runResult.timestamps.completedAt, error: runResult.error, process: prepared.recoveryRequired ? undefined : null,
           metrics: runResult.metrics, outcome: runResult.outcome ?? { status: 'unknown' },
           profileSettings: runResult.profileSettings, runningClients: runResult.runningClients,
           taskEnd: runResult.taskEnd ?? null, finalWorkspace: runResult.finalWorkspace ?? null,
@@ -923,11 +939,11 @@ export async function runAuditExperiment(store, input, context = {}) {
           profile: safeProfile(profile), agents: [], events: [], turns: [], skills: [], usage: {}, metrics: runResult.metrics,
           coverage: { timeline: 'unavailable', agents: 'unavailable', skills: 'unavailable', workspaceDiff: runResult.finalWorkspace?.fingerprint ? 'complete' : 'unavailable', outcome: 'partial' },
           outcome: { status: 'unknown' }, artifacts: runResult.artifacts, warnings: [] };
-        if (!recoveryRequired) Object.assign(runResult.normalized, await captureFrozenSessionReplay(deps, store,
+        if (!prepared.recoveryRequired) Object.assign(runResult.normalized, await captureFrozenSessionReplay(deps, store,
           runRecord.record?.profile ?? safeProfile(profile), runResult.normalized, runRecord.directory));
-        if (!recoveryRequired) runResult.coverage = { ...runResult.normalized.coverage, ...runResult.coverage,
+        if (!prepared.recoveryRequired) runResult.coverage = { ...runResult.normalized.coverage, ...runResult.coverage,
             agents: runResult.normalized.coverage.agents };
-        if (!recoveryRequired) pendingFinalReports.set(runRecord.id, { ...runResult.normalized, id: runRecord.id,
+        if (!prepared.recoveryRequired) pendingFinalReports.set(runRecord.id, { ...runResult.normalized, id: runRecord.id,
           experimentId: experiment.id, profile: safeProfile(profile), baseline: runRecord.record?.baseline,
           sourceWorkspace: runResult.sourceWorkspace, status: runResult.status,
           metrics: runResult.metrics, outcome: runResult.outcome ?? { status: 'unknown' }, taskEnd: runResult.taskEnd ?? null,
@@ -938,13 +954,29 @@ export async function runAuditExperiment(store, input, context = {}) {
           checkEvidence: runResult.checkEvidence });
         runs.push(runResult);
       }
-      if (recoveryRequired || failures.some(f => ['profile-settings-changed', 'profile-clients-changed', 'requested-approval-reviewer-unconfirmed'].includes(f.code)) || controller.signal.aborted) break;
+    };
+    if (spec.parallel) {
+      const settled = await Promise.allSettled(spec.profiles.map(selection => runLeg(selection, bySelection.get(selectionKey(selection)))));
+      for (const [index, result] of settled.entries()) {
+        if (result.status !== 'rejected') continue;
+        const reference = runReferences[index];
+        reference.recoveryRequired = true;
+        reference.failures.push({ profile: reference.profile.profileName, code: errorCode(result.reason), message: errorText(result.reason) });
+      }
+    } else for (const selection of spec.profiles) {
+      const reference = bySelection.get(selectionKey(selection));
+      await runLeg(selection, reference);
+      if (reference.recoveryRequired || reference.failures.some(f => ['profile-settings-changed', 'profile-clients-changed', 'requested-approval-reviewer-unconfirmed'].includes(f.code)) || controller.signal.aborted) break;
     }
   } catch (error) {
     failures.push({ code: error.code ?? errorCode(error), message: errorText(error) });
   } finally {
     clearTimeout(timer); deps.signal?.removeEventListener('abort', abortFromParent);
-    if (!recoveryRequired) for (const reservation of reservations.reverse()) {
+    const retainedRunIds = new Set(runReferences.filter(reference => reference.recoveryRequired).map(reference => reference.runRecord.id));
+    recoveryRequired = retainedRunIds.size > 0;
+    failures.push(...runReferences.flatMap(reference => reference.failures));
+    if (spec.parallel || !recoveryRequired) for (const reservation of reservations.reverse()) {
+      if (retainedRunIds.has(reservation.owner.runId)) continue;
       try {
         await deps.release({ root: reservation.profile.reservationRoot, owner: reservation.owner });
         await deps.writeState(store, reservation.owner.runId, { reservation: null, coordinator: await coordinatorIdentity() });
@@ -1013,9 +1045,8 @@ export async function runAuditExperiment(store, input, context = {}) {
         .then(() => finalizedRuns.add(run.id)).catch(() => {});
     }
   }
-  const profileOrder = new Map(spec.profiles.map((selection, index) => [selectionKey(selection), index]));
-  runs.sort((left, right) => (profileOrder.get(left.profile?.sideId ?? left.profile?.profileName?.toLowerCase()) ?? Number.MAX_SAFE_INTEGER)
-    - (profileOrder.get(right.profile?.sideId ?? right.profile?.profileName?.toLowerCase()) ?? Number.MAX_SAFE_INTEGER));
+  const runOrder = new Map(runReferences.map(({ runRecord }, index) => [runRecord.id, index]));
+  runs.sort((left, right) => runOrder.get(left.id) - runOrder.get(right.id));
   const reportRuns = runs.map(run => {
     const { normalized: capturedRun, ...execution } = run;
     // Full replay is stored once in each immutable run report. Repeating it in
@@ -1052,14 +1083,14 @@ export async function runAuditExperiment(store, input, context = {}) {
     : complete ? 'complete' : reservationBlocked ? 'blocked' : strictFailure ? 'failed' : partial || runs.length ? 'partial' : 'failed';
   const report = { schemaVersion: 1, kind: 'audit-experiment-report', id: experiment.id,
     status: reportStatus,
-    limits: { ...spec.limits, sandbox: spec.sandbox, ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}) },
+    limits: comparisonLimits(spec),
     baseline: { repository: preview.baseline?.repository ?? null, commit: preview.baseline?.commit ?? null,
       tree: preview.baseline?.tree ?? null, selectedRevision: preview.baseline?.selectedRevision ?? null,
       sourceHead: preview.baseline?.sourceHead ?? null, sourceDirty: preview.baseline?.sourceDirty ?? null,
       taskOrder: spec.profiles.map(p => p.sideId ?? p.name), source: 'same-committed-snapshot' },
     execution: { status: reportStatus, exitCode: recoveryRequired ? 2 : timedOut ? 124 : cancelled ? 130 : complete ? 0 : reservationBlocked ? 1 : strictFailure ? 4 : 2,
       startedAt: experiment.record.createdAt, completedAt: now(), elapsedMs: duration(startedAt),
-      order: spec.profiles.map(p => p.sideId ?? p.name), parallelism: 1, retries: 0, sandbox: spec.sandbox },
+      order: spec.profiles.map(p => p.sideId ?? p.name), parallelism: spec.parallel ? spec.profiles.length : 1, retries: 0, sandbox: spec.sandbox },
     profileOrder: context.profileOrder ?? spec.profiles.map(item => item.sideId ?? item.name),
     runs: reportRuns, comparisons, coverage: { profiles: runs.length === spec.profiles.length && runs.every(run => run.phase !== 'not-started') ? 'complete' : 'partial',
       skills: runs.every(run => run.coverage?.skills === 'complete') ? 'complete' : 'partial',

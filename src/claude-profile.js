@@ -62,8 +62,6 @@ export async function resolveClaudeProfile({ selected, repository, defaultUserHo
   const cwd = sessionOnly ? null : repository ?? selected?.repositories?.[0]?.path;
   if (!cwd && !sessionOnly) throw new Error('Select a workspace for Claude Code');
   const canonical = cwd === null ? null : await canonicalClaudeDirectory(await realpath(cwd), 'Claude workspace');
-  if (canonical && selected && !selected.repositories.some(row => row.path === canonical))
-    throw Object.assign(new Error('The selected repository is not already bound to this profile'), { code: 'profile-repository-unbound' });
   return { ...binary, profileId: selected?.id ?? 'default-claude-code', profileName: selected?.name ?? 'Default',
     client: CLAUDE_CLIENT, surface: 'cli', executionLocation: 'local', rootMode, home, userHome,
     nativeRoot: selected ? reservationRoot : null, reservationRoot, environmentId: selected?.native.environmentId ?? null,

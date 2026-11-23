@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { privateDirectory } from './metadata.js';
 import { runAuditProcess } from './audit-process.js';
 import { normalizeSessionReplay, REPLAY_LIMITS } from './audit-session-replay.js';
+import { copilotReplayId, copilotReplayTimestamp } from './copilot-events.js';
 import { assertCopilotEnvironment, COPILOT_SESSION_ID as UUID } from './copilot-profile.js';
 import { assertCopilotSessionSelection, createCopilotRuntime } from './copilot-runtime.js';
 import { assertCopilotImplicitEnvironment, COPILOT_IMPORT_BYTES as MAX_BYTES, COPILOT_READER, readCopilotJournal } from './copilot-transcript-reader.mjs';
@@ -61,8 +62,10 @@ function publicMessages(pages, sessionId) {
     const included = typeof text === 'string' && bodyBytes <= REPLAY_LIMITS.bodyBytes;
     if (!included) omittedBodies++;
     if (event.type === 'assistant.message' && typeof event.data?.model === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(event.data.model)) observedModels.add(event.data.model);
+    const rootTurnId = !event.agentId && !event.data?.agentId && event.checkpoint !== true && event.data?.checkpoint !== true
+      && copilotReplayId(event.data?.turnId) ? event.data.turnId : null;
     messages.push({ sessionId, itemId: event.id ?? null, type: event.type === 'user.message' ? 'user' : 'assistant',
-      timestamp: typeof event.timestamp === 'string' && Number.isFinite(Date.parse(event.timestamp)) ? new Date(event.timestamp).toISOString() : null,
+      ...(rootTurnId !== null ? { turnId: rootTurnId } : {}), timestamp: copilotReplayTimestamp(event.timestamp),
       body: included ? text : null, bodyStatus: included ? 'included' : 'omitted', bodyBytes,
       ...(!included ? { bodyReason: typeof text === 'string' ? 'body-size-limit' : 'non-text-content' } : {}) });
   }
@@ -114,10 +117,13 @@ export async function importCopilotTranscript({ sessionId, selection } = {}, { d
       { kind: 'source-line-basis', message: 'Source lines are ordinals in the sanitized SDK message snapshot.' },
       { kind: 'omitted-events', omitted: projected.omittedEvents, message: 'All system, reasoning, tool, opaque, asset and non-message event content is omitted.' }];
     if (projected.omittedBodies) limits.push({ kind: 'omitted-bodies', omitted: projected.omittedBodies, message: 'Non-text or oversized public message bodies are omitted.' });
+    const missingTimestamps = projected.messages.filter(message => message.timestamp === null).length;
+    if (missingTimestamps) limits.push({ kind: 'missing-timestamps', omitted: missingTimestamps, message: 'Some public journal messages have no usable native timestamp.' });
     const sessionReplay = normalizeSessionReplay({ schemaVersion: 1, kind: 'session-replay', sessions: [{ id: sessionId, parentId: null, depth: 0, status: 'partial', source: { fingerprint }, limits,
-      events: projected.messages.map((message, index) => ({ id: `${sessionId}:${fingerprint}:${index + 1}`, sessionId, turnId: null, sourceLine: index + 1,
+      events: projected.messages.map((message, index) => ({ id: `${sessionId}:${fingerprint}:${index + 1}`, sessionId, turnId: message.turnId ?? null, sourceLine: index + 1,
         ...(message.itemId !== null ? { itemId: message.itemId } : {}), kind: 'message', role: message.type, label: message.type === 'user' ? 'User message' : 'Assistant message',
-        timestamp: message.timestamp, body: message.body, bodyStatus: message.bodyStatus, bodyBytes: message.bodyBytes,
+        timestamp: message.timestamp, ...(message.timestamp ? { timestampSource: 'native' } : {}),
+        body: message.body, bodyStatus: message.bodyStatus, bodyBytes: message.bodyBytes,
         ...(message.bodyReason ? { bodyReason: message.bodyReason, contentOmitted: true } : {}) })) }] });
     const finalDirectory = await lstat(directory); if (finalDirectory.dev !== owned.dev || finalDirectory.ino !== owned.ino) throw failure();
     return { schemaVersion: 1, kind: 'audit-run', id: randomUUID(), status: 'partial',

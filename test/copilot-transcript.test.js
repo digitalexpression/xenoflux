@@ -16,8 +16,8 @@ const page = (events, extra = {}) => ({ events, cursor: 'cursor-one', cursorStat
 function events() {
   return [
     { id: 'start-event', type: 'session.start', timestamp: '2026-11-10T00:00:00Z', data: { sessionId, copilotVersion: '1.0.107', producer: 'desktop' } },
-    { id: 'opaque-native-user', type: 'user.message', timestamp: '2026-11-10T00:00:01Z', data: { content: 'PUBLIC QUESTION', transformedContent: privateCanary, attachments: [{ content: privateCanary }] } },
-    { id: 'opaque-native-assistant', type: 'assistant.message', timestamp: '2026-11-10T00:00:02Z', data: { content: 'PUBLIC ANSWER', model: 'observed-model', reasoningText: privateCanary, encryptedContent: privateCanary, opaque: privateCanary, toolRequests: [{ arguments: privateCanary }] } },
+    { id: 'opaque-native-user', type: 'user.message', timestamp: '2026-11-10T00:00:01Z', data: { turnId: '0', content: 'PUBLIC QUESTION', transformedContent: privateCanary, attachments: [{ content: privateCanary }] } },
+    { id: 'opaque-native-assistant', type: 'assistant.message', timestamp: '2026-11-10T00:00:02Z', data: { turnId: '0', content: 'PUBLIC ANSWER', model: 'observed-model', reasoningText: privateCanary, encryptedContent: privateCanary, opaque: privateCanary, toolRequests: [{ arguments: privateCanary }] } },
     { id: 'tool-event', type: 'tool.execution_complete', data: { content: privateCanary, output: privateCanary } },
     { type: 'session.resume', data: { content: privateCanary } },
     { type: 'session.shutdown', data: { content: privateCanary } },
@@ -53,7 +53,8 @@ test('public SDK page import preserves native IDs/times and private raw evidence
   const replay = run.sessionReplay.sessions[0];
   assert.deepEqual(replay.events.map(x => x.itemId), ['opaque-native-user', 'opaque-native-assistant']);
   assert.deepEqual(replay.events.map(x => x.timestamp), ['2026-11-10T00:00:01.000Z', '2026-11-10T00:00:02.000Z']);
-  assert.deepEqual(replay.events.map(x => x.turnId), [null, null]);
+  assert.deepEqual(replay.events.map(x => x.timestampSource), ['native', 'native']);
+  assert.deepEqual(replay.events.map(x => x.turnId), ['0', '0']);
   assert.equal(replay.events[1].body, 'PUBLIC ANSWER'); assert.equal(replay.status, 'partial');
   assert.equal((await stat(f.directory)).mode & 0o077, 0); assert.equal((await stat(join(f.directory, 'raw-page-01.json'))).mode & 0o077, 0);
   const other = structuredClone(run); other.id = randomUUID();
@@ -71,11 +72,14 @@ test('public SDK page import preserves native IDs/times and private raw evidence
 
 test('missing native IDs/timestamps remain unknown, only data.content text is selected', async t => {
   const f = await fixture(t), run = await importCopilotTranscript({ sessionId }, { ...f, readJournal: reader([page([
-    { type: 'user.message', data: { content: 'PUBLIC TEXT' } },
-    { type: 'assistant.message', data: { content: { type: 'text', text: privateCanary }, transformedContent: privateCanary } },
+    { type: 'user.message', timestamp: '0', data: { content: 'PUBLIC TEXT' } },
+    { type: 'assistant.message', agentId: 'child', data: { turnId: '0', content: { type: 'text', text: privateCanary }, transformedContent: privateCanary } },
   ])]) });
   const [user, assistant] = run.sessionReplay.sessions[0].events;
   assert.equal(Object.hasOwn(user, 'itemId'), false); assert.equal(user.timestamp, null);
+  assert.equal(user.turnId, null); assert.equal(user.timestampSource, undefined);
+  assert.equal(run.sessionReplay.sessions[0].limits.find(limit => limit.kind === 'missing-timestamps').omitted, 2);
+  assert.equal(assistant.turnId, null);
   assert.equal(assistant.body, null); assert.equal(assistant.bodyReason, 'non-text-content');
   assert.equal(JSON.stringify(run).includes(privateCanary), false);
 });

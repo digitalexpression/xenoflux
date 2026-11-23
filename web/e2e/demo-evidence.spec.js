@@ -8,13 +8,15 @@ test('demo comparison no longer exposes legacy findings or paired evidence pages
   const page = await browser.newPage();
   try {
     await page.goto(server.launchUrl);
-    await page.getByRole('heading', { name: 'What do you want to compare?' }).waitFor();
+    await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
     await page.goto(`${server.origin}/reports/demo-run`);
     await expect(page.getByRole('heading', { name: 'Behavioral findings' })).toHaveCount(0);
     await expect(page.getByRole('heading', { name: 'Paired action evidence' })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Open paired action evidence' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: /legacy behavioral findings/i })).toHaveCount(0);
-    await expect(page.getByRole('heading', { name: 'Conditions' })).toBeVisible();
+    await page.locator('summary').filter({ hasText: /^Conditions and coverage$/ }).click();
+    await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
+    await expect(page.getByRole('heading', { name: 'Conditions', exact: true })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Outcome and code' })).toBeVisible();
   } finally {
     await page.close();

@@ -1,4 +1,5 @@
 import { readFile, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { test as base, expect } from '@playwright/test';
 import { createUiRunsFixture } from '../../test-support/ui-runs-fixture.js';
@@ -72,12 +73,13 @@ test('explicit Claude snapshot comparison stays private and survives source loss
   }
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.getByRole('link', { name: 'View report', exact: true }).click();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Session replay', exact: true })).toBeVisible();
   const reportRef = decodeURIComponent(new URL(page.url()).pathname.split('/reports/')[1]);
   const presented = await app.provider.report({ ref: reportRef });
   for (const marker of canaries) expect(JSON.stringify(presented)).not.toContain(marker);
   const receipt = await app.provider.exportReport({ ref: reportRef });
-  const savedPath = join(receipt.folder, receipt.files.find(name => name.endsWith('.audit.json')));
+  const savedPath = join(receipt.folder.replace(/^~(?=\/|$)/, homedir()), receipt.files.find(name => name.endsWith('.audit.json')));
   const frozen = await readFile(savedPath, 'utf8');
   for (const marker of canaries) expect(frozen).not.toContain(marker);
   const report = JSON.parse(frozen);
@@ -94,6 +96,7 @@ test('explicit Claude snapshot comparison stays private and survives source loss
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedPath);
   await expect(page.getByRole('link', { name: 'View report', exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'View report', exact: true }).click();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Session replay', exact: true })).toBeVisible();
   expect(app.calls.captures).toEqual([]);
   expect(posts).toHaveLength(1);

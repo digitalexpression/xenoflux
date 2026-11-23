@@ -1,14 +1,15 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, open, readFile, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createEnvironmentBinding, createSettingsEvidence } from './client-contracts.js';
-import { normalizeSessionReplay } from './audit-session-replay.js';
+import { comparisonPermissionMode, validateAuditApprovalsReviewer } from './audit-spec.js';
 import { CATALOG_TTL_MS, validateCatalogSelection } from './client-catalog.js';
 import { CLAUDE_CLIENT, canonicalClaudeDirectory, inspectClaudeExecutable } from './claude-profile.js';
 import { CLAUDE_PERMISSION_MODES, claudeModels, createClaudeDecoder, nativeText, validateClaudeDecision } from './claude-decoder.js';
 import { claudeDeadline, claudeProcessCwd, deferred, ownClaudeProcess } from './claude-process.js';
+import { captureClaudeNativeReplay, captureClaudeObservedReplay, claudeTimestamp } from './claude-replay.js';
 
 const SDK = '0.3.322';
 const source = 'claude-agent-sdk/initialize';
@@ -29,10 +30,11 @@ async function sdkQuery() {
   return (await import(url)).query;
 }
 
-function launchArguments(sessionId, execution, probe) {
+function launchArguments(sessionId, execution, probe, autonomous) {
   return ['--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json',
     '--permission-prompt-tool=stdio', '--setting-sources=user,project,local', '--session-id=' + sessionId,
     ...(probe ? ['--no-session-persistence'] : []),
+    ...(autonomous ? ['--permission-prompts=none'] : []),
     ...(execution.model ? ['--model=' + execution.model] : []),
     ...(execution.reasoningEffort ? ['--effort=' + execution.reasoningEffort] : []),
     ...(execution.permissionMode ? ['--permission-mode=' + execution.permissionMode] : [])].sort();
@@ -157,9 +159,11 @@ function ownedHostIdle(frame, sessionId) {
 
 export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownClaudeProcess,
   readCwd = claudeProcessCwd, readTrust = claudeWorkspaceTrust } = {}) {
-  async function execute({ profile, workspace, task, execution = {}, processOptions, onProcessReady,
+  async function execute({ profile, workspace, task, execution = {}, executionMode, approvalsReviewer, autonomous = false,
+    networkAccess, processOptions, onProcessReady,
     onSession, onTurn, onNativeRequest, onTaskEnd, limits = {}, preflightOnly = false }) {
     const probe = preflightOnly === 'catalog', readiness = preflightOnly === true;
+    const comparison = executionMode === 'audit';
     const { signal, timeoutMs = probe ? startupMs : null, outputLimitBytes = outputCap, stdoutPath, stderrPath, onSpawn } = processOptions;
     if (profile?.client !== CLAUDE_CLIENT || !['implicit', 'explicit'].includes(profile.rootMode)
       || !isDeepStrictEqual(profile.env, processOptions.env) || !profile.env || profile.env.HOME !== profile.userHome
@@ -171,8 +175,15 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
       || !probe && !readiness && (typeof task !== 'string' || !task.trim() || Buffer.byteLength(task) > 256 * 1024)
       || !execution || Object.entries(execution).some(([key, value]) => !OPTIONS.has(key) || !nativeText(value))
       || execution.permissionMode && !CLAUDE_PERMISSION_MODES.includes(execution.permissionMode)
+      || typeof autonomous !== 'boolean' || networkAccess !== undefined && typeof networkAccess !== 'boolean'
+      || autonomous && approvalsReviewer !== undefined
+      || !comparison && (approvalsReviewer !== undefined || autonomous || networkAccess !== undefined)
       || execution.reasoningEffort && !['low', 'medium', 'high', 'xhigh', 'max'].includes(execution.reasoningEffort))
       throw new Error('Invalid Claude runtime binding or settings');
+    validateAuditApprovalsReviewer(approvalsReviewer);
+    const permissionMode = comparisonPermissionMode(CLAUDE_CLIENT, { approvalsReviewer, autonomous }, execution.permissionMode);
+    const approvalOverride = approvalsReviewer !== undefined || autonomous;
+    const nativeExecution = { ...execution, permissionMode };
     const sessionId = randomUUID(), promptId = randomUUID();
     const decoder = createClaudeDecoder({ sessionId, promptId, workspace });
     const nativeAbort = new AbortController(), actionAbort = new AbortController();
@@ -180,8 +191,10 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
     const errors = [], inFlight = new Set();
     let failure, nativeFailure, assistantError = null, query, pump, sent = false, initialized = false, dispatchAllowed = false, sessionObserved = false;
     let pumpJoined = false, inputStarted = false, inputFinished = false, initializeFrames = 0, interruptFrames = 0;
+    let settingApprovalMode = false, approvalModeFrames = 0;
     let version = null, interruption = null, account = { status: 'unverified', type: null, id: null }, models = [];
     let selectedModel, trustBefore, closing = false, sessionAck, checkpointedTurn;
+    let promptSentAt, terminalObservedAt;
     let commandStage = 0, resultPromptMatched = false;
     const requestStop = error => {
       failure ??= error;
@@ -196,8 +209,10 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
       errors, checkpoint: 'launch-bound', sessionBinding: { source: 'claude-sdk-sessionId', status: 'unconfirmed' },
       settingsEvidence: createSettingsEvidence({ requested: { source: 'frozen-execution-selection', ...execution },
         sent: { source: 'claude-agent-sdk-options', model: execution.model ?? null, reasoningEffort: execution.reasoningEffort ?? null,
-          permissionMode: execution.permissionMode ?? null } }),
+          permissionMode: permissionMode ?? null } }),
       observer: { transport: 'claude-agent-sdk', sdkVersion: SDK, effects: ['normal native profile history and startup settings'] } };
+    if (comparison) capture.observer.networkAccess = 'native-profile-policy';
+    if (approvalOverride) capture.settingsEvidence.requested.approvalMode = autonomous ? 'autonomous' : approvalsReviewer;
     const run = { schemaVersion: 1, kind: 'audit-run', id: limits.id ?? randomUUID(),
       profile: { profileId: profile.profileId, profileName: profile.profileName, home: profile.home, userHome: profile.userHome,
         environmentId: profile.environmentId }, status: 'partial', reason: null, source: null,
@@ -245,10 +260,12 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
         capture.commandClosure.hostIdleObserved = true;
         return;
       }
-      decoder.consume(frame);
+      const receivedAt = new Date().toISOString(), nativeTimestamp = claudeTimestamp(frame.timestamp);
+      decoder.consume(frame, { timestamp: nativeTimestamp ?? receivedAt, timestampSource: nativeTimestamp ? 'native' : 'observed' });
       if (frame.type === 'assistant' && frame.parent_tool_use_id == null && ASSISTANT_ERRORS.has(frame.error))
         assistantError = frame.error;
       if (frame.type === 'result') {
+        terminalObservedAt = receivedAt;
         resultPromptMatched = frame.user_message_uuid === promptId;
         // SDK success-subtype results with is_error=true carry an API failure, not task success.
         capture.terminalResult = { source: 'claude-sdk-result', subtype: decoder.result.subtype,
@@ -262,7 +279,9 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
       }
       if (decoder.init && !sessionObserved) {
         const confirmed = decoder.init;
-        if (!compareModel(confirmed.model, selectedModel) || execution.permissionMode && confirmed.permissionMode !== execution.permissionMode
+        if (permissionMode && confirmed.permissionMode !== permissionMode && approvalOverride)
+          throw Object.assign(new Error('Claude did not confirm the requested approval behavior'), { code: 'requested-approval-reviewer-unconfirmed' });
+        if (!compareModel(confirmed.model, selectedModel) || permissionMode && confirmed.permissionMode !== permissionMode
           || execution.reasoningEffort && confirmed.reasoningEffort && execution.reasoningEffort !== confirmed.reasoningEffort)
           throw new Error('Claude native settings do not match the frozen execution choices');
         sessionObserved = true;
@@ -286,6 +305,8 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
     const owner = processOwner({ stdoutPath, stderrPath, outputLimitBytes, onFrame, stop: requestStop, onInput(frame) {
       if (frame.type === 'control_request') {
         if (frame.request?.subtype === 'initialize' && ++initializeFrames === 1) return;
+        if (frame.request?.subtype === 'set_permission_mode' && settingApprovalMode && !sent
+          && frame.request.mode === permissionMode && Object.keys(frame.request).length === 2 && ++approvalModeFrames === 1) return;
         if (frame.request?.subtype === 'interrupt' && closing && sent && ++interruptFrames === 1) return;
         throw new Error('Claude SDK requested an unexpected native operation');
       }
@@ -294,9 +315,10 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
         || frame.parent_tool_use_id !== null || !isDeepStrictEqual(frame.message, { role: 'user', content: task }))
         throw new Error('Claude SDK attempted to submit a different or duplicate task');
       sent = true;
+      promptSentAt = new Date().toISOString();
     } });
     async function permission(name, input, meta) {
-      if (!sent || !onNativeRequest || probe || readiness) {
+      if (!sent || !onNativeRequest || probe || readiness || autonomous) {
         requestStop(new Error('Claude requested user input without an available approval handler'));
         return null;
       }
@@ -306,15 +328,15 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
       }
       const requestSignal = AbortSignal.any([meta.signal, actionAbort.signal]);
       try {
-        const bound = decoder.request(name, input, meta);
+        const bound = decoder.request(name, input, meta, comparison);
         await claudeDeadline(sessionAck, 5000, 'Claude session checkpoint did not finish', requestSignal);
         if (requestSignal.aborted) return null;
         const answer = await onNativeRequest(bound.request, { signal: requestSignal, item: bound.item });
         if (requestSignal.aborted || decoder.result) return null;
         validateClaudeDecision(bound.request, answer);
-        return answer.decision === 'accept'
-          ? { behavior: 'allow', updatedInput: structuredClone(bound.item.input), toolUseID: bound.item.id }
-          : { behavior: 'deny', message: 'Declined by the user', toolUseID: bound.item.id };
+        if (answer.decision === 'decline') return { behavior: 'deny', message: 'Declined by the user', toolUseID: bound.item.id };
+        return { behavior: 'allow', updatedInput: structuredClone(bound.item.input), toolUseID: bound.item.id,
+          ...(answer.decision === 'acceptForSession' && bound.sessionUpdate ? { updatedPermissions: [bound.sessionUpdate] } : {}) };
       } catch (error) {
         if (!requestSignal.aborted) requestStop(error);
         return null;
@@ -357,11 +379,12 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
         ...(probe ? { persistSession: false } : {}),
         ...(execution.model ? { model: execution.model } : {}),
         ...(execution.reasoningEffort ? { effort: execution.reasoningEffort } : {}),
-        ...(execution.permissionMode ? { permissionMode: execution.permissionMode } : {}),
+        ...(permissionMode ? { permissionMode } : {}),
+        ...(autonomous ? { permissionPrompts: 'none' } : {}),
         canUseTool, spawnClaudeCodeProcess(options) {
           if (options.command !== profile.executable || options.cwd !== workspace
             || !isDeepStrictEqual(options.env, { ...profile.env, ...controlled })
-            || !isDeepStrictEqual([...options.args].sort(), launchArguments(sessionId, execution, probe)))
+            || !isDeepStrictEqual([...options.args].sort(), launchArguments(sessionId, nativeExecution, probe, autonomous)))
             throw new Error('Claude SDK requested an unexpected native launch');
           return owner.start(options);
         },
@@ -376,6 +399,16 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
       const init = await stopStartup(query.initializationResult(), 'Claude initialization timed out');
       account = accountOf(init?.account);
       version = nativeText(init?.claude_code_version);
+      if (approvalOverride) {
+        settingApprovalMode = true;
+        try {
+          await stopStartup(query.setPermissionMode(permissionMode), 'Claude approval behavior confirmation timed out');
+          if (approvalModeFrames !== 1) throw new Error('Claude did not send the requested approval behavior');
+        } catch (cause) {
+          throw Object.assign(new Error('Claude did not confirm the requested approval behavior', { cause }),
+            { code: 'requested-approval-reviewer-unconfirmed' });
+        } finally { settingApprovalMode = false; }
+      }
       if (probe || execution.model || execution.reasoningEffort) {
         models = claudeModels(init?.models);
         if (!probe) {
@@ -455,7 +488,9 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
       capture.nativeReference = { sessionId, turnId: decoder.turnId };
       capture.settingsEvidence.observed = { source: 'claude-assistant/result', model: observedModel, reasoningEffort: result?.reasoningEffort ?? null };
       run.turns.push({ agentId: sessionId, turnId: decoder.turnId, status: complete ? 'completed' : cancellation ? 'interrupted' : 'unknown',
-        model: observedModel, reasoningEffort: result?.reasoningEffort ?? null });
+        model: observedModel, reasoningEffort: result?.reasoningEffort ?? null,
+        ...(promptSentAt ? { observedStartedAt: promptSentAt } : {}), ...(terminalObservedAt ? { observedCompletedAt: terminalObservedAt } : {}),
+        source: 'claude-agent-sdk' });
       run.agents[0].status = run.turns[0].status;
     }
     for (const tool of decoder.tools.values()) run.toolInvocations.push({ agentId: sessionId, turnId: decoder.turnId,
@@ -470,25 +505,28 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
     run.outcome.nativeTurnStatus = complete ? 'completed' : cancellation ? 'interrupted' : result ? 'failed' : null;
     if (sessionObserved && run.source) {
       const replayComplete = complete && !cancellation;
-      const items = [...decoder.assistant];
-      if (replayComplete && result.text?.trim()) items.push({ itemId: result.id, text: result.text, label: 'Claude result response' });
-      else if (!items.length && result?.text) items.push({ itemId: result.id, text: result.text });
       const terminalStatus = replayComplete ? 'completed' : cancellation ? 'interrupted' : result ? 'failed' : null;
-      const fingerprint = createHash('sha256').update(JSON.stringify([sessionId, decoder.turnId, items, terminalStatus])).digest('hex');
-      const turnId = /^[0-9a-f-]{36}$/i.test(decoder.turnId ?? '') ? decoder.turnId : null;
-      const events = items.map((item, index) => ({ id: `${sessionId}:${fingerprint}:${index + 1}`, sessionId,
-        turnId, sourceLine: index + 1, ...(item.itemId && item.itemId.length <= 256 ? { itemId: item.itemId } : {}),
-        kind: 'message', role: 'assistant', label: item.label ?? 'Assistant message',
-        timestamp: null, body: item.text, bodyStatus: 'included', bodyBytes: Buffer.byteLength(item.text) }));
-      if (terminalStatus) events.push({ id: `${sessionId}:${fingerprint}:${events.length + 1}`, sessionId, turnId,
-        sourceLine: events.length + 1, kind: 'session', label: 'Claude task result', status: terminalStatus,
-        timestamp: null, body: null, bodyStatus: 'unavailable', bodyReason: 'not-recorded' });
-      run.source.fingerprint = fingerprint;
-      run.sessionReplay = normalizeSessionReplay({ schemaVersion: 1, kind: 'session-replay', sessions: [{
-        id: sessionId, parentId: null, depth: 0, status: 'partial', source: { fingerprint },
-        limits: [{ kind: 'capture-boundary', message: 'Owned SDK assistant text and matching task result. Source lines are projection ordinals; tool bodies and delegated transcripts are not included.' }],
-        events,
-      }] });
+      const statusTime = terminalObservedAt ?? (cancellation ? new Date().toISOString() : null);
+      const terminal = terminalStatus ? { kind: 'session', label: result ? 'Claude task result' : 'Controller interruption', status: terminalStatus,
+        timestamp: statusTime, ...(statusTime ? { timestampSource: 'observed' } : {}) } : null;
+      const turnId = decoder.turnId;
+      const native = shutdown && replayComplete && resultPromptMatched
+        ? await captureClaudeNativeReplay({ home: profile.home, workspace, sessionId, turnId, promptId, task, terminal }).catch(() => null) : null;
+      const rows = [...decoder.replayRows];
+      if (!native) {
+        if (promptSentAt) rows.unshift({ kind: 'message', role: 'user', label: 'User message', itemId: promptId,
+          timestamp: promptSentAt, timestampSource: 'observed', text: task });
+        if (result?.text?.trim() && (replayComplete || !decoder.assistant.length)
+          && !decoder.assistant.some(item => item.text === result.text)) rows.push({
+          kind: 'message', role: 'assistant', label: 'Claude result response', timestamp: terminalObservedAt, timestampSource: 'observed', text: result.text });
+        if (terminal) rows.push(terminal);
+      }
+      const { fingerprint, replay } = native ?? captureClaudeObservedReplay({ sessionId, turnId, rows });
+      Object.assign(run.source, { fingerprint, model: observedModel, reasoningEffort: result?.reasoningEffort ?? null,
+        version: decoder.init.version });
+      run.sessionReplay = replay;
+      run.replayCapture = { status: replay.sessions[0].status, capturedAt: new Date().toISOString(), sourceFingerprint: fingerprint,
+        boundary: native ? 'finalized-native-history-snapshot' : 'owned-native-sdk-stream' };
     }
     capture.checkpoint = 'final';
     if (run.source && !cancellation) {
@@ -508,7 +546,7 @@ export function createClaudeRuntime({ loadQuery = sdkQuery, processOwner = ownCl
 
   return {
     capture(options) {
-      if (options.approvalsReviewer || options.selectedSkills?.length || options.profile?.nativeConfig)
+      if (options.selectedSkills?.length || options.profile?.nativeConfig)
         throw new Error('Codex-specific comparison overrides cannot be used for Claude Code');
       return execute(options);
     },

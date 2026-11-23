@@ -1,73 +1,87 @@
+import { useId } from 'react';
 import { Link } from 'react-router';
+import { Bookmark, ChevronRight, Columns2, FolderOpen, History, Info, LockKeyhole, Play,
+  ScanSearch, SlidersHorizontal, SquareTerminal, type LucideIcon } from 'lucide-react';
 import { apiGet } from '@/api/client';
-import type { Overview } from '@/api/types';
-import { TagPill } from '@/components/badges';
+import type { Overview, RecentItem } from '@/api/types';
 import { Loading, LoadError, Page, PageTitle, useInfo } from '@/components/layout';
+import { Button } from '@/components/ui/button';
 import { useResource } from '@/lib/useResource';
 
-const KIND = { task: 'Task', setup: 'Setup', saved: 'Saved' } as const;
+const recentKinds = {
+  task: { label: 'Task', icon: SquareTerminal },
+  setup: { label: 'Setup', icon: SlidersHorizontal },
+  saved: { label: 'Saved report', icon: Bookmark },
+};
 
-/** Two equal entries; nothing is preselected (DESIGN.md › Layout). */
 export function Landing() {
   const info = useInfo();
   const overview = useResource(() => apiGet<Overview>('/api/overview'), 'overview');
   const data = overview.data;
+  const sessionStatus = data?.sessions.text ?? (overview.loading ? 'Reading sessions…' : null);
+  const setupStatus = data?.setups.text ?? (overview.loading ? 'Reading profiles…' : null);
   return (
     <Page current="compare" title="Comparisons">
-      <PageTitle title="What do you want to compare?" />
+      <PageTitle title="Comparisons" breadcrumb={[{ label: 'Comparisons' }]} />
       {overview.error ? <LoadError error={overview.error} onRetry={overview.reload} /> : null}
-        <div className="grid gap-6" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))' }}>
-          <section className="panel flex flex-col gap-4" aria-labelledby="compare-task">
-            <div className="flex flex-col gap-1">
-              <h2 id="compare-task" className="text-heading">Compare a task</h2>
-              <p className="muted">See what two profiles did on the same task, what they produced, and what couldn’t be seen.</p>
-            </div>
-            <div className="landing-paths">
-              <EntryTile to="/compare/sessions" title="Use existing sessions" text="Work you already did in Codex CLI or Desktop. Reads history only."
-                status={data ? data.sessions.text : 'Reading sessions…'} />
-              {info?.features.runs ? (
-                <EntryTile to="/runs/new" title="Run a new task" text="Run one task with two sets of execution settings. Nothing starts until you review it."
-                  status={data?.runs.text ?? 'Checking profiles…'} />
-              ) : null}
-            </div>
-          </section>
-          <section className="panel flex flex-col gap-4" aria-labelledby="compare-setups">
-            <div className="flex flex-col gap-1">
-              <h2 id="compare-setups" className="text-heading">Compare setups</h2>
-              <p className="muted">Inspect one profile’s current sources, then compare setups from the same or different clients.</p>
-            </div>
-            <p className="text-meta font-medium mt-auto">{data ? data.setups.text : 'Reading profiles…'}</p>
-            <div>
-              <div className="flex flex-wrap gap-2"><Link className="btn" to="/profiles">Inspect a setup</Link><Link className="btn" to="/compare/setups">Choose two profiles</Link></div>
-            </div>
-          </section>
-        </div>
-      <section className="flex flex-col gap-3" aria-labelledby="recent">
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          {data?.recent.length ? <h2 id="recent" className="text-heading">Recent</h2> : <h2 id="recent" className="sr-only">Saved reports</h2>}
-          <Link to="/reports/open">Open a saved report…</Link>
+      <div className="landing-groups">
+        <section className="panel p-0 landing-group" aria-labelledby="compare-task">
+          <h2 id="compare-task" className="panel-head landing-group-heading"><SquareTerminal size={16} aria-hidden="true" /> Compare a task</h2>
+          <ul className="landing-actions list-none p-0">
+            <li><ActionLink to="/compare/sessions" title="Use existing sessions" icon={History}
+              description="Compare two recorded sessions. Reads history only." /></li>
+            {info?.features.runs ? <li><ActionLink to="/runs/new" title="Run a new task" icon={Play}
+              description="Prepare one task for two execution setups."
+              status={data?.runs.text ?? (overview.loading ? 'Checking profiles…' : undefined)} /></li> : null}
+          </ul>
+          {sessionStatus ? <p className="landing-group-note meta"><Info size={14} aria-hidden="true" /> {sessionStatus}</p> : null}
+        </section>
+        <section className="panel p-0 landing-group" aria-labelledby="compare-setups">
+          <h2 id="compare-setups" className="panel-head landing-group-heading"><SlidersHorizontal size={16} aria-hidden="true" /> Compare setups</h2>
+          <ul className="landing-actions list-none p-0">
+            <li><ActionLink to="/compare/setups" title="Choose two profiles" icon={Columns2}
+              description="Compare current settings, skills and integrations." /></li>
+            <li><ActionLink to="/profiles" title="Inspect a setup" icon={ScanSearch}
+              description="Read one profile’s current setup." /></li>
+          </ul>
+          {setupStatus ? <p className="landing-group-note meta"><LockKeyhole size={14} aria-hidden="true" /> {setupStatus}</p> : null}
+        </section>
+      </div>
+      <section className="flex flex-col gap-2" aria-labelledby="recent">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+          {data?.recent.length ? <h2 id="recent" className="text-body">Recent comparisons</h2> : <h2 id="recent" className="sr-only">Saved reports</h2>}
+          <Button asChild variant="ghost-link"><Link to="/reports/open"><FolderOpen size={16} aria-hidden="true" /> Open saved report</Link></Button>
         </div>
         {overview.loading && !data ? <Loading label="Reading recent work…" rows={2} /> : null}
-        {data?.recent.length ? (
-          <ul className="panel p-0 list-none">
-            {data.recent.map((item, index) => (
-              <li key={index} className="flex flex-wrap items-center gap-3 px-4 py-3 border-b last:border-b-0" style={{ borderColor: 'var(--color-divider)' }}>
-                <TagPill>{KIND[item.kind]}</TagPill>
-                <Link to={item.href} className="font-medium wrap-anywhere">{item.title}</Link>
-                <span className="meta">{item.meta}</span>
-              </li>
-            ))}
-          </ul>
-        ) : null}
+        {data?.recent.length ? <ul className="panel p-0 list-none landing-recent">
+          {data.recent.map((item, index) => <li key={index}><RecentLink item={item} /></li>)}
+        </ul> : null}
       </section>
     </Page>
   );
 }
 
-function EntryTile({ to, title, text, status }: { to: string; title: string; text: string; status: string }) {
-  return <div className="landing-path flex flex-col gap-2">
-    <Link to={to} className="text-ui font-semibold">{title}</Link>
-    <p className="hint">{text}</p>
-    <p className="meta">{status}</p>
-  </div>;
+function ActionLink({ to, title, icon: Icon, description, status }: {
+  to: string; title: string; icon: LucideIcon; description: string; status?: string;
+}) {
+  const id = useId();
+  return <Link to={to} className="landing-action" aria-labelledby={`${id}-title`} aria-describedby={`${id}-detail`}>
+    <Icon size={16} aria-hidden="true" />
+    <span className="landing-action-copy min-w-0 wrap-anywhere">
+      <span className="text-ui font-semibold" id={`${id}-title`}>{title}</span>
+      <span className="meta" id={`${id}-detail`}>{description}{status ? <span className="block">{status}</span> : null}</span>
+    </span>
+    <ChevronRight size={16} aria-hidden="true" />
+  </Link>;
+}
+
+function RecentLink({ item }: { item: RecentItem }) {
+  const id = useId();
+  const { icon: Icon, label } = recentKinds[item.kind];
+  return <Link to={item.href} className="landing-recent-link" aria-labelledby={`${id}-title`} aria-describedby={`${id}-detail`}>
+    <Icon size={16} aria-hidden="true" />
+    <span className="text-ui font-medium wrap-anywhere" id={`${id}-title`}>{item.title}</span>
+    <span className="meta landing-recent-meta wrap-anywhere" id={`${id}-detail`}><span className="sr-only">{label} · </span>{item.meta}</span>
+    <ChevronRight size={16} aria-hidden="true" />
+  </Link>;
 }

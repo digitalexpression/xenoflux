@@ -12,7 +12,7 @@ import { getAuditProcessIdentity } from './audit-process.js';
 import { assertCopilotEnvironment, assertCopilotRoots, copilotAccountRootIdentities, copilotAuth, copilotExecutableIdentity, copilotId, managedCopilotEnvironment, qualifiedCopilotRoute, COPILOT_SDK_VERSION } from './copilot-profile.js';
 import { decodeCopilotCatalog, selectCopilotSettings } from './copilot-catalog.js';
 import { readCopilotJournal } from './copilot-transcript-reader.mjs';
-import { copilotDecision } from './copilot-events.js';
+import { copilotDecision, copilotPermission } from './copilot-events.js';
 
 const ps = promisify(execFile);
 const { binding, env, accountQualification, paths, limit, operation, input } = workerData;
@@ -22,6 +22,7 @@ const pending = new Map();
 let child, closed, client, session, cleaning = false, bytes = 0, truncated = false, started = false, processIdentity, processFailure;
 let abortIdleObserved = false;
 let monitor, sampled = Promise.resolve(), sampling = false, inspectionFailed = false, unsubscribe;
+let retainCapture = true;
 const tracked = new Map();
 const originalSpawn = cp.spawn;
 const captureFailures = Object.freeze({
@@ -30,6 +31,8 @@ const captureFailures = Object.freeze({
   'session-create': 'Copilot could not create the owned native session.',
   'cwd-confirmation': 'Copilot did not confirm the exact working directory.',
   'model-confirmation': 'Copilot did not confirm the requested model, effort or route.',
+  'sandbox-settings': 'Copilot could not read the selected profile’s sandbox settings or support the requested network policy.',
+  'sandbox-confirmation': 'Copilot did not confirm an available native sandbox.',
   'permission-confirmation': 'Copilot did not confirm the native permission mode.',
   'session-checkpoint': 'Copilot could not checkpoint the owned native session.',
   'account-recheck': 'Copilot could not verify the account before initial submission.',
@@ -160,7 +163,7 @@ function installSpawn(out, err) {
       try {
         const left = Math.max(0, limit - bytes);
         // Metadata reads only persist their projected result in the coordinator.
-        if (left && operation === 'capture') writeSync(fd, data.subarray(0, left));
+        if (left && operation === 'capture' && retainCapture) writeSync(fd, data.subarray(0, left));
         bytes += data.length;
         if (bytes > limit) { truncated = true; stop.abort(); }
       } catch { processFailure = 'Copilot evidence write failed.'; stop.abort(); }
@@ -250,6 +253,28 @@ async function capture({ status, auth, publicAccount }) {
     ? decodeCopilotCatalog(await rpc(() => client.rpc.models.list({}))) : null;
   const selection = selectCopilotSettings(catalog, wanted);
   const permissionMode = selection.permissionMode ?? null;
+  let sandboxConfig;
+  if (input.networkAccess !== undefined || input.autonomous) {
+    captureStage = 'sandbox-settings';
+    // This RPC also returns unrelated private settings. Keep its reply out of raw capture.
+    retainCapture = false;
+    const { settings } = await rpc(() => client.rpc.user.settings.get());
+    const setting = settings?.sandbox;
+    const saved = setting?.value ?? {};
+    if (!setting || typeof saved !== 'object' || Array.isArray(saved)
+      || saved.enabled !== undefined && typeof saved.enabled !== 'boolean') throw new Error('Invalid Copilot sandbox settings.');
+    retainCapture = true;
+    const enabled = (saved.enabled ?? setting.default?.enabled) === true || input.networkAccess === false || input.autonomous === true;
+    if (enabled) {
+      sandboxConfig = { ...saved, enabled: true, allowBypass: false,
+        ...(input.networkAccess === undefined ? {} : { userPolicy: { ...saved.userPolicy,
+          network: { ...saved.userPolicy?.network, allowOutbound: input.networkAccess } } }),
+      };
+      const support = await rpc(() => client.rpc.sandbox.getHostSupport());
+      if (support?.supported !== true || input.networkAccess === true && !support.capabilities?.some(feature => feature.name === 'network' && feature.supported === true))
+        throw new Error('Copilot sandbox cannot enforce the requested network policy on this host.');
+    }
+  }
   const onPermissionRequest = () => ({ kind: 'no-result' });
   let startProof, startCount = 0, resolveStart;
   const observedStart = new Promise(resolve => { resolveStart = resolve; });
@@ -263,33 +288,64 @@ async function capture({ status, auth, publicAccount }) {
   };
   captureStage = 'session-create';
   session = await rpc(() => client.createSession({ onPermissionRequest, onEvent,
+    ...(sandboxConfig ? { sandboxConfig } : {}),
+    ...(input.autonomous ? { interactiveUser: false } : {}),
     ...(selection.model ? { model: selection.model } : {}),
     ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
     ...(selection.route ? { capi: { autoTier: selection.route } } : {}) }));
   const sessionId = session.sessionId;
-  let nativeIdle = false;
-  const permissions = new Set(), seenPermissions = new Set();
+  let nativeIdle = false, turnId;
+  const permissions = new Map(), seenPermissions = new Set();
   let finish, fail;
   const done = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
   done.catch(() => {});
+  const settlePermission = (requestId, result, decisionContext) => {
+    permissions.delete(requestId);
+    rpc(() => session.rpc.permissions.handlePendingPermissionRequest({ requestId, result, decisionContext }))
+      .then(response => { if (response?.success !== true) throw new Error('Copilot did not apply the permission decision.'); })
+      .catch(fail);
+  };
   unsubscribe = session.on(event => {
     if (event?.type === 'session.idle' && !event.agentId && !event.data?.agentId && !event.checkpoint && event.data?.aborted === true) {
       abortIdleObserved = true;
       send({ type: 'aborted-idle', value: true });
     }
     if (!started || stop.signal.aborted) return;
+    const ownedEvent = event && !event.agentId && !event.data?.agentId && !event.checkpoint && !event.data?.checkpoint
+      && (event?.sessionId == null || event.sessionId === sessionId) && (event?.data?.sessionId == null || event.data.sessionId === sessionId);
+    if (event?.type === 'assistant.turn_start' && ownedEvent) turnId = event.data?.turnId;
+    if (event?.type === 'assistant.turn_end' && ownedEvent && turnId === event.data?.turnId) turnId = undefined;
+    if (event?.type === 'permission.completed' && ownedEvent)
+      permissions.delete(event.data?.requestId);
     if (event?.type === 'session.idle' && !event.agentId && !event.data?.agentId && !event.checkpoint) {
       nativeIdle = true;
       permissions.clear();
     }
-    if (event?.type === 'permission.requested' && !event.agentId && !event.checkpoint && !event.data?.resolvedByHook) {
+    if (event?.type === 'permission.requested' && ownedEvent && !event.data?.resolvedByHook) {
       const requestId = event.data?.requestId;
-      if (!copilotId(requestId) || seenPermissions.has(requestId) || event.data.ownerSessionId !== sessionId) {
+      if (nativeIdle || !copilotId(requestId) || seenPermissions.has(requestId) || event.data.ownerSessionId !== sessionId) {
         fail(new Error('Copilot supplied an invalid permission identity.'));
         return;
       }
-      permissions.add(requestId);
+      let request;
+      try { request = copilotPermission(event, sessionId, turnId, binding.workspace, { allowSessionGrant: input.comparison }); }
+      catch (error) { fail(error); return; }
+      permissions.set(requestId, request);
       seenPermissions.add(requestId);
+      const assessment = event.data.assistedApprovalAssessment;
+      const { action, prompt, category } = request.params;
+      if (input.comparison && appliedPermission === 'assisted' && event.data.permissionMode === 'assisted'
+        && assessment?.status === 'completed' && assessment.recommendation === 'approve'
+        && !action.managedApprovalRequired && !prompt.managedApprovalRequired && ['commands', 'read', 'write', 'url'].includes(category)) {
+        settlePermission(requestId, { kind: 'approve-once' }, { source: 'assisted_approval', outcome: 'auto_approved',
+          surface: 'sdk', responseCapability: input.autonomous ? 'headless' : 'interactive' });
+        return;
+      }
+      if (input.autonomous) {
+        settlePermission(requestId, { kind: 'user-not-available' }, { source: 'unattended_fallback', outcome: 'autopilot_denied',
+          surface: 'sdk', responseCapability: 'headless' });
+        return;
+      }
     }
     send({ type: 'event', value: event });
   });
@@ -298,6 +354,13 @@ async function capture({ status, auth, publicAccount }) {
   const cwdConfirmed = () => startCount === 1 && copilotId(startProof?.eventId) && startProof.sessionId === sessionId
     && (startProof.streamSessionId === undefined || startProof.streamSessionId === sessionId) && startProof.cwd === binding.workspace;
   if (!cwdConfirmed()) throw new Error('Copilot did not confirm the exact working directory.');
+  if (sandboxConfig) {
+    captureStage = 'sandbox-confirmation';
+    // The protocol version alone cannot prove that session.create understood the sandbox field.
+    const applied = await rpc(() => session.rpc.options.update({ sandboxConfig }));
+    const enforcement = await rpc(() => session.rpc.sandbox.getEnforcementStatus());
+    if (applied?.success !== true || enforcement?.blocked !== false) throw new Error('Copilot sandbox is unavailable.');
+  }
   captureStage = 'model-confirmation';
   const confirmed = await rpc(() => session.rpc.model.getCurrent());
   if (selection.model && confirmed.modelId !== selection.model || selection.route && confirmed.autoTier !== selection.route
@@ -314,7 +377,8 @@ async function capture({ status, auth, publicAccount }) {
     appliedPermission = ['manual', 'assisted', 'allow-all'].includes(mode.mode) ? mode.mode : null;
   }
   captureStage = 'session-checkpoint';
-  await checkpoint('session', { sessionId, version: status.version, account: publicAccount, selection, confirmed: {
+  await checkpoint('session', { sessionId, version: status.version, account: publicAccount,
+    selection: { ...selection, ...(sandboxConfig && input.networkAccess !== undefined ? { networkAccess: input.networkAccess } : {}) }, confirmed: {
     model: copilotId(confirmed.modelId) ? confirmed.modelId : null,
     reasoningEffort: copilotId(confirmed.reasoningEffort) ? confirmed.reasoningEffort : null,
     route: copilotId(confirmed.autoTier) ? confirmed.autoTier : null, permissionMode: appliedPermission,
@@ -328,10 +392,13 @@ async function capture({ status, auth, publicAccount }) {
     if (message.done && nativeIdle) finish(true);
     if (message.permission && started && !nativeIdle && !stop.signal.aborted) {
       const { requestId, result } = message.permission;
-      if (!permissions.delete(requestId)) { fail(new Error('Copilot permission request is stale.')); return; }
-      rpc(() => session.rpc.permissions.handlePendingPermissionRequest({ requestId, result: copilotDecision(result) }))
-        .then(response => { if (response?.success !== true) throw new Error('Copilot did not apply the user decision.'); })
-        .catch(fail);
+      const request = permissions.get(requestId);
+      if (!request) { fail(new Error('Copilot permission request is stale.')); return; }
+      try {
+        const decision = copilotDecision(result, request);
+        if (decision.kind === 'approve-once') decision.approvedInteractively = true;
+        settlePermission(requestId, decision, { source: 'human_response', outcome: 'prompted_user', surface: 'sdk', responseCapability: 'interactive' });
+      } catch (error) { fail(error); }
     }
   };
   parentPort.on('message', handleControl);

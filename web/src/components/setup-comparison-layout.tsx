@@ -17,6 +17,20 @@ const categoryIcons: Record<string, LucideIcon> = {
 };
 const clientIcons: Record<ProfileClient, LucideIcon> = { codex: Terminal, 'claude-code': Asterisk, copilot: Terminal };
 
+export function SetupCategoryGroup({ category, label, description, open, onToggle, children }: {
+  category: string; label: string; description: string; open: boolean; onToggle: () => void; children: ReactNode;
+}) {
+  const bodyId = useId();
+  const Icon = categoryIcons[category] ?? FileText;
+  return <section className="setup-compare-group" aria-label={label}>
+    <h3><button className="setup-compare-category" type="button" aria-expanded={open} aria-controls={bodyId} onClick={onToggle}>
+      <span className="flex items-center gap-2 font-semibold"><ChevronRight className="setup-compare-chevron" size={14} aria-hidden="true" /><Icon className="setup-compare-category-icon" size={16} aria-hidden="true" />{label}</span>
+      <span className="hint text-right">{description}</span>
+    </button></h3>
+    <div id={bodyId} hidden={!open}>{open ? children : null}</div>
+  </section>;
+}
+
 export function ProfileIdentity({ profile, side }: { profile: SetupSelection; side: Side }) {
   const Icon = clientIcons[profile.client];
   return <span className="flex items-center gap-2 min-w-0">
@@ -94,7 +108,6 @@ export function SetupComparisonWorkspace<Row extends SetupResultRow>({ profiles,
   const rowTrigger = useRef<HTMLButtonElement>(null);
   const inspectorHeading = useRef<HTMLHeadingElement>(null);
   const results = useRef<HTMLDivElement>(null);
-  const prefix = useId();
   useEffect(() => {
     if (!narrow) setSheetOpen(false);
   }, [narrow]);
@@ -155,23 +168,14 @@ export function SetupComparisonWorkspace<Row extends SetupResultRow>({ profiles,
       <div ref={results} className="setup-compare-results" role="region" aria-label="Comparison results" tabIndex={0}>
         {visible.map(group => {
           const open = openGroups[group.id] ?? (filtered || group.id === defaultGroup?.id);
-          const Icon = categoryIcons[group.id] ?? FileText;
-          const headerId = `${prefix}-${group.id}`;
-          return <section key={group.id} className="setup-compare-group" aria-label={group.label}>
-            <h3><button id={headerId} className="setup-compare-category" type="button" aria-expanded={open}
-              aria-controls={`${headerId}-body`} onClick={() => setOpenGroups(value => ({ ...value, [group.id]: !open }))}>
-              <span className="flex items-center gap-2 font-semibold"><ChevronRight className="setup-compare-chevron" size={14} aria-hidden="true" /><Icon className="setup-compare-category-icon" size={16} aria-hidden="true" />{group.label}</span>
-              <span className="hint">{group.rows.length} {group.rows.length === 1 ? 'item' : 'items'}</span>
-            </button></h3>
-            <div id={`${headerId}-body`} hidden={!open}>
-              {open ? <>
-                {group.rows.length ? <ul className="list-none p-0">{group.rows.map(row => <ResultRow key={row.id} row={row} profiles={profiles}
-                  selected={row.id === current?.id} opensSheet={narrow} onSelect={trigger => choose(row, trigger)} />)}</ul>
-                  : <p className="setup-compare-notice hint">No items were observed in this category.</p>}
-                {group.coverage}
-              </> : null}
-            </div>
-          </section>;
+          return <SetupCategoryGroup key={group.id} category={group.id} label={group.label} open={open}
+            description={`${group.rows.length} ${group.rows.length === 1 ? 'item' : 'items'}`}
+            onToggle={() => setOpenGroups(value => ({ ...value, [group.id]: !open }))}>
+            {group.rows.length ? <ul className="list-none p-0">{group.rows.map(row => <ResultRow key={row.id} row={row} profiles={profiles}
+              selected={row.id === current?.id} opensSheet={narrow} onSelect={trigger => choose(row, trigger)} />)}</ul>
+              : <p className="setup-compare-notice hint">No items were observed in this category.</p>}
+            {group.coverage}
+          </SetupCategoryGroup>;
         })}
         {!rows.length && (filtered || !visible.length) ? <div className="flex flex-wrap items-center gap-2 p-3">
           <p className="text-ui">{filtered ? 'Nothing matches this view.' : 'No items were observed.'}</p>

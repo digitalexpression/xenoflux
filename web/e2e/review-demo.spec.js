@@ -8,7 +8,7 @@ test('demo review stays labelled simulated and its frozen task response survives
   const page = await browser.newPage();
   try {
     await page.goto(server.launchUrl);
-    await page.getByRole('heading', { name: 'What do you want to compare?' }).waitFor();
+    await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
     await page.goto(`${server.origin}/reports/demo-run`);
     await page.getByRole('link', { name: 'Review', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Reviews', level: 1 })).toBeVisible();

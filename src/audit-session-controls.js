@@ -72,8 +72,9 @@ export function compareSessionControls(left, right, { conditions } = {}) {
   add('execution-location', 'Original execution location', 'harness', 'observed', runs.map(run =>
     historicalImport(run) ? null : text(run.clientIdentity?.executionLocation)),
   'Original captured execution location only; the local location of an imported file does not establish where the task ran.');
-  add('native-version', 'Native version', 'harness', 'observed', cores.map(core => core.observedControls?.nativeVersion),
-    'Retained native version; equal versions do not establish equal historical configuration.', controlComparable);
+  add('native-version', 'Native version', 'harness', 'observed', cores.map((core, index) =>
+    core.observedControls?.nativeVersion ?? text(runs[index].settingsEvidence?.confirmed?.version)),
+  'Version reported by the native client at startup or in its session history.', controlComparable);
   for (const [index, control] of controls.entries()) {
     for (const stage of ['requested', 'sent', 'confirmed', 'observed']) {
       add(`${control.key}-${stage}`, control.name, control.group, stage, views.map(view => view.settings[index][stage]),
@@ -101,6 +102,9 @@ export function compareSessionControls(left, right, { conditions } = {}) {
     add(`condition-${key}`, name, 'inputs', null, [field?.left ?? null, field?.right ?? null],
       'Canonical retained comparison conditions; this row does not change task or metric eligibility.');
   }
+  const fileGlobs = list(conditions?.fields).find(row => row.key === 'editableFileGlobs');
+  if (fileGlobs) add('condition-editableFileGlobs', 'Editable wildcard patterns', 'inputs', null, [fileGlobs.left, fileGlobs.right],
+    'Recorded wildcard patterns for observed editing scope. This row does not change task or metric eligibility.');
   const setup = list(conditions?.fields).find(row => row.key === 'setup');
   add('setup-inputs', 'Setup and native configuration inputs', 'inputs', null, [setup?.left ?? null, setup?.right ?? null],
     'This fingerprint combines setup recipes and the entire nativeConfig, including model. A difference alone cannot identify a harness change; a match cannot establish full historical equality.');

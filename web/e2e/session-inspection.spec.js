@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { appendFile, readFile, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createUiBrowserFixture } from '../../test-support/ui-browser-fixture.js';
 import { createMixedClientFixture } from '../../test-support/ui-mixed-client-fixture.js';
@@ -105,7 +106,7 @@ for (const [client, profile, title, response] of [
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       const ref = decodeURIComponent(new URL(page.url()).pathname.split('/').at(-1));
       const exported = await app.provider.exportReport({ ref, includeReplayContent: true });
-      const file = join(exported.folder, exported.files[1]);
+      const file = join(exported.folder.replace(/^~(?=\/|$)/, homedir()), exported.files[1]);
       const text = await readFile(file, 'utf8');
       expect(JSON.parse(text).kind).toBe('audit-run');
       expect(text).toContain(response);

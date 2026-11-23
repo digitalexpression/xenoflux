@@ -451,7 +451,8 @@ test('two comparisons and two reviews overlap on one profile with separate setti
   assert.deepEqual(new Set((await app.provider.info()).activeJobs.map(job => job.id)), new Set(jobs));
   assert.equal((await readProfileOwners(app.homes.baseline.root)).length, 6);
   assert.equal(new Set([one, two, first, second].map(row => row.pendingRequests[0].requestId)).size, 4);
-  assert.equal(new Set([...captures.values()].map(options => options.workspace)).size, 4);
+  assert.deepEqual(new Set(captures.keys()), new Set(['c1-a', 'c1-b', 'c2-a', 'c2-b', 'r1', 'r2']));
+  assert.equal(new Set([...captures.values()].map(options => options.workspace)).size, 6);
   assert.equal(new Set([...captures.values()].map(options => options.profile.home)).size, 1);
   await assert.rejects(app.provider.renameProfile({ name: 'baseline', newName: 'busy' }), /locked by a run/);
   await assert.rejects(startReview('conflict', workspace, 'low'), { code: 'review-workspace-busy' });
@@ -483,7 +484,6 @@ test('two comparisons and two reviews overlap on one profile with separate setti
   assert.match(done[1].frozenPrompt, /^Review r1/);
   assert.match(done[2].frozenPrompt, /^Review r2/);
   assert.equal(done[1].sourceEvidenceFingerprint, done[2].sourceEvidenceFingerprint);
-  assert.equal(captures.has('c2-b'), false);
   assert.deepEqual(approvals, new Map([['c1-a', 'accept'], ['r1', 'decline'], ['r2', 'accept']]));
   await app.restartServer();
   assert.deepEqual(await app.provider.startRun({ previewToken: c1 }), { id: c1 });
@@ -509,9 +509,10 @@ test('shutdown waits for an ordinary review even when comparison receipt cleanup
   const review = await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
   await until(() => app.provider.reviewTask(review), task => task.status === 'running', 'Review did not start');
   mode.capture = 'delayed';
+  const previousCaptures = app.calls.captures.length;
   const runPreview = await app.provider.runPreview(input(app));
   const comparison = await app.provider.startRun({ previewToken: runPreview.previewToken });
-  await until(() => app.calls.captures.length, count => count === 3, 'Comparison did not start');
+  await until(() => app.calls.captures.length, count => count === previousCaptures + 2, 'Both comparison sides did not start');
   await writeFile(join(app.store.directory, 'ui-runs', `${comparison.id}.json`), 'corrupt receipt');
   let settled = false;
   const closing = app.provider.close().finally(() => { settled = true; });

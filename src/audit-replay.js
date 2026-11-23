@@ -134,6 +134,7 @@ async function retainedContext(store, current, read) {
       'selectedSkills', 'profileOrder', 'trialIndex', 'environment', 'baseline']) {
       if (previous[key] !== undefined && !isDeepStrictEqual(previous[key], joined[key])) throw Error('condition-binding');
     }
+    if (!isDeepStrictEqual(previous.editableFileGlobs, joined.editableFileGlobs)) throw Error('condition-binding');
     for (const key of ['qualityFingerprint', 'recipeFingerprint']) if (previous[key] != null
       && previous[key] !== joined[key]) throw Error('condition-binding');
     if (previous.variables?.length && !isDeepStrictEqual(previous.variables, joined.variables)) throw Error('condition-binding');

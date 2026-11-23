@@ -27,30 +27,58 @@ for (const theme of ['light', 'dark']) {
     }
   });
 
-  test(`report presents conditions and coverage before responses with solid keyboard focus in ${theme}`, async ({ page }, testInfo) => {
+  test(`comparison hub and report keep keyboard focus visible in ${theme}`, async ({ page }, testInfo) => {
     await page.getByRole('combobox', { name: 'Theme' }).selectOption(theme);
-    await page.getByRole('link', { name: /^Use existing sessions/ }).click();
+    const task = page.getByRole('region', { name: 'Compare a task', exact: true });
+    const setups = page.getByRole('region', { name: 'Compare setups', exact: true });
+    const saved = page.getByRole('region', { name: 'Saved reports', exact: true });
+    const existing = task.getByRole('link', { name: 'Use existing sessions', exact: true });
+    await expect(existing).toHaveAttribute('href', '/compare/sessions');
+    await expect(existing).toHaveAccessibleDescription(/\S/);
+    await expect(task.getByRole('link', { name: 'Run a new task', exact: true })).toHaveAttribute('href', '/runs/new');
+    await expect(setups.getByRole('link', { name: 'Choose two profiles', exact: true })).toHaveAttribute('href', '/compare/setups');
+    await expect(setups.getByRole('link', { name: 'Inspect a setup', exact: true })).toHaveAttribute('href', '/profiles');
+    await expect(saved.getByRole('link', { name: 'Open saved report', exact: true })).toHaveAttribute('href', '/reports/open');
+    for (const width of [320, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`comparisons-${theme}-${width}.png`), fullPage: true });
+    }
+    await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).focus();
+    await page.keyboard.press('Tab');
+    await expect(existing).toBeFocused();
+    await expect(existing).toHaveCSS('outline-style', 'solid');
+    await page.keyboard.press('Enter');
     await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Fix the date test');
     await page.getByRole('checkbox', { name: /Fix the date test, baseline, Codex CLI/ }).check();
     await page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop/ }).check();
     await page.getByRole('button', { name: 'Compare sessions', exact: true }).click();
+    const groups = page.locator('#report-overview details > summary').filter({
+      hasText: /^(Run facts|Time and tokens|Outcome|Conditions and coverage)$/,
+    });
+    await expect(groups).toHaveText(['Run facts', 'Time and tokens', 'Outcome', 'Conditions and coverage']);
+    await groups.filter({ hasText: /^Outcome$/ }).click();
     await expect(page.getByRole('heading', { name: 'Last recorded response', exact: true })).toBeVisible();
-    const headings = await page.getByRole('heading', { level: 2 }).allTextContents();
-    expect(headings.indexOf('Conditions')).toBeLessThan(headings.indexOf('Last recorded response'));
-    expect(headings.indexOf('What we could not see')).toBeLessThan(headings.indexOf('Last recorded response'));
-    for (const target of [page.locator('[data-slot="trace"] button').first()]) {
-      await target.focus();
-      await page.keyboard.press('Tab');
-      await page.keyboard.press('Shift+Tab');
-      await expect(target).toBeFocused();
-      await expect(target).toHaveCSS('outline-style', 'solid');
-      await expect(target).toHaveCSS('outline-width', '2px');
-      await expect(target).toHaveCSS('outline-offset', '2px');
-    }
+    await groups.filter({ hasText: /^Outcome$/ }).click();
     for (const width of [1280, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: testInfo.outputPath(`report-${theme}-${width}.png`), fullPage: true });
+      await page.screenshot({ path: testInfo.outputPath(`grouped-evidence-${theme}-${width}.png`), fullPage: true });
+    }
+    await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+    await page.getByRole('button', { name: 'Chat', exact: true }).click();
+    const trace = page.locator('#report-activity [data-slot="trace"] button').first();
+    await trace.focus();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    await expect(trace).toBeFocused();
+    await expect(trace).toHaveCSS('outline-style', 'solid');
+    await expect(trace).toHaveCSS('outline-width', '2px');
+    await expect(trace).toHaveCSS('outline-offset', '2px');
+    for (const width of [1280, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`replay-${theme}-${width}.png`), fullPage: true });
     }
   });
 }

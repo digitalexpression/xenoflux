@@ -94,6 +94,10 @@ test('Profiles refresh and edits recover only verified stopped reservations', as
   await lstat(join(live.native.root, '.run-lock'));
   await provider.bindProfile({ name: stopped.name, repository: f.root });
   assert.deepEqual((await provider.profiles()).profiles.find(p => p.name === stopped.name).repositories, [f.root]);
+  const bound = (await f.store.read()).profiles.find(profile => profile.id === stopped.id);
+  await provider.bindProfile({ name: stopped.name, repository: f.root, ensure: true });
+  assert.deepEqual((await f.store.read()).profiles.find(profile => profile.id === stopped.id), bound);
+  await assert.rejects(provider.bindProfile({ name: stopped.name, repository: f.root }), { code: 'bind-failed' });
   await acquire(lock, deadOwner);
   await provider.unbindProfile({ name: stopped.name, repository: f.root });
   await assert.rejects(lstat(lock), { code: 'ENOENT' });

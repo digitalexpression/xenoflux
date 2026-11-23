@@ -94,16 +94,19 @@ test('a changed parent recipe/baseline/profile refuses enrichment before source 
 });
 
 test('recorded condition fingerprints cannot be replaced by a changed parent definition', async () => {
-  const f = fixture();
-  const initial = await projectRetainedAuditRun({}, f.current, f.adapters);
-  f.current.report.comparisonConditions = initial.comparisonConditions;
-  f.parent.record.task = 'different task';
-  let read = false;
-  f.adapters.readNative = async () => { read = true; return f.native; };
-  const run = await projectRetainedAuditRun({}, f.current, f.adapters);
-  assert.equal(run.reportProjection.context, 'unavailable');
-  assert.equal(read, false);
-  assert.deepEqual(run.comparisonConditions, initial.comparisonConditions);
+  for (const change of [f => { f.parent.record.task = 'different task'; },
+    f => { f.parent.record.spec.taskContract.editableFileGlobs = ['src/**/*.js']; }]) {
+    const f = fixture();
+    const initial = await projectRetainedAuditRun({}, f.current, f.adapters);
+    f.current.report.comparisonConditions = initial.comparisonConditions;
+    change(f);
+    let read = false;
+    f.adapters.readNative = async () => { read = true; return f.native; };
+    const run = await projectRetainedAuditRun({}, f.current, f.adapters);
+    assert.equal(run.reportProjection.context, 'unavailable');
+    assert.equal(read, false);
+    assert.deepEqual(run.comparisonConditions, initial.comparisonConditions);
+  }
 });
 
 test('conflicting original turn controls remain unknown instead of being overwritten', async () => {

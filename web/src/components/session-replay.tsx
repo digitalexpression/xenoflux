@@ -1,5 +1,5 @@
 import { useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from 'react';
-import { ChevronRight, FileDiff, GitBranch, Terminal, Wrench } from 'lucide-react';
+import { ChevronRight, CircleDot, CornerDownRight, FileDiff, GitBranch, List, MessageSquare, MessagesSquare, Terminal, Wrench } from 'lucide-react';
 import { Message, MessageContent, MessageHeader } from '@/components/ui/message';
 import { Bubble, BubbleContent } from '@/components/ui/bubble';
 import { Trace, TraceLine, TraceIcon, TraceTitle, TraceDescription } from '@/components/ui/trace';
@@ -17,9 +17,17 @@ import { ReplayAgentPanel } from '@/components/replay-agent-panel';
 
 type Side = 'a' | 'b';
 type ReplaySide = { side: Side; profile: string; client?: string; replay: SessionReplay | null };
-type Row = { side: Side; profile: string; replay: SessionReplay; session: ReplaySession; event: ReplayEvent; key: string; at: number | null; elapsedMs: number | null };
+type Row = { side: Side; profile: string; replay: SessionReplay; session: ReplaySession; event: ReplayEvent; key: string; elapsedMs: number | null };
 type ReplayLocation = { selectedKey: string; query: string; inspecting: boolean; revealed: boolean; originSide: Side; originScroll: number; inspectorScroll: number; openDetails: boolean[] };
+type ClockSource = NonNullable<ReplayEvent['timestampSource']> | 'recorded';
+type ReplayClock = { source: ClockSource; origin: number; span: number | null };
+type ReplayPresentation = 'compact' | 'chat';
 const NAVIGATION_LIMIT = 8;
+const clockLabels: Record<ClockSource, string> = {
+  native: 'Native timestamps',
+  observed: 'Observed arrival times',
+  recorded: 'Recorded timestamps',
+};
 // Reuse the locale formatter across the thousands of timestamps in a replay.
 const timeFormatter = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
@@ -29,13 +37,12 @@ function date(value: string | null): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function clock(value: string | null): string {
+function clock(value: string | null): string | null {
   const parsed = date(value);
-  return parsed === null ? 'Time not recorded' : timeFormatter.format(parsed);
+  return parsed === null ? null : timeFormatter.format(parsed);
 }
 
-function elapsed(value: number | null): string {
-  if (value === null) return 'Time not recorded';
+function elapsed(value: number): string {
   const seconds = Math.round(value / 1000);
   const sign = seconds < 0 ? '−' : '+';
   const absolute = Math.abs(seconds);
@@ -45,12 +52,12 @@ function elapsed(value: number | null): string {
 function statusText(event: ReplayEvent): string {
   const reason = event.bodyReason === 'event-body-limit' ? 'The event exceeded the 1 MiB body limit.'
     : event.bodyReason === 'total-body-limit' ? 'The replay reached its aggregate body limit.'
-      : event.bodyReason === 'missing-body' ? 'The native record did not contain readable body text.' : event.bodyReason;
+      : event.bodyReason === 'missing-body' || event.bodyReason === 'opaque-or-missing-content' ? 'The native record did not contain readable body text.' : event.bodyReason;
   switch (event.bodyStatus) {
     case 'included': return event.body ? 'Recorded content available' : 'No body recorded';
     case 'truncated': return `Recorded content truncated${reason ? ` · ${reason}` : ''}`;
     case 'omitted': return `Content omitted from this replay${reason ? ` · ${reason}` : ''}`;
-    case 'unavailable': return `Content unavailable${reason ? ` · ${reason}` : ''}`;
+    case 'unavailable': return reason === 'not-recorded' ? 'No content recorded' : `Content unavailable${reason ? ` · ${reason}` : ''}`;
   }
 }
 
@@ -97,15 +104,71 @@ function eventLabel(event: ReplayEvent): string {
   return event.label.replace(/^Delegated agent (started|completed) \1$/, 'Delegated agent $1');
 }
 
-function rootSpan(replay: SessionReplay | null): number | null {
+function replayClock(replay: SessionReplay | null): ReplayClock | null {
   const roots = replay?.sessions.filter(session => session.parentId === null) ?? [];
-  const root = roots.length === 1 ? roots[0] : null;
-  const stamps = root?.events.map(event => date(event.timestamp)).filter((value): value is number => value !== null) ?? [];
-  return stamps.length >= 2 ? Math.max(...stamps) - Math.min(...stamps) : null;
+  if (roots.length !== 1 || !roots[0]) return null;
+  const times: Record<ClockSource, number[]> = { native: [], recorded: [], observed: [] };
+  for (const event of roots[0].events) {
+    const at = date(event.timestamp);
+    if (at !== null) times[event.timestampSource ?? 'recorded'].push(at);
+  }
+  const sources: ClockSource[] = ['native', 'recorded', 'observed'];
+  const source = sources.find(key => times[key].length >= 2) ?? sources.find(key => times[key].length > 0);
+  if (!source) return null;
+  const rootTimes = times[source];
+  const origin = Math.min(...rootTimes);
+  return { source, origin, span: rootTimes.length >= 2 ? Math.max(...rootTimes) - origin : null };
 }
 
-function TreeSession({ side, session, rootId, name, search, hasMatches, onAgent, origin, children, selectedKey, visibleKeys, onSelect, onMove }:
-  { side: Side; session: ReplaySession; rootId: string; name: string; search: string; hasMatches: boolean; onAgent: (trigger: HTMLButtonElement) => void; origin: number | null; children: ReactNode; selectedKey: string;
+function eventElapsed(event: ReplayEvent, axis: ReplayClock | null): number | null {
+  const at = date(event.timestamp);
+  return axis && at !== null && axis.source === (event.timestampSource ?? 'recorded') ? at - axis.origin : null;
+}
+
+function layOutTimedStops(rows: Row[], axisSpan: number) {
+  const last = [-Infinity, -Infinity, -Infinity, -Infinity];
+  const layers = new Map<string, number>();
+  for (const row of [...rows].sort((a, b) => a.elapsedMs! - b.elapsedMs!)) {
+    const layer = last.findIndex(at => row.elapsedMs! - at >= axisSpan / 16);
+    if (layer === -1) return null;
+    last[layer] = row.elapsedMs!;
+    layers.set(row.key, layer);
+  }
+  return { layers, count: Math.max(1, last.filter(Number.isFinite).length) };
+}
+
+function replayForest(sessions: ReplaySession[]) {
+  const ids = new Set(sessions.map(session => session.id));
+  const children = new Map<string, ReplaySession[]>();
+  const roots: ReplaySession[] = [];
+  for (const session of sessions) {
+    if (!session.parentId || !ids.has(session.parentId)) roots.push(session);
+    else {
+      const siblings = children.get(session.parentId) ?? [];
+      siblings.push(session);
+      children.set(session.parentId, siblings);
+    }
+  }
+  return { children, roots };
+}
+
+function stackedSessions(sessions: ReplaySession[]) {
+  const { children, roots } = replayForest(sessions);
+  const seen = new Set<string>();
+  const ordered: ReplaySession[] = [];
+  function add(session: ReplaySession) {
+    if (seen.has(session.id)) return;
+    seen.add(session.id);
+    ordered.push(session);
+    children.get(session.id)?.forEach(add);
+  }
+  roots.forEach(add);
+  sessions.forEach(add);
+  return ordered;
+}
+
+function TreeSession({ side, session, rootId, name, search, hasMatches, onAgent, axis, presentation, children, selectedKey, visibleKeys, onSelect, onMove }:
+  { side: Side; session: ReplaySession; rootId: string; name: string; search: string; hasMatches: boolean; onAgent: (trigger: HTMLButtonElement) => void; axis: ReplayClock | null; presentation: ReplayPresentation; children: ReactNode; selectedKey: string;
     visibleKeys: Set<string>; onSelect: (event: ReplayEvent, session: ReplaySession, inspect?: boolean) => void; onMove: (delta: number) => void }) {
   const disclosure = useRef<HTMLDetailsElement>(null);
   const [expandedTurns, setExpandedTurns] = useState<Record<string, boolean>>({});
@@ -122,18 +185,26 @@ function TreeSession({ side, session, rootId, name, search, hasMatches, onAgent,
       beforeSearch.current = null;
     }
   }, [search, hasMatches]);
-  const turns = new Map<string, { index: number; events: ReplayEvent[] }>();
+  const turnNumbers = new Map<string, { number: number; firstEvent: string }>();
+  const turns: { id: string | null; key: string; events: ReplayEvent[] }[] = [];
   for (const event of session.events) {
-    const turn = event.turnId ?? 'unassigned';
-    if (!turns.has(turn)) turns.set(turn, { index: turns.size + 1, events: [] });
-    if (visibleKeys.has(`${side}:${session.id}:${event.id}`)) turns.get(turn)!.events.push(event);
+    if (event.turnId !== null && !turnNumbers.has(event.turnId)) {
+      turnNumbers.set(event.turnId, { number: turnNumbers.size + 1, firstEvent: event.id });
+    }
+    if (turns.at(-1)?.id !== event.turnId) turns.push({ id: event.turnId, key: event.id, events: [] });
+    if (visibleKeys.has(`${side}:${session.id}:${event.id}`)) turns.at(-1)!.events.push(event);
   }
   function eventRow(event: ReplayEvent) {
     const key = `${side}:${session.id}:${event.id}`;
+    const at = date(event.timestamp);
+    const stamp = at === null ? null : timeFormatter.format(at);
+    const timeLabel = stamp ? <> · <time dateTime={event.timestamp!}>{stamp}</time></> : null;
+    const millis = eventElapsed(event, axis);
+    const relative = millis === null ? stamp : elapsed(millis);
     const trigger = {
       'data-replay-event': key, tabIndex: key === selectedKey ? 0 : -1,
       'aria-current': key === selectedKey ? 'true' as const : undefined,
-      'aria-label': `${eventLabel(event)} · ${clock(event.timestamp)}`,
+      'aria-label': stamp ? `${eventLabel(event)} · ${stamp}` : eventLabel(event),
       onFocus: () => onSelect(event, session), onClick: () => onSelect(event, session, true),
       onKeyDown: (keyEvent: React.KeyboardEvent<HTMLButtonElement>) => {
         if (keyEvent.key === 'ArrowDown' || keyEvent.key === 'ArrowUp') {
@@ -141,11 +212,11 @@ function TreeSession({ side, session, rootId, name, search, hasMatches, onAgent,
         }
       },
     };
-    if (event.kind === 'message') {
+    if (presentation === 'chat' && event.kind === 'message') {
       const align = event.role === 'user' ? 'end' : 'start';
       return <Message key={event.id} align={align}>
         <MessageContent>
-          <MessageHeader>{event.role === 'user' ? 'You' : event.role === 'assistant' ? 'Assistant' : event.label} · {clock(event.timestamp)}</MessageHeader>
+          <MessageHeader><span>{event.role === 'user' ? 'You' : event.role === 'assistant' ? 'Assistant' : event.label}{timeLabel}</span></MessageHeader>
           <Bubble variant={align === 'end' ? 'secondary' : 'outline'} align={align}>
             <BubbleContent asChild><button type="button" {...trigger}>
               <span className="line-clamp-3 whitespace-pre-wrap">{event.body ? event.body.slice(0, 300) : statusText(event)}</span>
@@ -155,12 +226,14 @@ function TreeSession({ side, session, rootId, name, search, hasMatches, onAgent,
         </MessageContent>
       </Message>;
     }
-    if (event.kind === 'session' || event.kind === 'turn') return <Marker key={event.id}><MarkerContent><Button variant="replay" {...trigger}>{eventLabel(event)} · {clock(event.timestamp)}</Button></MarkerContent></Marker>;
-    const Icon = event.kind === 'file-change' ? FileDiff : event.kind === 'delegation' ? GitBranch : event.kind === 'command' ? Terminal : Wrench;
+    const marker = event.kind === 'session' || event.kind === 'turn';
+    if (presentation === 'chat' && marker) return <Marker key={event.id}><MarkerContent><Button variant="replay" {...trigger}><span>{eventLabel(event)}{timeLabel}</span></Button></MarkerContent></Marker>;
+    const Icon = marker ? CircleDot : event.kind === 'message' ? MessageSquare : event.kind === 'file-change' ? FileDiff
+      : event.kind === 'delegation' ? GitBranch : event.kind === 'command' ? Terminal : Wrench;
     return <Button key={event.id} variant="replay" {...trigger}>
       <TraceLine status={event.kind === 'error' ? 'error' : undefined}>
         <TraceIcon><Icon /></TraceIcon><TraceTitle>{eventLabel(event)}</TraceTitle>
-        <TraceDescription>{origin !== null && date(event.timestamp) !== null ? elapsed(date(event.timestamp)! - origin) : 'No time'}</TraceDescription><TraceIcon><ChevronRight /></TraceIcon>
+        {relative ? <TraceDescription>{relative}</TraceDescription> : null}<TraceIcon><ChevronRight /></TraceIcon>
       </TraceLine>
     </Button>;
   }
@@ -170,21 +243,24 @@ function TreeSession({ side, session, rootId, name, search, hasMatches, onAgent,
     </summary>
     <Button variant="ghost-link" onClick={event => onAgent(event.currentTarget)}>View {name} summary</Button>
     {!session.events.length ? <p className="hint">{session.status === 'ready' ? 'No activity recorded in this session.' : `Activity unavailable: ${session.reason ?? 'The session history could not be read completely.'}`}</p> : null}
-    {[...turns].filter(([, turn]) => turn.events.length).map(([turn, { index, events }]) => {
+    {turns.filter(turn => turn.events.length).map(({ id, key, events }) => {
+      const turn = id === null ? null : turnNumbers.get(id)!;
+      const disclosureKey = turn?.firstEvent ?? key;
       const groups: ReplayEvent[][] = [];
-      for (const event of events) {
+      if (presentation === 'chat') for (const event of events) {
         const last = groups.at(-1);
         if (!['message', 'session', 'turn'].includes(event.kind) && last && !['message', 'session', 'turn'].includes(last[0]!.kind)) last.push(event);
         else groups.push([event]);
       }
-      return <details key={turn} open={Boolean(search) || expandedTurns[turn] !== false} className="flex flex-col gap-3">
-        <summary className="cursor-pointer meta" title={turn} onClick={event => {
+      return <details key={key} open={Boolean(search) || expandedTurns[disclosureKey] !== false} className="flex flex-col gap-3">
+        <summary className="cursor-pointer meta" title={id ?? undefined} onClick={event => {
           event.preventDefault();
           if (search) return;
           const open = !(event.currentTarget.parentElement as HTMLDetailsElement).open;
-          setExpandedTurns(previous => previous[turn] === open ? previous : { ...previous, [turn]: open });
-        }}>Turn {index}{turn === 'unassigned' ? ' · identifier not recorded' : ''}</summary>
-        {groups.map(group => group[0] && ['message', 'session', 'turn'].includes(group[0].kind) ? eventRow(group[0]) : <Trace key={group[0]?.id}>{group.map(eventRow)}</Trace>)}
+          setExpandedTurns(previous => previous[disclosureKey] === open ? previous : { ...previous, [disclosureKey]: open });
+        }}>{turn ? `Turn ${turn.number}${turn.firstEvent === key ? '' : ' · continued'}` : 'Session events'}</summary>
+        {presentation === 'compact' ? <Trace>{events.map(eventRow)}</Trace>
+          : groups.map(group => group[0] && ['message', 'session', 'turn'].includes(group[0].kind) ? eventRow(group[0]) : <Trace key={group[0]?.id}>{group.map(eventRow)}</Trace>)}
       </details>;
     })}
     {children}
@@ -196,11 +272,17 @@ export interface ReplayHandle {
   openSourceEvent: (side: Side, sessionId: string, eventId: string) => void;
 }
 
-export function SessionReplayView({ sides, ref, visible = true }: { sides: [ReplaySide] | [ReplaySide, ReplaySide]; ref?: Ref<ReplayHandle>; visible?: boolean }) {
+export function SessionReplayView({ sides, ref, visible = true, workspace, onReturnToReport }: {
+  sides: [ReplaySide] | [ReplaySide, ReplaySide]; ref?: Ref<ReplayHandle>; visible?: boolean;
+  workspace?: 'stacked'; onReturnToReport?: (origin: HTMLButtonElement) => void;
+}) {
   const single = sides.length === 1;
+  const stacked = workspace === 'stacked';
   const labelled = useId();
   const profileLabel = (side: Side, profile: string) => single ? <span className="font-semibold wrap-anywhere">{profile}</span> : <SideText side={side}>{profile}</SideText>;
   const [selectedKey, setSelectedKey] = useState('');
+  const [presentation, setPresentation] = useState<ReplayPresentation>(stacked ? 'compact' : 'chat');
+  const [eventOrder, setEventOrder] = useState(false);
   const [sideSelections, setSideSelections] = useState<Record<Side, string>>({ a: '', b: '' });
   const [query, setQuery] = useState('');
   const [inspecting, setInspecting] = useState(false);
@@ -212,17 +294,12 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
   const [navigation, setNavigation] = useState<Record<Side, ReplayLocation[]>>({ a: [], b: [] });
   const [revealedSides, setRevealedSides] = useState<Record<Side, boolean>>({ a: false, b: false });
   const preserveSelection = useRef<string | null>(null);
-  const all = useMemo(() => {
-    const source = sides.flatMap(({ side, profile, replay }) => replay?.sessions.flatMap(session =>
-      session.events.map(event => ({ side, profile, replay, session, event, key: `${side}:${session.id}:${event.id}`, at: date(event.timestamp) }))) ?? []);
-    const origins = new Map<Side, number | null>();
-    for (const side of sides) {
-      const rootId = side.replay?.sessions.find(session => !session.parentId)?.id;
-      const times = source.filter(row => row.side === side.side && row.session.id === rootId && row.at !== null).map(row => row.at!);
-      origins.set(side.side, times.length ? Math.min(...times) : null);
-    }
-    return source.map(row => ({ ...row, elapsedMs: row.at !== null && origins.get(row.side) !== null ? row.at - origins.get(row.side)! : null })) as Row[];
-  }, [sides]);
+  const clocks = useMemo(() => ({ a: replayClock(sides[0].replay), b: replayClock(sides[1]?.replay ?? null) }), [sides]);
+  const all = useMemo<Row[]>(() => sides.flatMap(({ side, profile, replay }) => replay?.sessions.flatMap(session =>
+    session.events.map(event => {
+      return { side, profile, replay, session, event, key: `${side}:${session.id}:${event.id}`,
+        elapsedMs: eventElapsed(event, clocks[side]) };
+    })) ?? []), [sides, clocks]);
   const names = useMemo(() => ({ a: replayNames(sides[0].replay), b: replayNames(sides[1]?.replay ?? null) }), [sides]);
   const summaries = useMemo(() => ({ a: deriveAgentSummaries(sides[0].replay ?? { schemaVersion: 1, kind: 'session-replay', sessions: [] }), b: deriveAgentSummaries(sides[1]?.replay ?? { schemaVersion: 1, kind: 'session-replay', sessions: [] }) }), [sides]);
   const agentSummary = agentView ? summaries[agentView.side].get(agentView.sessionId) : null;
@@ -236,27 +313,49 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
     if (activeIndex < 0 && filtered[0]) { setSelectedKey(filtered[0].key); setSideSelections(current => ({ ...current, [filtered[0]!.side]: filtered[0]!.key })); }
   }, [activeIndex, filtered, selectedKey]);
   const visibleKeys = new Set(filtered.map(row => row.key));
-  const relativeTimes = all.map(row => row.elapsedMs).filter((value): value is number => value !== null);
-  const axisStart = Math.min(0, ...relativeTimes), axisEnd = Math.max(0, ...relativeTimes);
-  const axisSpan = Math.max(1, axisEnd - axisStart);
+  const sharedScale = !stacked && Boolean(clocks.a && clocks.a.source === clocks.b?.source);
+  const selectedTime = selected ? clock(selected.event.timestamp) : null;
+
+  function revealEvent(key: string) {
+    const target = document.querySelector<HTMLButtonElement>(`[data-replay-event="${CSS.escape(key)}"]`);
+    let ancestor = target?.parentElement?.closest('details') ?? null;
+    while (ancestor) {
+      if (!ancestor.open) {
+        ancestor.querySelector<HTMLElement>(':scope > summary')?.click();
+        ancestor.open = true;
+      }
+      ancestor = ancestor.parentElement?.closest('details') ?? null;
+    }
+    return target;
+  }
 
   function focusEvent(key: string, inspector = false) {
     const previousFocus = document.activeElement;
     requestAnimationFrame(() => {
-      const target = document.querySelector<HTMLButtonElement>(`[data-replay-event="${CSS.escape(key)}"]`);
-      let ancestor = target?.parentElement?.closest('details') ?? null;
-      while (ancestor) {
-        if (!ancestor.open) {
-          ancestor.querySelector<HTMLElement>(':scope > summary')?.click();
-          ancestor.open = true;
-        }
-        ancestor = ancestor.parentElement?.closest('details') ?? null;
-      }
+      const target = revealEvent(key);
       // A delayed frame must respect focus moved by a newer user action.
       if (document.activeElement !== previousFocus && document.activeElement !== document.body) return;
       if (inspector) document.getElementById(`${labelled}-inspector-title`)?.focus();
       else target?.focus();
     });
+  }
+
+  function showInConversation(key: string) {
+    requestAnimationFrame(() => {
+      const target = revealEvent(key);
+      const viewport = target?.closest<HTMLElement>('[data-replay-side]');
+      if (!target || !viewport) return;
+      const bounds = viewport.getBoundingClientRect();
+      const row = target.getBoundingClientRect();
+      if (row.top < bounds.top) viewport.scrollTop += row.top - bounds.top;
+      else if (row.bottom > bounds.bottom) viewport.scrollTop += row.bottom - bounds.bottom;
+    });
+  }
+
+  function setReplayPresentation(view: ReplayPresentation) {
+    if (view === presentation) return;
+    setPresentation(view);
+    if (visibleKeys.has(selectedKey)) showInConversation(selectedKey);
   }
 
   function select(event: ReplayEvent, session: ReplaySession, side: Side, inspect = false) {
@@ -383,10 +482,7 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
 
   function tree(replay: SessionReplay, side: Side) {
     const rootId = replay.sessions.find(session => !session.parentId)?.id ?? '';
-    const rootTimes = replay.sessions.find(session => session.id === rootId)?.events.map(event => date(event.timestamp)).filter((time): time is number => time !== null) ?? [];
-    const origin = rootTimes.length ? Math.min(...rootTimes) : null;
-    const byParent = new Map<string, ReplaySession[]>();
-    for (const session of replay.sessions) if (session.parentId) byParent.set(session.parentId, [...(byParent.get(session.parentId) ?? []), session]);
+    const { children, roots } = replayForest(replay.sessions);
     const matched = new Set(filtered.filter(row => row.side === side).map(row => row.session.id));
     for (const id of [...matched]) {
       let parentId = replay.sessions.find(session => session.id === id)?.parentId;
@@ -400,12 +496,11 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
     const render = (session: ReplaySession): ReactNode => {
       if (seen.has(session.id)) return <p key={session.id} className="hint">Session {session.id}: repeated or circular lineage omitted.</p>;
       seen.add(session.id);
-      return <TreeSession key={session.id} side={side} session={session} rootId={rootId} name={names[side].get(session.id)!} search={revealedSides[side] ? '' : needle} hasMatches={matched.has(session.id)} onAgent={trigger => openAgent(session.id, side, trigger)} origin={origin} selectedKey={sideSelections[side]} visibleKeys={visibleKeys}
+      return <TreeSession key={session.id} side={side} session={session} rootId={rootId} name={names[side].get(session.id)!} search={revealedSides[side] ? '' : needle} hasMatches={matched.has(session.id)} onAgent={trigger => openAgent(session.id, side, trigger)} axis={clocks[side]} presentation={presentation} selectedKey={sideSelections[side]} visibleKeys={visibleKeys}
         onSelect={(event, row, inspect) => select(event, row, side, inspect)} onMove={delta => move(delta, true)}>
-        {(byParent.get(session.id) ?? []).map(child => render(child))}
+        {children.get(session.id)?.map(render)}
       </TreeSession>;
     };
-    const roots = replay.sessions.filter(session => !session.parentId || !replay.sessions.some(parent => parent.id === session.parentId));
     return roots.map(session => <MessageScrollerItem key={session.id} messageId={`${side}:${session.id}`}>{render(session)}</MessageScrollerItem>);
   }
 
@@ -427,8 +522,21 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
         else focusInspector();
       }}>
       <div className="flex flex-col gap-2">
-        <h2 id={`${labelled}-title`} className="text-heading">Session replay</h2>
-        <p className="hint">{single ? "The timeline starts at the main session’s first recorded event. Missing timestamps stay unplaced; recorded order is preserved." : "Each side’s timeline starts at that side’s root session’s first recorded event. The shared elapsed scale compares durations; it does not imply a shared wall clock. Missing timestamps stay unplaced."}</p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id={`${labelled}-title`} className="text-heading">Session replay</h2>
+          {stacked && all.length ? <div className="flex flex-wrap gap-3">
+            <div className="replay-options" role="group" aria-label="Session replay view">
+              <Button variant="ghost-link" aria-pressed={presentation === 'compact'} onClick={() => setReplayPresentation('compact')}><List data-icon="inline-start" />Compact</Button>
+              <Button variant="ghost-link" aria-pressed={presentation === 'chat'} onClick={() => setReplayPresentation('chat')}><MessagesSquare data-icon="inline-start" />Chat</Button>
+            </div>
+            <div className="replay-options" role="group" aria-label="Event map scale">
+              <Button variant="ghost-link" aria-pressed={!eventOrder} onClick={() => setEventOrder(false)}>Elapsed time</Button>
+              <Button variant="ghost-link" aria-pressed={eventOrder} onClick={() => setEventOrder(true)}>Event order</Button>
+            </div>
+          </div> : null}
+        </div>
+        {eventOrder ? <p className="hint">Dotted lanes show the recorded order of each session’s events.</p>
+          : clocks.a || clocks.b ? <p className="hint">Timed lanes start at each root session’s first timestamp.{sharedScale ? ' The shared scale compares elapsed durations.' : ''}</p> : null}
       </div>
       {sides.some(side => !side.replay) ? <InfoNotice title="Replay is only partly available">
         <p>{sides.map(side => `${side.profile}: ${side.replay ? 'native replay available' : 'native history unavailable'}`).join(' · ')}</p>
@@ -439,47 +547,90 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
           ...(session.limits ?? []).map((limit, index) => <li key={`${side}:${session.id}:${index}`}>{profile} · {names[side].get(session.id)}: {limit.message ?? limit.kind}{limit.omitted ? ` (${limit.omitted} records omitted)` : ''}</li>),
         ]) ?? [])}</ul>
       </InfoNotice></details> : null}
-      <p className="hint">Select an agent name for its assignment, result and parent follow-up. Dots open individual events; the conversations below show every recorded event.</p>
-      <div className={single ? "flex flex-col gap-4" : "report-sides"} role="group" aria-label="Session timelines">
+      {!stacked ? <p className="hint">Select an agent name for its assignment, result and parent follow-up. Dots open individual events; the conversations below show every recorded event.</p> : null}
+      <div className={single || stacked ? "flex flex-col gap-3" : "report-sides"} role="group" aria-label="Session timelines">
         {sides.map(({ side, profile, replay }) => {
           const rootId = replay?.sessions.find(session => !session.parentId)?.id ?? replay?.sessions[0]?.id ?? '';
+          const sideClock = clocks[side];
+          const sideRows = all.filter(row => row.side === side);
+          const times = (sharedScale ? all : sideRows).flatMap(row => row.elapsedMs === null ? [] : [row.elapsedMs]);
+          const axisStart = Math.min(0, ...times), axisEnd = Math.max(0, ...times);
+          const axisSpan = Math.max(1, axisEnd - axisStart);
           return <section key={side} className="panel replay-timeline flex flex-col gap-2" aria-label={single ? "Session timeline" : `${side === 'a' ? 'Left' : 'Right'} timeline`}>
             {profileLabel(side, profile)}
             {replay ? <>
-              <p className="hint">{replay.sessions.length} recorded session{replay.sessions.length === 1 ? '' : 's'}{replay.limits?.length ? ` · ${replay.limits.join(' ')}` : ''}</p>
-              <p className="meta">0 = this root session’s first timestamp · scale ends at {elapsed(axisEnd)} · {rootSpan(replay) === null ? 'root span unavailable' : `root span ${elapsed(rootSpan(replay))}`}</p>
+              <div className={stacked ? 'flex flex-wrap items-baseline gap-x-3 gap-y-1' : 'flex flex-col gap-2'}>
+                <p className="hint">{replay.sessions.length} recorded session{replay.sessions.length === 1 ? '' : 's'}{replay.limits?.length ? ` · ${replay.limits.join(' ')}` : ''}</p>
+                {sideClock && !eventOrder ? <p className="meta">{clockLabels[sideClock.source]} · scale ends at {elapsed(axisEnd)}{sideClock.span === null ? '' : ` · root span ${elapsed(sideClock.span)}`}</p>
+                  : sideRows.length && !eventOrder ? <p className="meta">Event order · no comparable timestamps</p> : null}
+              </div>
               {replay.sessions.length ? <ul className="list-none p-0 m-0 flex flex-col gap-3" aria-label={`${profile} recorded session lanes`}>
-                {replay.sessions.map(session => {
-                  const points = all.filter(row => row.side === side && row.session.id === session.id);
-                  const actorTimes = points.map(row => row.elapsedMs).filter((value): value is number => value !== null);
-                  const actorSpan = actorTimes.length >= 2 ? `${elapsed(Math.min(...actorTimes))} to ${elapsed(Math.max(...actorTimes))}` : actorTimes.length ? elapsed(actorTimes[0] ?? null) : 'time unavailable';
-                  return <li key={session.id} className="flex flex-col gap-1">
-                    <Button variant="replay" aria-label={`View ${names[side].get(session.id)} summary`} onClick={event => openAgent(session.id, side, event.currentTarget)}>{names[side].get(session.id)}<ChevronRight data-icon="inline-end" /></Button>
-                    <span className="meta" title={sessionName(session, rootId)}>{session.status} · {points.length} events · {actorSpan}</span>
-                    <div className="relative h-6 rounded-full" aria-label={`${sessionName(session, rootId)} event time lane`}>
-                      {points.map(row => row.elapsedMs === null ? null : <Button key={row.key} variant="ghost-link" size="icon" className="absolute top-0 size-6 min-w-0 rounded-full p-0 border-0"
-                        style={{ left: `clamp(0px, ${Math.max(0, Math.min(100, ((row.elapsedMs - axisStart) / axisSpan) * 100))}%, calc(100% - 24px))` }}
+                {(stacked ? stackedSessions(replay.sessions) : replay.sessions).map(session => {
+                  const points = sideRows.filter(row => row.session.id === session.id);
+                  const timestamped = eventOrder ? [] : points.filter(row => row.elapsedMs !== null);
+                  const placement = stacked ? layOutTimedStops(timestamped, axisSpan) : undefined;
+                  const timed = placement === null ? [] : timestamped;
+                  const outsideScale = eventOrder || placement === null ? points : points.filter(row => row.elapsedMs === null);
+                  const actorTimes = timed.map(row => row.elapsedMs!);
+                  const actorSpan = actorTimes.length >= 2 ? `${elapsed(Math.min(...actorTimes))} to ${elapsed(Math.max(...actorTimes))}` : actorTimes.length ? elapsed(actorTimes[0]!) : null;
+                  const parentName = session.parentId ? names[side].get(session.parentId) : null;
+                  const depth = parentName ? Math.min(session.depth ?? 1, 5) : 0;
+                  const active = points.some(row => row.key === sideSelections[side]);
+                  return <li key={session.id} className={stacked ? 'replay-stacked-session' : 'flex flex-col gap-1'} data-selected={stacked && active || undefined}>
+                    <div className="replay-lane-name flex min-w-0 flex-col" style={stacked && depth ? { paddingInlineStart: `calc(var(--space-8) * ${depth})` } : undefined}>
+                      <Button variant="replay" aria-label={`View ${names[side].get(session.id)} summary`} onClick={event => openAgent(session.id, side, event.currentTarget)}>
+                        {stacked && parentName ? <CornerDownRight data-icon="inline-start" /> : null}<span className="wrap-anywhere">{names[side].get(session.id)}</span><ChevronRight data-icon="inline-end" />
+                      </Button>
+                      <span className="meta" title={sessionName(session, rootId)}>{stacked && parentName ? `From ${parentName} · ` : ''}{points.length} {points.length === 1 ? 'event' : 'events'}
+                        {actorSpan ? ` · ${actorSpan}` : sideClock && points.length && !eventOrder ? ' · event order' : ''}{session.status !== 'ready' ? ` · ${session.status}` : ''}</span>
+                    </div>
+                    <div className="min-w-0">
+                    {placement === null ? <p className="meta">Crowded timestamps · event order</p> : null}
+                    {[{ ordered: false, rows: timed }, { ordered: true, rows: outsideScale }].filter(({ rows }) => rows.length).map(({ ordered, rows }) =>
+                    <div key={ordered ? 'order' : 'time'} className={ordered ? "min-w-0 overflow-x-auto" : undefined}>
+                      {ordered && timed.length ? <span className="hint">Events outside this time scale</span> : null}
+                      <div className="replay-event-lane relative rounded-full" role="group" aria-label={`${sessionName(session, rootId)} event ${ordered ? 'order' : 'time'} lane`} data-event-order={ordered || undefined}
+                      style={ordered ? { minWidth: rows.length * 24 } : placement ? { height: placement.count * 24 } : undefined}>
+                      {rows.map((row, index) => {
+                        const position = ordered ? index / Math.max(1, rows.length - 1) : (row.elapsedMs! - axisStart) / axisSpan;
+                        const detail = ordered ? `event ${index + 1} of ${rows.length}` : elapsed(row.elapsedMs!);
+                        return <Button key={row.key} variant="ghost-link" size="icon" className="absolute top-0 size-6 min-w-0 rounded-full p-0 border-0"
+                        style={{ left: ordered ? `calc((100% - 24px) * ${position})` : `clamp(0px, ${position * 100}%, calc(100% - 24px))`,
+                          top: !ordered && placement ? (placement.layers.get(row.key) ?? 0) * 24 : undefined,
+                          zIndex: !ordered && position === 0 ? 1 : undefined }}
                         tabIndex={row.key === selectedKey ? 0 : -1}
                         onKeyDown={event => { if (['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft'].includes(event.key)) { event.preventDefault(); move(event.key === 'ArrowDown' || event.key === 'ArrowRight' ? 1 : -1, true); } }}
-                        aria-label={`${profile}: ${eventLabel(row.event)}, ${elapsed(row.elapsedMs)}`} aria-pressed={row.key === sideSelections[side]}
-                        onClick={() => select(row.event, row.session, side, true)} title={`${eventLabel(row.event)} · ${elapsed(row.elapsedMs)}`}><span aria-hidden="true" className="size-2 rounded-full" style={{ background: single ? "var(--color-link-focus)" : `var(--color-side-${side})`, boxShadow: row.key === sideSelections[side] ? '0 0 0 2px var(--color-text)' : undefined }} /></Button>)}
+                        aria-label={`${profile}: ${eventLabel(row.event)}, ${detail}`} aria-pressed={row.key === sideSelections[side]}
+                        onClick={() => {
+                          select(row.event, row.session, side, true);
+                          if (stacked) {
+                            if (!visibleKeys.has(row.key)) setRevealedSides(current => ({ ...current, [side]: true }));
+                            showInConversation(row.key);
+                          }
+                        }} title={`${eventLabel(row.event)} · ${detail}`}><span aria-hidden="true" className="size-2 rounded-full" style={{ background: single ? "var(--color-link-focus)" : `var(--color-side-${side})`, boxShadow: row.key === sideSelections[side] ? '0 0 0 2px var(--color-text)' : undefined }} /></Button>;
+                      })}
+                    </div></div>)}
+                    {stacked && !points.length ? <p className="hint">{session.reason ?? 'No retained events.'}</p> : null}
                     </div>
-                    {points.some(row => row.elapsedMs === null) ? <span className="hint">Some events have no timestamp or cannot align to this root’s timeline.</span> : null}
                   </li>;
                 })}
               </ul> : <p className="text-ui">No recorded activity.</p>}
-            </> : <p className="text-ui">No native replay was captured for this saved report. Its original findings and evidence remain below.</p>}
+            </> : <p className="text-ui">No native replay was captured for this saved report. {stacked ? 'The original findings are available in Grouped evidence.' : 'The original findings and evidence remain below.'}</p>}
           </section>;
         })}
       </div>
       {all.length ? <div className="flex flex-col gap-3">
         <section className="flex flex-col gap-3" aria-labelledby={`${labelled}-tree-title`}>
           <h3 id={`${labelled}-tree-title`} className="text-body font-semibold">Recorded conversations</h3>
-          <label className="flex flex-col gap-1 text-ui" htmlFor={`${labelled}-search`}>Search recorded events
-            <input id={`${labelled}-search`} className="input" type="search" value={query} onChange={event => { setQuery(event.target.value); setRevealedSides({ a: false, b: false }); restoreScroll('a', 0); restoreScroll('b', 0); }} />
-          </label>
+          <div className={stacked ? 'flex flex-wrap items-end gap-2' : 'flex flex-col gap-3'}>
+            <label className="flex min-w-36 flex-1 flex-col gap-1 text-ui" htmlFor={`${labelled}-search`}>
+              <span className={stacked ? 'sr-only' : undefined}>Search recorded events</span>
+              <input id={`${labelled}-search`} className="input" type="search" placeholder={stacked ? 'Search recorded events' : undefined} value={query} onChange={event => { setQuery(event.target.value); setRevealedSides({ a: false, b: false }); restoreScroll('a', 0); restoreScroll('b', 0); }} />
+            </label>
+            {stacked ? <Button onClick={focusInspector} disabled={!selected}>Inspect selected event</Button> : null}
+          </div>
           {needle && (revealedSides.a || revealedSides.b) ? <p className="hint" role="status">Search is temporarily paused on {(["a", "b"] as Side[]).filter(side => revealedSides[side]).map(side => single ? sides[0].profile : side === 'a' ? 'Left' : 'Right').join(' and ')} to show linked events.</p> : null}
-          <div className="flex items-center justify-between gap-3"><p className="hint">↑ / ↓ browses events. F6 switches focus between the conversation and inspector.</p><Button onClick={focusInspector} disabled={!selected}>Inspect selected event</Button></div>
+          <div className="flex items-center justify-between gap-3"><p className="hint">↑ / ↓ browses events. F6 switches focus between the conversation and inspector.</p>{!stacked ? <Button onClick={focusInspector} disabled={!selected}>Inspect selected event</Button> : null}</div>
           {needle && filtered.length ? <p className="hint" role="status">{sides.map(({ side, profile }) => `${profile}: ${filtered.filter(row => row.side === side).length} events ${revealedSides[side] ? 'shown' : 'match'}`).join(' · ')}</p> : null}
           {!filtered.length ? <p role="status" className="hint">No events match this search.</p> : null}
         </section>
@@ -487,7 +638,7 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
           {sides.map(({ side, profile, replay }) => <section key={side} aria-label={`${profile} session tree`} className="panel replay-transcript min-w-0 flex flex-col gap-3">
             {profileLabel(side, profile)}
             {replay ? <MessageScrollerProvider autoScroll={false} defaultScrollPosition="start">
-              <div className="replay-chat"><MessageScroller>
+              <div className="replay-chat" data-presentation={presentation}><MessageScroller>
                 <MessageScrollerViewport role="region" aria-label="Conversation" data-replay-side={side} tabIndex={0}>
                   <MessageScrollerContent>{tree(replay, side)}</MessageScrollerContent>
                 </MessageScrollerViewport>
@@ -516,7 +667,11 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
               setReportOrigin(null);
               return;
             }
-            if (reportOrigin?.isConnected) { reportOrigin.focus(); setReportOrigin(null); }
+            if (reportOrigin?.isConnected) {
+              if (onReturnToReport) onReturnToReport(reportOrigin);
+              else reportOrigin.focus();
+              setReportOrigin(null);
+            }
             else if (agentView && agentTrigger.current?.isConnected) agentTrigger.current.focus();
             else if (selected) focusEvent(selected.key);
           }}>
@@ -524,17 +679,21 @@ export function SessionReplayView({ sides, ref, visible = true }: { sides: [Repl
             <SheetDescription id={`${labelled}-inspector-description`}>{agentView ? 'Recorded excerpts and direct source links. Missing evidence stays explicit.' : 'Select recorded events while this panel stays open.'}</SheetDescription>
           </SheetHeader>
           {agentView && agentSummary ? <ReplayAgentPanel key={`${agentView.side}:${agentView.sessionId}`} name={names[agentView.side].get(agentView.sessionId) ?? 'Agent'} profile={sides.find(side => side.side === agentView.side)!.profile} summary={agentSummary} onOpen={openAgentEvidence} /> : selected ? <><div key={selected.key} className="replay-inspector-content flex flex-col gap-3">
-            <p className="text-ui"><strong>{eventLabel(selected.event)}</strong> · {single ? selected.profile : selected.side === 'a' ? 'Left' : 'Right'} · {clock(selected.event.timestamp)}</p>
+            <p className="text-ui"><strong>{eventLabel(selected.event)}</strong> · {single ? selected.profile : selected.side === 'a' ? 'Left' : 'Right'} · {selectedTime ? <time dateTime={selected.event.timestamp!}>{selectedTime}</time> : 'Time not recorded'}{selectedTime && selected.event.timestampSource === 'observed' ? ' · observed arrival' : null}</p>
             <p className="hint">{selected.profile} · {names[selected.side].get(selected.session.id)}</p>
-            <p className="hint">{statusText(selected.event)}</p>
+            {selected.event.bodyStatus !== 'included' || !selected.event.body ? <p className="hint">{statusText(selected.event)}</p> : null}
             {selected.event.contentOmitted ? <p className="hint" role="note">Some recorded content was omitted for privacy; hidden content is not available in this replay.</p> : null}
+            {selected.event.body && (selected.event.kind === 'tool-call' || selected.event.kind === 'tool-result') ? <h3 className="text-ui font-semibold">{selected.event.kind === 'tool-call' ? 'Tool input' : 'Tool result'}</h3> : null}
             {typeof assignment(selected.event)?.message === 'string' && /^gAAAAA[A-Za-z0-9_-]{80,}={0,2}$/.test(assignment(selected.event)!.message!)
               ? <div className="flex flex-col gap-2"><p className="text-ui">Assignment text is opaque in this record; it cannot be read here.</p><details><summary className="cursor-pointer text-ui">Show recorded assignment fields</summary><pre className="code-block whitespace-pre-wrap break-words">{selected.event.body}</pre></details></div>
               : selected.event.body ? selected.event.body.length > 20_000
               ? <details><summary className="cursor-pointer text-ui">Show full recorded content ({selected.event.body.length.toLocaleString()} characters)</summary>
                 <pre className="code-block whitespace-pre-wrap break-words">{selected.event.body}</pre></details>
               : <pre className="code-block whitespace-pre-wrap break-words">{selected.event.body}</pre> : null}
-            <details><summary className="cursor-pointer text-ui">Source and event details</summary><div className="flex flex-col gap-2 pt-2">            <p className="hint">Client: {sides.find(side => side.side === selected.side)?.client ?? 'not recorded'} · Recorded label: {selected.event.label}</p><p className="hint">{selected.event.kind} · session {selected.event.sessionId} · turn {selected.event.turnId ?? 'not recorded'} · source line {selected.event.sourceLine ?? 'not recorded'}</p>
+            <details><summary className="cursor-pointer text-ui">Source and event details</summary><div className="flex flex-col gap-2 pt-2">
+            <p className="hint">Client: {sides.find(side => side.side === selected.side)?.client ?? 'not recorded'} · Recorded label: {selected.event.label}</p>
+            <p className="hint">{selected.event.kind} · session {selected.event.sessionId}{selected.event.turnId === null ? '' : ` · turn ${selected.event.turnId}`}{selected.event.sourceLine === null ? '' : ` · source line ${selected.event.sourceLine}`}</p>
+            {selectedTime ? <p className="hint">{selected.event.timestampSource === 'observed' ? 'Arrival time observed by Xenoflux' : selected.event.timestampSource === 'native' ? 'Native timestamp from the client' : 'Recorded timestamp'}</p> : null}
             <p className="hint">Source fingerprint: <code>{selected.session.source.fingerprint ?? 'not available'}</code></p>
             <p className="hint">Event reference: <code>{selected.event.id}</code></p>
             {selected.event.status ? <p className="hint">Recorded status: {selected.event.status}</p> : null}

@@ -1,6 +1,7 @@
 import { summarizeWorkflowUsage } from './audit-usage.js';
 import { projectRunRecordedUsage } from './audit-recorded-usage.js';
 import { presentAgentMeasurements } from './audit-agent-measurements.js';
+import { replaySpanTimestamps } from './audit-session-replay.js';
 
 const blank = () => ({ input: null, cachedInput: null, output: null, reasoning: null, total: null });
 const safe = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -31,23 +32,24 @@ function workflowSpan(run) {
     }
     if (current.id !== roots[0].id) return unknown;
   }
-  const seen = new Set(); let start = Infinity, end = -Infinity, timestamps = 0, missing = 0;
+  const seen = new Set();
+  const events = [];
   for (const session of sessions) {
     if (!session || typeof session.id !== 'string') return unknown;
     const agent = byId.get(session.id);
     if (!agent || seen.has(session.id) || session.parentId !== agent.parentId) return unknown;
     seen.add(session.id);
-    for (const event of session.events ?? []) {
-      const time = typeof event.timestamp === 'string' ? Date.parse(event.timestamp) : NaN;
-      if (!Number.isFinite(time)) { missing++; continue; }
-      start = Math.min(start, time); end = Math.max(end, time); timestamps++;
-    }
+    for (const event of session.events ?? []) events.push(event);
   }
-  if (timestamps < 2 || !Number.isSafeInteger(end - start)) return unknown;
+  const { timestamps, receipt, missing, otherClock } = replaySpanTimestamps(events);
+  if (timestamps.length < 2) return unknown;
+  const elapsed = Math.max(...timestamps) - Math.min(...timestamps);
+  if (!Number.isSafeInteger(elapsed)) return unknown;
   const gap = missing || seen.size !== agents.length
     ? ' Some sessions or event timestamps are missing; the full workflow duration is unknown.' : '';
-  return { durationMs: end - start,
-    timingNote: `Earliest to latest recorded event across captured sessions. Concurrent agent spans are not added; this is not active working time.${gap}` };
+  const clockNote = otherClock ? ' Events on a different clock are excluded.' : '';
+  return { durationMs: elapsed,
+    timingNote: `Earliest to latest ${receipt ? 'locally observed' : 'recorded'} event across captured sessions. Concurrent agent spans are not added; this is not active working time.${gap}${clockNote}` };
 }
 
 /** Revalidate retained evidence; never promote a stored aggregate or sum display rows. */

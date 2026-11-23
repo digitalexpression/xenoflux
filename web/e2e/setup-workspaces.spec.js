@@ -14,11 +14,16 @@ for (const theme of ['light', 'dark']) {
       await page.goto(server.launchUrl);
       await page.getByRole('combobox', { name: 'Theme' }).selectOption(theme);
       await page.goto(`${server.origin}/profiles/Default/setup?client=codex`);
-      await page.getByRole('button', { name: 'Inspect model source', exact: true }).click();
-      await expect(page.getByRole('button', { name: 'Hide model source', exact: true })).toBeFocused();
+      const model = page.getByRole('button', { name: 'Inspect model source', exact: true });
+      await model.click();
+      await expect(model).toBeFocused();
+      await expect(model).toHaveAttribute('aria-current', 'true');
+      const inspector = page.getByRole('complementary', { name: 'Inspector', exact: true });
+      await expect(inspector.getByRole('heading', { name: 'model', exact: true })).toBeVisible();
       await capture('inspection');
       await page.setViewportSize({ width: 320, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await expect(inspector).toBeInViewport();
       await capture('inspection-narrow');
       await page.setViewportSize({ width: 1440, height: 1000 });
       await page.goto(`${server.origin}/compare/setups?a=baseline&b=strict-review`);

@@ -26,8 +26,23 @@ test('captured marker shapes retain the exact final answer, opaque turns, typed 
   const final = decoded.replayEvents.find(row => row.label === 'Assistant final answer');
   assert.equal(final.text, 'Marker created.');
   assert.equal(final.turnId, '1');
+  assert.equal(final.at, '2026-01-01T00:00:09.000Z');
+  assert.equal(final.timestampSource, 'native');
   assert.ok(decoded.replayEvents.some(row => row.kind === 'tool-result' && JSON.parse(row.text).exitCode === 0));
   assert.equal(decoded.replayEvents.at(-1).id, decoded.idle.id);
+});
+
+test('Copilot live receipt is used only when a native timestamp is unusable', async () => {
+  const decoder = createCopilotDecoder({ sessionId, cwd });
+  const [user, turn] = await events();
+  const observedAt = '2026-01-01T00:01:00.000Z';
+  decoder.consume({ ...user, timestamp: '0' });
+  decoder.consume({ ...turn, timestamp: undefined }, { observedAt });
+  const [message, started] = decoder.snapshot().replayEvents;
+  assert.equal(message.at, null);
+  assert.equal(message.timestampSource, undefined);
+  assert.equal(started.at, observedAt);
+  assert.equal(started.timestampSource, 'observed');
 });
 
 test('missing or aborted idle keeps final content partial and cannot manufacture completion', async () => {
