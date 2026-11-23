@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { Store, create, renameProfile, bind } from '../src/profiles.js';
+import { Store, create, renameProfile } from '../src/profiles.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
 import { registerHome, listHomes } from '../src/homes.js';
 import { launchPlan, launchHome } from '../src/launcher.js';
@@ -44,15 +44,17 @@ async function task(environment, cwd = environment.cwd, rollout) {
   return path;
 }
 
-test('repository launches require an explicit binding and preserve the same fixed native home', async t => {
+test('a selected repository launches with either profile without saving a project binding', async t => {
   const f = await fixture(t), repo = join(f.root, 'work'); await mkdir(repo);
-  await assert.rejects(launchPlan(f.store, 'A', f.terminalEnvironment, { repository: repo }), /Bind this repository/);
-  await f.store.update(data => bind(data, 'A', repo));
+  const original = await readFile(f.store.file);
   const alias = join(f.root, 'alias'); await symlink(repo, alias);
   const plan = await launchPlan(f.store, 'A', f.terminalEnvironment, { repository: alias });
   assert.equal(plan.cwd, repo); assert.equal(plan.home, f.a.home);
   assert.equal(plan.env.CODEX_SQLITE_HOME, plan.home);
-  await assert.rejects(launchPlan(f.store, 'B', f.terminalEnvironment, { repository: repo }), /Bind this repository/);
+  assert.equal((await launchPlan(f.store, 'B', f.terminalEnvironment, { repository: repo })).cwd, repo);
+  await assert.rejects(launchPlan(f.store, 'B', f.terminalEnvironment, { repository: f.executable }), /canonical path/);
+  assert.equal((await launchPlan(f.store, 'A', f.terminalEnvironment)).cwd, f.a.cwd);
+  assert.deepEqual(await readFile(f.store.file), original);
 });
 
 test('resume selects the exact source home even when both homes contain the same task ID', async t => {
@@ -71,6 +73,14 @@ test('resume selects the exact source home even when both homes contain the same
   }
   const {stdout} = await promisify(execFile)(process.execPath,[cli,'--store',f.store.directory,'resume','A',taskId,'--dry-run','--json'], { env: { ...process.env, ...f.terminalEnvironment } });
   assert.equal(JSON.parse(stdout).home, f.a.home);
+});
+
+test('resuming from a project outside the saved list requires the exact recorded workspace', async t => {
+  const f = await fixture(t), repo = join(f.root, 'work'); await mkdir(repo);
+  await task(f.a, repo);
+  await assert.rejects(launchPlan(f.store, 'A', f.terminalEnvironment, { resumeId: taskId }), /Choose the saved task workspace/);
+  await assert.rejects(launchPlan(f.store, 'A', f.terminalEnvironment, { resumeId: taskId, repository: f.b.cwd }), /differs from the saved task workspace/);
+  assert.equal((await launchPlan(f.store, 'A', f.terminalEnvironment, { resumeId: taskId, repository: repo })).cwd, repo);
 });
 
 test('resume refuses transcript paths outside the selected home without translating matching relative paths', async t => {

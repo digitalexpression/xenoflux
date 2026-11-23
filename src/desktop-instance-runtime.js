@@ -213,10 +213,10 @@ export function createDesktopInstanceRuntime({
     }
     return [...selected.values()];
   }
-  function validateTarget(rows, main) {
+  function validateTarget(rows, main, { allowAncestor = false } = {}) {
     if (!main || !Number.isSafeInteger(main.pid) || main.pid < 1 || main.uid !== uid || !main.startedAt || !main.executable)
       throw fail('INVALID_TARGET');
-    if (ancestors(rows).has(main.pid)) throw fail('SELF_HOSTED', [main]);
+    if (!allowAncestor && ancestors(rows).has(main.pid)) throw fail('SELF_HOSTED', [main]);
     const current = rows.find(r => r.pid === main.pid);
     if (!current || !matchesProcessIdentity(current, main)) throw identityChanged(main, current);
     return current;
@@ -319,7 +319,7 @@ export function createDesktopInstanceRuntime({
     }
     throw fail('DESKTOP_OPEN_TIMEOUT', []);
   }
-  async function observe(main, { trackedProcesses = [], helperExecutable, resolveExecutable = false } = {}) {
+  async function observe(main, { trackedProcesses = [], helperExecutable, resolveExecutable = false, allowAncestor = false } = {}) {
     if (!Array.isArray(trackedProcesses)) throw fail('PROCESS_OBSERVATION_INVALID');
     const owned = ownedFor(main);
     for (const row of trackedProcesses) {
@@ -347,7 +347,7 @@ export function createDesktopInstanceRuntime({
     if (!samePid) return liveTracked.length
       ? { status: 'running', orphaned: true, processes: liveTracked }
       : { status: 'stopped', processes: [] };
-    validateTarget(rows, main);
+    validateTarget(rows, main, { allowAncestor });
     const tree = descendants(rows, samePid);
     const treePids = new Set(tree.map(row => row.pid));
     const escaped = liveTracked.filter(row => !treePids.has(row.pid));

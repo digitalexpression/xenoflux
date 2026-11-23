@@ -243,6 +243,6 @@ export function validateNativeResponse(request, result) {
 export function validateClientNativeResponse(client, request, answer) {
   if (client === 'codex') return validateNativeResponse(request, answer);
   if (client === 'claude-code' && request?.method === CLAUDE_REQUEST) return validateClaudeDecision(request, answer);
-  if (client === 'copilot' && request?.method === COPILOT_REQUEST) return copilotDecision(answer);
+  if (client === 'copilot' && request?.method === COPILOT_REQUEST) return copilotDecision(answer, request);
   throw new Error('Native request does not match the selected client.');
 }

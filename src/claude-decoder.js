@@ -29,9 +29,22 @@ export function claudeModels(value) {
 
 export function validateClaudeDecision(request, value) {
   if (request?.method !== CLAUDE_REQUEST || !object(value) || Object.keys(value).length !== 1
-    || !['accept', 'decline'].includes(value.decision) || !request.params?.availableDecisions?.includes(value.decision))
-    throw new Error('Choose approve once or decline for this Claude tool request');
+    || !['accept', 'acceptForSession', 'decline'].includes(value.decision) || !request.params?.availableDecisions?.includes(value.decision))
+    throw new Error('Choose an offered response for this Claude tool request');
   return value;
+}
+
+function sessionPermissionUpdate(name, meta) {
+  if (meta.suppressAlwaysAllowRule || !Array.isArray(meta.suggestions) || meta.suggestions.length > 20) return null;
+  const rules = [];
+  for (const suggestion of meta.suggestions) {
+    if (suggestion?.type !== 'addRules' || suggestion.behavior !== 'allow'
+      || !['localSettings', 'session'].includes(suggestion.destination)
+      || !Array.isArray(suggestion.rules) || !suggestion.rules.length || rules.length + suggestion.rules.length > 20
+      || !suggestion.rules.every(rule => rule?.toolName === name && nativeText(rule.ruleContent) && rule.ruleContent.trim() !== '*')) continue;
+    rules.push(...suggestion.rules.map(({ toolName, ruleContent }) => ({ toolName, ruleContent })));
+  }
+  return rules.length ? { type: 'addRules', behavior: 'allow', destination: 'session', rules } : null;
 }
 
 function usage(value) {
@@ -42,14 +55,18 @@ function usage(value) {
 }
 
 export function createClaudeDecoder({ sessionId, promptId, workspace }) {
-  const tools = new Map(), requests = new Set(), events = [], assistant = [], seenItems = new Set();
+  const tools = new Map(), requests = new Set(), events = [], assistant = [], replayRows = [], seenItems = new Set();
   let init = null, result = null, turnId = null, sourceLine = 0, observedModel = null;
-  function event(kind, values = {}) {
+  let timing = {};
+  function event(kind, values = {}, replay) {
     if (events.length >= 10000) throw new Error('Claude event limit exceeded');
-    events.push({ kind, agentId: sessionId, turnId, source: 'claude-agent-sdk', sourceLine, ...values });
+    events.push({ kind, agentId: sessionId, turnId, source: 'claude-agent-sdk', sourceLine,
+      ...(timing.timestamp ? { recordedAt: timing.timestamp, timestampSource: timing.timestampSource } : {}), ...values });
+    if (replay) replayRows.push({ timestamp: null, ...timing, ...replay });
   }
-  function consume(frame) {
+  function consume(frame, clock = {}) {
     sourceLine++;
+    timing = clock;
     if (!object(frame) || !nativeText(frame.type)) throw new Error('Invalid Claude event');
     if (frame.type === 'tool_progress' && (frame.session_id !== sessionId || !tools.has(frame.tool_use_id)
       || frame.parent_tool_use_id != null)) {
@@ -85,7 +102,8 @@ export function createClaudeDecoder({ sessionId, promptId, workspace }) {
       for (const block of frame.message.content) {
         if (block?.type === 'text' && body(block.text) !== null) {
           assistant.push({ itemId, text: block.text });
-          event('assistant-message', { itemId });
+          event('assistant-message', { itemId }, { kind: 'message', role: 'assistant', label: 'Assistant message', text: block.text,
+            ...(itemId && itemId.length <= 256 ? { itemId } : {}) });
         }
         if (block?.type === 'tool_use') {
           const id = nativeText(block.id), name = nativeText(block.name);
@@ -96,7 +114,9 @@ export function createClaudeDecoder({ sessionId, promptId, workspace }) {
             continue;
           }
           tools.set(id, { id, name, input: structuredClone(block.input), status: 'proposed', started: false });
-          event('claude-tool-proposed', { itemId: id, name });
+          event('claude-tool-proposed', { itemId: id, name }, id.length <= 256 ? {
+            kind: 'tool-call', callId: id, label: name.length <= 200 ? name : 'Tool call', text: block.input,
+          } : null);
         }
       }
     } else if (frame.type === 'tool_progress') {
@@ -114,7 +134,10 @@ export function createClaudeDecoder({ sessionId, promptId, workspace }) {
         tool.status = block.is_error === true
           ? /(?:stopped|interrupted|aborted) while (?:running|executing)/i.test(content) ? 'stopped-while-running' : 'failed'
           : block.is_error === false ? 'completed' : 'result-observed';
-        event('claude-tool-result', { itemId: tool.id, status: tool.status, name: tool.name });
+        event('claude-tool-result', { itemId: tool.id, status: tool.status, name: tool.name }, tool.id.length <= 256 ? {
+          kind: 'tool-result', callId: tool.id, label: 'Tool result', status: tool.status, text: content || null,
+          ...(Array.isArray(block.content) && block.content.some(value => value?.type !== 'text') ? { contentOmitted: true } : {}),
+        } : null);
       }
     } else if (frame.type === 'result') {
       if (!init) throw new Error('Claude result arrived without matching native initialization');
@@ -125,18 +148,21 @@ export function createClaudeDecoder({ sessionId, promptId, workspace }) {
       event('claude-result', { itemId: result.id, status: result.complete ? 'completed' : 'failed' });
     }
   }
-  function request(name, input, meta) {
+  function request(name, input, meta, comparison = false) {
     const id = nativeText(meta.requestId), itemId = nativeText(meta.toolUseID);
     const tool = tools.get(itemId);
     if (!init || result || !id || !tool || requests.has(id) || tool.name !== name
       || tool.requestId || !isDeepStrictEqual(tool.input, input))
       throw new Error('Claude permission request does not match the current exact tool action');
     requests.add(id); tool.requestId = id;
+    const sessionUpdate = comparison ? sessionPermissionUpdate(name, meta) : null;
     const params = { threadId: sessionId, turnId, itemId, toolName: name, input: structuredClone(tool.input),
-      availableDecisions: ['accept', 'decline'], title: nativeText(meta.title), blockedPath: nativeText(meta.blockedPath) };
-    return { request: { id, method: CLAUDE_REQUEST, params }, item: { id: itemId, name, input: structuredClone(tool.input) } };
+      availableDecisions: sessionUpdate ? ['accept', 'acceptForSession', 'decline'] : ['accept', 'decline'],
+      ...(sessionUpdate ? { sessionRules: structuredClone(sessionUpdate.rules) } : {}),
+      title: nativeText(meta.title), blockedPath: nativeText(meta.blockedPath) };
+    return { request: { id, method: CLAUDE_REQUEST, params }, item: { id: itemId, name, input: structuredClone(tool.input) }, sessionUpdate };
   }
-  return { consume, request, events, tools, assistant,
+  return { consume, request, events, tools, assistant, replayRows,
     get init() { return init; }, get result() { return result; }, get turnId() { return turnId; },
     get observedModel() { return observedModel; } };
 }

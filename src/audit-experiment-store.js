@@ -529,8 +529,8 @@ export async function inspectAuditReservation({ root, owner } = {}) {
   return current;
 }
 
-/** Reserve an audit-only lease for a native home without touching Xenoflux's .run-lock. */
-export async function reserveAuditProfile({ root, owner, desktopOwner } = {}) {
+/** Register the comparison's own lease without replacing other participants. */
+export async function reserveAuditProfile({ root, owner, desktopOwner, nativeOwners } = {}) {
   validateReservationOwner(owner);
   if (owner.membershipVersion === 1) {
     await withProfileOperation({ directory: owner.storePath }, owner.profileId, { waitMs: 5000, recovery: true }, async () => {
@@ -538,7 +538,7 @@ export async function reserveAuditProfile({ root, owner, desktopOwner } = {}) {
       const legacy = await auditLeasePath(owner);
       if (legacy && await lstat(legacy).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; }))
         throw new Error('An earlier audit lease still needs recovery');
-      await acquireProfileParticipant(root, owner, desktopOwner);
+      await acquireProfileParticipant(root, owner, nativeOwners ?? desktopOwner);
     });
     return { root, lock: join(root, '.run-lock'), owner };
   }

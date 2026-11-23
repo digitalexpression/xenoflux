@@ -7,7 +7,16 @@ const pathText = value => typeof value === 'string' && value.startsWith('/') && 
 const strings = value => Array.isArray(value) && value.length <= 128 && value.every(copilotId);
 const record = value => value && typeof value === 'object' && !Array.isArray(value);
 
-export function copilotPermission(event, sessionId, turnId, cwd) {
+export const copilotReplayId = value => typeof value === 'string' && value.length <= 256
+  && value.trim().length > 0 && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
+
+export function copilotReplayTimestamp(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+export function copilotPermission(event, sessionId, turnId, cwd, { allowSessionGrant = false } = {}) {
   const { requestId, ownerSessionId, permissionRequest: action, promptRequest: prompt } = event.data ?? {};
   if (ownerSessionId !== sessionId || !copilotId(requestId) || !copilotId(turnId)
     || !record(action) || !record(prompt) || !copilotId(action.toolCallId)
@@ -36,38 +45,49 @@ export function copilotPermission(event, sessionId, turnId, cwd) {
       || fields.some(key => !isDeepStrictEqual(action[key], prompt[key])))
       throw new Error('Unsupported or mismatched Copilot permission category.');
   }
+  const canOfferSessionApproval = allowSessionGrant && prompt.kind === 'commands' && prompt.canOfferSessionApproval === true
+    && action.canOfferSessionApproval === true && prompt.commandIdentifiers.length > 0;
   return { id: requestId, method: COPILOT_REQUEST, params: {
     threadId: sessionId, turnId, itemId: action.toolCallId, cwd, category: prompt.kind,
-    action: structuredClone(action), prompt: structuredClone(prompt), availableDecisions: ['approve-once', 'reject'],
+    action: structuredClone(action), prompt: structuredClone(prompt),
+    availableDecisions: ['approve-once', ...(canOfferSessionApproval ? ['approve-for-session'] : []), 'reject'],
   } };
 }
 
-export function copilotDecision(answer) {
-  if (!record(answer) || Object.keys(answer).length !== 1 || !['approve-once', 'reject'].includes(answer.kind))
-    throw new Error('Choose Approve once or Reject for this Copilot request.');
+export function copilotDecision(answer, request) {
+  if (!record(answer) || Object.keys(answer).length !== 1) throw new Error('Choose Approve once or Reject for this Copilot request.');
+  if (answer.kind === 'approve-for-session' && request?.method === COPILOT_REQUEST
+    && request.params?.availableDecisions?.includes(answer.kind) && request.params.prompt?.kind === 'commands'
+    && strings(request.params.prompt.commandIdentifiers) && request.params.prompt.commandIdentifiers.length)
+    return { kind: answer.kind, approval: { kind: 'commands', commandIdentifiers: [...request.params.prompt.commandIdentifiers] } };
+  if (!['approve-once', 'reject'].includes(answer.kind)) throw new Error('Choose Approve once or Reject for this Copilot request.');
   return { kind: answer.kind };
 }
 
-export function createCopilotDecoder({ sessionId, cwd }) {
+export function createCopilotDecoder({ sessionId, cwd, allowSessionGrant = false }) {
   const events = [], turns = [], messages = [], replayEvents = [], tools = new Map(), shells = new Map(), ids = new Set(), usage = [];
-  let current = null, idle = null, error = null, lastUsage = null, finalTurn = null;
-  function consume(event) {
-    if (event?.agentId || event?.data?.agentId || event?.checkpoint === true || event?.data?.checkpoint === true) return;
+  let current = null, idle = null, error = null, lastUsage = null, finalTurn = null, childActivity = false;
+  function consume(event, { observedAt } = {}) {
     const data = event?.data;
+    if (event?.checkpoint === true || data?.checkpoint === true) return;
+    if (event?.agentId || data?.agentId) { childActivity = true; return; }
     if (!copilotId(event?.id) || ids.has(event.id) || !record(data) || typeof event.type !== 'string'
       || event.sessionId != null && event.sessionId !== sessionId || data.sessionId != null && data.sessionId !== sessionId)
       throw new Error('Unexpected Copilot event identity.');
     if (ids.size >= 20000) throw new Error('Copilot event limit.');
     ids.add(event.id);
-    const at = Number.isFinite(Date.parse(event.timestamp)) ? new Date(event.timestamp).toISOString() : null;
-    const base = { kind: event.type, itemId: event.id, agentId: sessionId, turnId: copilotId(data.turnId) ? data.turnId : null, recordedAt: at };
+    if (event.type.startsWith('subagent.')) childActivity = true;
+    const nativeAt = copilotReplayTimestamp(event.timestamp);
+    const at = nativeAt ?? copilotReplayTimestamp(observedAt);
+    const timing = at ? { timestampSource: nativeAt ? 'native' : 'observed' } : {};
+    const base = { kind: event.type, itemId: event.id, agentId: sessionId, turnId: copilotId(data.turnId) ? data.turnId : null, recordedAt: at, ...timing };
     const replay = (kind, label, fields = {}) => replayEvents.push({
-      id: event.id, turnId: base.turnId, at, kind, label, ...fields,
+      id: event.id, turnId: base.turnId, at, ...timing, kind, label, ...fields,
     });
     switch (event.type) {
       case 'assistant.turn_start':
         if (idle || current || !copilotId(data.turnId) || turns.some(turn => turn.turnId === data.turnId)) throw new Error('Unexpected Copilot turn start.');
-        current = { agentId: sessionId, turnId: data.turnId, status: 'in-progress', observedStartedAt: at };
+        current = { agentId: sessionId, turnId: data.turnId, status: 'in-progress', recordedAt: at, observedStartedAt: at, ...timing };
         turns.push(current);
         events.push(base);
         replay('turn', 'Copilot turn started', { status: 'started', text: JSON.stringify({ nativeTurnId: data.turnId }) });
@@ -116,9 +136,10 @@ export function createCopilotDecoder({ sessionId, cwd }) {
         }
         tools.set(data.toolCallId, tool);
         events.push({ ...base, toolName: tool.name, nativeToolCallId: data.toolCallId });
+        const input = tool.name === 'bash' && typeof data.arguments?.command === 'string' ? { command: data.arguments.command }
+          : tool.name === 'read_bash' ? { shellId: tool.shell.id } : null;
         replay('tool-call', tool.name, { callId: data.toolCallId, status: 'started', phase: 'started',
-          ...(tool.name === 'bash' && typeof data.arguments?.command === 'string'
-            ? { text: JSON.stringify({ command: data.arguments.command }) } : {}) });
+          ...(input ? { text: JSON.stringify(input) } : {}) });
         break;
       }
       case 'tool.execution_complete': {
@@ -151,7 +172,10 @@ export function createCopilotDecoder({ sessionId, cwd }) {
         break;
       }
       case 'permission.requested':
-        if (!data.resolvedByHook) return { request: copilotPermission(event, sessionId, current?.turnId, cwd) };
+        if (!data.resolvedByHook) return { request: copilotPermission(event, sessionId, current?.turnId, cwd, { allowSessionGrant }) };
+        break;
+      case 'permission.completed':
+        if (copilotId(data.requestId)) return { resolvedRequestId: data.requestId };
         break;
       case 'user_input.requested':
       case 'elicitation.requested':
@@ -163,7 +187,7 @@ export function createCopilotDecoder({ sessionId, cwd }) {
         return { failed: error };
       case 'session.idle':
         if (idle) throw new Error('Duplicate Copilot idle event.');
-        idle = { id: event.id, at, aborted: Object.hasOwn(data, 'aborted') ? data.aborted : null,
+        idle = { id: event.id, at, ...timing, aborted: Object.hasOwn(data, 'aborted') ? data.aborted : null,
           normal: !Object.hasOwn(data, 'aborted') || data.aborted === false };
         events.push(base);
         replay('session', 'Copilot root idle', { status: 'unknown', text: JSON.stringify({ aborted: idle.aborted,
@@ -185,7 +209,7 @@ export function createCopilotDecoder({ sessionId, cwd }) {
         observedCompletedAtMs: tool.endedAt && (!command || exitCode !== null) ? Date.parse(tool.shell?.endedAt ?? tool.endedAt) : null,
         source: 'copilot-sdk:tool.execution_start/tool.execution_complete' };
     });
-    return { events, turns, usage, invocations,
+    return { events, turns, usage, invocations, childActivity,
       replayEvents: replayEvents.map(row => row.id === idle?.id ? { ...row, status: complete ? 'completed' : idle.aborted === true ? 'cancelled' : 'unknown' } : row),
       idle, complete, turnId: current?.turnId ?? finalTurn,
       observed: last.length ? { source: 'assistant.message/assistant.usage', model: [lastUsage?.model, last.at(-1).model].find(value => value && value !== 'auto') ?? null,

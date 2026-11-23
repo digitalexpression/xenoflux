@@ -7,16 +7,19 @@ import { buildAuditExplanation, freezeAuditComparisonEvidence, gateAuditComparis
 import { retainedAuditSelectionOptions } from './audit-selection.js';
 import path from 'node:path';
 import { presentAgentMeasurements } from './audit-agent-measurements.js';
+import { presentReportedUsage } from './audit-usage-presentation.js';
 import { presentWorkflowMeasurements } from './audit-workflow-measurements.js';
 import { projectAuditFileInventory } from './audit-file-inventory.js';
 import { presentCheckRows } from './audit-check-presentation.js';
 import { projectAuditWorkspacePatch } from './audit-workspace-patch.js';
 import { compareSessionControls } from './audit-session-controls.js';
+import { replaySpanTimestamps } from './audit-session-replay.js';
 
 const list = value => Array.isArray(value) ? value : [];
 const MAX_PRESENTED_STEPS = 80;
 const CAPTURE_FAILURE_TEXT = Object.freeze({
-  'requested-permission-unconfirmed': 'Codex did not confirm the requested permission mode. The model task did not start.',
+  'requested-permission-unconfirmed': 'The native client did not confirm the requested permissions. The model task did not start.',
+  'requested-approval-reviewer-unconfirmed': 'The native client did not confirm the requested approval mode. The model task did not start.',
   'startup-command-sandbox-unavailable': 'The native command sandbox could not be verified, so the model task did not start.',
 });
 export function nativeLimitReached(run) {
@@ -41,7 +44,8 @@ function knownCaptureFailures(run) {
 
 /** Completion is distinct from check results and capture coverage. */
 export function presentRunExecution(run) {
-  if (knownCaptureFailures(run).some(failure => failure.text === CAPTURE_FAILURE_TEXT['startup-command-sandbox-unavailable'] || failure.code === 'requested-permission-unconfirmed')
+  if (knownCaptureFailures(run).some(failure => failure.text === CAPTURE_FAILURE_TEXT['startup-command-sandbox-unavailable']
+    || ['requested-permission-unconfirmed', 'requested-approval-reviewer-unconfirmed'].includes(failure.code))
     || run?.status === 'not-started') return { state: 'not-started', text: 'Model task did not start' };
   if (nativeLimitReached(run)) return { state: 'failed', text: 'Native usage or rate limit reached' };
   const native = freezeAuditComparisonEvidence(run ?? {}).verification?.nativeCompletion;
@@ -193,7 +197,7 @@ function presentFinding(finding, names) {
 /* ---------- Conditions and limits ---------- */
 
 const CONDITION = {
-  task: 'Opening task text', commit: 'Commit', tree: 'Project files at the start', nativeVersion: 'Codex version',
+  task: 'Opening task text', commit: 'Commit', tree: 'Project files at the start', nativeVersion: 'Native client version',
   models: 'Model', reasoningEffort: 'Reasoning effort', setup: 'Recorded profile setup', editableFiles: 'Files it may change',
   editableFileGlobs: 'File wildcard patterns',
 };
@@ -211,9 +215,17 @@ const coverageText = status => status === 'partial' ? 'partly recorded' : status
 const CLIENT_TEXT = { cli: 'Codex CLI', desktop: 'Codex Desktop' };
 
 function sessionTime(run) {
-  const first = list(run?.turns).map(turn => Date.parse(turn?.recordedAt)).filter(Number.isFinite).sort((x, y) => x - y)[0];
-  if (!Number.isFinite(first)) return 'time not recorded';
-  return new Date(first).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const first = dates => dates.map(Date.parse).filter(Number.isFinite).sort((x, y) => x - y)[0];
+  const turns = list(run?.turns);
+  const events = rootReplayEvents(run) ?? [];
+  const native = first([...turns.map(turn => turn?.recordedAt),
+    ...events.filter(event => event.timestampSource !== 'observed').map(event => event.timestamp)]);
+  const observed = first([...turns.map(turn => turn?.observedStartedAt),
+    ...events.filter(event => event.timestampSource === 'observed').map(event => event.timestamp)]);
+  const time = native ?? observed;
+  if (time === undefined) return 'time not recorded';
+  const label = new Date(time).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return native === undefined ? `${label} (observed)` : label;
 }
 
 function duration(ms) {
@@ -225,22 +237,28 @@ function duration(ms) {
   return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
 
+function rootReplayEvents(run) {
+  const roots = list(run?.sessionReplay?.sessions).filter(session => session?.parentId === null);
+  return roots.length === 1 ? list(roots[0].events) : null;
+}
+
 function rootReplayTime(run) {
   const sessions = list(run?.sessionReplay?.sessions);
   if (!run?.sessionReplay) return null;
   const roots = sessions.filter(session => session?.parentId === null);
   if (roots.length !== 1) return { ms: null, scope: 'root-replay-events', note: roots.length
     ? 'The root replay is ambiguous, so no span is reported.' : 'The root session is unavailable, so no replay span is reported.' };
-  const root = roots[0];
-  const events = list(root?.events);
-  const times = events.map(event => Date.parse(event?.timestamp)).filter(Number.isFinite);
-  if (times.length < 2) return { ms: null, scope: 'root-replay-events', note: times.length === 1
-    ? 'Only one root event timestamp is available; a span cannot be measured.'
+  const events = list(roots[0].events);
+  const { timestamps: times, receipt, missing, otherClock } = replaySpanTimestamps(events);
+  if (times.length < 2) return { ms: null, scope: 'root-replay-events', note: times.length || otherClock
+    ? 'Root replay needs two timestamps from the same clock to measure a span.'
     : 'Root event timestamps are unavailable.' };
-  const partial = times.length < events.length;
-  return { ms: Math.max(...times) - Math.min(...times), scope: 'root-replay-events', note: partial
-    ? `First to last of ${times.length} timestamped root events (${events.length - times.length} without timestamps); not active working time.`
-    : 'First to last recorded root event; not active working time.' };
+  const caveat = [missing ? `${missing} without timestamps` : null,
+    otherClock ? `${otherClock} on a different clock` : null].filter(Boolean).join(', ');
+  return { ms: Math.max(...times) - Math.min(...times), scope: receipt ? 'Observed root replay timestamps' : 'root-replay-events',
+    note: caveat ? `First to last of ${times.length} timestamped root events (${caveat}); not active working time.`
+      : receipt ? 'First to last root event as observed by Xenoflux; includes delivery time.'
+        : 'First to last recorded root event; not active working time.' };
 }
 
 function recordedSpanForRun(run, comparisonSpan, key) {
@@ -255,6 +273,11 @@ function recordedSpanForRun(run, comparisonSpan, key) {
 }
 
 const TOKEN_FIELDS = [['inputTokens', 'input'], ['cachedInputTokens', 'cached input'], ['outputTokens', 'output'], ['reasoningOutputTokens', 'reasoning'], ['totalTokens', 'total']];
+
+const CLAUDE_TOKENS = [['uncachedInput', 'uncached input'], ['cacheRead', 'cache read'], ['cacheWrite', 'cache creation'],
+  ['output', 'output'], ['input', 'total input'], ['total', 'task submission total']];
+
+const tokenText = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString('en-GB') : 'Not recorded';
 
 function associationView(association, sameTaskLabel) {
   const status = association?.status;
@@ -390,8 +413,9 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
       // Keep all recorded root values; never select a child's or a single turn's setting.
       return values.length > 1 ? `Multiple recorded: ${values.join(', ')}` : values[0] ?? null;
     };
-    const actualModel = root?.model ?? run.source?.model ?? nativeValue('model') ?? run.capture?.effectiveSettings?.model;
-    const actualEffort = root?.reasoningEffort ?? run.source?.reasoningEffort ?? nativeValue('effort') ?? run.capture?.effectiveSettings?.reasoningEffort;
+    const observed = run.settingsEvidence?.observed;
+    const actualModel = root?.model ?? run.source?.model ?? observed?.model ?? nativeValue('model') ?? run.capture?.effectiveSettings?.model;
+    const actualEffort = root?.reasoningEffort ?? run.source?.reasoningEffort ?? observed?.reasoningEffort ?? nativeValue('effort') ?? run.capture?.effectiveSettings?.reasoningEffort;
     const selected = run.profile?.execution ?? run.comparisonConditions?.requestedExecution;
     const requested = run.nativeControls?.configured ?? {};
     return {
@@ -409,16 +433,48 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
 
   const conditions = explanation.conditions;
   const declared = new Set(list(conditions.userDeclaredVariables));
-  const rows = conditions.fields.map(field => ({ key: field.key, name: CONDITION[field.key] ?? field.key,
-    label: field.status === 'different' ? 'different' : field.status === 'match' ? 'same' : 'cannot-compare',
-    a: valueText(field.key, field.left), b: valueText(field.key, field.right) }));
+  const conditionText = (field, recorded, run) => {
+    if (field === 'models' || field === 'reasoningEffort') {
+      const observed = run.settingsEvidence?.observed;
+      return valueText(field, recorded ?? observed?.[field === 'models' ? 'model' : field]);
+    }
+    if (field === 'nativeVersion') return valueText(field, recorded ?? run.settingsEvidence?.confirmed?.version);
+    if ((field === 'editableFiles' || field === 'editableFileGlobs') && Array.isArray(recorded) && !recorded.length)
+      return 'None specified';
+    if (field === 'editableFiles' && recorded == null && run.comparisonConditions?.schemaVersion === 1
+      && /^[a-f0-9]{64}$/.test(run.comparisonConditions.taskFingerprint ?? '')
+      && !run.comparisonConditions.taskId && !Object.hasOwn(run.comparisonConditions, 'editableFiles')) return 'None specified';
+    return valueText(field, recorded);
+  };
+  const sameClient = nativeClient(left) !== null && nativeClient(left) === nativeClient(right);
+  const rootModels = [left, right].map(run => {
+    const rootId = run.nativeReference?.sessionId ?? run.source?.nativeSessionId ?? run.source?.threadId;
+    return [...new Set(list(run.turns).filter(turn => rootId && turn.agentId === rootId)
+      .map(turn => turn.model).filter(model => typeof model === 'string' && model.trim()))].sort();
+  });
+  const rows = conditions.fields.map(field => {
+    const { key } = field;
+    if (key === 'models' && field.status === 'unknown' && rootModels.every(models => models.length)) {
+      return { key, name: 'Main-session model', a: rootModels[0].join(', '), b: rootModels[1].join(', '),
+        label: JSON.stringify(rootModels[0]) === JSON.stringify(rootModels[1]) ? 'same' : 'different' };
+    }
+    const a = conditionText(key, field.left, left), b = conditionText(key, field.right, right);
+    const separateVersionSchemes = key === 'nativeVersion' && !sameClient && nativeClient(left) && nativeClient(right);
+    const noRules = ['editableFiles', 'editableFileGlobs'].includes(key) && a === 'None specified' && b === 'None specified';
+    return { key, name: CONDITION[key] ?? key, a, b,
+      label: separateVersionSchemes || noRules ? 'not-applicable'
+        : field.status === 'different' ? 'different' : field.status === 'match' ? 'same' : 'cannot-compare' };
+  });
   const clientNames = [clientText('left', left), clientText('right', right)];
   rows.push({ key: 'client', name: 'Client', label: clientNames.includes('Client not known') ? 'cannot-compare' : clientNames[0] === clientNames[1] ? 'same' : 'different',
     a: clientNames[0], b: clientNames[1] });
-  const differing = rows.filter(row => row.label === 'different').map(row => ({ ...row, intent: declared.has(row.name) ? 'intended' : 'not-marked' }));
+  const differing = rows.filter(row => row.label === 'different').map(row => ({ ...row,
+    intent: declared.has(CONDITION[row.key] ?? row.name) ? 'intended' : 'not-marked' }));
   const same = rows.filter(row => row.label === 'same').length, unknown = rows.filter(row => row.label === 'cannot-compare').length;
 
   const sides = [side('left', left), side('right', right)];
+  const agentMeasurements = { a: presentAgentMeasurements(left), b: presentAgentMeasurements(right) };
+  const reportedUsage = { a: presentReportedUsage(left, agentMeasurements.a), b: presentReportedUsage(right, agentMeasurements.b) };
   const limits = [];
   if (nativeClient(left) && nativeClient(right) && nativeClient(left) !== nativeClient(right))
     limits.push('These sides use different native permission rules.');
@@ -441,7 +497,14 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
       continue;
     }
     const states = ['left', 'right'].map(sideKey => (sideKey === 'left' ? left : right).coverage?.[key]);
-    const gaps = states.map((state, index) => state && !COMPLETE.has(state) ? `${coverageText(state)} for ${index ? names.b : names.a}` : null).filter(Boolean);
+    const gaps = states.map((state, index) => {
+      const run = index ? right : left;
+      if (key === 'outcome' && executions[index].state === 'completed' && run.comparisonConditions?.checkRecipes?.length === 0) return null;
+      if (key === 'usage' && state === 'partial' && reportedUsage[index ? 'b' : 'a'])
+        return `scoped counters available for ${index ? names.b : names.a}; verify scope under Time and tokens`;
+      if (key === 'agents' && state === 'partial') return `session discovery incomplete for ${index ? names.b : names.a}`;
+      return state && !COMPLETE.has(state) ? `${coverageText(state)} for ${index ? names.b : names.a}` : null;
+    }).filter(Boolean);
     if (gaps.length) limits.push(`${COVERAGE[key]}: ${gaps.join(', ')}.`);
   }
   const fullSetup = [left, right].some(run => run.source?.recordedSetup?.fullHistoricalSetup === 'unavailable');
@@ -483,6 +546,9 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
     ? measurement.counters.total.toLocaleString('en-GB')
     : ['unvalidated', 'partial'].includes(measurement.usageStatus) ? 'Not validated' : 'Unavailable';
   const leftTokens = c.usage?.left?.values, rightTokens = c.usage?.right?.values;
+  const leftClaude = left.source?.kind === 'claude-agent-sdk' ? reportedUsage.a?.counters : null;
+  const rightClaude = right.source?.kind === 'claude-agent-sdk' ? reportedUsage.b?.counters : null;
+  const rootScope = (client, tokens) => tokens ? `${client === 'codex' || !client ? 'Codex-reported' : 'Client-reported'} root session` : '—';
   const timeRows = [
     { name: 'Recorded time span', a: duration(recordedSpan.left.ms), b: duration(recordedSpan.right.ms),
       scope: { a: recordedSpan.left.scope, b: recordedSpan.right.scope },
@@ -491,10 +557,14 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
     { name: 'Runner task phase', a: duration(c.metrics?.taskMs?.left), b: duration(c.metrics?.taskMs?.right),
       scope: { a: 'Runner task and capture phase', b: 'Runner task and capture phase' },
       caveat: 'Local wall time for the task and capture, including startup and shutdown. Excludes setup and verification checks; not active working time.' },
-    ...TOKEN_FIELDS.map(([key, name], index) => ({ name: `Main-session ${name} tokens`, scope: { a: 'Codex-reported root session', b: 'Codex-reported root session' },
-      a: Number.isFinite(leftTokens?.[key]) ? leftTokens[key].toLocaleString('en-GB') : 'Not recorded',
-      b: Number.isFinite(rightTokens?.[key]) ? rightTokens[key].toLocaleString('en-GB') : 'Not recorded',
-      ...(index === TOKEN_FIELDS.length - 1 ? { caveat: 'As counted by Codex for the main session only.' } : {}) })),
+    ...(leftTokens || rightTokens ? TOKEN_FIELDS.map(([key, name]) => ({ name: `Main-session ${name} tokens`,
+      scope: { a: rootScope(nativeClient(left), leftTokens), b: rootScope(nativeClient(right), rightTokens) },
+      a: leftClaude ? '—' : tokenText(leftTokens?.[key]), b: rightClaude ? '—' : tokenText(rightTokens?.[key]) })) : []),
+    ...(leftClaude || rightClaude ? CLAUDE_TOKENS.map(([key, name]) => ({ name: `Claude ${name} tokens`,
+      basis: 'provider-submission',
+      scope: { a: leftClaude ? 'Claude task submission' : '—', b: rightClaude ? 'Claude task submission' : '—' },
+      a: leftClaude ? tokenText(leftClaude[key]) : '—', b: rightClaude ? tokenText(rightClaude[key]) : '—',
+      ...(key === 'total' ? { caveat: 'Sum of the reported input, cache read, cache creation and output counters for this submission.' } : {}) })) : []),
     { name: 'Total for the whole workflow', scope: { a: 'Whole workflow', b: 'Whole workflow' },
       a: workflowValue(workflowMeasurements.a), b: workflowValue(workflowMeasurements.b),
       caveat: [...new Set([workflowMeasurements.a.usageNote, workflowMeasurements.b.usageNote])].join(' ') },
@@ -544,6 +614,24 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
     : `${key === 'left' ? names.a : names.b}: only observed edit paths are listed; missing paths do not establish no change.`).join(' ')
     + ' Ignored file inventory does not imply captured file contents.';
 
+  const contexts = { a: rootContext(left), b: rootContext(right) };
+  const toolCount = tools => {
+    const count = Number.isSafeInteger(tools?.count) ? String(tools.count)
+      : Number.isSafeInteger(tools?.observedCount) && tools.observedCount > 0 ? `${tools.observedCount} retained` : null;
+    if (count === null) return null;
+    const tool = tools?.byIdentity?.length === 1 ? tools.byIdentity[0]?.toolName : null;
+    return tool ? `${count} · ${tool}` : count;
+  };
+  const timing = c.metrics?.taskMs;
+  const overview = [
+    { name: 'Main-session model', a: contexts.a.model, b: contexts.b.model },
+    { name: 'Task and capture time', a: duration(timing?.left), b: duration(timing?.right) },
+    { name: 'Tool calls', a: toolCount(c.tools?.left), b: toolCount(c.tools?.right) },
+    { name: 'Tracked files changed', a: inventories.left?.counts.tracked?.toLocaleString('en-GB'),
+      b: inventories.right?.counts.tracked?.toLocaleString('en-GB') },
+  ].filter(row => [row.a, row.b].some(value => value != null && value !== 'Not recorded'))
+    .map(row => ({ ...row, a: row.a ?? '—', b: row.b ?? '—' }));
+
   // Count the distinct actions that the paired findings can actually show.
   // Findings may cite the same action more than once, and named actions are
   // presented alongside the generic timeline actions below.
@@ -557,7 +645,7 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
     title: title || 'Session comparison',
     sessionControls,
     a: sides[0], b: sides[1],
-    replayRootContext: { a: rootContext(left), b: rootContext(right) },
+    replayRootContext: contexts,
     replay: { a: left.sessionReplay ?? null, b: right.sessionReplay ?? null },
     attempt: {
       title: notStarted ? 'Neither model task started' : completed ? 'Both model tasks completed'
@@ -573,11 +661,13 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
       ...(notStarted && explanation.conditions.taskAssociation?.status === 'recorded'
         ? { text: 'The same task was prepared for both profiles; neither model task started.' } : {}) },
     counts: countLabels(findings),
-    summaryLine: `Verification: ${noChecks ? 'no independent check was recorded' : notStarted ? 'checks not run; model tasks did not start' : noResults ? 'checks selected; no results recorded' : 'checks recorded'} · Reviews: ${review.reviewed ? 'attached' : 'not reviewed'} · One pair, so whether this repeats is unmeasured.`,
+    summaryLine: `${noChecks ? 'No checks selected' : notStarted ? 'Checks skipped because the tasks did not start' : noResults ? 'Checks selected, results unavailable' : 'Check results recorded'} · ${review.reviewed ? 'Review attached' : 'No review'}`,
     conditions: { rows: differing, allRows: rows,
-      scopeNote: 'Model and reasoning effort summarize recorded turns across the captured actors. Root values are shown separately.'
-        + ([left, right].some(run => run.comparisonConditions?.sharedProfileOverlap) ? ' Other jobs were observed on the same profile. Timing reflects shared conditions.' : ''),
-      footer: `${plural(same, 'condition')} the same · ${unknown} not recorded`,
+      scopeNote: (rows.some(row => row.name === 'Main-session model') ? 'Main-session models come from the retained root turns.'
+        : 'Model and reasoning effort summarize recorded turns across the captured actors. Root values are shown separately.')
+        + ([left, right].some(run => run.comparisonConditions?.parallel) ? ' The comparison was configured to run both sides in parallel. The sides can contend for shared resources.' : '')
+        + ([left, right].some(run => run.comparisonConditions?.sharedProfileOverlap) ? ' Concurrent work was observed on the same profile. Timing reflects shared conditions.' : ''),
+      footer: `${same} same · ${differing.length} different${unknown ? ` · ${unknown} unresolved` : ''}`,
       all: rows.map(row => ({ label: row.name, value: row.a === row.b ? `${row.a} on both` : `${names.a}: ${row.a} · ${names.b}: ${row.b}` })) },
     limits,
     findings: shown, moreFindings: { text: `View all findings · ${more.length} more that the records can’t show or compare`, items: more },
@@ -592,8 +682,10 @@ export function presentComparison(value, { title, reviews, sameTaskLabel } = {})
       text: count ? plural(count, 'distinct referenced step') : 'No referenced action steps to show' })),
       summary: `${names.a}: ${evidenceCounts[0] ? plural(evidenceCounts[0], 'distinct referenced step') : 'no referenced action steps to show'} · ${names.b}: ${evidenceCounts[1] ? plural(evidenceCounts[1], 'distinct referenced step') : 'no referenced action steps to show'}. A step cited by multiple findings is counted once. Steps are listed in each session’s own order and aren’t matched one to one.` },
     verification: { cells: verification, rows: presentCheckRows(left, right, explanation.verification.left.checks, explanation.verification.right.checks), none: noChecks, reviews: { text: review.reviewed ? `${plural(list(reviews?.reviews).length, 'review')} attached` : 'Not reviewed', reviewed: review.reviewed } },
-    agentMeasurements: { a: presentAgentMeasurements(left), b: presentAgentMeasurements(right) },
+    overview,
+    agentMeasurements,
     workflowMeasurements,
+    reportedUsage,
     timeTokens: { rows: timeRows, footer: 'Not cost, and less time or fewer tokens don’t mean better work.' },
     outcome: { summary: outcomeSummary, cells: [changeText('left', names.a), changeText('right', names.b)], files, code: null,
       patches: { a: presentTaskEndPatch(left), b: presentTaskEndPatch(right) },

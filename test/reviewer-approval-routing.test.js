@@ -32,16 +32,18 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  if(m.method==='skills/list')return reply({data:[]});
  if(m.method==='thread/start'){
    if(process.argv[2]==='unsupported')return send({id:m.id,error:{code:-32602,message:'unknown approval reviewer option'}});
-   return reply({cwd:process.cwd(),thread:{id:threadId,cwd:process.cwd()},approvalPolicy:m.params.approvalPolicy,
+   return reply({cwd:process.cwd(),thread:{id:threadId,cwd:process.cwd()},approvalPolicy:m.params.approvalPolicy??'never',
      sandbox:{type:m.params.sandbox==='read-only'?'readOnly':'workspaceWrite',networkAccess:false},
      ...(process.argv[2]==='missing'?{}:{approvalsReviewer:process.argv[2]})});
  }
  if(m.method==='turn/start'){
    reply({turn:{id:turnId}});
+   if((m.params.approvalPolicy??'never')==='never'||process.argv[2]==='auto_review')
+     return send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed'}}});
    return send({id:'native-approval',method:'item/commandExecution/requestApproval',params:{threadId,turnId,itemId,startedAtMs:1,
-     command:'printf exact-marker',cwd:process.cwd(),availableDecisions:['accept','decline']}});
+     command:'printf exact-marker',cwd:process.cwd(),availableDecisions:['accept','acceptForSession','decline']}});
  }
- if(m.id==='native-approval'&&m.result?.decision==='accept')send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed'}}});
+ if(m.id==='native-approval'&&['accept','acceptForSession'].includes(m.result?.decision))send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'completed'}}});
 });`, { mode: 0o600 });
   const captures = [];
   const service = createUiRuns({ store: app.store, defaultUserHome: join(app.root, 'default-user-home'),
@@ -59,22 +61,23 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 
 test('comparison freezes user approval routing, answers exact requests once, and retains native confirmation', async t => {
   const f = await fixture(t, 'user');
-  await assert.rejects(f.service.runPreview({ ...f.input, advanced: { ...f.input.advanced, approvalsReviewer: 'auto_review' } }), { status: 400 });
+  await assert.rejects(f.service.runPreview({ ...f.input, advanced: { approvalsReviewer: 'auto_review', autonomous: true } }), { status: 400 });
   const preview = await f.service.runPreview(f.input);
   assert.equal(preview.ready, true);
   assert.equal(preview.approvalsReviewer, 'user');
   f.input.advanced.approvalsReviewer = 'auto_review';
   const started = await f.service.startRun({ previewToken: preview.previewToken });
   assert.deepEqual(await f.service.startRun({ previewToken: preview.previewToken }), started);
-  for (const side of ['a', 'b']) {
-    const value = await waitFor(() => f.service.run(started), run => run.state !== 'running' || run.pendingRequests.some(request => request.side === side));
-    const request = value.pendingRequests.find(request => request.side === side);
-    assert.ok(request, JSON.stringify({ state: value.state, captures: f.captures }));
+  const waiting = await waitFor(() => f.service.run(started), run => run.state !== 'running' || run.pendingRequests.length === 2);
+  for (const side of ['b', 'a']) {
+    const request = waiting.pendingRequests.find(request => request.side === side);
+    assert.ok(request, JSON.stringify({ state: waiting.state, captures: f.captures }));
     assert.equal(request.method, 'item/commandExecution/requestApproval');
     assert.equal(request.params.command, 'printf exact-marker');
     assert.equal(request.params.itemId, 'marker-command');
-    const answer = { ...started, requestId: request.requestId, response: { decision: 'accept' } };
-    await f.service.respondRun(answer);
+    const answer = { ...started, requestId: request.requestId, response: { decision: side === 'b' ? 'acceptForSession' : 'accept' } };
+    const after = await f.service.respondRun(answer);
+    if (side === 'b') assert.ok(after.pendingRequests.some(pending => pending.side === 'a'));
     await assert.rejects(f.service.respondRun(answer), { status: 409, code: 'stale-run-request' });
   }
   const done = await waitFor(() => f.service.run(started), run => run.state !== 'running');
@@ -82,7 +85,7 @@ test('comparison freezes user approval routing, answers exact requests once, and
   const wire = await f.messages();
   assert.deepEqual(wire.filter(row => row.method === 'thread/start').map(row => row.params.approvalsReviewer), ['user', 'user']);
   assert.equal(wire.filter(row => row.method === 'turn/start').length, 2);
-  assert.equal(wire.filter(row => row.id === 'native-approval' && row.result?.decision === 'accept').length, 2);
+  assert.deepEqual(wire.filter(row => row.id === 'native-approval' && row.result).map(row => row.result.decision).sort(), ['accept', 'acceptForSession']);
   const parent = await readAuditRecord(f.app.store, started.id);
   assert.equal(parent.record.spec.approvalsReviewer, 'user');
   assert.equal(parent.report.limits.approvalsReviewer, 'user');
@@ -105,11 +108,34 @@ for (const reviewer of ['missing', 'auto_review', 'unsupported']) test(`unconfir
   const started = await f.service.startRun({ previewToken: preview.previewToken });
   const done = await waitFor(() => f.service.run(started), run => run.state !== 'running');
   assert.equal(done.state, 'failed');
-  assert.match(done.columns[0].failure ?? '', /did not confirm user approval routing/, JSON.stringify(f.captures));
+  assert.match(done.columns[0].failure ?? '', /did not confirm the requested approval mode/, JSON.stringify(f.captures));
   const wire = await f.messages();
-  assert.equal(wire.filter(row => row.method === 'thread/start').length, 1, 'remaining side stops after failed confirmation');
+  assert.equal(wire.filter(row => row.method === 'thread/start').length, 2);
   assert.equal(wire.filter(row => row.method === 'turn/start').length, 0);
   const parent = await readAuditRecord(f.app.store, started.id);
   const { report } = await readAuditRecord(f.app.store, parent.state.runs[0].id);
   assert.equal(report.capture.settingsEvidence.confirmed?.approvalsReviewer?.value ?? null, reviewer === 'auto_review' ? 'auto_review' : null);
 });
+
+for (const [mode, reviewer, approvalPolicy] of [['auto_review', 'auto_review', 'on-request'], ['autonomous', 'missing', 'never'], ['profile default', 'missing', undefined]]) {
+  test(`comparison runs with native ${mode} and the reviewed sandbox`, async t => {
+    const f = await fixture(t, reviewer);
+    const advanced = mode === 'autonomous' ? { autonomous: true, networkAccess: false }
+      : mode === 'auto_review' ? { approvalsReviewer: mode } : {};
+    const preview = await f.service.runPreview({ ...f.input, advanced });
+    assert.equal(preview.ready, true);
+    const started = await f.service.startRun({ previewToken: preview.previewToken });
+    const done = await waitFor(() => f.service.run(started), run => run.state !== 'running');
+    assert.match(done.state, /^finished/, JSON.stringify(f.captures));
+    assert.deepEqual(done.pendingRequests, []);
+    const wire = await f.messages();
+    const starts = wire.filter(row => row.method === 'thread/start');
+    const turns = wire.filter(row => row.method === 'turn/start');
+    assert.equal(starts.length, 2);
+    assert.equal(turns.length, 2);
+    assert.ok(starts.every(row => row.params.approvalPolicy === approvalPolicy && row.params.sandbox === 'read-only'));
+    assert.ok(turns.every(row => row.params.approvalPolicy === approvalPolicy && row.params.sandboxPolicy.type === 'readOnly'
+      && row.params.sandboxPolicy.networkAccess === (advanced.networkAccess ?? true)));
+    if (mode === 'auto_review') assert.ok(starts.every(row => row.params.approvalsReviewer === 'auto_review'));
+  });
+}

@@ -99,14 +99,23 @@ export function Report() {
           <a href="#report-overview">Overview</a><a href="#report-activity">Activity</a><a href="#report-harness">Harness and context</a><a href="#time">Usage</a><a href="#responses">Responses</a><a href="#outcome">Outcome</a><a href="#report-source">Source</a>
         </nav>
         <section id="report-overview" className="comparison-overview" aria-label="Comparison overview">
-          <div className="comparison-counts" role="group" aria-label="Recorded finding counts">
-            <div className="comparison-count comparison-count-primary"><strong>{data.counts.different}</strong><span>Different</span><span className="hint">Recorded findings</span></div>
-            <div className="comparison-count"><strong>{data.counts.same}</strong><span>Same</span><span className="hint">Recorded findings</span></div>
-            <div className="comparison-count"><strong>{data.counts.cannotCompare}</strong><span>Could not compare</span><span className="hint">Recorded findings</span></div>
-            <div className="comparison-count"><strong>{data.verification.none ? 0 : data.verification.rows?.length || 'Unknown'}</strong><span>Checks selected</span><span className="hint">Retained check recipes</span></div>
-          </div>
-          <p className="hint">{data.summaryLine}</p>
+          {data.overview?.length ? <section className="comparison-run-facts panel flex flex-col" aria-labelledby="run-facts">
+            <div className="comparison-section-heading">
+              <h2 id="run-facts" className="text-heading">Run facts</h2>
+              <a href="#time">Compare time and tokens</a>
+            </div>
+            <PairRows label="Run facts" names={[data.a.profile, data.b.profile]} rows={data.overview} />
+            <p className="hint">{data.summaryLine}{data.overview.some(row => row.name === 'Task and capture time') ? ' · Time includes startup and shutdown' : ''}</p>
+          </section> : <p className="hint">{data.summaryLine}</p>}
           <ComparisonLines data={data} onOpen={(side, sessionId, event, trigger) => replayRef.current?.openEvent(side, { sessionId, event, text: event.body ?? '' }, trigger)} />
+          <Disclosure label="Show analytical finding counts" expandedLabel="Hide analytical finding counts">
+            <div className="comparison-counts" role="group" aria-label="Recorded finding counts">
+              <div className="comparison-count comparison-count-primary"><strong>{data.counts.different}</strong><span>Different</span></div>
+              <div className="comparison-count"><strong>{data.counts.same}</strong><span>Same</span></div>
+              <div className="comparison-count"><strong>{data.counts.cannotCompare}</strong><span>Inconclusive</span></div>
+              <div className="comparison-count"><strong>{data.verification.none ? 0 : data.verification.rows?.length || 'Unknown'}</strong><span>Checks selected</span></div>
+            </div>
+          </Disclosure>
         </section>
 
         <section className="comparison-conditions panel flex flex-col" aria-labelledby="conditions">
@@ -129,9 +138,10 @@ export function Report() {
         </section>
 
         <div id="report-source"><InfoNotice as="section" title="What we could not see" headingLevel={2} className="scroll-mt-4">
-          <div>{data.attempt?.notStarted ? <><p>No model task started, so the missing actions, claims and token usage cannot be recovered from this attempt.</p>
-            <Disclosure label="Show recorded coverage limits" expandedLabel="Hide recorded coverage limits"><ul className="list-disc pl-5">{data.limits.map(limit => <li key={limit}>{limit}</li>)}</ul></Disclosure></>
-            : <ul className="list-disc pl-5 flex flex-col gap-1">{data.limits.length ? data.limits.map(limit => <li key={limit}>{limit}</li>) : <li>Nothing that this report depends on was missing.</li>}</ul>}</div>
+          {data.attempt?.notStarted ? <p>Neither task started. This attempt has no model activity or token usage.</p> : null}
+          {data.limits.length ? <Disclosure label="Show recorded coverage limits" expandedLabel="Hide recorded coverage limits">
+            <ul className="list-disc pl-5 flex flex-col gap-1">{data.limits.map(limit => <li key={limit}>{limit}</li>)}</ul>
+          </Disclosure> : <p>All evidence used by this report was available.</p>}
         </InfoNotice></div>
 
         <div id="report-harness">
@@ -165,7 +175,7 @@ export function Report() {
           <h2 id="time" className="text-heading">Time and tokens</h2>
           {data.attempt?.notStarted ? <p className="text-body">Model token usage is unavailable because neither task started. This is a startup attempt, not a measured model task.</p> : null}
           <WorkflowMeasurements profiles={[data.a.profile, data.b.profile]} workflow={data.workflowMeasurements}
-            agents={data.agentMeasurements} replay={data.replay} timeRows={data.timeTokens.rows}
+            agents={data.agentMeasurements} replay={data.replay} timeRows={data.timeTokens.rows} reportedUsage={data.reportedUsage}
             footer={data.timeTokens.footer} noTask={data.attempt?.notStarted ?? false} />
           <p className="hint">{data.timeTokens.footer}</p>
         </section>

@@ -2,7 +2,7 @@
 import { createInterface } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const retained = /* CLAUDE_SANITIZED_NATIVE_FRAMES */ null;
 const argv = process.argv.slice(2);
@@ -45,7 +45,9 @@ for (const [marker, value] of [
   ['fixture-startup-task', { subtype: 'task_started', task_id: 'unexpected-task' }],
   ['fixture-malformed-hook', { subtype: 'hook_started' }],
 ]) if (existsSync(join(process.env.HOME, marker))) frame({ type: 'system', ...value });
-let promptId, mode, tools = [], decisions = new Set();
+let promptId, mode, tools = [], decisions = new Set(), checkedPermissionMode;
+const comparisonPermission = () => ['fixture-comparison-approval', 'fixture-reject-approval-mode']
+  .some(marker => existsSync(join(process.env.HOME, marker)));
 const result = (error = false) => frame({ ...retained[error ? 'interrupt' : 'companion'].at(-1),
   user_message_uuid: promptId, duration_ms: 100,
   ...(mode === 'closing-response' ? { result: 'Claude fixture final response.' } : {}),
@@ -97,6 +99,15 @@ for await (const line of io) {
     const kind = message.request.subtype;
     if (kind === 'initialize') response(message.request_id, { commands: [], agents: [], models, account,
       output_style: 'default', available_output_styles: ['default'], claude_code_version: '2.1.319' });
+    else if (kind === 'set_permission_mode') {
+      if (promptId || checkedPermissionMode || message.request.mode !== arg('--permission-mode')) throw new Error('Unexpected permission mode control');
+      if (existsSync(join(process.env.HOME, 'fixture-reject-approval-mode'))) {
+        emit({ type: 'control_response', response: { subtype: 'error', request_id: message.request_id, error: 'Native policy refused the mode' } });
+        continue;
+      }
+      checkedPermissionMode = message.request.mode;
+      response(message.request_id, {});
+    }
     else if (kind === 'interrupt') {
       response(message.request_id, {});
       if (mode === 'running-cancel') toolResult(tools[0], retained.interrupt[1].is_error, retained.interrupt[1].content);
@@ -105,6 +116,9 @@ for await (const line of io) {
   } else if (message.type === 'user') {
     if (promptId || !session_id) throw new Error('Duplicate or unbound prompt');
     promptId = message.uuid; mode = message.message.content;
+    if ((comparisonPermission() || checkedPermissionMode) && (!checkedPermissionMode
+      || (checkedPermissionMode === 'dontAsk') !== (arg('--permission-prompts') === 'none')))
+      throw new Error('Prompt arrived without the reviewed approval behavior');
     if (mode.includes('Frozen report: ')) {
       for (const kind of ['report', 'evidence']) {
         const path = mode.match(new RegExp('^Frozen ' + kind + ': (.+)$', 'm'))?.[1];
@@ -125,6 +139,35 @@ for await (const line of io) {
       for (const state of ['queued', 'started']) frame({ type: 'command_lifecycle', command_uuid: promptId, state });
     }
     frame({ ...retained.companion[0], cwd: process.cwd(), apiKeySource: 'none', model, permissionMode: arg('--permission-mode') ?? 'default' });
+    if (mode.startsWith('native-replay')) {
+      const cwd = process.cwd(), nativeHome = process.env.CLAUDE_CONFIG_DIR ?? join(process.env.HOME, '.claude');
+      const project = join(nativeHome, 'projects', cwd.replace(/[^a-zA-Z0-9-]/g, '-'));
+      const nativeRow = (role, content, second, uuid = randomUUID()) => ({
+        type: role, cwd, sessionId: session_id, uuid, timestamp: `2026-11-21T11:00:0${second}.000Z`,
+        message: { role, content },
+      });
+      const tool = { type: 'tool_use', id: 'tool-fixture-native', name: 'Read', input: { file_path: 'fixture.txt',
+        private_reasoning: 'opaque nested value' } };
+      const toolOutput = { type: 'tool_result', tool_use_id: tool.id, is_error: false, content: [
+        { type: 'text', text: 'fixture output' }, { type: 'image', source: 'opaque image value' },
+      ] };
+      const final = { type: 'text', text: 'Claude fixture completed.' };
+      const rows = [
+        nativeRow('user', mode.endsWith('-unbound') ? 'foreign prompt' : mode, 0, promptId),
+        nativeRow('assistant', [{ type: 'thinking', thinking: 'opaque private value' }], 1),
+        nativeRow('assistant', [tool], 2),
+        nativeRow('user', [toolOutput], 3),
+        nativeRow('assistant', [final], 4),
+      ];
+      if (mode.endsWith('-open-call')) rows.splice(3, 1);
+      if (mode.endsWith('-no-time')) delete rows.at(-1).timestamp;
+      mkdirSync(project, { recursive: true, mode: 0o700 });
+      writeFileSync(join(project, session_id + '.jsonl'), rows.map(row => JSON.stringify(row)).join('\n') + '\n', { mode: 0o600 });
+      for (const row of rows.slice(2)) frame({ type: row.type, uuid: row.uuid, parent_tool_use_id: null,
+        message: { ...row.message, ...(row.type === 'assistant' ? { model: 'claude-fixture-sonnet' } : {}) } });
+      result();
+      continue;
+    }
     if (mode.startsWith('closure-')) {
       if (['closure-controller', 'closure-controller-idle'].includes(mode)) {
         tools = [{ type: 'tool_use', id: 'tool-fixture-0', name: 'Bash', input: { command: '/usr/bin/touch xfx-local-marker.txt' } }];
@@ -153,7 +196,7 @@ for await (const line of io) {
         ...(mode.endsWith('-foreign') ? { session_id: randomUUID() } : {}) });
       continue;
     }
-    if (!['queue', 'pending-cancel', 'running-cancel', 'mismatch'].includes(mode)) {
+    if (!['queue', 'pending-cancel', 'running-cancel', 'mismatch', 'session-allow', 'session-suppressed', 'session-wide'].includes(mode)) {
       frame({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', model: 'claude-fixture-sonnet',
         content: [{ type: 'text', text: mode === 'closing-response' ? 'Claude fixture progress.' : 'Claude fixture completed.' }] } });
       result();
@@ -164,6 +207,9 @@ for await (const line of io) {
     frame({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', model: 'claude-fixture-sonnet', content: tools } });
     for (const [index, tool] of tools.entries()) emit({ type: 'control_request', request_id: 'request-fixture-' + index,
       request: { subtype: 'can_use_tool', tool_name: tool.name, input: mode === 'mismatch' ? { command: 'printf changed' } : tool.input,
+        ...(mode.startsWith('session-') ? { permission_suggestions: [{ type: 'addRules', behavior: 'allow', destination: 'localSettings',
+          rules: [{ toolName: tool.name, ruleContent: mode === 'session-wide' ? '*' : tool.input.command }] }],
+        ...(mode === 'session-suppressed' ? { suppress_always_allow_rule: true } : {}) } : {}),
         tool_use_id: tool.id } });
   } else if (message.type === 'control_response') {
     const reply = message.response;
@@ -185,7 +231,10 @@ for await (const line of io) {
         const helper = spawn('/bin/sleep', ['10'], { detached: true, stdio: 'ignore' });
         helper.unref();
       }
-      if (reply.response.updatedInput?.command !== tool.input.command || reply.response.updatedPermissions) throw new Error('Widened approval');
+      const expected = mode === 'session-allow' ? [{ type: 'addRules', behavior: 'allow', destination: 'session',
+        rules: [{ toolName: tool.name, ruleContent: tool.input.command }] }] : undefined;
+      if (reply.response.updatedInput?.command !== tool.input.command
+        || JSON.stringify(reply.response.updatedPermissions) !== JSON.stringify(expected)) throw new Error('Widened approval');
       frame({ ...retained.companion[1], elapsed_time_seconds: 1 });
       frame({ type: 'tool_progress', parent_tool_use_id: null, tool_use_id: tool.id, tool_name: tool.name, elapsed_time_seconds: 1 });
       if (mode !== 'running-cancel') toolResult(tool, false, 'fixture output');

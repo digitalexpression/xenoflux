@@ -1,5 +1,4 @@
 import { useId, useState, type ReactNode } from 'react';
-import { Link } from 'react-router';
 import { ArrowLeftRight, CircleHelp, Columns2, Equal, GitCompareArrows } from 'lucide-react';
 import type { ExecutionSelection, NativeClientId, RunProfileOption, RunRequest, Side } from '@/api/types';
 import { useExecutionCatalog, useExecutionControls } from '@/components/ExecutionFields';
@@ -72,53 +71,8 @@ function SetupRow({ label, a, b, change }: { label: string; a: ReactNode; b: Rea
   </div>;
 }
 
-export type RunBindingResult = { bound: string[]; failed: { profile: string; message: string }[]; optionsReloaded: boolean };
-type BindProfiles = (repository: string, targets: RunProfileOption[]) => Promise<RunBindingResult>;
-
-function BindRunProfiles({ repository, targets, busy, onBind }: {
-  repository: string; targets: RunProfileOption[]; busy: boolean; onBind: BindProfiles;
-}) {
-  const details = useId();
-  const [checkedTargets, setCheckedTargets] = useState<string | null>(null);
-  const [result, setResult] = useState<RunBindingResult | null>(null);
-  const pending = targets.filter(profile => !result?.bound.includes(profile.name));
-  const targetKey = JSON.stringify(pending.map(profile => profile.name));
-  const checked = checkedTargets === targetKey;
-  if (!pending.length && !result) return null;
-
-  async function bind() {
-    if (!checked || busy || !pending.length) return;
-    const next = await onBind(repository, pending);
-    setResult({ ...next, bound: [...(result?.bound ?? []), ...next.bound] });
-  }
-
-  return <div className="run-paired-note flex flex-col gap-2">
-    {pending.length ? <>
-      <p id={details} className="text-ui wrap-anywhere">Add <code>{repository}</code> to {pending.map(profile => profile.label ?? profile.name).join(', ')}.</p>
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="flex items-center gap-2 text-ui">
-          <input type="checkbox" checked={checked} disabled={busy} aria-describedby={details}
-            onChange={event => setCheckedTargets(event.target.checked ? targetKey : null)} />
-          Bind selected profiles to this repository
-        </label>
-        <Button disabled={!checked} busy={busy} busyLabel="Binding profiles…" onClick={() => void bind()}>
-          {result?.failed.length ? 'Retry binding' : 'Bind profiles'}
-        </Button>
-      </div>
-    </> : null}
-    {result ? <div role="status" className="flex flex-col gap-1 text-ui wrap-anywhere">
-      {result.bound.length ? <p>Bound {result.bound.join(', ')} to <code>{repository}</code>.</p> : null}
-      {result.failed.map(({ profile, message }) => <p key={profile}>Could not bind {profile}. {message}</p>)}
-      {result.bound.length && !result.optionsReloaded ? <p>Project options could not be reloaded.</p> : null}
-    </div> : null}
-  </div>;
-}
-
-export function RunSetupPair({ setups, selected, profiles, workspace, workspaceEditing, simulated, noSharedRepository, repositorySuggestion,
-  binding, catalogRevisions, onBind, onRepositoryChange, onOpenProfiles, onProfileChange, onExecutionChange, onSwap }: {
+export function RunSetupPair({ setups, selected, profiles, workspace, workspaceEditing, simulated, onProfileChange, onExecutionChange, onSwap }: {
   setups: Pair; selected: Record<Side, string>; profiles: RunProfileOption[]; workspace: string; workspaceEditing: boolean; simulated?: boolean;
-  binding: boolean; catalogRevisions: Record<string, number>; onBind: BindProfiles;
-  noSharedRepository: boolean; repositorySuggestion?: string; onRepositoryChange: (path: string) => void; onOpenProfiles: () => void;
   onProfileChange: (side: Side, key: string) => void; onExecutionChange: (side: Side, value: ExecutionSelection) => void;
   onSwap: () => void;
 }) {
@@ -126,18 +80,14 @@ export function RunSetupPair({ setups, selected, profiles, workspace, workspaceE
   const [autoLoadModels, setAutoLoadModels] = useState(() => {
     try { return sessionStorage.getItem(AUTO_LOAD_MODELS) !== 'false'; } catch { return true; }
   });
-  const chosen = {
-    a: profiles.find(option => runProfileKey(option) === selected.a),
-    b: profiles.find(option => runProfileKey(option) === selected.b),
-  };
   const shared = Boolean(selected.a && selected.a === selected.b);
   const repository = workspace.trim();
-  const hasWorkspace = Boolean(repository);
-  const autoLoad = autoLoadModels && !simulated && !workspaceEditing && hasWorkspace && !binding;
+  const hasWorkspace = repository.startsWith('/');
+  const autoLoad = autoLoadModels && !simulated && !workspaceEditing && hasWorkspace;
   const leftName = hasWorkspace ? setups.a.name : '';
   const rightName = hasWorkspace ? setups.b.name : '';
-  const left = useExecutionCatalog({ profile: leftName, client: setups.a.client, workspace: repository, autoLoad, revision: catalogRevisions[selected.a] });
-  const right = useExecutionCatalog({ profile: shared ? '' : rightName, client: setups.b.client, workspace: repository, autoLoad, revision: catalogRevisions[selected.b] });
+  const left = useExecutionCatalog({ profile: leftName, client: setups.a.client, workspace: repository, autoLoad });
+  const right = useExecutionCatalog({ profile: shared ? '' : rightName, client: setups.b.client, workspace: repository, autoLoad });
   const catalogFor = (side: Side) => {
     const catalog = side === 'a' || shared ? left : right;
     if (hasWorkspace || !selected[side]) return catalog;
@@ -147,29 +97,16 @@ export function RunSetupPair({ setups, selected, profiles, workspace, workspaceE
     side: 'Left', onChange: value => onExecutionChange('a', value) });
   const b = useExecutionControls({ profile: rightName, client: setups.b.client, value: setups.b.execution, catalog: catalogFor('b'),
     shared, side: 'Right', onChange: value => onExecutionChange('b', value) });
-  const needsBinding = [chosen.a, chosen.b].some(profile => profile?.boundRepositories?.length === 0);
-  const repositoryUnbound = [left, right].some(catalog => catalog.errorCode === 'profile-repository-unbound');
-  const bindingTargets = new Map<string, RunProfileOption>();
-  if (!simulated && !workspaceEditing && repository.startsWith('/')) {
-    for (const side of ['a', 'b'] as const) {
-      const profile = chosen[side];
-      const catalog = catalogFor(side);
-      if (profile?.boundRepositories && (catalog.errorCode === 'profile-repository-unbound' || profile.boundRepositories.length === 0))
-        bindingTargets.set(profile.name, profile);
-    }
-  }
   const profileSelect = (side: Side, id: string) => {
-    const profile = chosen[side];
+    const profile = profiles.find(option => runProfileKey(option) === selected[side]);
     const detail = [profile?.surface?.toUpperCase(), profile?.rootMode ? `${profile.rootMode} root` : null, profile?.executionLocation, profile?.readiness].filter(Boolean).join(' · ');
-    const unbound = profile?.boundRepositories?.length === 0;
     return <div className="min-w-0">
       <label htmlFor={id} className="sr-only">{side === 'a' ? 'First · left side of the report' : 'Second · right side of the report'}</label>
-      <select id={id} className="input" value={selected[side]} disabled={binding} aria-describedby={unbound ? `${id}-binding` : detail ? `${id}-details` : undefined} onChange={event => onProfileChange(side, event.target.value)}>
+      <select id={id} className="input" value={selected[side]} aria-describedby={detail ? `${id}-details` : undefined} onChange={event => onProfileChange(side, event.target.value)}>
         <option value="">Choose a profile</option>
         {profiles.map(option => <option key={runProfileKey(option)} value={runProfileKey(option)}>{option.label ?? option.name}</option>)}
       </select>
-      {unbound ? <p id={`${id}-binding`} className="meta mt-1">No project bindings.</p>
-        : detail ? profile?.ready ? <p id={`${id}-details`} className="sr-only">{detail}</p>
+      {detail ? profile?.ready ? <p id={`${id}-details`} className="sr-only">{detail}</p>
         : <p id={`${id}-details`} className="meta mt-1 wrap-anywhere">{detail}</p> : null}
     </div>;
   };
@@ -181,22 +118,12 @@ export function RunSetupPair({ setups, selected, profiles, workspace, workspaceE
   return <section className="panel p-0" aria-labelledby="profiles-heading">
     <div className="panel-head run-paired-panel-head">
       <h2 id="profiles-heading" tabIndex={-1} className="run-paired-title"><Columns2 size={16} aria-hidden="true" /> Two setups</h2>
-      <Button variant="ghost-link" aria-label="Swap the two sides" disabled={binding} onClick={onSwap}><ArrowLeftRight size={16} aria-hidden="true" /> Swap sides</Button>
+      <Button variant="ghost-link" aria-label="Swap the two sides" onClick={onSwap}><ArrowLeftRight size={16} aria-hidden="true" /> Swap sides</Button>
     </div>
     <SetupGrid>
       {pairedFields(setups).map(({ id, label }) => <SetupRow key={id} label={label} a={values[id].a} b={values[id].b} change={changeFor(setups, id)} />)}
       <SetupRow label="Model catalogs" a={a.catalogControls} b={b.catalogControls} />
     </SetupGrid>
-    <BindRunProfiles key={JSON.stringify([repository, selected.a, selected.b])} repository={repository}
-      targets={[...bindingTargets.values()]} busy={binding} onBind={onBind} />
-    {repositorySuggestion || noSharedRepository || needsBinding || repositoryUnbound ? <div className="run-paired-note flex flex-wrap items-center gap-x-3 gap-y-1">
-      {repositorySuggestion ? <>
-        <Button variant="ghost-link" disabled={binding} onClick={() => onRepositoryChange(repositorySuggestion)}>Use shared repository</Button>
-        <code className="meta wrap-anywhere">{repositorySuggestion}</code>
-      </> : null}
-      {noSharedRepository ? <p className="meta">The selected profiles need a shared project binding.</p> : null}
-      {!binding && (noSharedRepository || needsBinding || repositoryUnbound) ? <Link className="btn btn-link" to="/profiles" onClick={onOpenProfiles}>Manage project bindings in Profiles</Link> : null}
-    </div> : null}
     {!simulated ? <div className="run-paired-note flex flex-col gap-1">
       <label className="flex items-center gap-2 text-ui w-fit">
         <input type="checkbox" checked={autoLoadModels} aria-describedby={autoLoadHint} onChange={event => {

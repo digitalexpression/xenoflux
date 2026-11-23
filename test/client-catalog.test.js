@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, realpath, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, writeFile, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { discoverCodexModels, readCodexModels, createClientCatalog, validateCatalogSelection, CATALOG_TTL_MS } from '../src/client-catalog.js';
@@ -61,6 +61,31 @@ test('owned catalog probe paginates without tasks, login, token refresh or polic
   assert.throws(() => validateCatalogSelection(snapshot, { model: 'removed' }), { code: 'catalog-model-unavailable' });
   assert.throws(() => validateCatalogSelection(snapshot, { model: 'unknown', reasoningEffort: 'max' }), { code: 'catalog-effort-unavailable' });
   assert.equal(validateCatalogSelection(snapshot, {}).status, 'inherited');
+});
+
+test('isolated Codex discovery uses private runtime and protects the selected profile', { skip: process.platform !== 'darwin' }, async t => {
+  const f = await fixture(t, `if(message.method === 'initialize') {
+    const { writeFileSync } = await import('node:fs');
+    const args = process.argv.slice(2);
+    const sqlite = JSON.parse(args[1].slice('sqlite_home='.length));
+    const logs = JSON.parse(args[3].slice('log_dir='.length));
+    if (args[4] !== 'app-server' || process.env.CODEX_SQLITE_HOME !== sqlite) throw Error('invalid catalog launch');
+    for (const dir of [sqlite, logs, process.env.TMPDIR]) writeFileSync(dir + '/marker', 'fixture');
+    try { writeFileSync(process.env.CODEX_HOME + '/config.toml', 'changed'); } catch (error) {
+      if (error.code !== 'EPERM' && error.code !== 'EACCES') throw error;
+    }
+  }`);
+  const executable = join(f.root, 'codex'), home = join(f.root, 'codex-home'), config = join(home, 'config.toml');
+  const runtime = join(f.root, 'probe');
+  await Promise.all([home, runtime].map(path => mkdir(path, { mode: 0o700 })));
+  await writeFile(config, 'original', { mode: 0o600 });
+  await writeFile(executable, '#!/bin/sh\nexec "$XFX_FIXTURE_NODE" "$XFX_FIXTURE_SCRIPT" "$@"\n', { mode: 0o700 });
+  const profile = { ...f.profile, home, executable, env: { ...f.profile.env, CODEX_HOME: home,
+    XFX_FIXTURE_NODE: process.execPath, XFX_FIXTURE_SCRIPT: f.profile.launchArgs[0] } };
+  const result = await discoverCodexModels({ ...f, profile, runtimeDirectory: runtime });
+  assert.equal(result.status, 'ready');
+  assert.equal(await readFile(config, 'utf8'), 'original');
+  for (const directory of ['sqlite', 'logs', 'tmp']) assert.equal(await readFile(join(runtime, directory, 'marker'), 'utf8'), 'fixture');
 });
 
 test('aggregate effort capability preserves absent, empty and mixed native metadata', async t => {

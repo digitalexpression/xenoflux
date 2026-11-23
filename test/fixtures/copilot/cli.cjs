@@ -15,9 +15,21 @@ const write = value => {
   const body = JSON.stringify({ jsonrpc: '2.0', ...value });
   process.stdout.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
 };
-const event = value => write({ method: 'session.event', params: { sessionId: activeId, event: {
-  ...value, data: { ...value.data, ...(value.data.ownerSessionId ? { ownerSessionId: activeId } : {}) },
-} } });
+const event = value => {
+  if (config.missingIdleTimestamp && value.type === 'session.idle') value = { ...value, timestamp: undefined };
+  const data = { ...value.data, ...(value.data.ownerSessionId ? { ownerSessionId: activeId } : {}) };
+  if (value.type === 'permission.requested' && data.promptRequest?.kind === 'commands') {
+    if (config.sessionApproval) {
+      data.promptRequest = { ...data.promptRequest, canOfferSessionApproval: true };
+      data.permissionRequest = { ...data.permissionRequest, canOfferSessionApproval: true };
+    }
+    if (config.assistedAssessment && mode === 'assisted') {
+      data.permissionMode = mode;
+      data.assistedApprovalAssessment = { status: 'completed', recommendation: 'approve' };
+    }
+  }
+  write({ method: 'session.event', params: { sessionId: activeId, event: { ...value, data } } });
+};
 const metadata = id => ({ sessionId: id, startTime: '2026-01-01T00:00:00.000Z', modifiedTime: '2026-01-01T00:00:01.000Z',
   summary: config.label, context: { cwd: config.wrongCwd ? '/' : workspace }, isRemote: false });
 
@@ -34,6 +46,9 @@ function handle({ method, id, params }) {
     case 'status.get': reply({ protocolVersion: 3, version: '1.0.107' }); break;
     case 'auth.getStatus': reply(config.signedOut ? { isAuthenticated: false } :
       { isAuthenticated: true, authType: config.authType ?? 'user', login: config.login ?? 'fixture-login', host: 'fixture.invalid' }); break;
+    case 'user.settings.get': reply({ settings: { sandbox: { value: config.sandbox ?? { enabled: false } },
+      unrelated: { value: 'PRIVATE_FIXTURE_SETTING' } } }); break;
+    case 'sandbox.getHostSupport': reply({ supported: true, capabilities: [{ name: 'network', supported: true }] }); break;
     case 'models.list': reply({ models: [], auto: { defaultTier: 'balance', tiers: [
       { id: 'balance', type: 'auto', status: { enabled: true, pickerVisible: true } },
       { id: 'fast', type: 'auto', status: { enabled: true, pickerVisible: false } },
@@ -69,6 +84,8 @@ function handle({ method, id, params }) {
       }
       break;
     case 'session.model.getCurrent': reply({ modelId: 'auto', autoTier: 'balance' }); break;
+    case 'session.options.update': reply({ success: config.sandboxUpdateRefused !== true }); break;
+    case 'session.sandbox.getEnforcementStatus': reply({ required: false, blocked: config.sandboxBlocked === true }); break;
     case 'session.permissions.getMode': reply({ mode }); break;
     case 'session.permissions.setMode': mode = params.mode; reply({ success: true, mode }); break;
     case 'session.send': {

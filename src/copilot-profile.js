@@ -151,7 +151,7 @@ async function settingsIdentity(binding) {
   return { algorithm: 'sha256-file-stat-metadata-v1', digest: createHash('sha256').update(JSON.stringify(rows)).digest('hex') };
 }
 
-/** Resolve the selected persisted profile after the coordinator validates its repository binding. */
+/** Resolve the selected profile and workspace. */
 export async function resolveCopilotProfile({ selected, stored = selected, repository, workspace,
   terminalEnvironment = process.env, defaultUserHome = userInfo().homedir, sessionOnly = false,
   bindingRepository, accountQualification } = {}) {
@@ -164,8 +164,6 @@ export async function resolveCopilotProfile({ selected, stored = selected, repos
     const chosen = sessionOnly ? userHome : repository ?? stored?.repositories?.[0]?.path;
     if (!chosen) throw new Error('Select a workspace for Copilot CLI.');
     workspace = await realpath(chosen);
-    if (!sessionOnly && managed && !stored.repositories?.some(row => row.path === workspace))
-      throw Object.assign(new Error('The selected repository is not already bound to this profile'), { code: 'profile-repository-unbound' });
     bindingRepository = sessionOnly ? null : workspace;
   }
   if (managed && (stored.client !== 'copilot' || !copilotId(stored.id)

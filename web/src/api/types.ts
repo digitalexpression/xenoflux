@@ -218,6 +218,7 @@ export interface ReplayEvent {
   kind: string;
   label: string;
   timestamp: string | null;
+  timestampSource?: 'native' | 'observed';
   sourceLine: number | null;
   body?: string | null;
   bodyStatus: 'included' | 'omitted' | 'truncated' | 'unavailable';
@@ -307,7 +308,7 @@ export interface CheckAssessmentRow {
   a: CheckInspection | null;
   b: CheckInspection | null;
 }
-export interface MeasureRow { name: string; a: string; b: string; caveat?: string; scope?: { a: string; b: string } }
+export interface MeasureRow { name: string; a: string; b: string; caveat?: string; scope?: { a: string; b: string }; basis?: 'provider-submission' }
 export interface AgentMeasurement {
   id: string;
   parentId: string | null;
@@ -324,6 +325,11 @@ export interface TokenCounters {
   output: number | null;
   reasoning: number | null;
   total: number | null;
+}
+export interface ReportedUsage {
+  scope: string;
+  note: string;
+  counters: Record<'input' | 'uncachedInput' | 'cacheRead' | 'cacheWrite' | 'output' | 'reasoning' | 'total', number | null>;
 }
 export interface WorkflowMeasurement {
   durationMs: number | null;
@@ -358,8 +364,10 @@ export interface Report {
   limits: string[];
   verification: { cells: VerificationCell[]; rows?: CheckAssessmentRow[]; none: boolean; reviews: { text: string; href: string | null } };
   timeTokens: { rows: MeasureRow[]; footer: string };
+  overview?: MeasureRow[];
   agentMeasurements?: { a: AgentMeasurement[]; b: AgentMeasurement[] };
   workflowMeasurements?: { a: WorkflowMeasurement; b: WorkflowMeasurement };
+  reportedUsage?: Record<Side, ReportedUsage | null>;
   outcome: { scopeNote?: string; summary: string; cells?: string[]; files: { path: string; a: string; b: string; category?: 'tracked' | 'ignored' | 'mixed' | 'observed' }[]; code: string | null;
     patches?: Record<Side, { status: string; text: string | null; note: string; sourceCommit: string | null }> };
   cliCommand: string;
@@ -501,7 +509,7 @@ export interface ReviewTaskView {
 }
 export interface ReviewTaskStartResponse { id: string }
 export interface ReviewTaskDecision {
-  kind?: 'approve-once' | 'reject';
+  kind?: 'approve-once' | 'approve-for-session' | 'reject';
   decision?: string | Record<string, unknown>;
   permissions?: Record<string, unknown>;
   scope?: 'turn' | 'session';
@@ -555,6 +563,9 @@ export interface RunAdvanced {
   outputMiB: number;
   program: string;
   reasoningEffort?: string;
+  networkAccess?: boolean;
+  approvalsReviewer?: 'user' | 'auto_review';
+  autonomous?: boolean;
   setup: { name: string; command: string }[];
 }
 export interface RunRequest {
@@ -579,6 +590,7 @@ export interface RunPreview {
   task: string;
   files: string;
   runs: { side: Side; profile: string; text: string; note?: string }[];
+  projectTrust?: { profile: string; client?: NativeClientId; paths: string[] }[];
   where: string[];
   checks: string[];
   limits: string[];

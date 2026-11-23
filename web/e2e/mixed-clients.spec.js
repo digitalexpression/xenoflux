@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { bind } from '../../src/profiles.js';
 import { createMixedClientFixture, pinnedCheck } from '../../test-support/ui-mixed-client-fixture.js';
 
-test('switching Codex and Claude keeps model choices scoped to each profile and a bound repository', async ({ page }) => {
+test('switching Codex and Claude scopes model choices to the selected repository without requiring a binding', async ({ page }) => {
   const app = await createMixedClientFixture();
   try {
     const codexOnly = join(app.root, 'codex-only');
@@ -16,7 +16,6 @@ test('switching Codex and Claude keeps model choices scoped to each profile and 
       if (request.url().endsWith('/api/catalog/refresh')) probes.push(request.postDataJSON());
     });
 
-    await page.addInitScript(() => sessionStorage.setItem('xenoflux-run-auto-load-models', 'false'));
     await page.goto(app.url);
     await page.getByRole('link', { name: 'Run a new task', exact: true }).click();
     const repository = page.getByLabel('Repository', { exact: true });
@@ -25,15 +24,13 @@ test('switching Codex and Claude keeps model choices scoped to each profile and 
     const leftModel = page.getByLabel('Model ID · Left', { exact: true });
     const rightModel = page.getByLabel('Model ID · Right', { exact: true });
     await leftProfile.selectOption('baseline');
-    await rightProfile.selectOption({ label: 'Claude managed · Claude Code' });
     await repository.fill(codexOnly);
     await repository.press('Tab');
-    await page.getByRole('checkbox', { name: 'Load models automatically in this tab', exact: true }).check();
-    const rightCatalog = page.getByRole('region', { name: 'Right model catalog', exact: true });
-    await expect(rightCatalog.getByRole('status')).toContainText('isn’t bound to this profile');
+    await rightProfile.selectOption({ label: 'Claude managed · Claude Code' });
+    await expect(page.getByRole('checkbox', { name: 'Load models automatically in this tab', exact: true })).toBeChecked();
     await expect(leftModel.getByRole('option', { name: 'Fixture · fixture', exact: true })).toHaveCount(1);
-    await expect(rightModel.getByRole('option')).toHaveCount(1);
-    expect(probes.some(probe => probe.profile === 'Claude managed')).toBe(false);
+    await expect(rightModel.getByRole('option', { name: /sonnet/i })).toHaveCount(1);
+    expect(probes.some(probe => probe.profile === 'Claude managed' && probe.workspace === codexOnly)).toBe(true);
 
     await repository.fill(app.repository);
     await repository.press('Tab');
@@ -54,20 +51,20 @@ test('switching Codex and Claude keeps model choices scoped to each profile and 
     await expect(leftModel.getByRole('option', { name: /sonnet/i })).toHaveCount(1);
     await expect(leftModel.getByRole('option', { name: 'Fixture · fixture', exact: true })).toHaveCount(0);
     await expect(leftModel).toHaveValue('');
-    expect(probes.filter(probe => probe.profile === 'Claude managed').map(probe => probe.workspace)).toEqual([app.repository]);
+    expect(probes.some(probe => probe.profile === 'Claude managed' && probe.workspace === app.repository)).toBe(true);
   } finally { await app.close(); }
 });
 
-test('binding both selected profiles needs an explicit action and preserves the task draft', async ({ page }) => {
+test('an unsaved repository loads models and reaches review without adding profile bindings', async ({ page }) => {
   const app = await createMixedClientFixture();
   try {
     const unboundRepo = join(app.root, 'unbound-repository');
     execFileSync('git', ['clone', '-q', '--local', app.repository, unboundRepo]);
-    const bound = [], probes = [], starts = [];
+    const bindingPosts = [], probes = [], starts = [];
     page.on('request', request => {
       if (request.method() !== 'POST') return;
       const path = new URL(request.url()).pathname;
-      if (path.endsWith('/binding')) bound.push(decodeURIComponent(path.split('/').at(-2)));
+      if (path.endsWith('/binding')) bindingPosts.push(path);
       if (path === '/api/catalog/refresh') probes.push(request.postDataJSON());
       if (path === '/api/runs') starts.push(path);
     });
@@ -80,34 +77,67 @@ test('binding both selected profiles needs an explicit action and preserves the 
     const repository = page.getByLabel('Repository', { exact: true });
     const commit = page.getByLabel('Commit or branch', { exact: true });
     await page.getByRole('combobox', { name: /First · left side/ }).selectOption('baseline');
+    await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'Claude managed · Claude Code' });
     await repository.fill(unboundRepo);
     await repository.press('Tab');
-    await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'Claude managed · Claude Code' });
     await task.fill(problem);
-    await commit.fill('HEAD');
-    const missing = page.getByRole('region', { name: /^(Left|Right) model catalog$/ }).getByText('This repository isn’t bound to this profile.', { exact: false });
-    await expect(missing).toHaveCount(2);
     await expect(page.getByRole('checkbox', { name: 'Load models automatically in this tab', exact: true })).toBeChecked();
-    const selection = page.getByRole('checkbox', { name: 'Bind selected profiles to this repository', exact: true });
-    const bindProfiles = page.getByRole('button', { name: 'Bind profiles', exact: true });
-    await expect(selection).not.toBeChecked();
-    await expect(bindProfiles).toBeDisabled();
-    await selection.check();
-    await expect(bindProfiles).toBeEnabled();
-    expect(await bindingNames()).toEqual([]);
-    expect(bound).toEqual([]);
-    expect(probes.filter(probe => probe.workspace === unboundRepo)).toEqual([]);
-
-    await bindProfiles.click();
     await expect(page.getByLabel('Model ID · Left', { exact: true }).getByRole('option', { name: 'Fixture · fixture', exact: true })).toHaveCount(1);
     await expect(page.getByLabel('Model ID · Right', { exact: true }).getByRole('option', { name: /sonnet/i })).toHaveCount(1);
-    expect(bound.sort()).toEqual(['Claude managed', 'baseline']);
-    expect(await bindingNames()).toEqual(['Claude managed', 'baseline']);
-    expect(probes.filter(probe => probe.workspace === unboundRepo).map(probe => probe.profile).sort()).toEqual(['Claude managed', 'baseline']);
+    await expect(page.getByRole('button', { name: 'Bind profiles', exact: true })).toHaveCount(0);
+    expect([...new Set(probes.filter(probe => probe.workspace === unboundRepo).map(probe => probe.profile))].sort()).toEqual(['Claude managed', 'baseline']);
+    await expect(commit).toHaveValue('HEAD');
+    await page.getByRole('button', { name: 'Review before starting' }).click();
+    await expect(page.getByRole('button', { name: 'Start 2 model runs' })).toBeEnabled();
+    await expect(page.getByText(`Pinned commit: ${execFileSync('git', ['rev-parse', 'HEAD'], { cwd: unboundRepo, encoding: 'utf8' }).trim()}`, { exact: true })).toBeVisible();
+    const projectTrust = page.getByText('Project trust', { exact: true }).locator('..');
+    await expect(projectTrust).toContainText('The entries remain after the comparison.');
+    await expect(projectTrust.getByText(unboundRepo, { exact: true }).first()).toBeVisible();
+    await page.getByRole('link', { name: 'Edit task and source' }).click();
     await expect(task).toHaveValue(problem);
     await expect(repository).toHaveValue(unboundRepo);
     await expect(commit).toHaveValue('HEAD');
+    expect(await bindingNames()).toEqual([]);
+    expect(bindingPosts).toEqual([]);
     expect(starts).toEqual([]);
+  } finally { await app.close(); }
+});
+
+test('Claude and Copilot can review and edit approvals and network settings without a Codex side', async ({ page }) => {
+  const app = await createMixedClientFixture();
+  try {
+    await page.addInitScript(() => sessionStorage.setItem('xenoflux-run-auto-load-models', 'false'));
+    await page.goto(app.url);
+    await page.getByRole('link', { name: 'Run a new task', exact: true }).click();
+    await page.getByRole('textbox', { name: 'What should both profiles do?' }).fill('Inspect the disposable fixture.');
+    await page.getByRole('combobox', { name: /First · left side/ }).selectOption({ label: 'Copilot managed · Copilot CLI' });
+    await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'Claude managed · Claude Code' });
+
+    const approvals = page.getByRole('combobox', { name: 'Approvals', exact: true });
+    const network = page.getByRole('checkbox', { name: 'Allow network access', exact: true });
+    const limits = page.getByRole('region', { name: 'Execution limits' });
+    await expect(approvals.getByRole('option')).toHaveText(['Profile default', 'Ask me', 'Automatic review', 'Autonomous']);
+    await expect(network).toBeChecked();
+    await approvals.selectOption({ label: 'Automatic review' });
+    await page.getByRole('button', { name: 'Review before starting' }).click();
+    await expect(page.getByRole('button', { name: 'Start 2 model runs' })).toBeEnabled();
+    await expect(limits.getByText(/native automatic review/)).toBeVisible();
+    await expect(limits.getByText(/Copilot CLI.*network/)).toBeVisible();
+    await expect(limits.getByText(/Claude Code.*profile.*network/)).toBeVisible();
+
+    await page.getByRole('link', { name: 'Edit checks and limits' }).click();
+    await expect(approvals).toHaveValue('auto_review');
+    await expect(network).toBeChecked();
+    await approvals.selectOption({ label: 'Autonomous' });
+    await network.uncheck();
+    await page.getByRole('button', { name: 'Review before starting' }).click();
+    await expect(page.getByRole('button', { name: 'Start 2 model runs' })).toBeEnabled();
+    await expect(limits.getByText(/run without approval prompts/)).toBeVisible();
+    await expect(limits.getByText(/Copilot CLI.*outbound network block/)).toBeVisible();
+    await expect(limits.getByText(/Claude Code.*profile.*network/)).toBeVisible();
+    await page.getByRole('link', { name: 'Edit checks and limits' }).click();
+    await expect(approvals).toHaveValue('autonomous');
+    await expect(network).not.toBeChecked();
   } finally { await app.close(); }
 });
 
@@ -133,11 +163,13 @@ test('mixed clients expose native choices and keep path and command decisions se
     await page.getByRole('combobox', { name: 'Model ID' }).first().selectOption('auto');
     await page.getByRole('combobox', { name: 'Permission mode' }).first().selectOption('manual');
     await expect(page.getByRole('combobox', { name: 'Permission mode' }).last().locator('option')).toHaveCount(1);
+    await page.getByRole('combobox', { name: 'Approvals', exact: true }).selectOption({ label: 'Ask me' });
     await page.getByRole('button', { name: 'Add a check command' }).click();
     await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Pinned fixture input');
     await page.getByRole('textbox', { name: 'Command you already use' }).fill(pinnedCheck);
     await page.getByRole('button', { name: 'Review before starting' }).click();
     await expect(page.getByText('These sides use different native permission rules.')).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Execution limits' }).getByText(/asks you to approve/)).toBeVisible();
     await expect(page.getByText(/Pinned commit:/)).toBeVisible();
     const differences = page.getByRole('region', { name: 'Setup differences', exact: true });
     const permission = differences.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'Permission mode', exact: true }) });
@@ -148,7 +180,7 @@ test('mixed clients expose native choices and keep path and command decisions se
     const path = page.getByRole('region', { name: 'Native request' }).filter({ hasText: 'requests path access' });
     const command = page.getByRole('region', { name: 'Native request' }).filter({ hasText: 'requests command execution' });
     const approve = path.getByRole('button', { name: 'Approve once' });
-    await expect(approve).toBeEnabled();
+    await expect(approve).toBeEnabled({ timeout: 12000 });
     await expect(command.getByRole('button', { name: 'Reject' })).toBeDisabled();
     await approve.focus();
     await page.keyboard.press('Enter');

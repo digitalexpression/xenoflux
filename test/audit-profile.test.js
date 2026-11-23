@@ -9,6 +9,7 @@ import { registerHome } from '../src/homes.js';
 import { hostname } from 'node:os';
 import { validateAuditSpec } from '../src/audit-spec.js';
 import { prepareNativeHome } from '../test-support/native-home-fixture.js';
+import { cliReportPath, nativeRootIdentity } from '../src/native-participants.js';
 import { auditSettingsIdentity, compareAuditProfileSettings, observeAuditProfileIdle, resolveAuditExecutionProfile,
   snapshotAuditProfileSettings, parseNativeResourceResult, observeAuditProfileAccess, inspectNativeResources,
   resolveProfileExecutionProfile, recheckProfileExecutionProfile } from '../src/audit-profile.js';
@@ -48,7 +49,10 @@ test('named execution profile reuses the bound home and keeps only approved envi
   assert.equal(profile.env.HOME, f.native.userHome);
   assert.deepEqual(Object.keys(profile.env).sort(), ['CODEX_HOME', 'CODEX_SQLITE_HOME', 'HOME', 'PATH', 'TEMP', 'TMP', 'TMPDIR'].sort());
   const other = join(f.root, 'other'); await mkdir(other, { mode: 0o700 });
-  await assert.rejects(resolveAuditExecutionProfile(f.store, 'Research', { repository: other }), { code: 'profile-repository-unbound' });
+  assert.equal((await resolveAuditExecutionProfile(f.store, 'Research', { repository: other })).bindingRepository, other);
+  const forCatalog = await resolveProfileExecutionProfile(f.store, 'Research', { repository: other });
+  assert.equal(forCatalog.environmentBinding.workspace, other);
+  assert.equal(forCatalog.home, f.native.home);
   assert.deepEqual(await readFile(f.store.file), f.profileStore);
 });
 
@@ -101,7 +105,7 @@ test('native config overrides are narrowly validated, normalized, and retained p
   }
 });
 
-test('Default needs an existing trusted repository entry and explicit executable', async t => {
+test('Default requires native trust except when preparing a comparison', async t => {
   const f = await fixture(t), userHome = join(f.root, 'user');
   await mkdir(userHome, { mode: 0o700 });
   const home = join(userHome, '.codex'); await mkdir(home, { mode: 0o700 });
@@ -122,7 +126,20 @@ test('Default needs an existing trusted repository entry and explicit executable
   assert.equal(current.executable, f.executable);
   assert.equal(current.version, null);
   await writeFile(join(home, 'config.toml'), `${stringify({ projects: { [f.repository]: { trust_level: 'untrusted' } } })}\n`, { mode: 0o600 });
-  await assert.rejects(resolveAuditExecutionProfile(f.store, input, { repository: f.repository, defaultUserHome: userHome }), /existing trusted repository entry/);
+  const options = { repository: f.repository, defaultUserHome: userHome };
+  await assert.rejects(resolveAuditExecutionProfile(f.store, input, options), /existing trusted repository entry/);
+  await assert.rejects(resolveProfileExecutionProfile(f.store, 'Default', options), /existing trusted repository entry/);
+  const config = join(home, 'config.toml'), before = await readFile(config);
+  const preflight = { ...options, allowUntrustedRepository: true };
+  assert.equal((await resolveAuditExecutionProfile(f.store, 'Default', preflight)).bindingRepository, f.repository);
+  assert.equal((await resolveProfileExecutionProfile(f.store, 'Default', preflight)).cwd, f.repository);
+  assert.deepEqual(await readFile(config), before);
+  await rm(config);
+  assert.equal((await resolveProfileExecutionProfile(f.store, 'Default', preflight)).cwd, f.repository);
+  await assert.rejects(access(config), { code: 'ENOENT' });
+  await assert.rejects(resolveAuditExecutionProfile(f.store, 'Default', options), /configuration is unavailable/);
+  await writeFile(config, '[invalid\n', { mode: 0o600 });
+  await assert.rejects(resolveProfileExecutionProfile(f.store, 'Default', preflight), /configuration is malformed/);
 });
 
 test('ordinary execution resolves the saved profile without a version probe and refuses changed settings at Start', async t => {
@@ -363,6 +380,10 @@ test('access trusts a matching running desktop journal even when its creator PID
   assert.deepEqual(check.clients, [identity]);
   assert.deepEqual(check.sourceReservation, { kind: 'desktop-instance', runId, profileId: profile.profileId,
     host: hostname(), journalPath, phase: 'running' });
+  const self = { ...identity, pid: process.pid, ppid: identity.pid, executable: process.execPath };
+  const fromDesktop = { inspectResources: async () => [identity.pid], processSnapshot: async () => [identity, self] };
+  assert.equal((await observeAuditProfileAccess(profile, fromDesktop)).status, 'unavailable');
+  assert.deepEqual((await observeAuditProfileAccess(profile, { ...fromDesktop, allowInteractivePeers: true })).nativeOwners, [owner]);
   const lateHelper = { ...identity, pid: identity.pid + 2, ppid: identity.pid, executable: '/fixture/late-codex' };
   const late = await observeAuditProfileAccess(profile, { store: f.store,
     inspectResources: async () => ({ pids: [lateHelper.pid], records: 1, clients: [], partial: false }),
@@ -486,6 +507,96 @@ test('foreign or malformed profile reservations remain blocked and are never rec
   assert.equal(await readFile(ownerPath, 'utf8'), '{malformed');
 });
 
+async function cliReservation(f, profile) {
+  const runId = '11111111-2222-4333-8444-555555555551';
+  const reportPath = cliReportPath(profile.nativeRoot, runId);
+  const { client, profileId, environmentId, home, executable, executableIdentity } = profile;
+  const owner = { kind: 'interactive-cli', membershipVersion: 1, client, runId, profileId, environmentId, home,
+    reportPath, host: hostname(), storePath: f.store.directory, pid: 987654 };
+  const identity = { pid: 811, ppid: owner.pid, uid: process.getuid(), startedAt: 'Thu Oct 15 10:00:00 2026 UTC', executable };
+  const report = { schemaVersion: 1, kind: owner.kind, client, runId, profileId, environmentId, home,
+    executable, executableIdentity, rootIdentity: await nativeRootIdentity(profile.nativeRoot, home),
+    spawnIntent: true, embedded: true, status: 'running', pid: identity.pid, processIdentity: identity };
+  await mkdir(dirname(reportPath), { recursive: true, mode: 0o700 });
+  await writeFile(reportPath, JSON.stringify(report), { mode: 0o600 });
+  const lockPath = join(profile.reservationRoot, '.run-lock');
+  await mkdir(lockPath, { mode: 0o700 });
+  const lockOwnerPath = join(lockPath, 'owner.json');
+  await writeFile(lockOwnerPath, JSON.stringify(owner), { mode: 0o600 });
+  return { owner, report, identity, lockOwnerPath };
+}
+
+for (const client of ['codex', 'claude-code', 'copilot']) {
+  test(`${client} access shares only a matching live managed Terminal reservation`, async t => {
+    const f = await fixture(t), profile = { ...await resolveAuditExecutionProfile(f.store, 'Research'), client };
+    const { owner, identity, report, lockOwnerPath } = await cliReservation(f, profile);
+    const check = identities => observeAuditProfileAccess(profile, {
+      allowInteractivePeers: true, inspectResources: async () => [identity.pid], processSnapshot: async () => identities,
+    });
+    const ready = await check([identity]);
+    assert.equal(ready.status, 'ready');
+    assert.deepEqual(ready.nativeOwners, [owner]);
+    assert.deepEqual(ready.clients, [identity]);
+    assert.equal((await observeAuditProfileAccess(profile, {
+      inspectResources: async () => [identity.pid], processSnapshot: async () => [identity],
+    })).status, 'blocked');
+    const reused = await check([{ ...identity, startedAt: 'Thu Oct 15 10:00:01 2026 UTC' }]);
+    assert.equal(reused.status, 'blocked');
+    assert.equal(reused.reason, 'cli-process-identity-unverified');
+    await writeFile(owner.reportPath, JSON.stringify({ ...report, rootIdentity: [] }));
+    assert.equal((await check([identity])).status, 'blocked');
+    assert.deepEqual(JSON.parse(await readFile(lockOwnerPath)), owner);
+  });
+}
+
+test('access verifies concurrent Desktop and Terminal holders alongside a catalog reservation', async t => {
+  const f = await fixture(t), profile = await resolveAuditExecutionProfile(f.store, 'Research');
+  const { owner, identity, lockOwnerPath } = await cliReservation(f, profile);
+  const desktopPath = join(f.store.directory, 'desktop-instances', `${profile.profileId}.json`);
+  const desktop = { kind: 'desktop-instance', profileId: owner.profileId, storePath: owner.storePath, host: owner.host,
+    pid: 987653, runId: '11111111-2222-4333-8444-555555555552', journalPath: desktopPath };
+  const main = { ...identity, pid: identity.pid + 1, ppid: 1, executable: '/Applications/Codex.app/Contents/MacOS/Codex' };
+  const state = { schemaVersion: 1, kind: desktop.kind, profileId: desktop.profileId, owner: desktop, phase: 'running',
+    plan: { profileId: desktop.profileId, nativeRoot: profile.nativeRoot, home: profile.home }, main, processes: [main] };
+  await mkdir(dirname(desktopPath), { mode: 0o700 });
+  await writeFile(desktopPath, JSON.stringify(state), { mode: 0o600 });
+  const catalog = { kind: 'catalog-probe', membershipVersion: 1, runId: '11111111-2222-4333-8444-555555555553',
+    profileId: owner.profileId, home: owner.home, storePath: owner.storePath, host: owner.host, pid: process.pid,
+    coordinatorIdentity: { pid: process.pid, host: owner.host, started: 'Thu Oct 15 10:00:00 2026', command: 'node' } };
+  const catalogPath = join(f.store.directory, 'catalog-probes', catalog.runId, 'probe.json');
+  const catalogState = { schemaVersion: 1, kind: 'xfx-catalog-probe', id: catalog.runId,
+    owner: catalog, root: profile.reservationRoot, status: 'prepared',
+    environmentBinding: { roots: { reservation: profile.reservationRoot } } };
+  await mkdir(dirname(catalogPath), { recursive: true, mode: 0o700 });
+  await writeFile(catalogPath, JSON.stringify(catalogState), { mode: 0o600 });
+  await writeFile(lockOwnerPath, JSON.stringify({ kind: 'execution-participants', schemaVersion: 1,
+    participants: [owner, desktop, catalog] }));
+  const probe = { ...identity, pid: identity.pid + 2, ppid: catalog.pid };
+  const processIdentity = { ...catalog.coordinatorIdentity, pid: probe.pid, started: probe.startedAt };
+  const check = rows => observeAuditProfileAccess(profile, {
+    allowInteractivePeers: true, inspectResources: async () => rows.map(row => row.pid), processSnapshot: async () => rows,
+    observeParticipantProcess: async saved => {
+      assert.deepEqual(saved, saved.pid === probe.pid ? processIdentity : catalog.coordinatorIdentity);
+      return { status: 'running' };
+    },
+  });
+  const ready = await check([main, identity]);
+  assert.equal(ready.status, 'ready');
+  assert.deepEqual(ready.nativeOwners, [desktop, owner]);
+  assert.deepEqual(ready.desktopOwner, desktop);
+  assert.equal(ready.sourceReservation.runId, desktop.runId);
+  assert.equal(ready.overlap[0].runId, catalog.runId);
+  assert.equal((await check([main, identity, probe])).reason, 'unattributed-native-client');
+  await writeFile(catalogPath, JSON.stringify({ ...catalogState, status: 'running', process: { processIdentity } }));
+  assert.equal((await check([main, identity, probe])).status, 'ready');
+  const reusedProbe = { ...probe, startedAt: 'Thu Oct 15 10:00:02 2026 UTC' };
+  assert.equal((await check([main, identity, reusedProbe])).reason, 'unattributed-native-client');
+  await writeFile(catalogPath, JSON.stringify({ ...catalogState, status: 'uncertain' }));
+  assert.equal((await check([])).status, 'blocked');
+  await writeFile(catalogPath, JSON.stringify({ ...catalogState, root: f.root }));
+  assert.equal((await check([main, identity])).status, 'blocked');
+});
+
 test('settings snapshots compare bounded metadata without exposing fingerprints or reading source bodies', async t => {
   const f = await fixture(t);
   const settings = join(f.native.home, 'AGENTS.md');
@@ -528,6 +639,62 @@ test('persistable settings identity is stable for matching metadata and unavaila
   const after = await snapshotAuditProfileSettings(profile);
   assert.notDeepEqual(auditSettingsIdentity(after), beforeIdentity);
   assert.doesNotMatch(JSON.stringify([before, after, beforeIdentity, auditSettingsIdentity(after)]), /version one|version two/);
+});
+
+test('managed Claude snapshots include project and selected settings without scanning the stock skill cache', async t => {
+  const f = await fixture(t), userHome = join(f.root, 'user'), nativeRoot = join(f.root, 'managed-claude');
+  const home = join(nativeRoot, 'config');
+  const parent = join(userHome, 'repos'), cwd = join(parent, 'comparison');
+  const stockCache = join(userHome, '.claude', 'skills', 'synced');
+  const projectRules = join(parent, '.claude', 'rules');
+  await Promise.all([home, cwd, stockCache, projectRules].map(directory => mkdir(directory, { recursive: true, mode: 0o700 })));
+  const cacheEntry = join(stockCache, 'unused.md'), projectRule = join(projectRules, 'rule.md');
+  const homeMemory = join(userHome, 'CLAUDE.md'), selected = join(home, 'settings.json');
+  const profile = { client: 'claude-code', executionMode: 'profile', home, userHome, cwd };
+  await writeFile(cacheEntry, 'stock skill cache', { mode: 0o600 });
+  await chmod(cacheEntry, 0o666);
+  const before = await snapshotAuditProfileSettings(profile);
+  assert.equal(before.status, 'ready');
+
+  await writeFile(cacheEntry, 'changed stock skill cache');
+  const afterCache = await snapshotAuditProfileSettings(profile);
+  assert.deepEqual(compareAuditProfileSettings(before, afterCache), { status: 'unchanged', changedPaths: [] });
+  await Promise.all([writeFile(projectRule, 'project rule', { mode: 0o600 }),
+    writeFile(homeMemory, 'inherited memory', { mode: 0o600 }), writeFile(selected, '{}', { mode: 0o600 })]);
+  const after = await snapshotAuditProfileSettings(profile);
+  assert.deepEqual(compareAuditProfileSettings(before, after), { status: 'changed',
+    changedPaths: ['$CLAUDE_CONFIG/settings.json', '$WORKSPACE_PARENT_1/.claude/rules/rule.md', '$WORKSPACE_PARENT_2/CLAUDE.md'] });
+
+  assert.equal((await snapshotAuditProfileSettings({ ...profile, home: join(userHome, '.claude') })).status, 'unavailable');
+  assert.equal((await snapshotAuditProfileSettings({ ...profile, cwd: userHome })).status, 'unavailable');
+
+  await mkdir(join(home, 'skills', ...Array(13).fill('nested')), { recursive: true, mode: 0o700 });
+  await writeFile(join(f.root, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+  const store = { read: async () => ({ profiles: [{ id: 'managed-claude', name: 'Managed Claude', client: 'claude-code',
+    native: { rootMode: 'explicit', root: nativeRoot, configRoot: home } }] }) };
+  await assert.rejects(resolveProfileExecutionProfile(store, 'Managed Claude', { repository: cwd, defaultUserHome: userHome,
+    terminalEnvironment: { PATH: f.root } }), { code: 'profile-settings-unavailable', message: /exceed the inspection limit/ });
+});
+
+test('Claude marketplace refresh timestamps preserve settings identity while source changes invalidate it', async t => {
+  const f = await fixture(t), home = join(f.root, 'claude'), plugins = join(home, 'plugins');
+  await mkdir(plugins, { recursive: true, mode: 0o700 });
+  const path = join(plugins, 'known_marketplaces.json');
+  const marketplace = { source: { source: 'github', repo: 'fixture/original' }, installLocation: '/fixture/marketplace',
+    lastUpdated: '2026-11-23T10:00:00Z' };
+  const writeMarketplace = async value => {
+    await writeFile(`${path}.tmp`, JSON.stringify({ fixture: value }), { mode: 0o600 });
+    await rename(`${path}.tmp`, path);
+  };
+  const profile = { client: 'claude-code', home, userHome: f.native.userHome, cwd: f.repository };
+  await writeMarketplace(marketplace);
+  const before = await snapshotAuditProfileSettings(profile);
+  await writeMarketplace({ ...marketplace, lastUpdated: '2026-11-23T10:01:00Z' });
+  assert.deepEqual(compareAuditProfileSettings(before, await snapshotAuditProfileSettings(profile)),
+    { status: 'unchanged', changedPaths: [] });
+  await writeMarketplace({ ...marketplace, source: { ...marketplace.source, repo: 'fixture/changed' } });
+  assert.deepEqual(compareAuditProfileSettings(before, await snapshotAuditProfileSettings(profile)),
+    { status: 'changed', changedPaths: ['$CLAUDE_CONFIG/plugins/known_marketplaces.json'] });
 });
 
 test('settings snapshots fingerprint bounded internal and external skill packages and reject broad, cyclic, or unsafe links', async t => {

@@ -108,6 +108,7 @@ xfx profile delete NAME
 
 Recorded versions are provenance, not a profile pin. The single-argument `unbind`
 removes native binding; a repository argument removes that project binding.
+Project bindings save shortcuts. You can select a different repository for a new launch.
 Registry changes preserve native files and refuse active/unresolved operations.
 
 ## Read and export evidence
@@ -203,6 +204,11 @@ pointers, and are bounded to 50,000 entries, 1 GiB total and 64 MiB/blob.
 Setup precedes tasks, checks follow them, and snapshots distinguish their changes.
 These commands execute outside the model sandbox and can affect external state.
 There are no automatic retries or automatically selected checks.
+Set `parallel` to `true` to launch the sides concurrently. Set `networkAccess`
+to `true` to allow network access in Codex and Copilot CLI sandboxes. CLI recipes
+default to sequential execution, disable Codex network access and leave Copilot's
+network policy to the profile unless the recipe specifies it. Claude Code uses
+its native profile network rules.
 
 String profile names select Codex. An explicit selection can use
 `{"name":"Research","client":"claude-code","sideId":"a","execution":{"permissionMode":"plan"}}`.

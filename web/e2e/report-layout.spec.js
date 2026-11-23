@@ -43,6 +43,7 @@ test('crowded stops stay separately reachable and absent replay keeps unavailabl
     }));
     expect(boxes.every((box, index) => !index || box.x >= boxes[index - 1].right)).toBe(true);
     await expect(lines.getByText(/first 20 of 25 stops/)).toBeVisible();
+    await page.getByRole('button', { name: 'Show analytical finding counts' }).click();
     await expect(page.getByRole('group', { name: 'Recorded finding counts' }).locator('.comparison-count strong').last()).toHaveText('Unknown');
     empty = true;
     await page.reload();
@@ -52,7 +53,7 @@ test('crowded stops stay separately reachable and absent replay keeps unavailabl
 });
 
 for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
-  test(`Counts lead report preserves source links and explicit unknowns in ${theme}`, async ({ browser }, testInfo) => {
+  test(`Run facts lead the report and activity keeps source links in ${theme}`, async ({ browser }, testInfo) => {
     const provider = createDemoProvider();
     const server = await startUiServer({ provider, staticRoot: resolve('dist/ui') });
     const page = await browser.newPage({ viewport: { width, height: 900 } });
@@ -61,26 +62,31 @@ for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
       const original = await provider.report({ ref: 'demo-run' });
       await page.route('**/api/reports/demo-run', route => route.fulfill({ json: {
         ...original, replay: { a: retainedReplay('left'), b: retainedReplay('right') },
+        overview: [{ name: 'Task and capture time', a: '13 s', b: '5 s' }, { name: 'Tool calls', a: '1', b: '1 retained' }],
       } }));
       await page.goto(server.launchUrl);
       await page.goto(`${server.origin}/reports/demo-run`);
       await page.getByRole('combobox', { name: 'Theme' }).selectOption(theme);
+      const facts = page.getByRole('table', { name: 'Run facts comparison' });
+      await expect(facts.getByRole('row', { name: /Tool calls/ })).toContainText('1 retained');
       const counts = page.getByRole('group', { name: 'Recorded finding counts' });
+      await expect(counts).toBeHidden();
+      await page.getByRole('button', { name: 'Show analytical finding counts' }).click();
       await expect(counts.locator('.comparison-count strong')).toHaveText([
         String(original.counts.different), String(original.counts.same), String(original.counts.cannotCompare), '0',
       ]);
+      await page.getByRole('button', { name: 'Hide analytical finding counts' }).click();
       const lines = page.getByRole('region', { name: 'Recorded activity', exact: true });
-      await expect(lines.getByText(/Turn token|Hollow stops/)).toBeVisible();
+      await expect(lines.getByText(/Dotted lanes show recorded order/)).toBeVisible();
       await expect(lines.locator('.comparison-branch[data-linked="true"]')).toHaveCount(2);
       await expect(lines.locator('.comparison-stop-track[data-ordered="true"]')).toHaveCount(1);
       await expect(lines.locator('.comparison-stop-track[data-ordered="false"]')).toHaveCount(1);
-      const [countBox, lineBox, conditionBox] = await Promise.all([
-        counts.boundingBox(), lines.boundingBox(), page.locator('.comparison-conditions').boundingBox(),
+      const [factsBox, lineBox, conditionBox] = await Promise.all([
+        facts.boundingBox(), lines.boundingBox(), page.locator('.comparison-conditions').boundingBox(),
       ]);
-      expect(countBox.y + countBox.height).toBeLessThanOrEqual(lineBox.y);
+      expect(factsBox.y + factsBox.height).toBeLessThanOrEqual(lineBox.y);
       expect(lineBox.y + lineBox.height).toBeLessThanOrEqual(conditionBox.y);
-      const firstCondition = await page.getByRole('table', { name: 'Recorded conditions comparison' }).getByRole('row').nth(1).boundingBox();
-      expect(firstCondition.y + firstCondition.height).toBeLessThanOrEqual(900);
+      expect(factsBox.y + factsBox.height).toBeLessThanOrEqual(900);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`report-${theme}-${width}.png`), animations: 'disabled' });
       await page.locator('.comparison-conditions').scrollIntoViewIfNeeded();

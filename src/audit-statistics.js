@@ -350,6 +350,7 @@ function compactComparisonConditions(value) {
     fingerprint: fingerprint(row?.fingerprint),
   }));
   return { schemaVersion: source.schemaVersion === 1 ? 1 : null,
+    ...(source.parallel === true ? { parallel: true } : {}),
     ...(source.sharedProfileOverlap === true ? { sharedProfileOverlap: true } : {}),
     ...(source.sideId ? { sideId: text(source.sideId, 40) } : {}),
     ...(source.requestedExecution ? { requestedExecution: pick(source.requestedExecution, ['model', 'reasoningEffort']) } : {}),

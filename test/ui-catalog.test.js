@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, realpath, mkdir, rm, readFile, access } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createUiCatalog } from '../src/ui-catalog.js';
 import { acquire, readJSON, record } from '../src/metadata.js';
+import { acquireNativeParticipant, readProfileOwners } from '../src/profile-reservations.js';
 
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { resolve, promise }; };
 async function fixture(t, overrides = {}) {
@@ -41,6 +42,7 @@ test('duplicate refresh starts one probe, checkpoints ownership before discovery
   f = await fixture(t, { discover: async options => {
     calls++;
     await options.onSpawn(f.native);
+    assert.equal(options.runtimeDirectory, join(f.store.directory, 'catalog-probes', input.requestId));
     const receipt = await readJSON(f.receipt(input.requestId));
     assert.equal(receipt.status, 'running'); assert.deepEqual(receipt.process, f.native);
     assert.equal((await readJSON(join(f.lock, 'owner.json'))).runId, input.requestId);
@@ -71,24 +73,68 @@ test('cancel and close during pending profile selection prevent all discovery an
 });
 
 test('busy exclusive reservation stays byte-identical and never starts discovery', async t => {
-  const f = await fixture(t); const owner = { kind: 'review-task', runId: randomUUID() };
+  const f = await fixture(t); const owner = { kind: 'native-signin', runId: randomUUID() };
   await acquire(f.lock, owner, true); const before = await readFile(join(f.lock, 'owner.json'));
   await assert.rejects(f.service.refresh(f.input()), { code: 'catalog-profile-busy', status: 409 });
   assert.deepEqual(await readFile(join(f.lock, 'owner.json')), before); assert.equal(f.calls(), 0);
 });
 
-test('unbound profile workspace is an actionable client error for reads and refreshes', async t => {
-  const f = await fixture(t, {
-    resolveProfile: async () => { throw Object.assign(new Error('Unbound'), { code: 'profile-repository-unbound' }); },
-  });
-  for (const client of ['codex', 'claude-code']) {
-    const input = { ...f.input(), client };
-    for (const operation of [f.service.get, f.service.refresh]) {
-      await assert.rejects(operation(input), { code: 'profile-repository-unbound', status: 422 });
-    }
-  }
-  await assert.rejects(access(f.lock), { code: 'ENOENT' });
+test('a bounded probe shares a verified Desktop and CLI reservation and releases only its own membership', async t => {
+  const gate = deferred(), entered = deferred(); let f;
+  const nativeOwners = [];
+  f = await fixture(t, { observeAccess: async (profile, { store, allowInteractivePeers }) => {
+    assert.equal(profile.profileId, f.profile.profileId);
+    assert.equal(store, f.store);
+    assert.equal(allowInteractivePeers, true);
+    return { status: 'ready', nativeOwners };
+  }, discover: async options => {
+    await options.onSpawn(f.native);
+    assert.equal(options.runtimeDirectory, join(f.store.directory, 'catalog-probes', input.requestId));
+    entered.resolve();
+    await gate.promise;
+    return f.result();
+  } });
+  const common = { profileId: f.profile.profileId, home: f.home, storePath: f.store.directory, host: hostname(), pid: process.pid };
+  const desktop = { ...common, kind: 'desktop-instance', runId: randomUUID() };
+  const cli = { ...common, kind: 'interactive-cli', membershipVersion: 1, runId: randomUUID(),
+    client: 'codex', environmentId: randomUUID(), reportPath: join(f.root, 'cli-report.json') };
+  await acquireNativeParticipant(f.home, desktop);
+  await acquireNativeParticipant(f.home, cli, desktop);
+  nativeOwners.push(desktop, cli);
+  const input = f.input(), refresh = f.service.refresh(input);
+  try {
+    await Promise.race([entered.promise, refresh]);
+    const { owner } = await readJSON(f.receipt(input.requestId));
+    assert.equal(owner.membershipVersion, 1);
+    assert.deepEqual(await readProfileOwners(f.home), [...nativeOwners, owner]);
+  } finally { gate.resolve(); }
+  assert.equal((await refresh).status, 'ready');
+  assert.deepEqual(await readProfileOwners(f.home), nativeOwners);
+});
+
+test('an unverified Desktop reservation cannot be shared by a catalog probe', async t => {
+  const f = await fixture(t, { observeAccess: async () => ({ status: 'ready', nativeOwners: [] }) });
+  const owner = { kind: 'desktop-instance', runId: randomUUID(), profileId: f.profile.profileId,
+    home: f.home, storePath: f.store.directory, host: hostname(), pid: process.pid };
+  await acquireNativeParticipant(f.home, owner);
+  await assert.rejects(f.service.refresh(f.input()), { code: 'catalog-profile-busy', status: 409 });
   assert.equal(f.calls(), 0);
+  assert.deepEqual(await readProfileOwners(f.home), [owner]);
+});
+
+test('catalog reads and refreshes use the same selected repository through reconciliation', async t => {
+  let f;
+  const resolutions = [];
+  f = await fixture(t, { allowUntrustedRepository: true, resolveProfile: async (_store, _name, options) => {
+    resolutions.push(options);
+    return { ...structuredClone(f.profile), bindingRepository: f.root };
+  } });
+  const input = f.input();
+  assert.equal((await f.service.get(input)).status, 'unavailable');
+  assert.equal((await f.service.refresh(input)).status, 'ready');
+  assert.ok(resolutions.length > 2);
+  assert.ok(resolutions.every(options => options.repository === f.root && options.allowUntrustedRepository));
+  assert.equal(f.calls(), 1);
 });
 
 test('a concurrent refresh for the same scope reuses one probe and a queued request can cancel', async t => {
@@ -172,6 +218,17 @@ test('restart cancellation only inspects and releases exact stopped owner, prese
     assert.equal(inspected, 1);
     if (status === 'stopped') await assert.rejects(access(f.lock), { code: 'ENOENT' }); else await access(f.lock);
   }
+});
+
+test('restart cancellation can still release an exact stopped legacy catalog reservation', async t => {
+  const f = await fixture(t), input = f.input();
+  await mkdir(join(f.store.directory, 'catalog-probes', input.requestId), { recursive: true, mode: 0o700 });
+  const owner = { kind: 'catalog-probe', profileId: f.profile.profileId, runId: input.requestId, storePath: f.store.directory };
+  await acquire(f.lock, owner, true);
+  await record(f.receipt(input.requestId), { kind: 'xfx-catalog-probe', schemaVersion: 1, id: input.requestId,
+    owner, root: f.home, environmentBinding: f.profile.environmentBinding, shutdown: { groupTerminated: true } });
+  assert.equal((await f.service.cancel(input)).status, 'stopped');
+  await assert.rejects(access(f.lock), { code: 'ENOENT' });
 });
 
 

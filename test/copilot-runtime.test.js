@@ -129,7 +129,7 @@ test('ambient override and unverified managed route refuse effects', async t => 
   await assert.rejects(paths.log(), { code: 'ENOENT' });
 });
 
-async function runCapture(t, settings = {}) {
+async function runCapture(t, settings = {}, overrides = {}) {
   const { workspace, profileFor, evidence } = await setup(t);
   const profile = await profileFor('Bound', settings);
   const paths = await evidence('capture');
@@ -150,12 +150,15 @@ async function runCapture(t, settings = {}) {
       signal.addEventListener('abort', () => reject(Error('Stopped fixture')), { once: true });
       if (requests.length === 2) resolveQueued();
     }),
+    ...overrides,
   });
-  return { controller, requests, turns, checkpoints, taskEnds, result, queued: Promise.race([queued, result.then(value => assert.fail(value.run.reason))]), paths };
+  const waiting = Promise.race([queued, result.then(value => assert.fail(value.run.reason))]);
+  waiting.catch(() => {});
+  return { controller, requests, turns, checkpoints, taskEnds, result, queued: waiting, paths };
 }
 
 test('qualified capture queues path and command approvals and distinguishes shell yield from typed exit', async t => {
-  const { requests, turns, checkpoints, taskEnds, queued, result, paths } = await runCapture(t);
+  const { requests, turns, checkpoints, taskEnds, queued, result, paths } = await runCapture(t, { missingIdleTimestamp: true });
   await queued;
   assert.deepEqual(requests.map(row => row.request.params.category), ['path', 'commands']);
   assert.equal(requests[0].request.params.itemId, requests[1].request.params.itemId);
@@ -181,10 +184,20 @@ test('qualified capture queues path and command approvals and distinguishes shel
   const replay = capture.run.sessionReplay.sessions[0].events;
   assert.equal(replay.at(-1).kind, 'session');
   assert.equal(replay.at(-1).status, 'completed');
-  assert.ok(replay.some(event => event.kind === 'tool-call'));
-  assert.ok(replay.some(event => event.kind === 'tool-result'));
+  assert.equal(replay.at(-1).timestampSource, 'observed');
+  assert.equal(replay[0].timestampSource, 'native');
+  assert.equal(replay[0].turnId, 'turn-1');
+  assert.equal(replay.findLast(event => event.role === 'assistant').turnId, turns.at(-1).turnId);
+  const call = replay.find(event => event.kind === 'tool-call');
+  const toolResult = replay.find(event => event.kind === 'tool-result' && event.callId === call.callId);
+  assert.equal(call.relatedEventId, toolResult.id);
+  assert.equal(toolResult.relatedEventId, call.id);
+  assert.equal(capture.run.coverage.timeline, 'observed');
+  assert.equal(capture.run.coverage.tools, 'observed');
   assert.equal(taskEnds.length, 1);
   assert.equal(taskEnds[0].complete, true);
+  assert.equal(taskEnds[0].nativeEndedAt, null);
+  assert.equal(taskEnds[0].at, replay.at(-1).timestamp);
   assert.equal(taskEnds[0].processGroupStopped, true);
   assert.equal(taskEnds[0].childAgentsComplete, false);
   const wire = await paths.log();
@@ -210,6 +223,71 @@ test('cancel aborts the owned session before teardown and ignores stale decision
   assert.ok(methods.indexOf('session.abort') < methods.indexOf('session.detach'));
   assert.equal(methods.includes('session.permissions.handlePendingPermissionRequest'), false);
 });
+
+test('comparison allows outbound network and preserves the selected Copilot sandbox and exact session grant', async t => {
+  const saved = { enabled: true, allowBypass: true, userPolicy: { filesystem: { deniedPaths: ['/fixture/denied'] },
+    network: { allowOutbound: false, allowLocalNetwork: false, blockedHosts: ['blocked.invalid'] } } };
+  const { requests, queued, result, paths } = await runCapture(t, { sandbox: saved, sessionApproval: true },
+    { executionMode: 'audit', approvalsReviewer: 'user', networkAccess: true });
+  await queued;
+  assert.deepEqual(requests[0].request.params.availableDecisions, ['approve-once', 'reject']);
+  assert.deepEqual(requests[1].request.params.availableDecisions, ['approve-once', 'approve-for-session', 'reject']);
+  requests[0].resolve({ kind: 'reject' });
+  requests[1].resolve({ kind: 'approve-for-session' });
+  const capture = await result;
+  assert.equal(capture.response.status, 'complete');
+  assert.equal(capture.run.settingsEvidence.sent.networkAccess, true);
+  const wire = await paths.log();
+  assert.deepEqual(wire.find(row => row.method === 'session.create').params.sandboxConfig, { ...saved, allowBypass: false,
+    userPolicy: { ...saved.userPolicy, network: { ...saved.userPolicy.network, allowOutbound: true } } });
+  assert.deepEqual(wire.find(row => row.method === 'session.options.update').params.sandboxConfig,
+    wire.find(row => row.method === 'session.create').params.sandboxConfig);
+  const grant = wire.find(row => row.params?.result?.kind === 'approve-for-session').params;
+  assert.equal(grant.requestId, requests[1].request.id);
+  assert.equal(grant.decisionContext.source, 'human_response');
+  assert.deepEqual(grant.result.approval, { kind: 'commands', commandIdentifiers: ['/bin/sleep'] });
+  assert.doesNotMatch(await readFile(paths.stdoutPath, 'utf8'), /PRIVATE_FIXTURE_SETTING/);
+});
+
+test('Copilot automatic review preserves a sandbox opt-out and asks for residual decisions', async t => {
+  const interact = [];
+  const { result, paths } = await runCapture(t, { assistedAssessment: true, sandbox: { userPolicy: {} } }, {
+    executionMode: 'audit', execution: {}, approvalsReviewer: 'auto_review', networkAccess: true,
+    onNativeRequest: async request => { interact.push(request); return { kind: 'reject' }; },
+  });
+  assert.equal((await result).response.status, 'complete');
+  assert.deepEqual(interact.map(row => row.params.category), ['path']);
+  const wire = await paths.log();
+  assert.equal(wire.find(row => row.method === 'session.create').params.sandboxConfig, undefined);
+  assert.equal(wire.find(row => row.method === 'session.permissions.setMode').params.mode, 'assisted');
+  const allowed = wire.find(row => row.params?.decisionContext?.source === 'assisted_approval').params;
+  assert.equal(allowed.requestId, 'request-4');
+  assert.deepEqual(allowed.result, { kind: 'approve-once' });
+});
+
+test('autonomous Copilot uses native assisted review and settles unmatched requests without the UI', async t => {
+  const { result, paths } = await runCapture(t, { assistedAssessment: true }, {
+    executionMode: 'audit', execution: {}, autonomous: true, networkAccess: false,
+    onNativeRequest: async () => { assert.fail('Autonomous mode cannot send a request to a person.'); },
+  });
+  const capture = await result;
+  assert.equal(capture.response.status, 'complete');
+  assert.equal(capture.run.settingsEvidence.confirmed.permissionMode, 'assisted');
+  const wire = await paths.log();
+  assert.deepEqual(wire.find(row => row.method === 'session.create').params.sandboxConfig,
+    { enabled: true, allowBypass: false, userPolicy: { network: { allowOutbound: false } } });
+  const decisions = wire.filter(row => row.method === 'session.permissions.handlePendingPermissionRequest');
+  assert.deepEqual(decisions.map(row => [row.params.result.kind, row.params.decisionContext.source]),
+    [['user-not-available', 'unattended_fallback'], ['approve-once', 'assisted_approval']]);
+});
+
+for (const barrier of ['sandboxBlocked', 'sandboxUpdateRefused']) {
+  test(`Copilot sandbox admission failure (${barrier}) prevents model submission`, async t => {
+    const { result, paths } = await runCapture(t, { [barrier]: true }, { executionMode: 'audit', networkAccess: false });
+    assert.match((await result).run.reason, /did not confirm an available native sandbox/);
+    assert.equal((await paths.log()).some(row => row.method === 'session.send'), false);
+  });
+}
 
 test('wrong native working directory prevents initial submission', async t => {
   const { result, paths, queued, checkpoints } = await runCapture(t, { wrongCwd: true });
@@ -313,6 +391,7 @@ test('permission validation refuses altered action ownership and any persistent 
   const event = rows.find(row => row.data.promptRequest?.kind === 'commands');
   const scope = [event.data.ownerSessionId, 'turn-fixture', '@WORKSPACE@'];
   assert.equal(copilotPermission(event, ...scope).params.category, 'commands');
+  assert.throws(() => copilotDecision({ kind: 'approve-for-session' }, copilotPermission(event, ...scope, { allowSessionGrant: true })), /Approve once or Reject/);
   event.data.promptRequest.commandIdentifiers = ['/bin/echo'];
   assert.throws(() => copilotPermission(event, ...scope), /does not match/);
   assert.throws(() => copilotDecision({ kind: 'approve-for-session' }), /Approve once or Reject/);

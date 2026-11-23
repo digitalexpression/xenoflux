@@ -8,7 +8,7 @@ type Question = { id: string; header: string; question: string; isOther?: boolea
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown) => typeof value === 'string' ? value : '';
 const labels: Record<string, string> = { accept: 'Allow once', acceptForSession: 'Allow for this session',
-  decline: 'Decline', 'approve-once': 'Approve once', reject: 'Reject', cancel: 'Cancel native action' };
+  decline: 'Decline', 'approve-once': 'Approve once', 'approve-for-session': 'Allow for this session', reject: 'Reject', cancel: 'Cancel native action' };
 
 function decisionLabel(value: string | Record<string, unknown>) {
   if (typeof value === 'string') return labels[value] ?? value;
@@ -102,11 +102,15 @@ export function NativeReviewRequest({ request, busy, onRespond }: {
       <p className="text-ui wrap-anywhere">{text(params.toolName)}</p>
       {text(params.blockedPath) ? <p className="text-ui wrap-anywhere"><strong>Requested path: </strong>{text(params.blockedPath)}</p> : null}
       <RecordedValue value={params.input} />
+      {Array.isArray(params.sessionRules) && params.sessionRules.length ? <div>
+        <p className="text-ui font-medium">Rules for this session</p>
+        <RecordedValue value={params.sessionRules} />
+      </div> : null}
     </> : null}
     {copilot ? <>
       <RecordedValue value={params.prompt} />
       <Disclosure label="Inspect the native action" expandedLabel="Hide the native action"><RecordedValue value={params.action} /></Disclosure>
-      <div className="flex flex-wrap gap-2">{(['approve-once', 'reject'] as const).filter(kind => choices.includes(kind)).map(kind =>
+      <div className="flex flex-wrap gap-2">{(['approve-once', 'approve-for-session', 'reject'] as const).filter(kind => choices.includes(kind)).map(kind =>
         <Button key={kind} disabled={disabled} onClick={() => void respond({ kind })}>{decisionLabel(kind)}</Button>)}</div>
     </> : null}
     {command || files || claude ? <>

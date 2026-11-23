@@ -124,6 +124,94 @@ test('explicit null time limits reach model capture without creating a timeout',
   assert.equal(report.status, 'complete');
 });
 
+test('a comparison forwards approval and network choices to Claude and Copilot without a Codex side', async t => {
+  const h = await harness(t), captured = [];
+  h.profiles.get('Alpha').client = 'claude-code';
+  h.profiles.get('Beta').client = 'copilot';
+  const capture = async input => {
+    captured.push({ client: input.profile.client, approvals: input.approvalsReviewer, network: input.networkAccess });
+    return h.captureFixture(input);
+  };
+  Object.assign(h.context, { onNativeRequest: () => assert.fail('The fixture should not request permission'),
+    clientRuntimes: { 'claude-code': { capture }, copilot: { capture } } });
+  const input = { ...spec(h.repository), parallel: true, approvalsReviewer: 'auto_review', networkAccess: false };
+  const report = await runAuditExperiment(h.store, input, h.context);
+  assert.equal(report.status, 'complete');
+  assert.deepEqual(captured.toSorted((a, b) => a.client.localeCompare(b.client)), [
+    { client: 'claude-code', approvals: 'auto_review', network: false }, { client: 'copilot', approvals: 'auto_review', network: false },
+  ]);
+  const conflicting = { ...input, profiles: [{ name: 'Alpha', execution: { permissionMode: 'plan' } }, { name: 'Beta' }] };
+  const preview = await previewAuditExperiment(h.store, conflicting, h.context);
+  assert.equal(preview.status, 'blocked');
+  assert.ok(preview.failures.some(failure => failure.code === 'comparison-approval-mode-conflict'));
+});
+
+test('parallel comparisons start both admitted sides and keep their input order when the right side finishes first', async t => {
+  const h = await harness(t);
+  const rightFinished = Promise.withResolvers(), captures = new Map(), finished = [];
+  const timeout = setTimeout(() => rightFinished.reject(new Error('Right side did not start while the left side waited')), 3000);
+  t.after(() => clearTimeout(timeout));
+  h.context.capture = async input => {
+    const name = input.profile.profileName;
+    captures.set(name, input.workspace);
+    assert.equal(h.reservations.length, 2);
+    assert.equal(h.releases.length, 0);
+    if (name === 'Alpha') await rightFinished.promise;
+    const result = await h.captureFixture(input);
+    finished.push(name);
+    if (name === 'Beta') rightFinished.resolve();
+    return result;
+  };
+  const report = await runAuditExperiment(h.store, { ...spec(h.repository), parallel: true }, h.context);
+  assert.equal(report.status, 'complete');
+  assert.equal(report.execution.parallelism, 2);
+  assert.deepEqual(finished, ['Beta', 'Alpha']);
+  assert.deepEqual(report.runs.map(run => run.profile.profileName), ['Alpha', 'Beta']);
+  assert.notEqual(captures.get('Alpha'), captures.get('Beta'));
+});
+
+test('parallel shutdown uncertainty retains the affected lease and finalizes the stopped sibling', async t => {
+  const h = await harness(t);
+  h.context.capture = async input => {
+    const result = await h.captureFixture(input);
+    if (input.profile.profileName === 'Alpha') {
+      result.process.status = 'shutdown-failed';
+      result.process.shutdown.groupTerminated = false;
+    }
+    return result;
+  };
+  const report = await runAuditExperiment(h.store, { ...spec(h.repository), parallel: true }, h.context);
+  assert.equal(report.status, 'recovery-required');
+  assert.deepEqual(report.runs.map(run => run.status), ['recovery-required', 'complete']);
+  assert.equal(h.states.get(report.runs[0].id).reservation.status, 'held');
+  assert.equal(h.finalized.has(report.runs[0].id), false);
+  assert.deepEqual(h.releases.map(({ owner }) => owner.runId), [report.runs[1].id]);
+  assert.equal(h.finalized.has(report.runs[1].id), true);
+});
+
+test('cancelling a parallel comparison waits for both owned legs to stop', async t => {
+  const controller = new AbortController(), h = await harness(t, { signal: controller.signal });
+  const entered = new Set(), stopped = new Set();
+  const timeout = setTimeout(() => controller.abort('fixture timed out waiting for both sides'), 3000);
+  t.after(() => clearTimeout(timeout));
+  h.context.capture = async input => {
+    const side = input.profile.profileName;
+    const stoppedByCancellation = new Promise(resolve => input.processOptions.signal.addEventListener('abort', resolve, { once: true }));
+    await input.processOptions.onSpawn({ pid: side === 'Alpha' ? 301 : 302 });
+    entered.add(side);
+    if (entered.size === 2) controller.abort('fixture cancellation');
+    await stoppedByCancellation;
+    assert.equal(h.releases.length, 0);
+    stopped.add(side);
+    return { process: { status: 'cancelled', shutdown: { groupTerminated: true } } };
+  };
+  const report = await runAuditExperiment(h.store, { ...spec(h.repository), parallel: true }, h.context);
+  assert.equal(report.status, 'cancelled');
+  assert.deepEqual(report.runs.map(run => run.status), ['cancelled', 'cancelled']);
+  assert.deepEqual(stopped, new Set(['Alpha', 'Beta']));
+  assert.equal(h.releases.length, 2);
+});
+
 test('aggregate reports omit duplicate replay payloads while finalized per-run records retain captures', async t => {
   const h = await harness(t), fingerprint = 'c'.repeat(64);
   const threadIds = ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000102'];
@@ -337,7 +425,7 @@ test('outcome coverage distinguishes evaluated failure, interrupted checks and a
     const report = await runAuditExperiment(h.store, input, h.context);
     const run = h.finalized.get(report.runs[0].id);
     assert.equal(run.outcome.task.status, 'passed');
-    assert.equal(run.coverage.outcome, mode === 'none' ? 'unavailable' : mode === 'failed' ? 'complete' : 'partial');
+    assert.equal(run.coverage.outcome, mode === 'none' ? 'not-applicable' : mode === 'failed' ? 'complete' : 'partial');
     assert.equal(run.outcome.status, mode === 'none' ? 'not-evaluated' : mode === 'stopped-early' ? 'failed' : mode);
     assert.equal(auditExitCode(report), mode === 'none' ? 2 : mode === 'timeout' ? 124 : mode === 'cancelled' ? 130 : 4);
   });

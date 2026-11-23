@@ -81,13 +81,15 @@ function isolatedNativeOptions(env, paths) {
  */
 export async function runAuditCapture(options = {}) {
   const { executionMode, profile, workspace, task, selectedSkills = [], sandbox: auditSandbox = 'workspace-write', processOptions = {},
+    networkAccess = false, autonomous = false,
     onSession, onPhase, onTaskEnd, onTurn, onNativeRequest, onProcessReady, requiredContext, preflightOnly = false, limits = {},
     telemetryFactory = startAuditTelemetry } = options;
   if (!['audit', 'profile'].includes(executionMode)) throw new TypeError('Select an explicit capture executionMode');
   const ordinary = executionMode === 'profile';
   const approvalsReviewer = validateAuditApprovalsReviewer(options.approvalsReviewer);
-  const auditApprovalPolicy = typeof onNativeRequest === 'function' ? 'on-request' : 'never';
-  if (ordinary && (['sandbox', 'sandboxPolicy', 'approvalPolicy', 'approvalsReviewer', 'model', 'effort', 'nativeConfig', 'selectedSkills', 'requiredContext', 'preflightOnly', 'telemetryFactory'].some(key => Object.hasOwn(options, key))
+  const auditApprovalPolicy = autonomous || typeof onNativeRequest !== 'function' ? 'never'
+    : approvalsReviewer ? 'on-request' : undefined;
+  if (ordinary && (['sandbox', 'sandboxPolicy', 'networkAccess', 'approvalPolicy', 'approvalsReviewer', 'autonomous', 'model', 'effort', 'nativeConfig', 'selectedSkills', 'requiredContext', 'preflightOnly', 'telemetryFactory'].some(key => Object.hasOwn(options, key))
     || profile?.nativeConfig !== undefined || profile?.skills !== undefined
     || ['args', 'runtimeDirectory'].some(key => Object.hasOwn(processOptions, key))
     || ['completionWaitMs', 'maxTelemetryBytes', 'maxTelemetryEvents'].some(key => Object.hasOwn(limits, key))
@@ -95,7 +97,7 @@ export async function runAuditCapture(options = {}) {
     || (profile?.launchArgs !== undefined && !isDeepStrictEqual(profile.launchArgs, ['-c', `sqlite_home=${JSON.stringify(profile.home)}`]))))
     throw new TypeError('Profile execution does not accept audit policy overrides');
   if (approvalsReviewer && auditApprovalPolicy !== 'on-request')
-    throw new TypeError('User approval routing requires a comparison request handler');
+    throw new TypeError('Native approval review requires on-request policy and a comparison request handler');
   if (ordinary && (typeof onSession !== 'function' || workspace !== profile?.cwd
     || !profile?.env || !isDeepStrictEqual(processOptions.env, profile.env)))
     throw new TypeError('Profile execution requires the selected cwd/environment and a durable session checkpoint');
@@ -109,6 +111,7 @@ export async function runAuditCapture(options = {}) {
     || typeof workspace !== 'string' || !workspace.startsWith('/') || typeof task !== 'string' || task.length === 0
     || !['read-only', 'workspace-write', 'danger-full-access'].includes(sandbox)
     || !processOptions.env || !processOptions.stdoutPath || !processOptions.stderrPath
+    || typeof networkAccess !== 'boolean' || typeof autonomous !== 'boolean'
     || typeof preflightOnly !== 'boolean' || preflightOnly && processOptions.args !== undefined) {
     throw new TypeError('Invalid audit capture input');
   }
@@ -138,7 +141,10 @@ export async function runAuditCapture(options = {}) {
     sent: { source: 'process-local-native-config',
       model: nativeConfig.model ?? null, reasoningEffort: nativeConfig.model_reasoning_effort ?? null },
   });
+  if (!ordinary && sandbox !== 'danger-full-access')
+    capture.settingsEvidence.requested.networkAccess = { value: networkAccess, source: 'frozen-comparison-spec' };
   if (approvalsReviewer) capture.settingsEvidence.requested.approvalsReviewer = { value: approvalsReviewer, source: 'frozen-comparison-spec' };
+  if (autonomous) capture.settingsEvidence.requested.approvalPolicy = { value: 'never', source: 'frozen-comparison-spec' };
   const provenance = createResourceProvenance({ workspace, profileHome: profile.home, userHome: profile.userHome });
   const updateProvenance = () => {
     run.resourceProvenance = provenance.snapshot();
@@ -474,7 +480,7 @@ export async function runAuditCapture(options = {}) {
           throw new Error('Native request does not belong to the active session and turn');
         if (nativeRequests.size >= MAX_ITEMS) throw new Error(`Native request limit exceeded: ${message.method}`);
         if (nativeRequests.has(key)) throw new Error(`Duplicate native request: ${message.method}`);
-        if (typeof onNativeRequest !== 'function') throw new Error(`Native request requires user input: ${message.method}`);
+        if (autonomous || typeof onNativeRequest !== 'function') throw new Error(`Native request requires user input: ${message.method}`);
         const item = approvalItems.get(approvalItemKey(validated.params)) ?? null;
         if (validated.method === 'item/fileChange/requestApproval'
           && (item?.type !== 'fileChange' || !Array.isArray(item.changes) || !item.changes.length
@@ -613,14 +619,16 @@ export async function runAuditCapture(options = {}) {
       // trust/config/managed-policy decisions, and verify it before any task.
       if (!ordinary) capture.settingsEvidence.sent.permissionMode = { value: sandbox, source: 'thread/start' };
       if (approvalsReviewer) capture.settingsEvidence.sent.approvalsReviewer = { value: approvalsReviewer, source: 'thread/start' };
+      if (approvalsReviewer || autonomous)
+        capture.settingsEvidence.sent.approvalPolicy = { value: auditApprovalPolicy, source: 'thread/start' };
       let started;
       try {
         started = await nativeRuntime.createSession(nativeHandle, { ephemeral: false, experimentalRawEvents: false,
           ...(!ordinary ? { sandbox, approvalPolicy: auditApprovalPolicy, historyMode: 'paginated' } : {}),
           ...(approvalsReviewer ? { approvalsReviewer } : {}) });
       } catch (error) {
-        if (!approvalsReviewer) throw error;
-        throw Object.assign(new Error('Codex could not confirm the requested user approval routing; no model task was started'),
+        if (!approvalsReviewer && !autonomous) throw error;
+        throw Object.assign(new Error('Codex could not confirm the requested approval settings; no model task was started'),
           { code: 'requested-approval-reviewer-unconfirmed', cause: error });
       }
       const nativeCwds = [started?.cwd, started?.thread?.cwd].filter(cwd => cwd !== undefined);
@@ -637,16 +645,23 @@ export async function runAuditCapture(options = {}) {
         .map(key => [key, ordinary ? started[key] ?? null : safeText(started[key], 100)]));
       capture.settingsEvidence.confirmed = { source: 'thread/start', ...capture.effectiveSettings };
       if (!ordinary) {
-        const expectedType = sandbox === 'read-only' ? 'readOnly' : 'workspaceWrite';
-        const confirmed = started.sandbox?.type === expectedType && started.sandbox.networkAccess === false;
-        if (permissionMode && !confirmed)
-          throw Object.assign(new Error('Codex did not confirm the requested permission mode with network disabled'), { code: 'requested-permission-unconfirmed' });
-        if (confirmed) capture.settingsEvidence.confirmed.permissionMode = { value: sandbox, source: 'thread/start' };
+        const expectedType = sandbox === 'read-only' ? 'readOnly' : sandbox === 'workspace-write' ? 'workspaceWrite' : 'dangerFullAccess';
+        const { type, networkAccess: startupNetwork = false } = started.sandbox ?? {};
+        // Legacy read-only threads start with networking disabled. The turn can override networking independently.
+        const networkConfirmed = type === 'dangerFullAccess' || startupNetwork === networkAccess
+          || type === 'readOnly' && startupNetwork === false;
+        const confirmed = type === expectedType && networkConfirmed;
+        if ((permissionMode || networkAccess || started.sandbox !== undefined) && !confirmed)
+          throw Object.assign(new Error('Codex did not confirm the requested sandbox settings'), { code: 'requested-permission-unconfirmed' });
+        if (confirmed) {
+          capture.settingsEvidence.confirmed.permissionMode = { value: sandbox, source: 'thread/start' };
+          capture.settingsEvidence.confirmed.networkAccess = { value: type === 'dangerFullAccess' || startupNetwork, source: 'thread/start' };
+        }
       }
-      if (approvalsReviewer) {
-        const value = ['user', 'auto_review', 'guardian_subagent'].includes(started.approvalsReviewer) ? started.approvalsReviewer : null;
-        capture.effectiveSettings.approvalsReviewer = value;
-        capture.settingsEvidence.confirmed.approvalsReviewer = { value, source: 'thread/start' };
+      const nativeReviewer = ['user', 'auto_review', 'guardian_subagent'].includes(started.approvalsReviewer) ? started.approvalsReviewer : null;
+      if (approvalsReviewer || nativeReviewer) {
+        capture.effectiveSettings.approvalsReviewer = nativeReviewer;
+        capture.settingsEvidence.confirmed.approvalsReviewer = { value: nativeReviewer, source: 'thread/start' };
       }
       if ((execution?.model !== undefined && started.model !== execution.model)
         || (execution?.reasoningEffort !== undefined && started.reasoningEffort !== execution.reasoningEffort))
@@ -673,15 +688,16 @@ export async function runAuditCapture(options = {}) {
       run.usage.accounting = nativeUsageAccounting(profile.version);
       capture.checkpoint = 'native-session-started';
       updateInstructionCoverage();
-      const reviewerRejected = Boolean(approvalsReviewer && (started.approvalsReviewer !== approvalsReviewer || started.approvalPolicy !== auditApprovalPolicy));
-      if (reviewerRejected) {
+      const approvalRejected = (approvalsReviewer && nativeReviewer !== approvalsReviewer)
+        || ((approvalsReviewer || autonomous) && started.approvalPolicy !== auditApprovalPolicy);
+      if (approvalRejected) {
         capture.errors.push({ code: 'requested-approval-reviewer-unconfirmed' });
         capture.checkpoint = 'approval-reviewer-rejected';
         run.status = 'unavailable'; capture.status = 'unavailable';
-        run.reason = 'Codex did not confirm user approval routing with on-request policy; no model task was started';
+        run.reason = 'Codex did not confirm the requested approval settings; no model task was started';
       }
       let contextRejected = false;
-      if (contextRules && !reviewerRejected) {
+      if (contextRules && !approvalRejected) {
         const rootRules = contextRules.filter(rule => rule.agents !== 'descendants');
         if (rootRules.length) {
           const acceptance = evaluateRequiredContext(run, rootRules, { rootOnly: true });
@@ -706,10 +722,10 @@ export async function runAuditCapture(options = {}) {
         run.reason = 'Could not checkpoint the native session before task start';
         return;
       }
-      if (contextRejected || reviewerRejected) return;
-      const sandboxPolicy = sandbox === 'read-only' ? { type: 'readOnly', networkAccess: false }
+      if (contextRejected || approvalRejected) return;
+      const sandboxPolicy = sandbox === 'read-only' ? { type: 'readOnly', networkAccess }
         : sandbox === 'danger-full-access' ? { type: 'dangerFullAccess' }
-          : { type: 'workspaceWrite', writableRoots: [workspace], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
+          : { type: 'workspaceWrite', writableRoots: [workspace], networkAccess, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
       if (runtime) {
         // The outer profile write guard must coexist with the native command
         // sandbox. Check that before spending a model turn; never bypass either.
@@ -731,6 +747,8 @@ export async function runAuditCapture(options = {}) {
         run.reason = 'Native readiness only; no model task was requested';
         return;
       }
+      if (!ordinary && sandboxPolicy.networkAccess !== undefined)
+        capture.settingsEvidence.sent.networkAccess = { value: networkAccess, source: 'turn/start' };
       const turnResponse = await nativeRuntime.submit(nativeHandle, { threadId: rootThreadId, cwd: workspace,
         ...(!ordinary ? { sandboxPolicy, approvalPolicy: auditApprovalPolicy } : {}), input: [{ type: 'text', text: task }, ...structuredSelections.map(skill => ({ type: 'skill', name: skill.name, path: skill.path }))] }, ordinary ? 30000 : timeoutMs);
       rootTurnId = turnResponse?.turn?.id;
@@ -1150,7 +1168,8 @@ export async function runAuditCapture(options = {}) {
       runtime = await privateRuntimeDirectory(processOptions.stdoutPath, processOptions.runtimeDirectory);
       capture.runtimeRoots = { mode: 'per-job-private', config: profile.home, ...runtime };
       const isolated = isolatedNativeOptions(processOptions.env, runtime);
-      nativeArgs = [...executionArgs, ...isolated.args];
+      nativeArgs = [...executionArgs, ...isolated.args,
+        ...(sandbox === 'workspace-write' ? ['-c', `sandbox_workspace_write.network_access=${networkAccess}`] : [])];
       nativeEnv = isolated.env;
       capture.observer = { transport: 'loopback-otlp-http-json', savedSettingsChanged: false,
         profileHomeUsedForReadOnlySettingsAndSkills: true,

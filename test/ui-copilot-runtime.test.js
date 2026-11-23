@@ -235,14 +235,15 @@ test('two persisted Copilot profiles reserve the requested repository and launch
   assert.notEqual(captures[0].workspace, captures[1].workspace);
   for (const [index, leg] of legs.entries()) {
     const { native, id } = app.managed[index];
+    const reservation = app.reservations.find(entry => entry.runId === leg.record.id);
+    const capture = captures.find(entry => entry.workspace === leg.state.workspace.directory);
     assert.equal(leg.record.profile.bindingRepository, app.repository);
-    assert.equal(app.reservations[index].binding.workspace, app.repository);
-    assert.equal(app.reservations[index].profileId, id);
-    assert.equal(app.reservations[index].runId, leg.record.id);
+    assert.equal(reservation?.binding.workspace, app.repository);
+    assert.equal(reservation?.profileId, id);
     assert.equal(leg.state.reservation, null);
     assert.equal(leg.report.environmentBinding.workspace, leg.state.workspace.directory);
-    assert.deepEqual(captures[index], { workspace: leg.state.workspace.directory, home: homedir(), root: native.configRoot });
-    assert.notEqual(captures[index].workspace, app.repository);
+    assert.deepEqual(capture, { workspace: leg.state.workspace.directory, home: homedir(), root: native.configRoot });
+    assert.notEqual(capture.workspace, app.repository);
     await assert.rejects(lstat(join(native.root, '.run-lock')), { code: 'ENOENT' });
   }
 
@@ -261,16 +262,15 @@ test('two persisted Copilot profiles reserve the requested repository and launch
     data.profiles.find(profile => profile.id === app.managed[1].id).repositories.shift();
   });
   const priorLaunches = await launched();
-  const blocked = await app.provider.runPreview(input);
-  assert.equal(blocked.ready, false);
-  assert.equal(blocked.previewToken, null);
-  assert.match(blocked.blocked.reason, /Copilot B: The selected repository is not already bound/);
+  const unlisted = await app.provider.runPreview(input);
+  assert.equal(unlisted.ready, true);
+  assert.ok(unlisted.previewToken);
   assert.deepEqual(await launched(), priorLaunches);
   for (const { native } of app.managed)
     await assert.rejects(lstat(join(native.root, '.run-lock')), { code: 'ENOENT' });
 });
 
-test('uncertain Copilot shutdown leaves the exact reservation and skips verification checks', async t => {
+test('uncertain Copilot shutdown retains its reservation while the sibling verifies', async t => {
   const app = await setup(t, { escapedDescendant: true });
   const started = await startComparison(app, { ...compareInput(app), checks: [{ name: 'fixture check', command: 'true' }] });
   await waitFor(() => app.provider.run(started), value => value.pendingRequests.length === 2, 'Uncertain fixture queue');
@@ -279,8 +279,10 @@ test('uncertain Copilot shutdown leaves the exact reservation and skips verifica
     (requestId, response) => app.provider.respondRun({ ...started, requestId, response }));
   const done = await waitFor(() => app.provider.run(started), terminalRun, 'Uncertain Copilot comparison');
   assert.equal(done.state, 'cannot-tidy', JSON.stringify(done));
-  assert.deepEqual(app.calls.checks, []);
+  assert.deepEqual(app.calls.checks, [['/bin/sh', '-lc', 'true']]);
   const experiment = await readAuditRecord(app.store, started.id);
+  const sibling = await readAuditRecord(app.store, experiment.state.runs[1].id);
+  assert.deepEqual(sibling.report.checks.map(check => check.status), ['passed']);
   const run = await readAuditRecord(app.store, experiment.state.runs[0].id);
   assert.equal(run.state.nativeShutdownPending, true);
   assert.equal(run.state.workspace.active, true);
@@ -328,8 +330,10 @@ test('unjoined Copilot failure before the session checkpoint preserves compariso
   const started = await startComparison(app, { ...compareInput(app), checks: [{ name: 'fixture check', command: 'true' }] });
   const done = await waitFor(() => app.provider.run(started), terminalRun, 'Unjoined pre-session failure');
   assert.equal(done.state, 'cannot-tidy', JSON.stringify(done));
-  assert.deepEqual(app.calls.checks, []);
+  assert.deepEqual(app.calls.checks, [['/bin/sh', '-lc', 'true']]);
   const experiment = await readAuditRecord(app.store, started.id);
+  const sibling = await readAuditRecord(app.store, experiment.state.runs[1].id);
+  assert.deepEqual(sibling.report.checks.map(check => check.status), ['passed']);
   const leg = await readAuditRecord(app.store, experiment.state.runs[0].id);
   assert.equal(leg.state.phase, 'process-shutdown');
   assert.equal(leg.state.nativeShutdownPending, true);
@@ -412,8 +416,14 @@ test('authenticated Copilot list and import bind opaque tokens to their exact ro
   assert.equal((await post({ token: a.token }, { token: b.token })).status, 422);
   assert.deepEqual(order(await launches()), order(expected));
   const lastBinding = app.managed[0].repositories.pop();
-  assert.equal((await list('Copilot A')).status, 422);
-  assert.deepEqual(order(await launches()), order(expected));
+  const fallback = await list('Copilot A');
+  assert.equal(fallback.status, 200, await fallback.clone().text());
+  assert.equal((await fallback.json()).sessions.length, 1);
+  assert.deepEqual(await launches().then(rows => rows.at(-1)), {
+    workspace: join(app.managed[0].native.root, 'workspace'), home: homedir(), root: app.managed[0].native.configRoot,
+  });
+  assert.equal((await post({ token: a.token }, { token: b.token })).status, 422);
+  assert.equal((await launches()).length, expected.length + 1);
   app.managed[0].repositories.push(firstBinding, lastBinding);
 
   await writeFile(join(app.managed[1].native.configRoot, 'settings.json'), '{}', { mode: 0o600 });

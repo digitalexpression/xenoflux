@@ -31,6 +31,8 @@ async function assertReportSides(page, { leftName = 'strict-review', rightName =
 async function assertCompactMeasurements(page, profiles = ['strict-review', 'baseline']) {
   const section = page.locator('section[aria-labelledby="time"]');
   await expect(page.getByRole('heading', { name: 'Time and tokens', exact: true })).toBeVisible();
+  const details = section.getByRole('button', { name: 'Workflow and per-session details' });
+  if (await details.count()) await details.click();
   await expect(section.getByRole('list', { name: 'Token bar legend', exact: true })).toHaveCount(1);
   await expect(section.getByRole('table', { name: 'Time and tokens comparison' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Agent measurements', exact: true })).toHaveCount(0);
@@ -76,6 +78,7 @@ test('compare saved sessions with replay-first outcomes across reload', async ({
   await expect(page.getByRole('link', { name: 'Open paired action evidence' })).toHaveCount(0);
   await assertReportSides(page);
   const limitsRegion = page.locator('section').filter({ has: page.getByRole('heading', { name: 'What we could not see', exact: true }) });
+  await limitsRegion.getByRole('button', { name: 'Show recorded coverage limits' }).click();
   const limits = await limitsRegion.innerText();
   expect(limits).toContain('Environment and cache state');
   expect(limits).toContain('one pair');
@@ -86,6 +89,7 @@ test('compare saved sessions with replay-first outcomes across reload', async ({
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
   await assertCompactMeasurements(page);
   await assertReportSides(page);
+  await limitsRegion.getByRole('button', { name: 'Show recorded coverage limits' }).click();
   expect(await limitsRegion.innerText()).toBe(limits);
   expect(new URL(page.url()).pathname).toBe(new URL(reportUrl).pathname);
 });
@@ -103,6 +107,7 @@ test('export report files and reopen JSON after source histories are removed', a
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
   await assertCompactMeasurements(page);
   const limitsRegion = page.locator('section').filter({ has: page.getByRole('heading', { name: 'What we could not see', exact: true }) });
+  await limitsRegion.getByRole('button', { name: 'Show recorded coverage limits' }).click();
   const limits = await limitsRegion.innerText();
   expect(limits).toContain('Environment and cache state');
   expect(limits).toContain('one pair');
@@ -164,7 +169,8 @@ test('export report files and reopen JSON after source histories are removed', a
   await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
   await assertCompactMeasurements(page);
-  expect(await page.locator('section').filter({ has: page.getByRole('heading', { name: 'What we could not see', exact: true }) }).innerText()).toBe(limits);
+  await limitsRegion.getByRole('button', { name: 'Show recorded coverage limits' }).click();
+  expect(await limitsRegion.innerText()).toBe(limits);
 });
 
 test('collect two sessions in the library tray, swap them and compare', async ({ page }) => {

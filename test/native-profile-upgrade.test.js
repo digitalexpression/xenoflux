@@ -52,6 +52,10 @@ test('managed Claude follows the current CLI while an executable change invalida
   assert.equal(profile.bindingRepository, f.workspace);
   const selected = { name: f.selected.name, client: 'claude-code' };
   const preview = await resolveProfileExecutionProfile(f.store, selected, f.options);
+  const project = join(f.root, 'unlisted-project'); await mkdir(project, { mode: 0o700 });
+  const unlisted = await resolveProfileExecutionProfile(f.store, selected, { ...f.options, repository: project });
+  assert.equal(unlisted.environmentBinding.workspace, project);
+  assert.equal(unlisted.home, f.configRoot);
   await f.switchExecutable();
   await assert.rejects(recheckProfileExecutionProfile(f.store, preview, f.options), { code: 'profile-preview-changed' });
   const fresh = await resolveProfileExecutionProfile(f.store, selected, f.options);

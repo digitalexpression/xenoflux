@@ -706,6 +706,16 @@ test('maps read-only isolation through native ThreadStart and TurnStart schema f
   assert.equal(process.status, 'exited');
 });
 
+test('refuses unexpected network access before a turn with default workspace permissions', async t => {
+  const f = await fixture(t);
+  const script = f.script.replace('instructionSources:undefined', 'sandbox:{type:"workspaceWrite",networkAccess:true}');
+  assert.notEqual(script, f.script);
+  const { run, capture } = await runAuditCapture({ ...f.options, networkAccess: false,
+    processOptions: { ...f.options.processOptions, args: ['-e', script] } });
+  assert.equal(run.turns.length, 0);
+  assert.ok(capture.errors.some(error => error.code === 'requested-permission-unconfirmed'));
+});
+
 test('refuses missing, different or inconsistent inherited native working directories before starting a task', async t => {
   for (const reportedCwd of [undefined, '/different-workspace', 'inconsistent']) {
     const f = await fixture(t);

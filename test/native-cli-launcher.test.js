@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { Store, bind } from '../src/profiles.js';
+import { Store } from '../src/profiles.js';
 import { launchHome, launchPlan } from '../src/launcher.js';
 import { managedNativeProfiles } from '../src/managed-native-profile.js';
 import { runInteractive } from '../src/interactive-process.js';
@@ -111,13 +111,15 @@ for (const client of ['claude-code', 'copilot']) {
 
   test(`${client}: named profile preview and interactive launch preserve exact roots and own the reservation`, async t => {
     const f = await fixture(t, client), before = await readFile(f.store.file);
-    const options = { defaultUserHome: f.defaultUserHome };
+    const repository = join(f.root, 'unlisted repository'); await mkdir(repository, { mode: 0o700 });
+    const options = { defaultUserHome: f.defaultUserHome, repository };
     const plans = await Promise.all(f.profiles.map(profile => launchPlan(f.store, profile.name, f.terminalEnvironment, options)));
     const cli = new URL('../bin/xfx.js', import.meta.url).pathname;
-    const dryRun = JSON.parse((await promisify(execFile)(process.execPath, [cli, '--store', f.store.directory, 'launch', 'First', '--dry-run', '--json'],
+    const dryRun = JSON.parse((await promisify(execFile)(process.execPath, [cli, '--store', f.store.directory, 'launch', 'First', '--repo', repository, '--dry-run', '--json'],
       { env: f.terminalEnvironment })).stdout);
     assert.equal(dryRun.client, client);
     assert.equal(dryRun.home, plans[0].home);
+    assert.equal(dryRun.cwd, repository);
     assert.notEqual(plans[0].home, plans[1].home);
     assert.deepEqual(await readFile(f.store.file), before);
     await assert.rejects(access(f.log), { code: 'ENOENT' });
@@ -137,23 +139,23 @@ for (const client of ['claude-code', 'copilot']) {
       assert.equal(client === 'claude-code' ? claude : copilot, plan.home);
       assert.equal(client === 'claude-code' ? copilot : claude, '');
       assert.equal(home, f.defaultUserHome);
-      assert.equal(cwd, plan.cwd);
+      assert.equal(cwd, repository);
       await assert.rejects(access(join(plan.nativeRoot, '.run-lock')), { code: 'ENOENT' });
       assert.doesNotMatch(await readFile(result.reportPath, 'utf8'), /CLAUDE_CONFIG_DIR|COPILOT_HOME/);
     }
   });
 
-  test(`${client}: repository, resume and changed-installation refusals start no interactive client`, async t => {
+  test(`${client}: launch preview accepts an unsaved repository while invalid resume and changed executables refuse startup`, async t => {
     const f = await fixture(t, client), options = { defaultUserHome: f.defaultUserHome };
     const repository = join(f.root, 'repository'); await mkdir(repository, { mode: 0o700 });
-    await assert.rejects(launchPlan(f.store, 'First', f.terminalEnvironment, { ...options, repository }), /Bind this repository/);
-    await f.store.update(data => bind(data, 'First', repository));
+    const before = await readFile(f.store.file);
     assert.equal((await launchPlan(f.store, 'First', f.terminalEnvironment, { ...options, repository })).cwd, repository);
     await assert.rejects(launchPlan(f.store, 'First', f.terminalEnvironment, { ...options, resumeId: randomUUID() }), /only supported for Codex/);
     const result = await launchHome(f.store, 'First', { ...options, terminalEnvironment: f.terminalEnvironment,
       probe: async () => { await writeFile(f.executable, '#!/bin/sh\nexit 9\n'); return '99.0.0'; },
       run: () => assert.fail('Changed installation must not launch') });
     assert.equal(result.error, 'EXECUTABLE_CHANGED');
+    assert.deepEqual(await readFile(f.store.file), before);
     await assert.rejects(access(join(f.profiles[0].native.root, '.run-lock')), { code: 'ENOENT' });
     await assert.rejects(access(f.log), { code: 'ENOENT' });
   });

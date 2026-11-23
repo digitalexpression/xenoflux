@@ -3,11 +3,12 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { Worker } from 'node:worker_threads';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { comparisonPermissionMode } from './audit-spec.js';
 import { acquireCopilotAccount } from './copilot-account-lock.js';
 import { normalizeSessionReplay, REPLAY_LIMITS } from './audit-session-replay.js';
 import { assertEnvironmentBinding, createNativeReference, createSettingsEvidence } from './client-contracts.js';
 import { assertCopilotEnvironment, copilotBinding, copilotId, isCopilotNativeAuthType, qualifiedCopilotRoute, COPILOT_SDK_VERSION, COPILOT_SESSION_ID } from './copilot-profile.js';
-import { copilotDecision, createCopilotDecoder } from './copilot-events.js';
+import { copilotDecision, copilotReplayId, createCopilotDecoder } from './copilot-events.js';
 
 const sdk = `@github/copilot-sdk@${COPILOT_SDK_VERSION}`;
 const maxBytes = 8 * 1024 * 1024;
@@ -162,18 +163,25 @@ export function createCopilotRuntime({ launch: launchWorker = startWorker, acqui
   }
 
   async function capture(options) {
-    const { profile, workspace, execution, task, processOptions, onSession, onTurn, onNativeRequest, onProcessReady, onTaskEnd, onPhase } = options;
+    const { profile, workspace, execution, task, processOptions, onSession, onTurn, onNativeRequest, onProcessReady, onTaskEnd, onPhase,
+      networkAccess, approvalsReviewer, autonomous = false } = options;
+    const comparison = options.executionMode === 'audit';
     if (!['profile', 'audit'].includes(options.executionMode) || !task?.trim() || typeof onSession !== 'function'
       || !isDeepStrictEqual(profile?.env, processOptions?.env) || options.requiredContext || options.selectedSkills?.length
-      || options.approvalsReviewer || options.preflightOnly)
+      || options.preflightOnly || typeof autonomous !== 'boolean' || networkAccess !== undefined && typeof networkAccess !== 'boolean'
+      || approvalsReviewer !== undefined && !['user', 'auto_review'].includes(approvalsReviewer)
+      || autonomous && approvalsReviewer || !comparison && (networkAccess !== undefined || autonomous || approvalsReviewer))
       throw new Error('Unsupported Copilot capture input.');
+    const mode = comparisonPermissionMode('copilot', { approvalsReviewer, autonomous }, execution?.permissionMode);
     const { signal, timeoutMs = options.executionMode === 'profile' ? null : 300000 } = processOptions;
     if (timeoutMs !== null && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs >= 2147483647))
       throw new Error('Invalid Copilot capture deadline.');
     let data;
     try {
       signal?.throwIfAborted();
-      data = workerInput('capture', { ...processOptions, profile, workspace, input: { execution, task, timeoutMs } });
+      data = workerInput('capture', { ...processOptions, profile, workspace, input: {
+        execution: mode ? { ...execution, permissionMode: mode } : execution, task, timeoutMs, networkAccess, autonomous, comparison,
+      } });
     } catch (error) {
       throw Object.assign(new Error(error?.message ?? 'Copilot did not start.'), {
         ...(signal?.aborted ? { code: 'cancelled' } : {}),
@@ -195,7 +203,9 @@ export function createCopilotRuntime({ launch: launchWorker = startWorker, acqui
     };
     const capture = { status: 'partial', checkpoint: 'starting', errors: [], capabilities: {
       runtimeEvents: 'supported', childHydration: 'unsupported', skillUseObservability: 'unavailable',
-    }, settingsEvidence: createSettingsEvidence({ requested: { source: 'frozen-execution-selection', ...execution } }) };
+    }, settingsEvidence: createSettingsEvidence({ requested: { source: 'frozen-execution-selection', ...execution,
+      ...(mode ? { permissionMode: mode } : {}), ...(networkAccess === undefined ? {} : { networkAccess }),
+      ...(autonomous ? { autonomous: true } : {}) } }) };
     let decoder, sessionId, failure, nativeAborted = false, timedOut = false, worker;
     let sequence = Promise.resolve();
     const requests = new Map(), controls = new AbortController();
@@ -218,7 +228,8 @@ export function createCopilotRuntime({ launch: launchWorker = startWorker, acqui
       Promise.resolve().then(async () => {
         const answer = await onNativeRequest(request, { signal: controller.signal });
         if (controls.signal.aborted || controller.signal.aborted || requests.get(request.id) !== controller) return;
-        worker.send({ permission: { requestId: request.id, result: copilotDecision(answer) } });
+        copilotDecision(answer, request);
+        worker.send({ permission: { requestId: request.id, result: answer } });
       }).catch(error => { if (!controller.signal.aborted) refuse(error); }).finally(() => {
         controller.abort();
         if (requests.get(request.id) === controller) requests.delete(request.id);
@@ -226,6 +237,7 @@ export function createCopilotRuntime({ launch: launchWorker = startWorker, acqui
     }
     const receive = (message, reply) => {
       if (message.type === 'aborted-idle') { nativeAborted = true; return; }
+      const observedAt = message.type === 'event' ? new Date().toISOString() : undefined;
       sequence = sequence.then(async () => {
         controls.signal.throwIfAborted();
         if (message.type === 'process') {
@@ -235,26 +247,31 @@ export function createCopilotRuntime({ launch: launchWorker = startWorker, acqui
           const value = message.value;
           if (sessionId || !copilotId(value.sessionId)) throw new Error('Invalid Copilot session checkpoint.');
           sessionId = value.sessionId;
-          decoder = createCopilotDecoder({ sessionId, cwd: workspace });
+          decoder = createCopilotDecoder({ sessionId, cwd: workspace, allowSessionGrant: comparison });
           run.nativeReference = createNativeReference({ ...scope, sessionId });
           run.source = { kind: 'copilot-sdk-stdio', provider: 'copilot', client: 'cli', clientEvidence: sdk,
             version: value.version, accountRoute: value.account, threadId: sessionId, workspace, persistence: 'native-owned-session', freshThread: true };
           run.agents.push({ id: sessionId, sessionId, parentId: null, depth: 0, cwd: workspace });
           capture.settingsEvidence.sent = { source: 'copilot-sdk:session.create/session.permissions.setMode',
             model: value.selection.model ?? null, reasoningEffort: value.selection.reasoningEffort ?? null,
-            route: value.selection.route ?? null, permissionMode: value.selection.permissionMode ?? null };
+            route: value.selection.route ?? null, permissionMode: value.selection.permissionMode ?? null,
+            ...(value.selection.networkAccess === undefined ? {} : { networkAccess: value.selection.networkAccess }) };
           capture.settingsEvidence.confirmed = { source: 'copilot-sdk:session.model.getCurrent/session.permissions', ...value.confirmed };
           capture.effectiveSettings = value.confirmed;
           capture.checkpoint = 'native-session-started';
           await onSession(run, capture);
         } else if (message.type === 'event') {
           if (!decoder) throw new Error('Copilot event arrived before the session checkpoint.');
-          const action = decoder.consume(message.value);
+          const action = decoder.consume(message.value, { observedAt });
           if (action?.turnId) {
             if (requests.size) throw new Error('Copilot advanced while a user decision was pending.');
             await onTurn?.({ threadId: sessionId, turnId: action.turnId });
           }
           if (action?.request) queueRequest(action.request);
+          if (action?.resolvedRequestId) {
+            requests.get(action.resolvedRequestId)?.abort();
+            requests.delete(action.resolvedRequestId);
+          }
           if (action?.failed) throw new Error(`Copilot reported ${action.failed}.`);
           if (action?.idle) {
             for (const controller of requests.values()) controller.abort();
@@ -300,7 +317,9 @@ export function createCopilotRuntime({ launch: launchWorker = startWorker, acqui
       run.agents[0].terminal = !!decoded.idle;
       run.usage.observations = decoded.usage;
       run.coverage.usage = decoded.usage.length ? 'partial' : 'unavailable';
-      run.coverage.tools = decoded.invocations.length || decoded.toolsComplete ? 'partial' : 'unavailable';
+      const rootCoverage = completed && !decoded.childActivity;
+      if (rootCoverage && decoded.events.every(event => event.recordedAt)) run.coverage.timeline = 'observed';
+      run.coverage.tools = rootCoverage && decoded.toolsComplete ? 'observed' : decoded.invocations.length ? 'partial' : 'unavailable';
       capture.settingsEvidence.observed = decoded.observed;
       if (decoded.observed) {
         run.source.model = decoded.observed.model;
@@ -308,20 +327,36 @@ export function createCopilotRuntime({ launch: launchWorker = startWorker, acqui
       }
       if (COPILOT_SESSION_ID.test(sessionId) && decoded.replayEvents.length) {
         const records = decoded.replayEvents.slice(0, Math.min(2000, REPLAY_LIMITS.records));
+        const limits = [{ kind: 'capture-boundary', message: 'Public messages, turns, tool metadata and root idle from the owned Copilot stream. Source lines are projection ordinals. Private reasoning, tool output and child history are outside this capture.' }];
+        if (decoded.replayEvents.length > records.length)
+          limits.push({ kind: 'record-limit', omitted: decoded.replayEvents.length - records.length });
         let retainedBytes = 0;
-        const rows = records.map(({ id: itemId, text, at: timestamp, turnId, ...fields }, index) => {
+        const rows = records.map(({ id: itemId, text, at: timestamp, turnId, callId, label, ...fields }, index) => {
           const bodyBytes = typeof text === 'string' ? Buffer.byteLength(text) : 0;
           const included = typeof text === 'string' && bodyBytes <= REPLAY_LIMITS.bodyBytes && retainedBytes + bodyBytes <= 1024 * 1024
             && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(text);
           if (included) retainedBytes += bodyBytes;
-          return { ...fields, itemId, timestamp, turnId: COPILOT_SESSION_ID.test(turnId ?? '') ? turnId : null,
-            sessionId, sourceLine: index + 1, body: included ? text : null, bodyBytes, bodyStatus: included ? 'included' : 'omitted' };
+          return { ...fields, ...(copilotReplayId(itemId) ? { itemId } : {}), ...(copilotReplayId(callId) ? { callId } : {}),
+            label: label.length <= 200 ? label : 'Copilot tool', timestamp, turnId: copilotReplayId(turnId) ? turnId : null,
+            sessionId, sourceLine: index + 1, body: included ? text : null,
+            ...(included ? { bodyStatus: 'included', bodyBytes } : typeof text === 'string'
+              ? { bodyStatus: 'omitted', bodyReason: 'projection-bounds', contentOmitted: true }
+              : { bodyStatus: 'unavailable', bodyReason: 'not-recorded' }) };
         });
+        if (rows.some(row => row.timestampSource === 'observed'))
+          limits.push({ kind: 'observed-timestamps', message: 'Events without a usable native timestamp show when Xenoflux received them.' });
         const fingerprint = createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+        const eventId = row => `${sessionId}:${fingerprint}:${row.sourceLine}`;
+        const calls = new Map(rows.filter(row => row.kind === 'tool-call' && row.callId).map(row => [row.callId, row]));
+        const results = new Map(rows.filter(row => row.kind === 'tool-result' && row.callId).map(row => [row.callId, row]));
+        const events = rows.map(row => {
+          const isCall = row.kind === 'tool-call';
+          const pair = row.callId && (isCall ? results : calls).get(row.callId);
+          return { ...row, id: eventId(row), ...(pair ? { relatedEventId: eventId(pair) } : row.callId
+            ? { linkStatus: isCall ? 'result-not-found' : 'call-not-found' } : {}) };
+        });
         run.sessionReplay = normalizeSessionReplay({ schemaVersion: 1, kind: 'session-replay', sessions: [{
-          id: sessionId, parentId: null, depth: 0, status: 'partial', source: { fingerprint },
-          limits: [{ kind: 'capture-boundary', message: 'Public messages, turns, tool metadata and root idle from the owned Copilot stream. Source lines are projection ordinals. Opaque native turn IDs remain in turn bodies; tool output and child history are omitted.' }],
-          events: rows.map(row => ({ ...row, id: `${sessionId}:${fingerprint}:${row.sourceLine}` })),
+          id: sessionId, parentId: null, depth: 0, status: 'partial', source: { fingerprint }, limits, events,
         }] });
         run.replayCapture = { status: 'partial', capturedAt: new Date().toISOString(), sourceFingerprint: fingerprint,
           boundary: 'owned-copilot-live-message-projection' };
@@ -335,7 +370,8 @@ export function createCopilotRuntime({ launch: launchWorker = startWorker, acqui
     capture.nativeReference = run.nativeReference;
     await onPhase?.('capture');
     if (sessionId && !controls.signal.aborted) await onSession(run, capture);
-    if (decoded?.idle && process.shutdown.groupTerminated) await onTaskEnd?.({ nativeEndedAt: decoded.idle.at, at: new Date().toISOString(),
+    if (decoded?.idle && process.shutdown.groupTerminated) await onTaskEnd?.({ nativeEndedAt: decoded.idle.timestampSource === 'native' ? decoded.idle.at : null,
+      at: decoded.idle.timestampSource === 'observed' ? decoded.idle.at : new Date().toISOString(),
       complete: completed && decoded.toolsComplete, rootComplete: completed, childAgentsComplete: false,
       processGroupStopped: process.shutdown.groupTerminated, boundary: 'owned-copilot-process-ancestry-checked', run });
     const response = decoded?.response ? { ...decoded.response, status: completed ? 'complete' : 'partial' } : undefined;

@@ -421,6 +421,60 @@ test('real-style delegation is searchable, named and reachable from its assignme
   } finally { await page.close(); await server.close(); }
 });
 
+for (const timestampSource of [null, 'observed', 'mixed']) {
+  const clockDescription = timestampSource === 'mixed' ? 'separate native and arrival times' : timestampSource ? 'arrival times' : 'untimed event order';
+  test(`vendor replay keeps tool input, result and ${clockDescription} inspectable`, async ({ browser }) => {
+    const provider = createDemoProvider();
+    const left = replay('left'), right = replay('right');
+    for (const session of left.sessions) {
+      for (const item of session.events) if (item.timestamp) item.timestampSource = 'native';
+    }
+    const root = right.sessions[0];
+    right.sessions = [root];
+    const row = (line, label, extra) => event(line, root.id, label,
+      timestampSource ? new Date(Date.UTC(2026, 9, 28, 12, 26, line)).toISOString() : null,
+      { timestampSource: timestampSource === 'mixed' ? line === 5 ? 'observed' : 'native' : timestampSource ?? undefined, sourceLine: null, ...extra });
+    root.events = [
+      row(1, 'Session started', { kind: 'session', turnId: null }),
+      row(2, 'User message', { kind: 'message', role: 'user', body: 'Read the project notes.', bodyStatus: 'included' }),
+      row(3, 'Read', { kind: 'tool-call', body: '{"file_path":"NOTES.md"}', bodyStatus: 'included', relatedEventId: `${root.id}:4` }),
+      row(4, 'Read finished', { kind: 'tool-result', body: 'Project notes captured.', bodyStatus: 'included', relatedEventId: `${root.id}:3` }),
+      row(5, 'Session completed', { kind: 'session', turnId: null }),
+    ];
+    const server = await startUiServer({ provider, staticRoot: resolve('dist/ui') });
+    const page = await browser.newPage();
+    try {
+      await page.route('**/api/reports/demo-run', async route => route.fulfill({ json: { ...await provider.report({ ref: 'demo-run' }), replay: { a: left, b: right } } }));
+      await page.goto(server.launchUrl);
+      await page.goto(`${server.origin}/reports/demo-run`);
+      await expect(page.getByRole('region', { name: 'Left timeline' })).toContainText('Native timestamps');
+      const lane = page.getByRole('region', { name: 'Right timeline' });
+      await expect(lane).toContainText(timestampSource === 'mixed' ? 'Native timestamps' : timestampSource ? 'Observed arrival times' : 'Event order · no comparable timestamps');
+      const dots = lane.getByRole('group', { name: timestampSource ? /event time lane$/ : /event order lane$/ });
+      await expect(dots.getByRole('button')).toHaveCount(timestampSource === 'mixed' ? root.events.length - 1 : root.events.length);
+      if (timestampSource === 'mixed') {
+        const terminal = lane.getByRole('group', { name: /event order lane$/ }).getByRole('button');
+        await expect(terminal).toHaveAccessibleName(/Session completed, event 1 of 1/);
+      }
+      expect(await dots.evaluate(track => getComputedStyle(track, '::before').borderBlockStartStyle)).toBe(timestampSource ? 'solid' : 'dotted');
+      const conversation = page.getByRole('region', { name: /strict-review session tree/i }).getByRole('region', { name: 'Conversation' });
+      await expect(conversation).not.toContainText(/Time not recorded|No time/);
+      const labels = await conversation.locator('[data-replay-event]').evaluateAll(rows =>
+        rows.map(row => row.getAttribute('aria-label').split(' · ')[0]));
+      expect(labels).toEqual(root.events.map(item => item.label));
+      await dots.getByRole('button', { name: /strict-review: Read,/ }).click();
+      const inspector = page.getByRole('dialog', { name: 'Event inspector' });
+      await expect(inspector.getByRole('heading', { name: 'Tool input' })).toBeVisible();
+      await expect(inspector).toContainText('{"file_path":"NOTES.md"}');
+      await inspector.getByRole('button', { name: 'Go to linked event: Read finished' }).click();
+      await expect(inspector.getByRole('heading', { name: 'Tool result' })).toBeVisible();
+      await expect(inspector).toContainText('Project notes captured.');
+      await expect(inspector).toContainText(timestampSource === 'mixed' ? 'Native timestamp from the client' : timestampSource ? 'observed arrival' : 'Time not recorded');
+      await expect(conversation.getByRole('button', { name: /^Read finished/ })).toBeFocused();
+    } finally { await page.close(); await server.close(); }
+  });
+}
+
 for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
 test(`agent summaries link assignment, result and parent follow-up without search or side confusion in ${theme}`, async ({ browser }) => {
   const provider = createDemoProvider();

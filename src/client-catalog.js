@@ -1,7 +1,10 @@
 // Explicit native catalog probes submit no task. Cache reads never launch a client.
 import { selectCopilotSettings } from './copilot-catalog.js';
 import { isDeepStrictEqual } from 'node:util';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { runAuditProcess } from './audit-process.js';
+import { prepareAuditStartup } from './audit-startup.js';
 import { createEnvironmentBinding } from './client-contracts.js';
 
 export const CATALOG_TTL_MS = 5 * 60 * 1000;
@@ -82,11 +85,27 @@ function accountObservation(response) {
     comparison: JSON.stringify([account?.type ?? null, account?.email ?? null, account?.planType ?? null, account?.workspaceName ?? null]) };
 }
 
-export async function discoverCodexModels({ profile, workspace, signal, stdoutPath, stderrPath,
+export async function discoverCodexModels({ profile, workspace, signal, stdoutPath, stderrPath, runtimeDirectory,
   timeoutMs = 15000, runProcess = runAuditProcess, onSpawn } = {}) {
   const scope = contextScope({ profile, workspace });
   if (scope.environmentBinding.client !== 'codex')
     throw fail('catalog-unsupported-context', 'Codex model discovery requires the Codex CLI profile');
+  let launch = { executable: profile.executable, args: [...(profile.launchArgs ?? []), 'app-server'] };
+  const env = { ...profile.env };
+  if (runtimeDirectory) {
+    try {
+      const sqlite = join(runtimeDirectory, 'sqlite'), logs = join(runtimeDirectory, 'logs');
+      const temp = join(runtimeDirectory, 'tmp');
+      await Promise.all([sqlite, logs, temp].map(path => mkdir(path, { mode: 0o700 })));
+      Object.assign(env, { CODEX_SQLITE_HOME: sqlite, TMPDIR: temp, TMP: temp, TEMP: temp });
+      launch = await prepareAuditStartup({ profile, directory: join(runtimeDirectory, 'startup-protection'),
+        args: ['-c', `sqlite_home=${JSON.stringify(sqlite)}`, '-c', `log_dir=${JSON.stringify(logs)}`, 'app-server'] });
+    } catch {
+      return { status: 'unavailable', reason: 'catalog-startup-protection-unavailable', source: 'codex-model/list',
+        scope: { ...scope, account: null }, models: [], capabilities: { models: 'unknown', effort: 'unknown' },
+        process: { status: 'failed', shutdown: { groupTerminated: true } } };
+    }
+  }
   let nextId = 0, waiting = null, failure = null, models = [], account = { status: 'unverified', type: null, id: null };
   let initialized = false;
   function requestMessage(method, params) {
@@ -125,8 +144,8 @@ export async function discoverCodexModels({ profile, workspace, signal, stdoutPa
   })();
   let process;
   try {
-    process = await runProcess({ executable: profile.executable, args: [...(profile.launchArgs ?? []), 'app-server'],
-      cwd: workspace, env: { ...profile.env }, input, signal, timeoutMs, stdoutPath, stderrPath, onSpawn,
+    process = await runProcess({ executable: launch.executable, args: launch.args,
+      cwd: workspace, env, input, signal, timeoutMs, stdoutPath, stderrPath, onSpawn,
       outputLimitBytes: 8 * 1024 * 1024,
       onEvent: async event => {
         try {

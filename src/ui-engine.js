@@ -273,8 +273,10 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
   async function resolveCopilotSource(name) {
     const stock = name.trim().toLowerCase() === 'default';
     const selected = stock ? null : find(await store.read(), name);
-    const repository = selected?.repositories[0]?.path;
-    if (!stock && !repository) throw new Error('Bind a workspace to the selected Copilot profile.');
+    if (selected && (selected.client !== 'copilot' || !selected.native)) throw new Error('Choose an available Copilot profile.');
+    const savedWorkspace = selected?.repositories[0]?.path;
+    const repository = selected ? savedWorkspace ?? join(selected.native.root, 'workspace') : undefined;
+    if (selected && !savedWorkspace) await privateDirectory(repository);
     const profile = await resolveProfileExecutionProfile(store, { name, client: 'copilot' }, {
       defaultUserHome, sessionOnly: stock, repository, terminalEnvironment: runContext.terminalEnvironment ?? process.env,
       profileResolvers: runContext.profileResolvers,
@@ -382,7 +384,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     },
     release(id) { admitted.delete(id); },
   };
-  const catalogs = createUiCatalog({ store, defaultUserHome, context: { lockOptions, ...catalogContext } });
+  const catalogs = createUiCatalog({ store, defaultUserHome, context: { lockOptions, allowUntrustedRepository: true, ...catalogContext } });
   const signins = createUiSignins({ nativeProfiles,
     browser: accountContext.openBrowser,
     invalidate: client => catalogs.invalidate(client),
@@ -413,7 +415,7 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
     }
     return profiles;
   }
-  const runs = createUiRuns({ store, defaultUserHome, context: { validateSelection, nativeExecutionOptions, ...runContext }, admission });
+  const runs = createUiRuns({ store, defaultUserHome, context: { lockOptions, validateSelection, nativeExecutionOptions, ...runContext }, admission });
   const reviewTasks = createUiReviewTasks({ store, defaultUserHome, context: { validateSelection, nativeExecutionOptions, ...reviewContext }, admission,
     resolveComparison: async ref => {
       // A Start rechecks current session evidence, not a previously cached view.

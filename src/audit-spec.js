@@ -22,8 +22,18 @@ const NATIVE_REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'h
 export const selectionKey = selection => selection.sideId ?? (selection.client && selection.client !== 'codex' ? `${selection.client}:${selection.name.toLowerCase()}` : selection.name.toLowerCase());
 
 export function validateAuditApprovalsReviewer(value) {
-  if (value !== undefined && value !== 'user') throw new Error('Comparison approval reviewer must be user or inherited');
+  if (value !== undefined && !['user', 'auto_review'].includes(value)) throw new Error('Choose a supported approval reviewer');
   return value;
+}
+
+export function comparisonPermissionMode(client, { approvalsReviewer, autonomous }, selectedMode) {
+  const modes = client === 'claude-code' ? { user: 'default', auto_review: 'auto', autonomous: 'dontAsk' }
+    : client === 'copilot' ? { user: 'manual', auto_review: 'assisted', autonomous: 'assisted' } : null;
+  const mode = modes?.[autonomous ? 'autonomous' : approvalsReviewer];
+  if (mode && selectedMode && mode !== selectedMode) throw Object.assign(
+    new Error(`The selected ${selectedMode} permission mode conflicts with the comparison’s approval choice. Change Approvals or use the profile default for Permission mode.`),
+    { code: 'comparison-approval-mode-conflict' });
+  return mode ?? selectedMode;
 }
 
 export const CODEX_PERMISSION_MODES = Object.freeze(['read-only', 'workspace-write']);
@@ -102,7 +112,7 @@ function taskContract(value) {
 
 /** Freeze one task, committed baseline, selected setups and bounded execution recipe. */
 export function validateAuditSpec(value) {
-  allowed(value, ['schemaVersion', 'repository', 'revision', 'task', 'taskContract', 'profiles', 'limits', 'setup', 'checks', 'sandbox', 'approvalsReviewer', 'allowIncompleteCapture', 'captureRequirements', 'quality', 'trials', 'variables'], 'experiment specification');
+  allowed(value, ['schemaVersion', 'repository', 'revision', 'task', 'taskContract', 'profiles', 'limits', 'setup', 'checks', 'sandbox', 'networkAccess', 'parallel', 'approvalsReviewer', 'autonomous', 'allowIncompleteCapture', 'captureRequirements', 'quality', 'trials', 'variables'], 'experiment specification');
   if (value.schemaVersion !== 1 || !plain(value.repository) || !value.repository.startsWith('/')
     || resolve(value.repository) !== value.repository || !plain(value.revision, 200))
     throw new Error('Specify schemaVersion 1, an absolute repository and explicit Git revision');
@@ -144,7 +154,7 @@ export function validateAuditSpec(value) {
   allowed(value.limits ?? {}, ['runMs', 'experimentMs', 'outputBytes', 'maxRuns'], 'experiment limits');
   const nullableInteger = (selected, fallback, label) => selected === null ? null : integer(selected, fallback, 1, 86400000, label);
   const runMs = nullableInteger(value.limits?.runMs, 900000, 'runMs');
-  const defaultExperimentMs = runMs === null ? 900000 : Math.min(86400000, runMs * profiles.length + 120000);
+  const defaultExperimentMs = runMs === null ? 900000 : Math.min(86400000, runMs * (value.parallel === true ? 1 : profiles.length) + 120000);
   const limits = { runMs,
     experimentMs: nullableInteger(value.limits?.experimentMs, defaultExperimentMs, 'experimentMs'),
     outputBytes: integer(value.limits?.outputBytes, 8 * 1024 * 1024, 1024, 64 * 1024 * 1024, 'outputBytes'),
@@ -152,6 +162,10 @@ export function validateAuditSpec(value) {
   const sandbox = value.sandbox ?? 'workspace-write';
   if (!['read-only', 'workspace-write'].includes(sandbox)) throw new Error('Audit sandbox must be read-only or workspace-write');
   const approvalsReviewer = validateAuditApprovalsReviewer(value.approvalsReviewer);
+  for (const key of ['networkAccess', 'parallel', 'autonomous']) {
+    if (value[key] !== undefined && typeof value[key] !== 'boolean') throw new Error(`${key} must be a boolean`);
+  }
+  if (approvalsReviewer && value.autonomous) throw new Error('Choose an approval reviewer or autonomous execution.');
   if (value.allowIncompleteCapture !== undefined && typeof value.allowIncompleteCapture !== 'boolean') throw new Error('allowIncompleteCapture must be a boolean');
   const setup = commands(value.setup, 'setup'), checks = commands(value.checks, 'check');
   const contract = taskContract(value.taskContract);
@@ -172,6 +186,8 @@ export function validateAuditSpec(value) {
     throw new Error('Intended setup variables require a trial schedule and distinct plain labels');
   return { schemaVersion: 1, repository: value.repository, revision: value.revision, task: value.task, profiles, limits,
     setup, checks, sandbox, ...(approvalsReviewer ? { approvalsReviewer } : {}), allowIncompleteCapture: value.allowIncompleteCapture ?? false,
+    ...(value.networkAccess !== undefined ? { networkAccess: value.networkAccess } : {}), ...(value.parallel ? { parallel: true } : {}),
+    ...(value.autonomous ? { autonomous: true } : {}),
     ...(contract ? { taskContract: contract } : {}),
     ...(captureRequirements ? { captureRequirements } : {}),
     ...(quality ? { quality } : {}), ...(trials ? { trials, variables: value.variables ?? [] } : {}) };

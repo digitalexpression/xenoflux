@@ -322,6 +322,45 @@ test('token fields line up independently and preserve zero versus missing values
   assert.equal(cached.b, 'Not recorded');
 });
 
+test('displays known Claude settings and submission usage without promoting mixed clocks or workflow totals', () => {
+  const pair = bookingLedgerPair();
+  const claude = pair[1];
+  claude.clientIdentity = { client: 'claude-code', surface: 'cli', executionLocation: 'local' };
+  claude.source.kind = 'claude-agent-sdk';
+  delete claude.source.clientVersion;
+  claude.coverage.outcome = 'unavailable';
+  claude.comparisonConditions = { schemaVersion: 1, taskFingerprint: claude.comparisonConditions.taskFingerprint, checkRecipes: [] };
+  claude.checks = [];
+  claude.settingsEvidence = { confirmed: { version: '2.1.326' }, observed: { model: 'claude-haiku-5-5' } };
+  for (const turn of claude.turns) { turn.model = 'claude-haiku-5-5'; turn.reasoningEffort = null; }
+  claude.coverage.tools = 'partial';
+  claude.toolInvocations = [{ agentId: claude.agents[0].id, turnId: claude.turns[0].turnId, itemId: 'owned-read',
+    toolName: 'Read', kind: 'native-tool', status: 'result-observed' }];
+  claude.usage.observations = [{ source: 'claude-sdk-result', scope: 'single-submission',
+    values: { input_tokens: 0, cache_read_input_tokens: 8000, cache_creation_input_tokens: 200, output_tokens: 60 } }];
+  claude.sessionReplay = { sessions: [{ id: claude.agents[0].id, parentId: null, events: [
+    { timestamp: '2026-01-01T00:00:01Z', timestampSource: 'native' },
+    { timestamp: '2026-01-01T00:00:07Z', timestampSource: 'native' },
+    { timestamp: '2026-01-01T00:01:10Z', timestampSource: 'observed' },
+  ] }] };
+  const report = presentComparison(compareAuditRuns(...pair));
+  const condition = key => report.conditions.allRows.find(row => row.key === key);
+  assert.equal(condition('nativeVersion').b, '2.1.326');
+  assert.equal(condition('models').b, 'claude-haiku-5-5');
+  assert.equal(condition('models').label, 'different');
+  assert.equal(condition('models').name, 'Main-session model');
+  assert.equal(condition('editableFiles').b, 'None specified');
+  assert.ok(!report.limits.some(note => note.startsWith('Outcome:') && note.includes('for B')));
+  assert.equal(report.timeTokens.rows.find(row => row.name === 'Recorded time span').b, '6 s');
+  assert.equal(report.agentMeasurements.b[0].durationMs, 6000);
+  assert.equal(report.workflowMeasurements.b.durationMs, 6000);
+  assert.equal(report.workflowMeasurements.b.counters.total, null);
+  assert.deepEqual(report.overview.find(row => row.name === 'Tool calls'), { name: 'Tool calls', a: '—', b: '1 retained · Read' });
+  assert.equal(report.reportedUsage.b.counters.total, 8260);
+  assert.deepEqual(report.timeTokens.rows.filter(row => row.basis === 'provider-submission').map(row => [row.a, row.b]),
+    [['—', '0'], ['—', '8,000'], ['—', '200'], ['—', '60'], ['—', '8,200'], ['—', '8,260']]);
+});
+
 test('snapshot file counts and classified rows survive a source-free export and reopen', async t => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');

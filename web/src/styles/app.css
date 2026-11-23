@@ -80,13 +80,15 @@
   /* Replay event buttons inherit the app's 40px control height. Reserve a
      24px lane for their minimum pointer target so dense histories stay inside
      the timeline and do not cover the session label. */
-  .replay-timeline [aria-label$='event time lane'] { height: 24px; }
-  .replay-timeline [aria-label$='event time lane']::before {
-    content: ''; position: absolute; inset-inline: 12px; top: 11px; height: 2px; background: var(--color-divider);
+  .replay-event-lane { height: 24px; }
+  .replay-event-lane::before {
+    content: ''; position: absolute; inset-inline: 12px; top: 11px; border-block-start: 2px solid var(--color-divider);
   }
-  .replay-timeline [aria-label$='event time lane'] > .btn-icon {
+  .replay-event-lane[data-event-order]::before { border-block-start-style: dotted; }
+  .replay-event-lane > .btn-icon {
     width: 24px; min-width: 24px; height: 24px; min-height: 24px;
   }
+  .replay-event-lane[data-event-order] > .btn-icon:focus-visible { outline-offset: -2px; }
   .replay-coverage > summary { color: var(--color-text-muted); }
   .replay-coverage[open] > summary { margin-bottom: var(--space-8); }
   .replay-chat { height: min(58vh, 40rem); min-height: 20rem; }
@@ -565,10 +567,10 @@
   .comparison-stop:hover { background: var(--color-surface-raised); }
   .comparison-stop-circle { display: block; width: 12px; height: 12px; border: 2px solid var(--line-side); border-radius: var(--radius-pill); background: var(--color-surface); }
   .comparison-stop-index { font-size: var(--text-meta); line-height: 1; }
-  .comparison-conditions { scroll-margin-top: var(--space-24); padding: var(--space-16); gap: var(--space-8); }
-  .comparison-conditions .report-pairs { border: 0; border-radius: 0; }
-  .comparison-conditions .report-pair-heading > *, .comparison-conditions .report-pair-label, .comparison-conditions .report-pair-value, .comparison-conditions .report-pair-result { padding: var(--space-8) var(--space-12); }
-  .comparison-conditions .report-pair-label { gap: var(--space-4); }
+  :is(.comparison-run-facts, .comparison-conditions) { scroll-margin-top: var(--space-24); padding: var(--space-16); gap: var(--space-8); }
+  :is(.comparison-run-facts, .comparison-conditions) .report-pairs { border: 0; border-radius: 0; }
+  :is(.comparison-run-facts, .comparison-conditions) :is(.report-pair-heading > *, .report-pair-label, .report-pair-value, .report-pair-result) { padding: var(--space-8) var(--space-12); }
+  :is(.comparison-run-facts, .comparison-conditions) .report-pair-label { gap: var(--space-4); }
   .report-pairs-classified .report-pair-heading, .report-pairs-classified .report-pair-row { grid-template-columns: minmax(180px, 1fr) repeat(2, minmax(0, 1fr)) minmax(150px, 0.75fr); }
   .report-pair-result { padding: var(--space-12) var(--space-16); border-left: 1px solid var(--color-divider); }
   .session-facets { display: flex; flex-wrap: wrap; gap: var(--space-4); border-bottom: 1px solid var(--color-divider); padding-bottom: var(--space-8); }

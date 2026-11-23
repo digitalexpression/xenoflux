@@ -209,7 +209,7 @@ Inspection and comparison read files without opening, signing in or activating c
 Choose a profile for each side and a repository, then describe one task. Both
 sides may use the same profile or different supported clients. Review the pinned
 commit, model/effort, permissions, limits and any setup/check commands before
-**Start 2 model runs**. Sides run sequentially in separate copies of committed
+**Start 2 model runs**. Both sides run in parallel in separate copies of committed
 source; dirty, untracked and ignored files are excluded.
 
 Preparation groups **Task and source**, **Two setups**, and **Checks and limits**
@@ -220,15 +220,30 @@ Use **Hide matches** to focus on differences and unresolved values. Edit links
 return to the relevant section before requesting a fresh preview.
 
 No checks are selected automatically. Setup/check programs run outside the Codex
-sandbox and can affect external files/services; select trusted commands. Codex
-comparisons default to workspace-write with networking disabled and offer read-only.
-Other clients use their supported permission modes. Ordinary review inherits native
-permissions. Matching effort labels across clients do not imply equal computation.
+sandbox and can affect external files/services; select trusted commands. Network
+access is on by default for Codex and Copilot CLI comparison sandboxes. Use
+**Allow network access** to change that setting. Claude Code follows the profile's
+network and tool rules. Copilot enables its task sandbox when outbound access is
+off or the run is autonomous. Managed restrictions still apply.
+
+**Approvals** applies to both sides. Choose **Profile default**, **Ask me**,
+**Automatic review**, or **Autonomous**. Automatic review uses the client's native
+reviewer. Autonomous runs use the client's unattended permissions. Copilot CLI
+uses assisted review in Autonomous mode and declines decisions that still require
+a person. Answer requests from either side in Comparison progress.
+**Allow for this session** appears when
+the native request offers a session-scoped grant. Choose each side's permission
+mode separately, and use the profile default there when it conflicts with the
+comparison's approval choice. Ordinary review inherits native permissions.
+Matching effort labels across clients do not imply equal computation.
 
 Fresh model catalogs load automatically for the selected profile and repository.
-Choose a repository bound to both managed profiles. Use **Use shared repository**
-when the editor suggests a match. To add missing bindings for the current selection,
-check **Bind selected profiles to this repository** and choose **Bind profiles**.
+Select any accessible Git repository, including one the profiles have never used.
+Saved project bindings provide shortcuts. Review lists the profiles where **Start**
+will add the selected repository to native trusted projects. The entries persist
+after the run. A profile with active work must finish before Xenoflux can add trust.
+If the native client explicitly distrusts the project, change that decision in the
+native client before starting the comparison.
 Both sides share a catalog when they use the same profile. **Load models automatically
 in this tab** is on by default. Turn it off to keep discovery manual in that tab.
 You can choose **Refresh models** in **Catalog details** for either side. Discovery
@@ -243,15 +258,18 @@ line. `*` matches within a directory, `?` matches one character, and a whole `**
 segment spans directories, as in `src/**/*.ts`. Reports flag recorded edits outside
 these rules. The client sandbox applies its own permissions independently.
 
-If another operation holds the profile reservation, let it finish or close the
-client before refreshing models. For a stopped operation, see
+Verified managed Codex Desktop and managed Codex, Claude Code, and Copilot CLI
+sessions can stay open during model discovery and comparisons. Each Codex catalog
+probe uses separate SQLite, log, and temporary directories. Exclusive operations
+such as sign-in and managed Claude or Copilot Desktop sessions still block model
+discovery and comparisons for that profile. For an interrupted reservation, see
 [profile recovery](CLI.md#profiles-copy-and-recovery).
 
 Independent comparisons/reviews can overlap, including on one profile, with separate
 progress, approvals, cancellation and results. Simultaneous review workspaces must
 not overlap. Profile mutations and new Desktop startup are blocked by execution
-reservations. The controller's default capacity is eight jobs. Shared activity
-limits timing comparisons.
+reservations. The controller's default capacity is eight jobs. Concurrent sides
+and other activity can contend for shared resources, which limits timing comparisons.
 
 Open **Activity** in the sidebar for current comparisons and reviews and recent
 comparison records. Open a job to see its current state, answer its native requests
@@ -263,8 +281,8 @@ the list and recent records. Opening a record never resumes or retries model wor
 From **Sessions**, choose **Inspect** beside a Codex session, or choose
 **Choose a session by profile** for Codex, Claude Code or GitHub Copilot.
 Profiles also offers **Inspect sessions** with that profile selected. Listing
-Copilot history uses its CLI and existing sign-in; managed profiles need a bound
-repository. Inspection submits no model task and never resumes the session.
+Copilot history uses its CLI and existing sign-in. Inspection submits no model
+task and never resumes the session.
 
 The inspector shows coverage, the last recorded response, model and permission
 observations, turn settings, skills, time, tokens and recorded activity. Open an
@@ -305,7 +323,7 @@ while you search or open other pages; **Compare…** continues to the picker, wh
 you can also select both. The first is the left side and **Swap sides** reverses them.
 For different profiles/clients, use **Choose recent sessions by profile**, select
 each profile and **List recent sessions**. Changed context needs a fresh selection.
-Managed Copilot listing uses its first bound repository; bind one before listing.
+Managed Copilot listing uses its first saved project or the profile's private workspace.
 History inspection starts no model task. Titles alone do not prove the same task.
 
 On **Open saved report**, you can also select two UTF-8 UUID-named Claude `.jsonl`
@@ -319,11 +337,10 @@ so native histories are no longer needed. Raw transcripts remain private.
 ## Read and export a report
 
 Comparison reports are designed for desktop windows at least 1280 CSS pixels wide.
-Their Overview leads with recorded finding counts, paired activity lines and
-conditions. Different, Same and Could not compare count findings, not condition
-rows or task quality. Hollow activity stops have no per-turn token total; dotted
-lines preserve recorded order where stop timestamps do not support a time scale.
-Choose a stop to open its retained event. Each session keeps its own clock.
+Their Overview leads with Run facts and paired activity. Expand **Show analytical
+finding counts** for classified findings. Dotted lines preserve recorded order
+where stop timestamps do not support a time scale. Choose a stop to open its
+retained event. Each session keeps its own clock.
 
 Use **Overview**, **Activity**, **Harness and context**, **Usage**, **Responses**,
 **Outcome** and **Source** to move within the report. **Review** and **Export report**
@@ -348,16 +365,18 @@ use the same interpretation of the retained evidence, without reading today's fi
 
 | View | Meaning |
 | --- | --- |
+| Run facts | Recorded main-session models, runner time, retained tool calls and tracked file changes. Runner time includes startup and shutdown. A retained tool count gives the evidence available for that side. |
 | Responses and replay | Recorded text, events, owned delegations, references and explicit gaps. Each side has its own order and elapsed-time origin. |
 | Assessment | Named check recipes, status, timing and retained output. Matching names alone do not establish equivalent checks; Inspect never reruns them. |
-| Time and tokens | Scoped counters, not billing or quality. Cached input is part of input, reasoning part of output, and overlapping spans are not summed. Missing totals stay unknown. |
+| Time and tokens | Side-by-side counters with each client's measurement scope. Codex includes cached input in input and reasoning in output. Claude reports uncached input, cache reads and cache creation separately for the task submission. Its submission total adds those input counters and output when all four values are available. |
 | Outcome and code | Captured source-baseline-to-task-end changes, which may include setup. Ignored/unchanged/binary/oversized contents and fallback timing remain explicit. |
 
 In replay, **Open delegated session** follows a child; **Return to calling event**
 restores that side's event/search/scroll. Select an event for the inspector;
 **F6** switches focus and **Escape** closes it. **Source and event details** shows
-recorded references. Reopening never adds later activity or reconstructs missing
-history from today's files.
+recorded references. Replay identifies timestamps supplied by the client and times
+observed by Xenoflux. Untimed events remain selectable in recorded order. Reopening
+never adds later activity or reconstructs missing history from today's files.
 
 Select an agent name for its assignment, result and parent use. When the native
 assignment is encrypted, readable parent assignment statements and child task

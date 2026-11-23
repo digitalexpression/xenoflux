@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store, create, bind } from '../src/profiles.js';
@@ -22,7 +22,7 @@ const execFile = promisify(execFileCallback);
  *
  * Modes: { capture: 'success' | 'partial' | 'delayed' | 'crash' | 'sandbox-unavailable' | 'sandbox-error-with-turn', check: 'pass' | 'fail' | 'output',
  * staleCommit: boolean }. Delayed capture waits for cancellation. The fixture's
- * `releaseCapture()` also lets a test resume it deterministically.
+ * `releaseCapture(profileName)` also lets a test resume one side deterministically.
  */
 export async function createUiRunsFixture({
   staticRoot = join(process.cwd(), 'dist', 'ui'),
@@ -30,9 +30,9 @@ export async function createUiRunsFixture({
 } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'xfx-ui-runs-')));
   let server, provider;
-    const calls = { captures: [], checks: [], catalogs: [] };
-  let delayedRelease;
-  let releaseRequested = false;
+  const calls = { captures: [], checks: [], catalogs: [] };
+  const delayedCaptures = new Set();
+  const releaseRequested = new Set();
   try {
     await symlink(await realpath(process.execPath), join(root, 'node'));
     const executable = join(root, 'codex');
@@ -47,6 +47,10 @@ export async function createUiRunsFixture({
     await execFile('git', ['-C', repository, 'commit', '-qm', 'fixture baseline']);
     const [baseline, strict] = await Promise.all(['baseline', 'strict-review'].map(name =>
       prepareNativeHome({ directory: join(root, `native-${name}`), executable, codexVersion: '0.153.4' })));
+    if (!mode.untrustedProject) {
+      await Promise.all([baseline, strict].map(({ home }) => appendFile(join(home, 'config.toml'),
+        `\n[projects.${JSON.stringify(repository)}]\ntrust_level = "trusted"\n`)));
+    }
     const store = new Store(join(root, 'store'));
     await store.update(async data => {
       create(data, 'baseline'); create(data, 'strict-review');
@@ -80,20 +84,15 @@ trust_level = "trusted"
           outcome: { status: 'unknown', nativeTurnStatus: 'cancelled' } }, capture: { status: 'partial', errors: [] } };
       if (mode.capture === 'delayed') {
         await new Promise(resolve => {
-          let done = false;
-          const finish = () => {
-            if (done) return;
-            done = true;
-            input.processOptions.signal?.removeEventListener('abort', finish);
-            if (delayedRelease === finish) delayedRelease = null;
+          const { signal } = input.processOptions;
+          const capture = { profileName: input.profile.profileName, finish() {
+            if (!delayedCaptures.delete(capture)) return;
+            signal?.removeEventListener('abort', capture.finish);
             resolve();
-          };
-          delayedRelease = finish;
-          if (input.processOptions.signal?.aborted || releaseRequested) {
-            releaseRequested = false;
-            finish();
-          }
-          else input.processOptions.signal?.addEventListener('abort', finish, { once: true });
+          } };
+          delayedCaptures.add(capture);
+          if (signal?.aborted || releaseRequested.delete(capture.profileName)) capture.finish();
+          else signal?.addEventListener('abort', capture.finish, { once: true });
         });
         if (input.processOptions.signal?.aborted) return { process: { status: 'cancelled', exitCode: null,
           elapsedMs: 1, shutdown: { groupTerminated: true }, output: { bytes: 0, truncated: false } },
@@ -225,9 +224,10 @@ trust_level = "trusted"
     const fixture = { root, store, repository, executable, homes: { baseline, strict }, reportsRoot, serverLogs, calls, runContext,
       get url() { return server.launchUrl; }, get origin() { return server.origin; }, get provider() { return provider; },
       seedStoppedRun,
-      releaseCapture: () => {
-        if (delayedRelease) delayedRelease();
-        else releaseRequested = true;
+      releaseCapture: profileName => {
+        const capture = [...delayedCaptures].find(entry => entry.profileName === profileName);
+        if (capture) capture.finish();
+        else releaseRequested.add(profileName);
       },
       restartServer: async () => {
         await provider.close?.();

@@ -254,23 +254,21 @@ components without changing their interpretation.
 
 ### Comparison report
 
-Use the chosen Counts lead composition at desktop widths of 1280 CSS pixels and
-above. Narrow comparison-report layouts are not a support target. Preserve the
-other pages' existing reflow behavior.
+Use the paired run overview at desktop widths of 1280 CSS pixels and above.
+Preserve the other pages' existing reflow behavior.
 
 Keep compact Left/Right identities and recorded session details above section
 navigation. Put supporting provenance in each side's native Details disclosure;
-keep task status and evidence limits visible. Four tiles lead the report: Different, Same, Could not compare and
-Checks selected. The first three count the engine's recorded findings, not condition
-rows or quality scores. Use the secondary count size (28px), with a stronger neutral
-boundary on Different. An unavailable check count stays unknown.
+keep task status visible. Align the recorded model, task and capture time, tools
+and tracked file changes in Run facts. Keep analytical finding counts and coverage
+limits in named disclosures. An unavailable check count stays unknown.
 
 A paired recorded-activity card follows, then the conditions card. Stops open
 their retained source event in the existing inspector. Each lane uses its own
 clock. Use recorded order and a dotted line when stop timestamps cannot establish
 an ordered scale. Only retained parent relationships identify delegated lanes.
-Turn stops remain hollow while per-turn token totals are unavailable; session
-totals never imply a per-turn allocation. Keep scoped usage in Time and tokens.
+Show available counters side by side in Time and tokens, with the measurement
+scope under each profile. Keep workflow and per-session accounting in the details.
 
 ### Profiles and clients
 
@@ -360,14 +358,15 @@ beside repository selection and command effects beside the optional commands.
 Align Left and Right profile, model, effort and permission controls in the same rows.
 Show which requested values differ and keep unresolved values explicit. Put model
 catalog status and the tab's automatic loading control beneath the fields. Disclose
-native discovery effects beside the control. Name the selected profiles and repository
-before an in-place binding. Give each allowed file path or pattern its own line in the
+native discovery effects beside the control. Use saved projects as optional suggestions.
+Give each allowed file path or pattern its own line in the
 source textarea. The form ends with one Review before starting action.
 
-Review leads with the engine's readiness and side order, the no-checks consequence
+Review leads with the engine's readiness and execution schedule, the no-checks consequence
 and the verification status. Show the exact task and pinned source above the paired
 settings, with an option to hide matches. Keep limits and command effects above one
-explicit start action. Edit links return to the corresponding preparation section.
+explicit start action. List any native trust writes beside that action with the exact
+paths and profiles. Edit links return to the corresponding preparation section.
 
 Activity separates current jobs from recent comparison records. Job links lead to
 their existing progress and native requests; the list does not infer completion or

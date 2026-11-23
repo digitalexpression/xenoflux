@@ -135,8 +135,12 @@ After sign-in, an interactive CLI and managed Desktop can hold separate claims o
 that home in either launch order. Admit the second client only with a verified
 peer and identifiable file holders. The CLI runs without a shared daemon for
 this pair. Keep sign-in and log storage preparation out of the join path. Closing
-or recovering one client releases only its own claim. Verified managed Codex
-Desktop can also participate in comparison or review under the task admission rules.
+or recovering one client releases only its own claim. Comparisons and model
+discovery can share a reservation with verified managed Codex Desktop and
+managed Codex, Claude Code or Copilot CLI sessions. Read-only verification may
+observe an ancestor process. Native actions retain their ownership checks.
+Ordinary review can share a verified managed Codex Desktop reservation under its
+own task admission rules.
 
 Ordinary review uses the selected profile's normal cwd, sign-in, settings, instructions,
 integrations and permissions, with explicit process-local model/effort overrides only.
@@ -147,8 +151,14 @@ Embedded report instructions are evidence, not commands. Report-only reasoning i
 prompt instruction, not enforced isolation; normal native runtime/history effects apply.
 
 Comparisons freeze one commit and separate workspaces, preserving the source worktree/
-index and excluding dirty/untracked/ignored inputs. Sides run in recorded order. Setup/
-check commands execute outside the model sandbox and may affect external state. No
+index and excluding dirty/untracked/ignored inputs. A saved project binding is optional.
+Web review discloses missing saved native trust for the exact source repository. The
+reviewed Start can add those entries under the profile operation gate before any task
+starts. Preserve explicit distrust and refuse writes while a profile is in use. Preview
+and catalog reads do not change trust. Web comparison sides run concurrently after
+both are admitted. Report order follows the reviewed sides. CLI audit recipes
+remain sequential unless they request parallel execution. Setup/check commands
+execute outside the model sandbox and may affect external state. No
 checks are auto-selected; no checks means unverified. Changed trust/cwd/native startup
 or saved settings drift stops affected work without rolling back external changes.
 
@@ -162,8 +172,13 @@ Missing attached native state never creates a replacement session.
 A native reply consumes the exact stored live request/action once. Wrong-task, stale,
 duplicate, regenerated or terminal requests never inherit approval. Cancel, completion,
 connection loss and owner changes invalidate pending replies. Show the actual proposed
-action and native choices; never auto-approve, synthesize denial, lower native policy,
-hang on unsupported methods or retry silently. Distinguish JSON-RPC requests from
+action and native choices. Each side can answer its own requests independently.
+Session grants require an exact native offer and apply to the owning session.
+Automatic review uses each client's native reviewer. Autonomous mode applies the
+client's unattended permission policy under its sandbox and managed rules. The
+controller verifies explicit modes before submitting a task and preserves the
+exact native reply and sandbox policy.
+It never manufactures an approval or denial or retries silently. Distinguish JSON-RPC requests from
 responses/notifications by shape. Keep provider-specific handle/reply codecs exact.
 
 Catalog identity includes client/profile/root mode, installation, account/connection
@@ -171,9 +186,10 @@ generation and effective workspace settings. Ordinary reads and preview use cach
 metadata. The refresh path owns bounded initialization without task submission, login
 fallback, or model-policy mutation. The comparison editor requests refresh for missing
 or expired catalogs by default, with a tab-scoped opt-out and disclosure of startup
-hooks and state effects. Refreshes sharing a reservation root wait for the
-controller's current probe to finish cleanup. Preserve reservations from other
-operations and scopes with unconfirmed shutdown. Admit late results only for the
+hooks and state effects. Codex model probes protect saved profile settings and
+use separate SQLite, log and temporary directories. Refreshes sharing a
+reservation root wait for the controller's current probe to finish cleanup.
+Release only the probe's own reservation after confirmed shutdown. Admit late results only for the
 current scope and generation. Five-minute freshness does not survive
 setup/authentication changes. Failure is unavailable, not an empty successful catalog.
 
@@ -181,7 +197,11 @@ Model/effort defaults inherit independently. Native IDs/effort strings are opaqu
 changing model invalidates explicit effort until rechecked. Start validates explicit
 advertised choices and required native confirmation without substitution/downgrade.
 Keep requested, sent, confirmed and turn-reported settings separate. Catalog membership
-is neither account entitlement nor execution proof. Codex interactive user-reviewer
+is neither account entitlement nor execution proof. Web comparisons request
+network access by default. Codex and Copilot CLI apply the reviewed network
+setting in the task sandbox. Claude Code uses the profile's native sandbox and
+tool network rules. These options leave saved profile policy intact.
+Codex interactive user-reviewer
 requests require a live handler plus native `user`/`on-request` confirmation; ordinary
 reviews retain their normal native reviewer and permissions.
 
@@ -234,8 +254,9 @@ Desktop in either launch order. Use separate membership records and require an
 exact live peer before joining. Verify allowed holders on shared resources and
 scan Claude Desktop storage separately. For Copilot, require a Desktop holder
 of the profile database even when the CLI also holds it. Recovery or closure
-releases only the stopped owner's membership. Xenoflux sign-in, profile mutations,
-and task admission require an idle profile. Before startup, bind the current signed
+releases only the stopped owner's membership. A managed Claude or Copilot Desktop
+reservation remains exclusive to that Desktop and its verified CLI peer. Xenoflux
+sign-in and profile mutations require an idle profile. Before startup, bind the current signed
 installation and canonical profile roots and their identities. Persist intent and
 refuse conflicting reservations. Copilot Desktop refuses an existing vendor app.
 Claude uses a distinct Desktop data
@@ -370,6 +391,11 @@ scope/cursors/unsupported reads fail without replacement. Both sides pass admiss
 before publication; rollback removes newly owned files only. Reader shutdown is not
 historical task completion. Preserve projection origins and unknown account/surface/
 usage rather than borrowing execution claims from historical events.
+
+Live comparison replay freezes the owned public event projection. Claude can use
+the exact native root transcript when the stopped session, workspace and submitted
+prompt match. Copilot uses the owned live event stream. Replay distinguishes native
+timestamps from local receipt times and preserves unknown historical timestamps.
 
 Keep local web access on loopback with session/Host/Origin validation. Render native
 content as untrusted text. No arbitrary command/configuration API or authorizing code
