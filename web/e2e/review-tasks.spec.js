@@ -100,7 +100,9 @@ test('runs one native review, answers its approval, and reopens frozen response 
   await expect(page.getByText(/this is a task-scoped review\./i)).toBeVisible();
   await page.getByRole('link', { name: 'Open its comparison and evidence' }).click();
   await expect(page).toHaveURL(new RegExp(`/reports/r\\.${taskId}$`));
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await expect(page.getByRole('group', { name: 'Compared profiles' })).toContainText('baseline');
   await expect(page.getByRole('group', { name: 'Compared profiles' })).toContainText('strict-review');
@@ -149,6 +151,7 @@ test('a missing review response remains visible with its frozen evidence', async
   await expect(page.getByRole('heading', { name: 'Response unavailable' })).toBeVisible();
   await expect(page.getByText(/The captured response is missing, unreadable, or changed/).first()).toBeVisible();
   await page.getByRole('link', { name: 'Open its comparison and evidence' }).click();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
 });
 

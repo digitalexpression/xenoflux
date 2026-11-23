@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { readFile, rm } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createUiBrowserFixture } from '../../test-support/ui-browser-fixture.js';
 import { bookingLedgerPair } from '../../test-support/audit-explanation/booking-ledger.js';
@@ -80,6 +81,7 @@ for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
       await page.goto(app.url);
       await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
       await page.goto(`${app.origin}/reports/${encodeURIComponent(opened.ref)}`);
+      await page.locator('summary').filter({ hasText: /^Conditions and coverage$/ }).click();
       await expect(page.getByText('Model task completed', { exact: true })).toHaveCount(2);
       await expect(page.getByText('Task completion not recorded', { exact: true })).toHaveCount(0);
       const comparison = page.getByRole('region', { name: 'Session and harness comparison', exact: true });
@@ -109,6 +111,7 @@ for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
       await expect(comparison.getByText('Clock relationship unknown. These timestamps do not establish delivery latency.', { exact: true })).toBeVisible();
       await comparison.getByRole('button', { name: 'Hide telemetry clock details', exact: true }).click();
       await expect(page.getByRole('button', { name: /^Unsupported native item:/ })).toHaveCount(0);
+      await page.getByRole('link', { name: 'Session replay', exact: true }).click();
       await page.getByRole('button', { name: /^Offered tool catalog/ }).last().click();
       const inspector = page.getByRole('dialog', { name: 'Event inspector' });
       await expect(inspector.getByText(/offered-not-invoked/)).toBeVisible();
@@ -116,7 +119,7 @@ for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`owned-evidence-${theme}.png`) });
       const exported = await app.provider.exportReport({ ref: opened.ref, includeReplayContent: true });
-      const saved = await app.provider.openReport({ fileName: exported.files[1], text: await readFile(join(exported.folder, exported.files[1]), 'utf8') });
+      const saved = await app.provider.openReport({ fileName: exported.files[1], text: await readFile(join(exported.folder.replace(/^~(?=\/|$)/, homedir()), exported.files[1]), 'utf8') });
       const reopened = await app.provider.report({ ref: saved.ref });
       expect(reopened.sessionControls).toEqual((await app.provider.report({ ref: opened.ref })).sessionControls);
       expect(reopened.sessionHarness).toEqual((await app.provider.report({ ref: opened.ref })).sessionHarness);
@@ -135,6 +138,7 @@ for (const [theme, width, effortChanged] of [['light', 1280, false], ['dark', 14
       await page.goto(app.url);
       await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
       await page.goto(`${app.origin}/reports/${encodeURIComponent(opened.ref)}`);
+      await page.locator('summary').filter({ hasText: /^Conditions and coverage$/ }).click();
       const comparison = page.getByRole('region', { name: 'Session and harness comparison', exact: true });
       await expect(comparison.getByText('Model-only request', { exact: true })).toBeVisible();
       await expect(comparison.getByText(effortChanged ? 'Harness controls differ' : 'Observed models differ', { exact: true })).toBeVisible();
@@ -154,10 +158,11 @@ for (const [theme, width, effortChanged] of [['light', 1280, false], ['dark', 14
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`paired-harness-${theme}.png`), fullPage: true });
       const exported = await app.provider.exportReport({ ref: opened.ref, includeReplayContent: true });
-      const markdown = await readFile(join(exported.folder, exported.files[0]), 'utf8');
+      const markdown = await readFile(join(exported.folder.replace(/^~(?=\/|$)/, homedir()), exported.files[0]), 'utf8');
       expect(markdown).toContain('Requested comparison: Model-only request');
-      const frozen = await app.provider.openReport({ fileName: exported.files[1], text: await readFile(join(exported.folder, exported.files[1]), 'utf8') });
+      const frozen = await app.provider.openReport({ fileName: exported.files[1], text: await readFile(join(exported.folder.replace(/^~(?=\/|$)/, homedir()), exported.files[1]), 'utf8') });
       await page.goto(`${app.origin}/reports/${encodeURIComponent(frozen.ref)}`);
+      await page.locator('summary').filter({ hasText: /^Conditions and coverage$/ }).click();
       await expect(page.getByText(effortChanged ? 'Harness controls differ' : 'Observed models differ', { exact: true })).toBeVisible();
     } finally { await app.close(); }
   });
@@ -177,12 +182,14 @@ test('single inspection carries its frozen side into a newly chosen session comp
     await page.getByRole('combobox', { name: 'Profile', exact: true }).selectOption('codex:strict-review');
     await page.getByRole('button', { name: 'List recent sessions', exact: true }).click();
     await page.getByRole('button', { name: 'Compare with Fix the date test', exact: true }).click();
+    await page.locator('summary').filter({ hasText: /^Conditions and coverage$/ }).click();
     await expect(page.getByRole('heading', { name: 'Session and harness comparison', exact: true })).toBeVisible();
     await expect(page.getByText('Retained comparison', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Copy CLI command', exact: true })).toHaveCount(0);
+    await page.getByRole('link', { name: 'Session replay', exact: true }).click();
     await expect(page.getByRole('region', { name: 'Left timeline', exact: true })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Right timeline', exact: true })).toBeVisible();
-    await page.getByRole('heading', { name: 'Session and harness comparison', exact: true }).scrollIntoViewIfNeeded();
+    await page.getByRole('region', { name: 'Left timeline', exact: true }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath('retained-comparison.png') });
   } finally { await app.close(); }
 });

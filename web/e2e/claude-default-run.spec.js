@@ -19,6 +19,7 @@ test('previews and runs Codex Default versus Claude Code Default through the rea
     await expect(page.getByRole('region', { name: 'Tasks completed · evidence partial' })).toBeVisible({ timeout: 15000 });
     expect(fixture.calls.captures).toEqual(['Default']);
     await page.getByRole('link', { name: 'Open the report' }).click();
+    await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
     await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
     await expect(page.getByText('Claude Code CLI', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('Claude fixture completed.', { exact: true }).first()).toBeVisible();

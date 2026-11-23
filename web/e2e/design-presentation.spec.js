@@ -53,23 +53,32 @@ for (const theme of ['light', 'dark']) {
     await page.getByRole('checkbox', { name: /Fix the date test, baseline, Codex CLI/ }).check();
     await page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop/ }).check();
     await page.getByRole('button', { name: 'Compare sessions', exact: true }).click();
+    const groups = page.locator('#report-overview details > summary').filter({
+      hasText: /^(Run facts|Time and tokens|Outcome|Conditions and coverage)$/,
+    });
+    await expect(groups).toHaveText(['Run facts', 'Time and tokens', 'Outcome', 'Conditions and coverage']);
+    await groups.filter({ hasText: /^Outcome$/ }).click();
     await expect(page.getByRole('heading', { name: 'Last recorded response', exact: true })).toBeVisible();
-    const headings = await page.getByRole('heading', { level: 2 }).allTextContents();
-    expect(headings.indexOf('Conditions')).toBeLessThan(headings.indexOf('Last recorded response'));
-    expect(headings.indexOf('What we could not see')).toBeLessThan(headings.indexOf('Last recorded response'));
-    for (const target of [page.locator('[data-slot="trace"] button').first()]) {
-      await target.focus();
-      await page.keyboard.press('Tab');
-      await page.keyboard.press('Shift+Tab');
-      await expect(target).toBeFocused();
-      await expect(target).toHaveCSS('outline-style', 'solid');
-      await expect(target).toHaveCSS('outline-width', '2px');
-      await expect(target).toHaveCSS('outline-offset', '2px');
-    }
+    await groups.filter({ hasText: /^Outcome$/ }).click();
     for (const width of [1280, 1440]) {
       await page.setViewportSize({ width, height: 900 });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      await page.screenshot({ path: testInfo.outputPath(`report-${theme}-${width}.png`), fullPage: true });
+      await page.screenshot({ path: testInfo.outputPath(`grouped-evidence-${theme}-${width}.png`), fullPage: true });
+    }
+    await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+    await page.getByRole('button', { name: 'Chat', exact: true }).click();
+    const trace = page.locator('#report-activity [data-slot="trace"] button').first();
+    await trace.focus();
+    await page.keyboard.press('Tab');
+    await page.keyboard.press('Shift+Tab');
+    await expect(trace).toBeFocused();
+    await expect(trace).toHaveCSS('outline-style', 'solid');
+    await expect(trace).toHaveCSS('outline-width', '2px');
+    await expect(trace).toHaveCSS('outline-offset', '2px');
+    for (const width of [1280, 1440]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`replay-${theme}-${width}.png`), fullPage: true });
     }
   });
 }

@@ -22,6 +22,7 @@ async function openValue(page, app, value) {
   await page.goto(`${app.origin}/reports/open`);
   await page.getByLabel('Choose the report’s JSON file').setInputFiles({ name: 'patches.audit.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(value)) });
   await page.getByRole('link', { name: 'View report' }).click();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
 }
 
 async function exportValue(page, include) {

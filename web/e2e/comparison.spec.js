@@ -28,9 +28,21 @@ async function assertReportSides(page, { leftName = 'strict-review', rightName =
   await expect(sides.getByText('Root reasoning effort (reported): medium', { exact: true })).toHaveCount(2);
 }
 
+async function openEvidenceGroup(page, name) {
+  const summary = page.locator('summary').filter({ hasText: new RegExp(`^${name}$`) });
+  if (!await summary.evaluate(node => node.parentElement.open)) await summary.click();
+}
+
+async function checkReplayView(page) {
+  const views = page.getByRole('navigation', { name: 'Report views' });
+  await views.getByRole('link', { name: 'Session replay' }).click();
+  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+  await views.getByRole('link', { name: 'Grouped evidence' }).click();
+}
+
 async function assertCompactMeasurements(page, profiles = ['strict-review', 'baseline']) {
-  const section = page.locator('section[aria-labelledby="time"]');
-  await expect(page.getByRole('heading', { name: 'Time and tokens', exact: true })).toBeVisible();
+  await openEvidenceGroup(page, 'Time and tokens');
+  const section = page.getByRole('region', { name: 'Time and tokens evidence' });
   const details = section.getByRole('button', { name: 'Workflow and per-session details' });
   if (await details.count()) await details.click();
   await expect(section.getByRole('list', { name: 'Token bar legend', exact: true })).toHaveCount(1);
@@ -66,11 +78,13 @@ test('compare saved sessions with replay-first outcomes across reload', async ({
   await page.getByRole('checkbox', { name: variableName, exact: true }).check();
   await page.getByRole('button', { name: 'Compare sessions' }).click();
 
-  await expect(page.getByRole('heading', { name: 'Conditions' })).toBeVisible();
+  await openEvidenceGroup(page, 'Conditions and coverage');
+  await openEvidenceGroup(page, 'Outcome');
+  await expect(page.getByRole('heading', { name: 'Conditions', exact: true })).toBeVisible();
   await expect(page.getByText('Your statement:')).toBeVisible();
   await expect(page.getByText(variableName, { exact: true })).toBeVisible();
   await expect(page.getByText('You meant to vary this')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+  await checkReplayView(page);
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
   await assertCompactMeasurements(page);
   await expect(page.getByRole('heading', { name: 'Behavioral findings' })).toHaveCount(0);
@@ -85,7 +99,9 @@ test('compare saved sessions with replay-first outcomes across reload', async ({
   const reportUrl = page.url();
   expect(new URL(reportUrl).pathname).toMatch(/^\/reports\/p\.[0-9a-f-]{36}$/);
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+  await checkReplayView(page);
+  await openEvidenceGroup(page, 'Outcome');
+  await openEvidenceGroup(page, 'Conditions and coverage');
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
   await assertCompactMeasurements(page);
   await assertReportSides(page);
@@ -103,7 +119,9 @@ test('export report files and reopen JSON after source histories are removed', a
   await page.getByRole('textbox', { name: 'Task name' }).fill('Fix the date test');
   await page.getByRole('button', { name: 'Compare sessions' }).click();
   await assertReportSides(page);
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+  await checkReplayView(page);
+  await openEvidenceGroup(page, 'Outcome');
+  await openEvidenceGroup(page, 'Conditions and coverage');
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
   await assertCompactMeasurements(page);
   const limitsRegion = page.locator('section').filter({ has: page.getByRole('heading', { name: 'What we could not see', exact: true }) });
@@ -164,9 +182,11 @@ test('export report files and reopen JSON after source histories are removed', a
   expect(new URL(page.url()).pathname).toMatch(/^\/reports\//);
   expect(page.url()).not.toContain('Fix%20the%20date%20test');
   await expect(page.getByText('Your statement:')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Conditions' })).toBeVisible();
+  await openEvidenceGroup(page, 'Conditions and coverage');
+  await openEvidenceGroup(page, 'Outcome');
+  await expect(page.getByRole('heading', { name: 'Conditions', exact: true })).toBeVisible();
   await assertReportSides(page);
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+  await checkReplayView(page);
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
   await assertCompactMeasurements(page);
   await limitsRegion.getByRole('button', { name: 'Show recorded coverage limits' }).click();
@@ -198,7 +218,7 @@ test('collect two sessions in the library tray, swap them and compare', async ({
   await expect(page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop.*left side/ })).toBeChecked();
   await expect(page.getByRole('checkbox', { name: /Fix the date test, baseline, Codex CLI.*right side/ })).toBeChecked();
   await page.getByRole('button', { name: 'Compare sessions' }).click();
-  await expect(page.getByRole('heading', { name: 'Conditions' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Grouped evidence' })).toHaveAttribute('aria-current', 'page');
   await expect(tray).toHaveCount(0);
   expect(await page.evaluate(() => window.sessionStorage.getItem('xenoflux.comparison-tray'))).toBeNull();
 });
@@ -234,7 +254,7 @@ test('find and carry an older session beyond the latest hundred into comparison'
   expect(sides.indexOf('Rare older task')).toBeGreaterThanOrEqual(0);
   expect(sides.indexOf('Rare older task')).toBeLessThan(sides.indexOf('Fix the date test'));
   await page.getByRole('button', { name: 'Compare sessions' }).click();
-  await expect(page.getByRole('heading', { name: 'Conditions' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Grouped evidence' })).toHaveAttribute('aria-current', 'page');
   await assertReportSides(page, { leftName: 'baseline', rightName: 'strict-review', leftClient: 'Codex CLI', rightClient: 'Codex Desktop' });
   await expect(page.getByText('Same task not shown:', { exact: false })).toBeVisible();
   await expect(page.locator('p').filter({ hasText: 'The records don’t show whether both sessions got the same task.' })).toBeVisible();

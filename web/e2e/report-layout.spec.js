@@ -27,7 +27,7 @@ test('crowded stops stay separately reachable and absent replay keeps unavailabl
     const original = await provider.report({ ref: 'demo-run' });
     const replay = retainedReplay('left');
     replay.sessions[0].events = Array.from({ length: 25 }, (_, index) => ({
-      ...replay.sessions[0].events[0], id: `dense-${index}`, turnId: `turn-${index}`, timestamp: '2026-11-15T08:00:00Z',
+      ...replay.sessions[0].events[0], id: `dense-${index}`, turnId: `turn-${index}`, timestamp: null,
     }));
     await page.route('**/api/reports/demo-run', route => route.fulfill({ json: { ...original,
       verification: { ...original.verification, none: false, rows: [] },
@@ -35,20 +35,22 @@ test('crowded stops stay separately reachable and absent replay keeps unavailabl
     } }));
     await page.goto(server.launchUrl);
     await page.goto(`${server.origin}/reports/demo-run`);
-    const lines = page.getByRole('region', { name: 'Recorded activity', exact: true });
-    const track = lines.getByRole('group', { name: 'baseline · Main session recorded stops', exact: true });
-    await expect(track.getByRole('button')).toHaveCount(20);
+    const tabs = page.getByRole('navigation', { name: 'Report views' });
+    await tabs.getByRole('link', { name: 'Session replay' }).click();
+    const track = page.getByRole('region', { name: 'Left timeline' }).getByRole('group', { name: 'Root session left-root event order lane' });
+    await expect(track.getByRole('button')).toHaveCount(25);
     const boxes = await track.getByRole('button').evaluateAll(nodes => nodes.map(node => {
       const box = node.getBoundingClientRect(); return { x: box.x, right: box.right };
     }));
     expect(boxes.every((box, index) => !index || box.x >= boxes[index - 1].right)).toBe(true);
-    await expect(lines.getByText(/first 20 of 25 stops/)).toBeVisible();
+    await tabs.getByRole('link', { name: 'Grouped evidence' }).click();
     await page.getByRole('button', { name: 'Show analytical finding counts' }).click();
     await expect(page.getByRole('group', { name: 'Recorded finding counts' }).locator('.comparison-count strong').last()).toHaveText('Unknown');
+    await tabs.getByRole('link', { name: 'Session replay' }).click();
     empty = true;
     await page.reload();
-    await expect(lines.getByText('No replay retained for this side. Activity cannot be reconstructed.')).toHaveCount(2);
-    await expect(lines.getByRole('button')).toHaveCount(0);
+    await expect(page.getByText('Session replay unavailable')).toBeVisible();
+    await expect(track).toHaveCount(0);
   } finally { await page.close(); await server.close(); }
 });
 
@@ -76,35 +78,32 @@ for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
         String(original.counts.different), String(original.counts.same), String(original.counts.cannotCompare), '0',
       ]);
       await page.getByRole('button', { name: 'Hide analytical finding counts' }).click();
-      const lines = page.getByRole('region', { name: 'Recorded activity', exact: true });
-      await expect(lines.getByText(/Dotted lanes show recorded order/)).toBeVisible();
-      await expect(lines.locator('.comparison-branch[data-linked="true"]')).toHaveCount(2);
-      await expect(lines.locator('.comparison-stop-track[data-ordered="true"]')).toHaveCount(1);
-      await expect(lines.locator('.comparison-stop-track[data-ordered="false"]')).toHaveCount(1);
-      const [factsBox, lineBox, conditionBox] = await Promise.all([
-        facts.boundingBox(), lines.boundingBox(), page.locator('.comparison-conditions').boundingBox(),
-      ]);
-      expect(factsBox.y + factsBox.height).toBeLessThanOrEqual(lineBox.y);
-      expect(lineBox.y + lineBox.height).toBeLessThanOrEqual(conditionBox.y);
+      const factsBox = await facts.boundingBox();
       expect(factsBox.y + factsBox.height).toBeLessThanOrEqual(900);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       await page.screenshot({ path: testInfo.outputPath(`report-${theme}-${width}.png`), animations: 'disabled' });
-      await page.locator('.comparison-conditions').scrollIntoViewIfNeeded();
+      await page.locator('summary').filter({ hasText: 'Conditions and coverage' }).click();
       await expect(page.getByRole('table', { name: 'Recorded conditions comparison' }).getByRole('columnheader', { name: 'Recorded result' })).toBeVisible();
       await page.screenshot({ path: testInfo.outputPath(`report-conditions-${theme}-${width}.png`), animations: 'disabled' });
-      const stop = lines.getByRole('button', { name: /baseline · Main session · Turn 1/ });
-      await stop.focus();
-      await page.keyboard.press('Enter');
+      await page.getByRole('navigation', { name: 'Report views' }).getByRole('link', { name: 'Session replay' }).click();
+      const leftLane = page.getByRole('region', { name: 'Left timeline' });
+      const rightLane = page.getByRole('region', { name: 'Right timeline' });
+      const [leftBox, rightBox] = await Promise.all([leftLane.boundingBox(), rightLane.boundingBox()]);
+      expect(leftBox.y + leftBox.height).toBeLessThanOrEqual(rightBox.y);
+      await expect(leftLane.getByRole('group', { name: 'Child session left-child event time lane' })).toBeVisible();
+      const citation = JSON.stringify(['a', 'left-root', 'first']);
+      await page.goto(`${server.origin}/reports/demo-run?event=${encodeURIComponent(citation)}`);
       const inspector = page.getByRole('dialog', { name: 'Event inspector' });
       await expect(inspector.getByRole('heading', { name: 'Event inspector' })).toBeFocused();
       await expect(inspector.getByText('left retained task', { exact: true })).toBeVisible();
+      expect(new URL(page.url()).searchParams.get('event')).toBe(citation);
       await expect(inspector.getByText('Time not recorded', { exact: false }).first()).toBeVisible();
       const rightConversation = await page.getByRole('region', { name: 'strict-review session tree', exact: true }).boundingBox();
       const inspectorBox = await inspector.boundingBox();
       expect(rightConversation.x + rightConversation.width).toBeLessThanOrEqual(inspectorBox.x);
       await page.keyboard.press('Escape');
       await expect(inspector).toHaveCount(0);
-      await expect(stop).toBeFocused();
+      await expect(page.getByRole('navigation', { name: 'Report views' }).getByRole('link', { name: 'Session replay' })).toHaveAttribute('aria-current', 'page');
     } finally { await page.close(); await server.close(); }
   });
 }

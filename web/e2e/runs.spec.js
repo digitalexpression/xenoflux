@@ -163,8 +163,10 @@ test('pins the reviewed commit, runs both profiles, then exports and reopens the
   await expect(page.getByRole('region', { name: 'Finished' })).toBeVisible({ timeout: 15000 });
   expect(app.calls.captures.toSorted()).toEqual(['baseline', 'strict-review']);
   await page.getByRole('link', { name: 'Open the report' }).click();
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Export report' }).first()).toBeVisible();
   await page.getByRole('link', { name: 'Export report' }).first().click();
   await page.getByRole('button', { name: 'Export', exact: true }).click();
@@ -219,6 +221,7 @@ test('check assessment output retention inspects safely, navigates, and exports 
   expect(app.calls.captures.toSorted()).toEqual(['baseline', 'strict-review']);
   expect(app.calls.checks).toHaveLength(4);
   await page.getByRole('link', { name: 'Open the report' }).click();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
 
   const table = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(table.locator('tbody tr')).toHaveCount(2);
@@ -301,7 +304,8 @@ test('successful partial capture preserves task completion, validation and recor
   expect(app.calls.checks).toHaveLength(2);
   await page.getByRole('link', { name: 'Open the report', exact: true }).click();
   await expect(page.getByRole('group', { name: 'Compared profiles' }).getByText('Model task completed', { exact: true })).toHaveCount(2);
-  const measurements = page.locator('section[aria-labelledby="time"]');
+  await page.locator('summary').filter({ hasText: /^Time and tokens$/ }).click();
+  const measurements = page.getByRole('region', { name: 'Time and tokens evidence' });
   await expect(measurements.getByRole('table', { name: 'Time and tokens comparison' })).toHaveCount(0);
   await expect(measurements.getByRole('list', { name: 'Token bar legend' }).getByRole('listitem')).toHaveCount(4);
   const leftMeasurements = measurements.locator('[aria-label="baseline time and tokens"]');
@@ -316,6 +320,7 @@ test('successful partial capture preserves task completion, validation and recor
   await expect(leftRows.nth(0).getByRole('img')).toHaveCount(0);
   await leftRows.nth(0).locator('summary').click();
   await expect(leftRows.nth(0)).toContainText('Workflow mix withheld until its accounting is validated');
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   const assessment = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(assessment.locator('tbody tr')).toHaveCount(1);
   await expect(assessment.getByRole('button', { name: 'Inspect baseline result for smoke' })).toBeVisible();
@@ -333,9 +338,9 @@ test('successful partial capture preserves task completion, validation and recor
   await page.setViewportSize({ width: 1280, height: 800 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.setViewportSize({ width: 1280, height: 800 });
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
-  await expect(page.locator('section[aria-labelledby="time"]').getByRole('list', { name: 'Token bar legend' })).toHaveCount(1);
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await page.getByRole('link', { name: 'Export report' }).first().click();
   await page.getByRole('button', { name: 'Export', exact: true }).click();
   await expect(page.getByRole('status', { name: 'Report saved' })).toBeVisible();
@@ -348,6 +353,7 @@ test('successful partial capture preserves task completion, validation and recor
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedJson);
   await page.getByRole('link', { name: 'View report' }).click();
   await expect(page.getByText('Shown exactly as saved')).toBeVisible();
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   const reopenedOutcome = page.getByRole('table', { name: 'Outcome comparison', exact: true });
   const reopenedCounts = reopenedOutcome.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'File-change result' }) }).getByRole('cell');
   await expect(reopenedCounts.nth(0)).toContainText('1 tracked file · 0 ignored files or artifacts');
@@ -359,8 +365,9 @@ test('successful partial capture preserves task completion, validation and recor
   const reopenedAssessment = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(reopenedAssessment.locator('tbody tr')).toHaveCount(1);
   await expect(reopenedAssessment.getByRole('button', { name: 'Inspect baseline result for smoke' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
+  await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
   expect(await readFile(savedJson, 'utf8')).toBe(original);
   expect(app.calls.captures.toSorted()).toEqual(['baseline', 'strict-review']);
 });
@@ -382,6 +389,7 @@ test('native sandbox preflight failure is clear in progress and the reopened fro
   await page.getByRole('link', { name: 'Open the partial report' }).click();
   await expect(page.getByText('Neither model task started', { exact: true })).toBeVisible();
   await expect(page.getByRole('group', { name: 'Compared profiles' }).getByText(/The native command sandbox could not be verified, so the model task did not start\./)).toHaveCount(2);
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   const assessment = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(assessment.locator('tbody tr')).toHaveCount(1);
   const assessmentRow = assessment.locator('tbody tr');
@@ -399,6 +407,7 @@ test('native sandbox preflight failure is clear in progress and the reopened fro
   await page.getByLabel('Choose the report’s JSON file').setInputFiles(savedJson);
   await page.getByRole('link', { name: 'View report' }).click();
   await expect(page.getByRole('group', { name: 'Compared profiles' }).getByText(/The native command sandbox could not be verified, so the model task did not start\./)).toHaveCount(2);
+  await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
   const reopenedAssessment = page.getByRole('table', { name: 'Recorded checks assessment' });
   await expect(reopenedAssessment.locator('tbody tr')).toHaveCount(1);
   const reopenedRow = reopenedAssessment.locator('tbody tr');

@@ -254,19 +254,21 @@ components without changing their interpretation.
 
 ### Comparison report
 
-Use the paired run overview at desktop widths of 1280 CSS pixels and above.
+Use Grouped evidence and Session replay at desktop widths of 1280 CSS pixels and above.
 Preserve the other pages' existing reflow behavior.
 
 Keep compact Left/Right identities and recorded session details above section
 navigation. Put supporting provenance in each side's native Details disclosure;
 keep task status visible. Align the recorded model, task and capture time, tools
-and tracked file changes in Run facts. Keep analytical finding counts and coverage
-limits in named disclosures. An unavailable check count stays unknown.
+and tracked file changes in Run facts. Keep related evidence in icon-labeled
+disclosures. An unavailable check count stays unknown.
 
-A paired recorded-activity card follows, then the conditions card. Stops open
-their retained source event in the existing inspector. Each lane uses its own
-clock. Use recorded order and a dotted line when stop timestamps cannot establish
-an ordered scale. Only retained parent relationships identify delegated lanes.
+Stack the profiles' event maps in Session replay and give each retained session a
+lane. Use recorded parent links to identify subagent lanes. Stops open their source
+event in the existing inspector. Elapsed time uses a separate clock for each side.
+Use a dotted lane for recorded order or events outside the elapsed-time scale.
+Keep the paired conversations below the maps. Compact shows event rows. Chat adds
+message bubbles. Both views share the same selection, search and inspector.
 Show available counters side by side in Time and tokens, with the measurement
 scope under each profile. Keep workflow and per-session accounting in the details.
 

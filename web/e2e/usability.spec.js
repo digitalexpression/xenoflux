@@ -51,13 +51,15 @@ test('keep keyboard focus through session replay, export, and saved reopen', asy
   await tabTo(page, page.getByRole('button', { name: 'Compare sessions', exact: true }));
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { level: 1 })).toBeFocused();
+  const outcome = page.locator('summary').filter({ hasText: /^Outcome$/ });
+  await tabTo(page, outcome);
+  await page.keyboard.press('Enter');
+  await expect(outcome).toBeFocused();
   await expect(page.getByRole('heading', { name: 'Last recorded response' })).toBeVisible();
   const expandResponse = page.getByRole('button', { name: 'Read full response', exact: true }).first();
-  let openedResponseEvent = false;
   if (await expandResponse.count()) {
     await tabTo(page, expandResponse);
     await page.keyboard.press('Enter');
-    openedResponseEvent = true;
     const collapseResponse = page.getByRole('button', { name: 'Hide full response', exact: true }).first();
     await expect(collapseResponse).toBeFocused();
     const openResponseEvent = page.getByRole('button', { name: 'Open response event', exact: true }).first();
@@ -72,10 +74,6 @@ test('keep keyboard focus through session replay, export, and saved reopen', asy
   await expect(page.getByRole('heading', { name: 'Behavioral findings' })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Paired action evidence' })).toHaveCount(0);
 
-  if (openedResponseEvent) {
-    await page.goBack();
-    await expect(page.getByRole('heading', { level: 1 })).toBeFocused();
-  }
   await tabTo(page, page.getByRole('link', { name: 'Export report', exact: true }).first());
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'Export this report' })).toBeFocused();

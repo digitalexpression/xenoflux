@@ -190,6 +190,7 @@ test('mixed clients expose native choices and keep path and command decisions se
     await page.locator('details.comparison-side-details > summary').first().click();
     await expect(page.getByText('Copilot Auto · repeating this pair may route to different models.')).toBeVisible();
     await expect(page.getByText(/Turn 1 · fixture-routed-model/)).toBeVisible();
+    await page.locator('summary').filter({ hasText: /^Outcome$/ }).click();
     await expect(page.getByText('Pinned fixture input', { exact: true }).first()).toBeVisible();
     await expect(page.getByText('Claude fixture completed.', { exact: true }).first()).toBeVisible();
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');

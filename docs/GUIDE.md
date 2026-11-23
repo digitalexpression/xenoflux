@@ -337,14 +337,15 @@ so native histories are no longer needed. Raw transcripts remain private.
 ## Read and export a report
 
 Comparison reports are designed for desktop windows at least 1280 CSS pixels wide.
-Their Overview leads with Run facts and paired activity. Expand **Show analytical
-finding counts** for classified findings. Dotted lines preserve recorded order
-where stop timestamps do not support a time scale. Choose a stop to open its
-retained event. Each session keeps its own clock.
-
-Use **Overview**, **Activity**, **Harness and context**, **Usage**, **Responses**,
-**Outcome** and **Source** to move within the report. **Review** and **Export report**
+**Grouped evidence** leads with Run facts. Expand **Time and tokens**, **Outcome**,
+or **Conditions and coverage** for more detail. **Review** and **Export report**
 remain above the evidence. Technical session details stay in each side's **Details**.
+
+**Session replay** stacks the profiles' event maps and gives each retained
+subagent a lane beneath its recorded parent. Choose **Elapsed time** or **Event
+order** for the map. Choose a stop to open its event. **Compact** lists the events
+as rows, and **Chat** shows the messages as conversation bubbles. Both views keep
+the selected event and search.
 
 **Session and harness comparison** separates requested variation from recorded
 differences. **Model-only request** means only the model differs among the listed

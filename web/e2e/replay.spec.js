@@ -72,8 +72,9 @@ test('replay presents independent trees, linked events and source gaps with keyb
     });
     await page.goto(server.launchUrl);
     await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
-    await page.goto(`${server.origin}/reports/demo-run`);
+    await page.goto(`${server.origin}/reports/demo-run#report-activity`);
     await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
+    await page.getByRole('button', { name: 'Chat', exact: true }).click();
     const leftTree = page.getByRole('region', { name: /baseline session tree/i });
     const inspector = page.getByRole('dialog', { name: 'Event inspector' });
     await expect(inspector).toHaveCount(0);
@@ -291,11 +292,50 @@ test('unavailable root histories retain their reason even without any events', a
       await route.fulfill({ json: { ...view, replay: { a: missing, b: missing } } });
     });
     await page.goto(server.launchUrl);
-    await page.goto(`${server.origin}/reports/demo-run`);
+    await page.goto(`${server.origin}/reports/demo-run#report-activity`);
     await expect(page.getByText('Replay coverage', { exact: true })).toBeVisible();
-    await expect(page.getByRole('region', { name: 'Recorded activity', exact: true }).getByText(/Exact native source is missing/)).toHaveCount(2);
-    await expect(page.getByRole('region', { name: 'Session replay', exact: true }).getByText(/Exact native source is missing/)).toHaveCount(2);
+    await expect(page.getByRole('group', { name: 'Session timelines', exact: true }).getByText(/Exact native source is missing/)).toHaveCount(2);
     await expect(page.getByText('No activity recorded in this session.', { exact: true })).toHaveCount(0);
+  } finally { await page.close(); await server.close(); }
+});
+
+test('stacked lanes group subagents and keep the selected event across replay views', async ({ browser }) => {
+  const provider = createDemoProvider();
+  const server = await startUiServer({ provider, staticRoot: resolve('dist/ui') });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  try {
+    const left = replay('left');
+    const [main, parent, nested, missing] = left.sessions;
+    nested.events[0] = { ...nested.events[0], kind: 'message', role: 'assistant', body: 'Retained nested result.', bodyStatus: 'included' };
+    left.sessions = [main, nested, parent, missing];
+    await page.route('**/api/reports/demo-run', async route => route.fulfill({ json: {
+      ...await provider.report({ ref: 'demo-run' }), replay: { a: left, b: replay('right') },
+    } }));
+    await page.goto(server.launchUrl);
+    await page.goto(`${server.origin}/reports/demo-run#report-activity`);
+    const leftMap = page.getByRole('region', { name: 'Left timeline' });
+    const rightMap = page.getByRole('region', { name: 'Right timeline' });
+    await expect(leftMap.getByRole('button', { name: /View .* summary/ })).toHaveText(['Main session', 'Child 00000002', 'Child 00000003', 'Child 00000004']);
+    await expect(leftMap.getByText(/From Child 00000002/)).toBeVisible();
+    await expect(leftMap.getByText('Native child history unavailable.')).toBeVisible();
+    const [leftBox, rightBox] = await Promise.all([leftMap.boundingBox(), rightMap.boundingBox()]);
+    expect(rightBox.y).toBeGreaterThanOrEqual(leftBox.y + leftBox.height);
+
+    const mode = page.getByRole('group', { name: 'Session replay view' });
+    await expect(mode.getByRole('button', { name: 'Compact' })).toHaveAttribute('aria-pressed', 'true');
+    await leftMap.getByRole('button', { name: /baseline: Worker two result/ }).click();
+    const inspector = page.getByRole('dialog', { name: 'Event inspector' });
+    await expect(inspector).toContainText('Retained nested result.');
+    const current = page.locator('[data-replay-side="a"] [data-replay-event][aria-current="true"]');
+    const identity = await current.getAttribute('data-replay-event');
+    await mode.getByRole('button', { name: 'Chat' }).click();
+    await expect(current).toHaveAttribute('data-replay-event', identity);
+    await expect(current).toContainText('Retained nested result.');
+    await expect(inspector).toContainText('Retained nested result.');
+    await mode.getByRole('button', { name: 'Compact' }).click();
+    await page.getByRole('button', { name: 'Event order', exact: true }).click();
+    await expect(leftMap.getByRole('group', { name: `Child session ${nested.id} event order lane` })).toBeVisible();
+    await expect(current).toHaveAttribute('data-replay-event', identity);
   } finally { await page.close(); await server.close(); }
 });
 
@@ -311,7 +351,7 @@ test('replay keeps both sides readable at desktop widths in light and dark theme
         replay: { a: replay('left'), b: replay('right') } } });
     });
     await page.goto(server.launchUrl);
-    await page.goto(`${server.origin}/reports/demo-run`);
+    await page.goto(`${server.origin}/reports/demo-run#report-activity`);
     await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
 
     const theme = page.getByRole('combobox', { name: 'Theme' });
@@ -325,8 +365,8 @@ test('replay keeps both sides readable at desktop widths in light and dark theme
         await expect(left).toBeVisible();
         await expect(right).toBeVisible();
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${mode}, ${width}px, text ${fontSize}`).toBe(true);
-        await expect(page.getByText('baseline', { exact: true }).first()).toBeVisible();
-        await expect(page.getByText('strict-review', { exact: true }).first()).toBeVisible();
+        await expect(left.getByText('baseline', { exact: true })).toBeVisible();
+        await expect(right.getByText('strict-review', { exact: true })).toBeVisible();
         for (const target of [left.getByRole('button', { name: /User message/ }).first(), left.getByRole('button', { name: /Run check/ }).first()]) {
           await target.focus();
           await page.keyboard.press('Tab');
@@ -370,7 +410,7 @@ test('real-style delegation is searchable, named and reachable from its assignme
       await route.fulfill({ json: { ...await provider.report({ ref: 'demo-run' }), replay: { a: left, b: right } } });
     });
     await page.goto(server.launchUrl);
-    await page.goto(`${server.origin}/reports/demo-run`);
+    await page.goto(`${server.origin}/reports/demo-run#report-activity`);
     const leftTree = page.getByRole('region', { name: /baseline session tree/i });
     const rightTree = page.getByRole('region', { name: /strict-review session tree/i });
     const search = page.getByRole('searchbox', { name: 'Search recorded events' });
@@ -404,12 +444,13 @@ test('real-style delegation is searchable, named and reachable from its assignme
     await expect(inspector.getByRole('button', { name: /Open delegated session/ })).toHaveCount(0);
     await inspector.getByRole('button', { name: 'Close', exact: true }).click();
     await expect(leftTree.getByRole('button', { name: /^Delegated agent started ·/ })).toHaveCount(1);
-    await expect(page.locator('[aria-label$="event time lane"] button[tabindex="0"]')).toHaveCount(1);
-    await page.locator('[aria-label$="event time lane"] button[tabindex="0"]').focus();
+    const activeStop = page.locator('.replay-event-lane button[tabindex="0"]');
+    await expect(activeStop).toHaveCount(1);
+    await activeStop.focus();
     await page.keyboard.press('ArrowDown');
     await expect(page.locator('[data-replay-event][aria-current="true"]:focus')).toHaveCount(1);
     // Dense marker controls remain inside their lanes, including the last timestamp.
-    const geometry = await page.locator('[aria-label$="event time lane"]').evaluateAll(lanes => lanes.every(lane => {
+    const geometry = await page.locator('.replay-event-lane').evaluateAll(lanes => lanes.every(lane => {
       const bounds = lane.getBoundingClientRect();
       return [...lane.querySelectorAll('button')].every(button => {
         const box = button.getBoundingClientRect();
@@ -446,7 +487,7 @@ for (const timestampSource of [null, 'observed', 'mixed']) {
     try {
       await page.route('**/api/reports/demo-run', async route => route.fulfill({ json: { ...await provider.report({ ref: 'demo-run' }), replay: { a: left, b: right } } }));
       await page.goto(server.launchUrl);
-      await page.goto(`${server.origin}/reports/demo-run`);
+      await page.goto(`${server.origin}/reports/demo-run#report-activity`);
       await expect(page.getByRole('region', { name: 'Left timeline' })).toContainText('Native timestamps');
       const lane = page.getByRole('region', { name: 'Right timeline' });
       await expect(lane).toContainText(timestampSource === 'mixed' ? 'Native timestamps' : timestampSource ? 'Observed arrival times' : 'Event order · no comparable timestamps');
@@ -508,7 +549,7 @@ test(`agent summaries link assignment, result and parent follow-up without searc
     await page.addInitScript(value => localStorage.setItem('xenoflux-theme', value), theme);
     await page.route('**/api/reports/demo-run', async route => route.fulfill({ json: { ...await provider.report({ ref: 'demo-run' }), replay: { a: left, b: right } } }));
     await page.goto(server.launchUrl);
-    await page.goto(`${server.origin}/reports/demo-run`);
+    await page.goto(`${server.origin}/reports/demo-run#report-activity`);
     const search = page.getByRole('searchbox', { name: 'Search recorded events' });
     const leftTree = page.getByRole('region', { name: 'baseline session tree', exact: true });
     const firstTurn = leftTree.locator('summary').filter({ hasText: /^Turn 1$/ }).first().locator('..');
@@ -641,7 +682,7 @@ test('comparison reconciles task outcomes, scoped measurements and recorded clos
       } });
     });
     await page.goto(server.launchUrl);
-    await page.goto(`${server.origin}/reports/demo-run`);
+    await page.goto(`${server.origin}/reports/demo-run#outcome`);
 
     const outcomes = page.locator('[aria-label$="task outcome"]');
     await expect(outcomes).toHaveCount(2);
@@ -661,12 +702,9 @@ test('comparison reconciles task outcomes, scoped measurements and recorded clos
       return Boolean(outcome && replayHeading && outcome.compareDocumentPosition(replayHeading) & Node.DOCUMENT_POSITION_FOLLOWING);
     });
     expect(order).toBe(true);
-    await expect(replayHeading).toBeVisible();
-
-    await expect(page.getByText('Every bar uses the same scale.', { exact: false })).toBeVisible();
-    await expect(page.getByText('A partial workflow bar covers captured sessions only; missing sessions remain unknown.', { exact: true })).toBeVisible();
-    await expect(page.getByText('These model and effort values describe recorded turns; child settings may be unknown.', { exact: true })).toBeVisible();
     await expect(page.getByText('Counts and paths come from one complete task-end inventory.', { exact: true })).toBeVisible();
+    await page.getByRole('link', { name: 'Session replay', exact: true }).click();
+    await expect(replayHeading).toBeVisible();
 
     const rightTree = page.getByRole('region', { name: 'strict-review session tree', exact: true });
     await rightTree.getByRole('button', { name: /User message ·/ }).first().click();
@@ -674,8 +712,9 @@ test('comparison reconciles task outcomes, scoped measurements and recorded clos
     const rightSelection = rightTree.locator('[data-replay-event][aria-current="true"]');
     await expect(rightSelection).toHaveCount(1);
     const rightSelectedId = await rightSelection.getAttribute('data-replay-event');
-    const search = page.getByRole('searchbox', { name: 'Search recorded events' });
+    const search = page.locator('#report-activity input[type="search"]');
     await search.fill('no matching recorded event');
+    await page.getByRole('link', { name: 'Grouped evidence', exact: true }).click();
     const responses = page.getByRole('heading', { name: 'Last recorded response', exact: true });
     await expect(responses).toBeVisible();
     const leftResponseRegion = page.locator('[aria-label="baseline last recorded response"]');
@@ -691,7 +730,10 @@ test('comparison reconciles task outcomes, scoped measurements and recorded clos
     await expect(leftResponseRegion.getByRole('button', { name: 'Hide full response', exact: true })).toBeVisible();
     await expect(leftResponseRegion.locator('pre').last()).toHaveText(longResponse);
 
-    const timeSection = page.locator('section[aria-labelledby="time"]');
+    await page.getByRole('link', { name: 'Compare time and tokens', exact: true }).click();
+    const timeSection = page.getByRole('region', { name: 'Time and tokens evidence' });
+    await expect(timeSection.getByText('Every bar uses the same scale.', { exact: false })).toBeVisible();
+    await expect(timeSection.getByText('A partial workflow bar covers captured sessions only; missing sessions remain unknown.', { exact: true })).toBeVisible();
     const legend = timeSection.getByRole('list', { name: 'Token bar legend', exact: true });
     await expect(legend.getByRole('listitem')).toHaveText(['Uncached input', 'Cached input', 'Other output', 'Reasoning']);
     await expect(legend).toHaveCount(1);
@@ -766,6 +808,7 @@ test('comparison reconciles task outcomes, scoped measurements and recorded clos
     await expect(search).toHaveValue('no matching recorded event');
 
     await responseEventTrigger.click();
+    await expect(inspector.getByRole('heading', { name: 'Event inspector', exact: true })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(inspector).toHaveCount(0);
     await expect(responseEventTrigger).toBeFocused();
@@ -793,6 +836,8 @@ test('comparison reconciles task outcomes, scoped measurements and recorded clos
 
     rightWorkflowValidated = true;
     await page.reload();
+    await page.getByRole('link', { name: 'Grouped evidence', exact: true }).click();
+    await page.getByRole('link', { name: 'Compare time and tokens', exact: true }).click();
     const validatedWorkflow = page.locator('[aria-label="strict-review time and tokens"]').locator('details.measurement-row').first();
     await expect(validatedWorkflow.locator('.measurement-total')).toHaveText('120 tokens');
     await expect(validatedWorkflow.getByRole('img', { name: /Workflow: 120 tokens/ })).toBeVisible();
