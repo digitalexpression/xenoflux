@@ -27,9 +27,28 @@ for (const theme of ['light', 'dark']) {
     }
   });
 
-  test(`report presents conditions and coverage before responses with solid keyboard focus in ${theme}`, async ({ page }, testInfo) => {
+  test(`comparison hub and report keep keyboard focus visible in ${theme}`, async ({ page }, testInfo) => {
     await page.getByRole('combobox', { name: 'Theme' }).selectOption(theme);
-    await page.getByRole('link', { name: /^Use existing sessions/ }).click();
+    const task = page.getByRole('region', { name: 'Compare a task', exact: true });
+    const setups = page.getByRole('region', { name: 'Compare setups', exact: true });
+    const saved = page.getByRole('region', { name: 'Saved reports', exact: true });
+    const existing = task.getByRole('link', { name: 'Use existing sessions', exact: true });
+    await expect(existing).toHaveAttribute('href', '/compare/sessions');
+    await expect(existing).toHaveAccessibleDescription(/\S/);
+    await expect(task.getByRole('link', { name: 'Run a new task', exact: true })).toHaveAttribute('href', '/runs/new');
+    await expect(setups.getByRole('link', { name: 'Choose two profiles', exact: true })).toHaveAttribute('href', '/compare/setups');
+    await expect(setups.getByRole('link', { name: 'Inspect a setup', exact: true })).toHaveAttribute('href', '/profiles');
+    await expect(saved.getByRole('link', { name: 'Open saved report', exact: true })).toHaveAttribute('href', '/reports/open');
+    for (const width of [320, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`comparisons-${theme}-${width}.png`), fullPage: true });
+    }
+    await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).focus();
+    await page.keyboard.press('Tab');
+    await expect(existing).toBeFocused();
+    await expect(existing).toHaveCSS('outline-style', 'solid');
+    await page.keyboard.press('Enter');
     await page.getByRole('searchbox', { name: 'Search title or project' }).fill('Fix the date test');
     await page.getByRole('checkbox', { name: /Fix the date test, baseline, Codex CLI/ }).check();
     await page.getByRole('checkbox', { name: /Fix the date test, strict-review, Codex Desktop/ }).check();

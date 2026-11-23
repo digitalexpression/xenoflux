@@ -192,10 +192,11 @@ Let content determine height. Dense tables may reduce padding, but retain readab
 
 ### Comparison hub
 
-Give Compare a task and Compare setups equal panel weight. Within the task
-panel, use equal underlined links, descriptions and availability summaries for
-Use existing sessions and Run a new task. Separate these choices with ruled
-spacing rather than nested cards. Recent work follows as flat rows.
+Give Compare a task and Compare setups equal panel weight. Use an icon in each
+header and full-width action links with an icon, a short description and a trailing
+chevron. Keep availability with its workflow and separate links with dividers.
+Stack the panels when their contents need more width. Recent comparisons follow
+as flat links with aligned metadata. Keep Open saved report beside the list title.
 
 ### Primary action button
 
@@ -328,15 +329,18 @@ controls with their existing-setup scope. Stack inventory columns below 800px.
 ### Setup inspection and selected copying
 
 Keep the selected setup and optional repository scope above the current read.
-Pair source search, category selection and reading coverage with one flat source
-inventory. Keep each category's limits visible and disclose values, files and
-source facts in place. Refresh is explicit; browsing source evidence does not
-reread or mutate the setup. Mixed-client inventories keep independent labels and
-coverage under aligned category headings, without equality counts or copy actions.
+Use the comparison view's icon-labeled collapsible categories for the compact
+source inventory. Keep source search above the rows and open matching categories
+while searching. The Inspector stays beside the list on wide screens and above it
+on narrow screens. Give the list and inspector independent scrolling. Select a row
+to see values, source locations, file previews and category coverage. Keep reading
+limits, setup selection and refresh in the toolbar. Refresh is explicit. Browsing
+source evidence uses the current read.
 
-Use the same compact comparison frame for both modes, with aligned profile
-columns, search and filters, and icon-labeled collapsible categories. Keep the
-breadcrumb, reading limits, profile selection and refresh in the toolbar. The
+Use one compact frame for same-client and mixed-client comparisons, with aligned
+profile columns, search, filters and icon-labeled collapsible categories. Mixed-client
+inventories keep independent labels and coverage under aligned category headings.
+Keep the breadcrumb, reading limits, profile selection and refresh in the toolbar. The
 results and docked inspector scroll independently. On narrow screens, opening
 a row shows a bottom sheet and closing it returns focus to that row. Keep the
 exact state, content diff and eligible copy actions in the same-client inspector.

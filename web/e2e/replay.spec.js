@@ -71,7 +71,7 @@ test('replay presents independent trees, linked events and source gaps with keyb
       await route.fulfill({ json: { ...view, replay: { a: replay('left'), b: replay('right') } } });
     });
     await page.goto(server.launchUrl);
-    await page.getByRole('heading', { name: 'What do you want to compare?' }).waitFor();
+    await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
     await page.goto(`${server.origin}/reports/demo-run`);
     await expect(page.getByRole('heading', { name: 'Session replay' })).toBeVisible();
     const leftTree = page.getByRole('region', { name: /baseline session tree/i });

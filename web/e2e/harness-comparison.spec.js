@@ -78,7 +78,7 @@ for (const [theme, width] of [['light', 1280], ['dark', 1440]]) {
       const pair = compareAuditRuns(...ownedControlsPair());
       const opened = await app.provider.openReport({ fileName: 'owned-comparison.audit.json', text: JSON.stringify(pair) });
       await page.goto(app.url);
-      await page.getByRole('heading', { name: 'What do you want to compare?', exact: true }).waitFor();
+      await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
       await page.goto(`${app.origin}/reports/${encodeURIComponent(opened.ref)}`);
       await expect(page.getByText('Model task completed', { exact: true })).toHaveCount(2);
       await expect(page.getByText('Task completion not recorded', { exact: true })).toHaveCount(0);
@@ -133,7 +133,7 @@ for (const [theme, width, effortChanged] of [['light', 1280, false], ['dark', 14
       const value = compareAuditRuns(...controlsPair(effortChanged));
       const opened = await app.provider.openReport({ fileName: 'comparison.audit.json', text: JSON.stringify(value) });
       await page.goto(app.url);
-      await page.getByRole('heading', { name: 'What do you want to compare?', exact: true }).waitFor();
+      await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
       await page.goto(`${app.origin}/reports/${encodeURIComponent(opened.ref)}`);
       const comparison = page.getByRole('region', { name: 'Session and harness comparison', exact: true });
       await expect(comparison.getByText('Model-only request', { exact: true })).toBeVisible();
@@ -170,7 +170,7 @@ test('single inspection carries its frozen side into a newly chosen session comp
     const inspection = await app.provider.inspectSession({ key: row.key });
     await rm(app.rollouts[0]);
     await page.goto(app.url);
-    await page.getByRole('heading', { name: 'What do you want to compare?', exact: true }).waitFor();
+    await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
     await page.goto(`${app.origin}/sessions/${encodeURIComponent(inspection.ref)}`);
     await page.getByRole('link', { name: 'Compare with another session', exact: true }).click();
     await expect(page.getByText('Left session is retained', { exact: true })).toBeVisible();

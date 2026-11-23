@@ -181,14 +181,15 @@ values, file previews, source locations and reading limits. These are current
 local setup sources, not proof of effective precedence, native loading or session use.
 An absent CLI or sign-in does not prevent inspection of a safely readable profile.
 
-Optionally choose a repository to include its project instructions and settings.
-Search sources or choose a category to narrow the inventory. Expand a source for
-its values and file evidence without rereading the setup.
-Use **Refresh setup** to reread the selected scope. Invalid repository paths fail
-explicitly; they do not fall back to a comparison without project context.
+Use **Change setup…** to select a profile and optionally include project
+instructions and settings from a repository. Expand the source groups or use
+**Find a source** to search them. Select any source to see its evidence in the
+Inspector, which stays beside the list on wide screens and above it on narrow
+screens. **Reading limits** shows what the current read covered. **Refresh setup**
+rereads the selected scope. Invalid repository paths show an error.
 
 Choose **Compare with…** to select another profile from the same or a different
-vendor. Both views use the same side-by-side columns, search and collapsible
+vendor. Setup comparisons use side-by-side columns, search and collapsible
 categories. Use **Reading limits**, **Change profiles**, or **Refresh setups**
 from the comparison toolbar.
 Same-vendor comparisons retain **Same**, **Different**, **Could not compare**

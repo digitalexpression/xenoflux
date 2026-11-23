@@ -16,33 +16,59 @@ async function inspect(page, app, name, client = 'codex', repo) {
   await expect(page.getByRole('heading', { level: 1 })).toContainText(`Inspect setup · ${name}`);
   await expect(page.getByRole('button', { name: 'Refresh setup', exact: true })).toBeEnabled();
 }
-async function openSource(page, name, within = page) {
-  const trigger = within.getByRole('button', { name: `Inspect ${name} source`, exact: true }).first();
-  await trigger.click();
-  return within.getByRole('button', { name: `Hide ${name} source`, exact: true }).first().locator('../../..');
+const sourceRow = (within, name) => within.getByRole('button', { name: `Inspect ${name} source`, exact: true }).first();
+const inspectorPane = page => page.getByRole('complementary', { name: 'Inspector', exact: true });
+const sourceSearch = page => page.getByRole('searchbox', { name: 'Find a source', exact: true });
+
+async function openSource(page, name) {
+  await sourceSearch(page).fill(name);
+  const row = sourceRow(page, name);
+  await row.click();
+  await expect(row).toHaveAttribute('aria-current', 'true');
+  const inspector = inspectorPane(page);
+  await expect(inspector.getByRole('heading', { name, exact: true })).toBeVisible();
+  return inspector;
 }
 
 test('single Codex setup exposes current values and source files and refreshes only on request', async ({ app, page }) => {
   await page.clock.install();
   await inspect(page, app, 'baseline');
-  await expect(page.getByText('Current source evidence', { exact: true })).toBeVisible();
-  const effort = await openSource(page, 'model_reasoning_effort');
-  await expect(effort).toContainText('medium');
-  await expect(effort).toContainText('config.toml');
-  const instructions = await openSource(page, 'AGENTS.md');
-  await expect(instructions).toContainText('Run the test suite before proposing a commit.');
-  await expect(instructions).toContainText('Source files');
-  await expect(instructions).not.toContainText('No value was returned by this read.');
+  const inspector = inspectorPane(page);
+  await expect(inspector).toBeVisible();
+  const settings = page.getByRole('region', { name: 'Settings', exact: true });
+  const settingsGroup = settings.getByRole('button', { name: /^Settings/ });
+  await expect(settingsGroup).toHaveAttribute('aria-expanded', 'true');
+  await sourceRow(settings, 'model_reasoning_effort').click();
+  await expect(inspector).toContainText('medium');
+  await expect(inspector).toContainText('config.toml');
+  const instructions = page.getByRole('region', { name: 'Instructions, agents and rules', exact: true });
+  const instructionsGroup = instructions.getByRole('button', { name: /^Instructions, agents and rules/ });
+  const agents = sourceRow(instructions, 'AGENTS.md');
+  await expect(instructionsGroup).toHaveAttribute('aria-expanded', 'false');
+  await instructionsGroup.press('Enter');
+  await agents.click();
+  await expect(inspector).toContainText('Source files');
+  await expect(inspector).not.toContainText('No value was returned by this read.');
+  await inspector.getByRole('button', { name: 'Source preview', exact: true }).click();
+  await expect(inspector).toContainText('Run the test suite before proposing a commit.');
+  await instructionsGroup.press('Space');
+  await expect(agents).toBeHidden();
+  await expect(inspector).toContainText('Run the test suite before proposing a commit.');
   await writeFile(app.instructions.baseline, 'Changed inspection instructions.\n');
   await page.clock.fastForward(5000);
-  await expect(instructions).not.toContainText('Changed inspection instructions.');
+  await expect(inspector).not.toContainText('Changed inspection instructions.');
   await page.getByRole('button', { name: 'Refresh setup', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Refresh setup', exact: true })).toBeEnabled();
-  await expect(instructions).toContainText('Changed inspection instructions.');
+  await expect(inspector).toContainText('Changed inspection instructions.');
+  await instructionsGroup.press('Enter');
+  await expect(agents).toHaveAttribute('aria-current', 'true');
   await expect(page.getByRole('button', { name: /^Show \d+ missing sources$/ }).first()).toBeVisible();
-  await page.getByRole('searchbox', { name: 'Find a source', exact: true }).fill('AGENTS.override.md');
-  await expect(page.getByRole('button', { name: 'Inspect AGENTS.override.md source', exact: true }).first()).toBeVisible();
+  await sourceSearch(page).fill('AGENTS.override.md');
+  await expect(sourceRow(page, 'AGENTS.override.md')).toBeVisible();
   await expect(page.getByRole('button', { name: /^Show \d+ missing sources$/ })).toHaveCount(0);
+  await sourceSearch(page).fill('no-such-source-observation');
+  await expect(inspector).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Setup sources', exact: true }).getByRole('listitem')).toHaveCount(0);
   await expect(page.getByRole('link', { name: /Copy from/ })).toHaveCount(0);
   await expect(readFile(app.nativeProfileLog, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
 });
@@ -54,8 +80,11 @@ for (const [client, name, instructionName] of [['claude-code', 'Claude source', 
     const settings = await openSource(page, 'settings.json');
     await expect(settings).toContainText(`${client}-fixture`);
     await expect(settings).toContainText(app.setupSources.nativeRoots[client]);
-    await expect(await openSource(page, instructionName)).toContainText(`${client} profile inspection instruction.`);
+    const instructions = await openSource(page, instructionName);
+    await instructions.getByRole('button', { name: 'Source preview', exact: true }).click();
+    await expect(instructions).toContainText(`${client} profile inspection instruction.`);
     const skill = await openSource(page, 'source-helper');
+    await skill.getByRole('button', { name: 'Source preview', exact: true }).click();
     await expect(skill).toContainText('Keep the inspection source text visible.');
     await expect(skill).toContainText('scripts/check.sh');
     const integration = await openSource(page, 'source-tools');
@@ -63,7 +92,10 @@ for (const [client, name, instructionName] of [['claude-code', 'Claude source', 
     await expect(integration).toContainText('settings.json');
     await expect(integration).toContainText('false');
     await expect(integration).toContainText('Source role');
-    await expect(page.getByText(/native loading or use|native loading and use|native loading, loading and use/).first()).toBeVisible();
+    await page.getByText('Reading limits', { exact: true }).click();
+    const limits = page.getByRole('region', { name: 'Reading limits', exact: true });
+    await expect(limits.getByText('Current source evidence', { exact: true })).toBeVisible();
+    await expect(limits.getByText(/native loading or use|native loading and use|native loading, loading and use/).first()).toBeVisible();
     await expect(readFile(app.nativeProfileLog, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   });
 }
@@ -148,7 +180,9 @@ test('mixed setups align exact skill names and keep per-profile source evidence 
 
 test('qualified Default choices and colon profile names stay distinct without parsing names', async ({ app, page }) => {
   await inspect(page, app, 'codex:with:colon');
-  await expect(await openSource(page, 'AGENTS.md')).toContainText('Colon profile inspection instruction.');
+  const inspector = await openSource(page, 'AGENTS.md');
+  await inspector.getByRole('button', { name: 'Source preview', exact: true }).click();
+  await expect(inspector).toContainText('Colon profile inspection instruction.');
   await page.getByRole('link', { name: 'Compare with…', exact: true }).click();
   const left = page.getByRole('combobox', { name: /First · left side/ });
   await expect(left).toHaveValue(JSON.stringify(['codex', 'codex:with:colon']));
@@ -174,10 +208,32 @@ test('removed setup choices retain the explicit selection and request a replacem
   await expect(page.getByRole('button', { name: 'Compare setups', exact: true })).toBeDisabled();
 });
 
+test('Change setup switches vendors and applies the selected repository scope', async ({ app, page }) => {
+  await inspect(page, app, 'baseline');
+  const repo = app.setupSources.repository;
+  await page.getByRole('button', { name: 'Change setup…', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Change setup', exact: true });
+  await dialog.getByRole('combobox', { name: 'Profile and client' }).selectOption({ label: 'Copilot source · GitHub Copilot' });
+  await dialog.getByRole('textbox', { name: 'Repository scope (optional)' }).fill(repo);
+  await dialog.getByRole('button', { name: 'Inspect setup', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('Copilot source');
+  await expect(dialog).toBeHidden();
+  expect(new URL(page.url()).searchParams.get('repo')).toBe(repo);
+  await sourceSearch(page).fill('copilot-instructions.md');
+  await expect(inspectorPane(page).getByRole('heading', { name: 'copilot-instructions.md' })).toBeVisible();
+});
+
 test('scope validation errors retain the repository and unreadable sources stay explicit', async ({ app, page }) => {
   await inspect(page, app, 'baseline', 'codex', '/missing-inspection-repository');
   await expect(page.getByRole('alert')).toContainText('Couldn’t read this project');
-  await expect(page.getByRole('textbox', { name: 'Repository scope (optional)' })).toHaveValue('/missing-inspection-repository');
+  await page.getByRole('button', { name: 'Change setup…', exact: true }).click();
+  const scope = page.getByRole('dialog', { name: 'Change setup', exact: true });
+  const repository = scope.getByRole('textbox', { name: 'Repository scope (optional)' });
+  await expect(repository).toHaveValue('/missing-inspection-repository');
+  await repository.fill(app.setupSources.repository);
+  await scope.getByRole('button', { name: 'Inspect setup', exact: true }).click();
+  await expect(inspectorPane(page)).toBeVisible();
+  expect(new URL(page.url()).searchParams.get('repo')).toBe(app.setupSources.repository);
   const claudeRoot = app.setupSources.nativeRoots['claude-code'];
   await rm(join(claudeRoot, 'settings.json'));
   await mkdir(join(claudeRoot, 'settings.json'));
@@ -185,10 +241,17 @@ test('scope validation errors retain the repository and unreadable sources stay 
   const unreadable = await openSource(page, 'settings.json');
   await expect(unreadable).toContainText('settings.json');
   await expect(unreadable).toContainText('unavailable');
-  await page.getByRole('button', { name: 'Show reading coverage', exact: true }).click();
-  await expect(page.getByRole('region', { name: 'Setup source inventory' })).toContainText('Partly read');
-  await page.getByRole('combobox', { name: 'Category', exact: true }).selectOption('memory');
-  await expect(page.getByText('No source observations in this category. Read the coverage above for limits.', { exact: true })).toBeVisible();
+  const limitsTrigger = page.getByText('Reading limits', { exact: true });
+  await limitsTrigger.click();
+  const limits = page.getByRole('region', { name: 'Reading limits', exact: true });
+  await limits.getByRole('button', { name: 'Show reading coverage', exact: true }).click();
+  await expect(limits).toContainText('Partly read');
+  await limitsTrigger.press('Escape');
+  await sourceSearch(page).clear();
+  const memory = page.getByRole('region', { name: 'Memory settings', exact: true });
+  await memory.getByRole('button', { name: /^Memory settings/ }).click();
+  await expect(memory).toContainText('No sources observed');
+  await expect(memory).toContainText('Not known');
 });
 
 for (const [width, theme] of [[320, 'light'], [390, 'dark'], [1200, 'light']]) {
@@ -197,11 +260,20 @@ for (const [width, theme] of [[320, 'light'], [390, 'dark'], [1200, 'light']]) {
     await page.addInitScript(theme => localStorage.setItem('xenoflux-theme', theme), theme);
     await inspect(page, app, 'Claude source', 'claude-code');
     await expect(page.getByRole('heading', { level: 1 })).toBeFocused();
-    const source = page.getByRole('button', { name: 'Inspect settings.json source', exact: true });
+    const inspector = inspectorPane(page);
+    await expect(inspector).toBeInViewport();
+    const source = sourceRow(page, 'settings.json');
     await source.focus();
     await page.keyboard.press('Enter');
-    await expect(page.getByRole('button', { name: 'Hide settings.json source', exact: true })).toBeFocused();
-    await expect(page.getByText('claude-code-fixture', { exact: false }).first()).toBeVisible();
+    await expect(source).toBeFocused();
+    await expect(inspector).toBeInViewport();
+    await expect(inspector.getByRole('heading', { name: 'settings.json', exact: true })).toBeInViewport();
+    await expect(inspector).toContainText('claude-code-fixture');
+    await sourceSearch(page).fill('source-helper');
+    await inspector.getByRole('button', { name: 'Source preview' }).click();
+    const preview = inspector.getByRole('region', { name: /Source file .*SKILL\.md/ });
+    await expect(preview).toBeInViewport();
+    await expect(preview).toContainText('Keep the inspection source text visible.');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   });

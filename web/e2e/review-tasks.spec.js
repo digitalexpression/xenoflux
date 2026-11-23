@@ -23,7 +23,7 @@ const test = base.extend({
 
 async function openReview(page, app) {
   await page.goto(app.url);
-  await expect(page.getByRole('heading', { name: 'What do you want to compare?', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true })).toBeVisible();
   await page.goto(`${app.origin}/reports/${app.ref}`);
   await page.getByRole('link', { name: 'Review', exact: true }).click();
   await expect(page).toHaveURL(/\/reviews\?new=1/);
@@ -95,7 +95,7 @@ test('runs one native review, answers its approval, and reopens frozen response 
   await rm(`${app.homes.baseline.home}/sessions`, { recursive: true, force: true });
   await rm(`${app.homes.strict.home}/sessions`, { recursive: true, force: true });
   await page.goto(restarted.url);
-  await expect(page.getByRole('heading', { name: 'What do you want to compare?', level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true })).toBeVisible();
   await page.goto(`${restarted.origin}/reports/r.${taskId}/reviews?task=${taskId}`);
   await expect(page.getByText(/this is a task-scoped review\./i)).toBeVisible();
   await page.getByRole('link', { name: 'Open its comparison and evidence' }).click();

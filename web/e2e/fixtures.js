@@ -10,7 +10,7 @@ export const test = base.extend({
   },
   page: async ({ page, app }, use, testInfo) => {
     await page.goto(app.url);
-    await page.getByRole('heading', { name: 'What do you want to compare?', level: 1 }).waitFor();
+    await page.getByRole('heading', { name: 'Comparisons', level: 1, exact: true }).waitFor();
     await use(page);
     if (testInfo.status !== testInfo.expectedStatus && app.serverLogs.length) {
       await testInfo.attach('ui-server.log', {

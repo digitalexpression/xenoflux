@@ -1,7 +1,6 @@
-import { useId, useState } from 'react';
-import type { ProfileClient, SetupChoice, SetupInventory, SetupInventoryGroup, SetupSourceItem } from '@/api/types';
+import type { ProfileClient, SetupChoice, SetupInventory, SetupSourceItem } from '@/api/types';
 import { Disclosure } from '@/components/controls';
-import { InfoNotice } from '@/components/notices';
+import { cn } from '@/lib/cn';
 
 export const setupClientLabels: Record<ProfileClient, string> = { codex: 'Codex', 'claude-code': 'Claude Code', copilot: 'Copilot CLI' };
 export type SetupSelection = Pick<SetupChoice, 'name' | 'client'>;
@@ -37,68 +36,23 @@ export function InventoryCoverage({ inventory }: { inventory: SetupInventory }) 
   </div>;
 }
 
-function matches(item: SetupSourceItem, query: string) {
-  return `${item.name} ${item.category} ${item.scope} ${item.origin} ${item.status} ${item.sources.map(source => source.where).join(' ')}`.toLowerCase().includes(query);
-}
-
-function SourceEvidence({ item }: { item: SetupSourceItem }) {
-  return <li className="setup-source py-4 border-t flex flex-col gap-2 min-w-0 wrap-anywhere" style={{ borderColor: 'var(--color-divider)' }}>
-    <div className="flex flex-wrap gap-x-4 gap-y-1 justify-between"><h3 className="text-body font-semibold">{item.name}</h3><span className="text-ui">{item.status}</span></div>
-    <p className="hint">{[item.category, item.scope, item.origin].filter(Boolean).join(' · ')}</p>
-    {item.sources.map((source, index) => <p className="hint font-mono wrap-anywhere" key={index}>{source.where}</p>)}
-    <Disclosure label={`Inspect ${item.name} source`} expandedLabel={`Hide ${item.name} source`}>
-      <SourceDetails item={item} />
-    </Disclosure>
-  </li>;
-}
-
-export function SourceDetails({ item }: { item: SetupSourceItem }) {
+export function SourceDetails({ item, view = 'all' }: { item: SetupSourceItem; view?: 'all' | 'details' | 'files' }) {
+  const skillEntry = view === 'files' ? item.files.find(file => file.path === 'SKILL.md') : undefined;
+  const files = skillEntry ? [skillEntry, ...item.files.filter(file => file !== skillEntry)] : item.files;
   return <div className="setup-source flex flex-col gap-3 min-w-0">
-    <p className="text-ui font-medium">{item.value === null && item.files.length ? 'Source files' : 'Value'} · {item.valueStatus}</p>
-    {item.value !== null ? <pre className="text-ui font-mono whitespace-pre-wrap wrap-anywhere">{item.value}</pre> : !item.files.length ? <p className="hint">No value was returned by this read.</p> : null}
-    {item.note ? <p className="text-ui">{item.note}</p> : null}
-    {item.sources.length ? <dl className="flex flex-col gap-2 text-ui">{item.sources.map((source, index) => <div key={index}><dt className="font-medium">{source.scope} · {source.status}</dt><dd className="font-mono muted wrap-anywhere">{source.where}</dd></div>)}</dl> : null}
-    {item.facts.length ? <dl className="flex flex-col gap-2 text-ui">{item.facts.map((fact, index) => <div key={index}><dt className="font-medium">{fact.label}</dt><dd className="muted whitespace-pre-wrap wrap-anywhere">{fact.value}</dd></div>)}</dl> : null}
-    {item.files.map((file, index) => <section className="border-t pt-3 flex flex-col gap-2 min-w-0" style={{ borderColor: 'var(--color-divider)' }} key={`${file.path}-${index}`} aria-label={`Source file ${file.path}`}>
-      <p className="font-mono text-ui wrap-anywhere">{file.path}</p><p className="hint">{file.status}</p>
+    {view !== 'files' ? <>
+      <p className="text-ui font-medium">{item.value === null && item.files.length ? 'Source files' : 'Value'} · {item.valueStatus}</p>
+      {item.value !== null ? <pre className="text-ui font-mono whitespace-pre-wrap wrap-anywhere">{item.value}</pre> : !item.files.length ? <p className="hint">No value was returned by this read.</p> : null}
+      {item.note ? <p className="text-ui">{item.note}</p> : null}
+      {item.sources.length ? <dl className="flex flex-col gap-2 text-ui">{item.sources.map((source, index) => <div key={index}><dt className="font-medium">{source.scope} · {source.status}</dt><dd className="font-mono muted wrap-anywhere">{source.where}</dd></div>)}</dl> : null}
+      {item.facts.length ? <dl className="flex flex-col gap-2 text-ui">{item.facts.map((fact, index) => <div key={index}><dt className="font-medium">{fact.label}</dt><dd className="muted whitespace-pre-wrap wrap-anywhere">{fact.value}</dd></div>)}</dl> : null}
+    </> : null}
+    {view !== 'details' ? files.map((file, index) => <section className={cn('flex flex-col gap-2 min-w-0', (view === 'all' || index > 0) && 'border-t pt-3')} style={{ borderColor: 'var(--color-divider)' }} key={`${file.path}-${index}`} aria-label={`Source file ${file.path}`}>
+      <div className={cn('flex gap-2', view === 'files' ? 'flex-wrap items-baseline' : 'flex-col')}>
+        <p className="font-mono text-ui wrap-anywhere min-w-0">{file.path}</p><p className="hint">{file.status}</p>
+      </div>
       {file.note ? <p className="text-ui">{file.note}</p> : null}
       {file.preview !== null ? <pre className="text-ui font-mono whitespace-pre-wrap wrap-anywhere">{file.preview}</pre> : null}
-    </section>)}
-  </div>;
-}
-
-function SourceGroup({ group, query }: { group: SetupInventoryGroup | undefined; query: string }) {
-  const items = group?.items.filter(item => matches(item, query)) ?? [];
-  const missing = query ? [] : items.filter(item => item.status === 'missing');
-  const shown = query ? items : items.filter(item => item.status !== 'missing');
-  return <div className="min-w-0 flex flex-col gap-2">
-    <p className="hint wrap-anywhere">{group?.coverage ?? 'No coverage observation was returned for this category. Coverage is unknown.'}</p>
-    {items.length ? <>
-      <p className="hint">{items.length} source {items.length === 1 ? 'observation' : 'observations'}{missing.length ? ` · ${missing.length} missing` : ''}</p>
-      {shown.length ? <ul className="list-none p-0">{shown.map(item => <SourceEvidence key={item.id} item={item} />)}</ul> : null}
-      {missing.length ? <Disclosure label={`Show ${missing.length} missing sources`} expandedLabel={`Hide ${missing.length} missing sources`}>
-        <ul className="list-none p-0">{missing.map(item => <SourceEvidence key={item.id} item={item} />)}</ul>
-      </Disclosure> : null}
-    </> : <p className="text-ui">{query && group?.items.length ? 'No sources match this search.' : group ? 'No source observations in this category. Read the coverage above for limits.' : 'No category observations returned.'}</p>}
-  </div>;
-}
-
-export function SetupInventoryBrowser({ inventory }: { inventory: SetupInventory }) {
-  const [query, setQuery] = useState('');
-  const [category, setCategory] = useState('');
-  const searchId = useId(), categoryId = useId();
-  return <section className="setup-inventory" aria-label="Setup source inventory">
-    <div className="setup-inventory-tools"><InventoryFilters searchId={searchId} categoryId={categoryId} query={query} setQuery={setQuery} category={category} setCategory={setCategory} groups={inventory.groups} /><InventoryCoverage inventory={inventory} /></div>
-    <div className="setup-source-groups">{inventory.groups.filter(group => !category || group.id === category).map(group => <section className="setup-source-group min-w-0" key={group.id} aria-label={group.label}><h2 className="text-heading mb-2">{group.label}</h2><SourceGroup group={group} query={query.trim().toLowerCase()} /></section>)}
-    {!inventory.groups.length ? <InfoNotice title="No source inventory returned"><p>Read the coverage and warnings above. An empty inventory does not establish an empty setup.</p></InfoNotice> : null}</div>
-  </section>;
-}
-
-function InventoryFilters({ searchId, categoryId, query, setQuery, category, setCategory, groups }: {
-  searchId: string; categoryId: string; query: string; setQuery: (value: string) => void; category: string; setCategory: (value: string) => void; groups: Pick<SetupInventoryGroup, 'id' | 'label'>[];
-}) {
-  return <div className="flex flex-wrap items-end gap-4">
-    <div className="flex-1 min-w-0 basis-[280px]"><label htmlFor={searchId} className="field-label">Find a source</label><input className="input" id={searchId} type="search" value={query} onChange={event => setQuery(event.target.value)} /></div>
-    <div className="flex-1 min-w-0 basis-[220px]"><label htmlFor={categoryId} className="field-label">Category</label><select className="input" id={categoryId} value={category} onChange={event => setCategory(event.target.value)}><option value="">All categories</option>{groups.map(group => <option key={group.id} value={group.id}>{group.label}</option>)}</select></div>
+    </section>) : null}
   </div>;
 }
