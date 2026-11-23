@@ -451,7 +451,8 @@ test('two comparisons and two reviews overlap on one profile with separate setti
   assert.deepEqual(new Set((await app.provider.info()).activeJobs.map(job => job.id)), new Set(jobs));
   assert.equal((await readProfileOwners(app.homes.baseline.root)).length, 6);
   assert.equal(new Set([one, two, first, second].map(row => row.pendingRequests[0].requestId)).size, 4);
-  assert.equal(new Set([...captures.values()].map(options => options.workspace)).size, 4);
+  assert.deepEqual(new Set(captures.keys()), new Set(['c1-a', 'c1-b', 'c2-a', 'c2-b', 'r1', 'r2']));
+  assert.equal(new Set([...captures.values()].map(options => options.workspace)).size, 6);
   assert.equal(new Set([...captures.values()].map(options => options.profile.home)).size, 1);
   await assert.rejects(app.provider.renameProfile({ name: 'baseline', newName: 'busy' }), /locked by a run/);
   await assert.rejects(startReview('conflict', workspace, 'low'), { code: 'review-workspace-busy' });
@@ -483,7 +484,6 @@ test('two comparisons and two reviews overlap on one profile with separate setti
   assert.match(done[1].frozenPrompt, /^Review r1/);
   assert.match(done[2].frozenPrompt, /^Review r2/);
   assert.equal(done[1].sourceEvidenceFingerprint, done[2].sourceEvidenceFingerprint);
-  assert.equal(captures.has('c2-b'), false);
   assert.deepEqual(approvals, new Map([['c1-a', 'accept'], ['r1', 'decline'], ['r2', 'accept']]));
   await app.restartServer();
   assert.deepEqual(await app.provider.startRun({ previewToken: c1 }), { id: c1 });

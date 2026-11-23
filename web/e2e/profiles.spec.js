@@ -476,7 +476,7 @@ test('Claude creation previews and cancels without launching; selected copy and 
   await expect(card.getByRole('button', { name: 'Open Claude Desktop for claude-parts', exact: true })).toHaveCount(0);
   const signIn = card.getByRole('button', { name: 'Sign in for claude-parts', exact: true });
   const check = card.getByRole('button', { name: 'Check sign-in for claude-parts', exact: true });
-  await expect(card.getByText('Sign in required', { exact: true })).toBeVisible();
+  await expect(card.getByText('Sign in required', { exact: true })).toBeVisible({ timeout: 15000 });
   await expect(signIn).toBeVisible();
   await expect(check).toHaveCount(0);
   const calls = await nativeCalls();

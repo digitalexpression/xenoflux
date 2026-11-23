@@ -8,6 +8,7 @@ if (process.argv.includes('--version')) {
 
 const sessionId = '00000000-0000-4000-8000-000000000001';
 const threadId = sessionId, turnId = 'fixture-turn', cwd = process.cwd();
+const workspaceNetworkAccess = process.argv.includes('sandbox_workspace_write.network_access=true');
 const send = value => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...value }) + '\n');
 const notify = (method, params) => send({ method, params });
 const item = { id: 'fixture-answer', type: 'agentMessage', phase: 'final_answer', text: 'Codex fixture completed.' };
@@ -25,7 +26,8 @@ createInterface({ input: process.stdin }).on('line', line => {
       isDefault: true, supportedReasoningEfforts: [{ reasoningEffort: 'low' }] }], nextCursor: null });
     case 'skills/list': return reply({ data: [] });
     case 'thread/start': {
-      const sandbox = params.sandbox ? { type: params.sandbox === 'read-only' ? 'readOnly' : 'workspaceWrite', networkAccess: false } : null;
+      const sandbox = params.sandbox ? { type: params.sandbox === 'read-only' ? 'readOnly' : 'workspaceWrite',
+        networkAccess: params.sandbox === 'workspace-write' && workspaceNetworkAccess } : null;
       return reply({ cwd, thread: { id: threadId, sessionId, cwd }, model: 'fixture', reasoningEffort: 'low', sandbox,
         approvalPolicy: params.approvalPolicy, approvalsReviewer: params.approvalsReviewer });
     }
