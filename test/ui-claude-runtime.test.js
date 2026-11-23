@@ -136,7 +136,9 @@ test('successful ordinary Claude comparison exposes its exact closing response a
     const result = deriveAgentSummaries(replay).get(session.id).result;
     assert.equal(result?.text, 'Claude fixture final response.');
     assert.equal(session.events.find(event => event.id === result.event.id).body, 'Claude fixture final response.');
-    assert.equal(session.events[0].body, 'Claude fixture progress.');
+    assert.equal(session.events[0].role, 'user');
+    assert.equal(session.events[0].body, 'closing-response');
+    assert.equal(session.events.find(event => event.role === 'assistant')?.body, 'Claude fixture progress.');
     assert.equal(session.events.at(-1).kind, 'session');
     assert.equal(session.events.at(-1).status, 'completed');
     assert.ok(session.events.every(event => event.turnId === null));
