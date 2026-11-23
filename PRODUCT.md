@@ -74,8 +74,9 @@ or session-ID reconstruction.
   distinct. Missing evidence must limit the conclusions people draw.
 - Recorded work remains useful. Existing sessions and frozen reports matter
   alongside newly executed tasks.
-- People control consequential actions. Reading evidence and preparing a choice
-  remain separate from starting native clients, model tasks, or profile changes.
+- People control consequential actions. Model tasks and profile changes require an
+  explicit action. The comparison editor can load model choices on entry and gives
+  people control over automatic discovery.
 
 ## Evidence limits
 

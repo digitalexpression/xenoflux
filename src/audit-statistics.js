@@ -13,6 +13,7 @@ import { buildAuditConsistency } from './audit-consistency.js';
 import { normalizeAuditCheckEvidence } from './audit-check-evidence.js';
 import { retainedAuditSelectionOptions } from './audit-selection.js';
 import { validateAuditNativeConfig } from './audit-spec.js';
+import { readAuditFileGlobs, readAuditFilePaths } from './audit-file-scope.js';
 
 function nativeConfigOf(value) {
   try { return validateAuditNativeConfig(value); } catch { return undefined; }
@@ -341,9 +342,9 @@ function compactComparisonConditions(value) {
   const environment = obj(source.environment);
   const baseline = obj(source.baseline);
   const taskId = typeof source.taskId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/.test(source.taskId) ? source.taskId : null;
-  const editableFiles = bounded(source.editableFiles, 64).filter(path => typeof path === 'string'
-    && path.length <= 240 && !path.startsWith('/') && !path.includes('\\')
-    && path.split('/').every(part => part && part !== '.' && part !== '..'));
+  const editableFiles = source.editableFileGlobs !== undefined ? readAuditFilePaths(source.editableFiles)
+    : bounded(source.editableFiles, 64).filter(path => typeof path === 'string' && path.length <= 240
+      && !path.startsWith('/') && !path.includes('\\') && path.split('/').every(part => part && part !== '.' && part !== '..'));
   const checkRecipes = bounded(source.checkRecipes, 20).map(row => ({
     name: typeof row?.name === 'string' && /^[\p{L}\p{N}][\p{L}\p{N} ._:+-]{0,199}$/u.test(row.name) ? row.name : null,
     fingerprint: fingerprint(row?.fingerprint),
@@ -353,7 +354,8 @@ function compactComparisonConditions(value) {
     ...(source.sideId ? { sideId: text(source.sideId, 40) } : {}),
     ...(source.requestedExecution ? { requestedExecution: pick(source.requestedExecution, ['model', 'reasoningEffort']) } : {}),
     taskFingerprint: fingerprint(source.taskFingerprint), ...(taskId ? { taskId } : {}),
-    ...(Array.isArray(source.editableFiles) ? { editableFiles } : {}), checkRecipes,
+    ...(source.editableFileGlobs !== undefined || Array.isArray(source.editableFiles) ? { editableFiles } : {}),
+    ...(source.editableFileGlobs !== undefined ? { editableFileGlobs: readAuditFileGlobs(source.editableFileGlobs) } : {}), checkRecipes,
     qualityFingerprint: fingerprint(source.qualityFingerprint),
     setupFingerprint: fingerprint(source.setupFingerprint), selectedSkills: source.selectedSkills === null ? null : safeLabels(source.selectedSkills),
     variables: source.variables === null ? null : safeLabels(source.variables, 20), profileOrder: safeLabels(source.profileOrder, 8),

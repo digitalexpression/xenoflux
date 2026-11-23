@@ -195,6 +195,7 @@ function presentFinding(finding, names) {
 const CONDITION = {
   task: 'Opening task text', commit: 'Commit', tree: 'Project files at the start', nativeVersion: 'Codex version',
   models: 'Model', reasoningEffort: 'Reasoning effort', setup: 'Recorded profile setup', editableFiles: 'Files it may change',
+  editableFileGlobs: 'File wildcard patterns',
 };
 const HASHED = new Set(['task', 'tree', 'setup']);
 const valueText = (key, value) => value == null || (Array.isArray(value) && !value.length) ? 'Not recorded'

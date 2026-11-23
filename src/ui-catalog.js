@@ -9,7 +9,7 @@ import { discoverClaudeModels } from './claude-runtime.js';
 import { CODEX_PERMISSION_MODES } from './audit-spec.js';
 import { resolveProfileExecutionProfile } from './audit-profile.js';
 import { withProfileOperation } from './desktop-instances.js';
-import { acquire, privateDirectory, readJSON, record, release } from './metadata.js';
+import { acquire, exists, privateDirectory, readJSON, record, release } from './metadata.js';
 import { getAuditProcessIdentity, observeAuditProcess } from './audit-process.js';
 import { UiError } from './ui-server.js';
 
@@ -17,8 +17,17 @@ const UUID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
 const unavailable = (reason, client = 'codex') => ({ status: 'unavailable', source: ({ 'claude-code': 'claude-agent-sdk/initialize', copilot: 'copilot-models.list' }[client] ?? 'codex-model/list'), reason, models: [],
   capabilities: { models: 'unknown', effort: 'unknown' } });
 
+function waitForProbe(probe, signal) {
+  if (signal.aborted) return;
+  return new Promise(resolve => {
+    const done = () => { signal.removeEventListener('abort', done); resolve(); };
+    signal.addEventListener('abort', done, { once: true });
+    probe.then(done, done);
+  });
+}
+
 export function createUiCatalog({ store, defaultUserHome, context = {} }) {
-  const active = new Map(), attempts = new Map();
+  const active = new Map(), attempts = new Map(), runningByRoot = new Map();
   let closing = false;
   const resolveProfile = context.resolveProfile ?? resolveProfileExecutionProfile;
   const select = (name, client) => client ? { name, client } : name;
@@ -53,6 +62,8 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
     } catch (error) {
       if (error.code === 'copilot-account-unverified')
         throw new UiError(422, 'Open Profiles to verify sign-in for the selected Copilot profile before discovering models.', error.code);
+      if (error.code === 'profile-repository-unbound')
+        throw new UiError(422, 'This repository isn’t bound to this profile. Choose a repository bound to both profiles.', error.code);
       throw error;
     }
     return { profile, workspace: profile.cwd, requestedWorkspace: repository ?? null, requestedClient: input.client ?? null };
@@ -92,10 +103,8 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
     if (closing) throw new UiError(409, 'Xenoflux is stopping.', 'stopping');
     if (work.controller.signal.aborted) throw new UiError(409, 'Model discovery was cancelled.', 'catalog-cancelled');
   }
-  async function launch(input, work) {
-    assertOpen(work);
-    const chosen = await selected(input), { profile } = chosen;
-    assertOpen(work);
+  async function launchProbe(chosen, input, work) {
+    const { profile } = chosen;
     const { controller } = work, id = input.requestId;
     const root = join(store.directory, 'catalog-probes'), directory = join(root, id);
     await privateDirectory(store.directory, true); await privateDirectory(root, true);
@@ -111,6 +120,7 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
       environmentBinding: profile.environmentBinding, status: 'prepared', process: null, shutdown: null };
     const save = () => record(join(directory, 'probe.json'), state);
     Object.assign(work, { directory, state, save, profile });
+    const reservation = join(profile.reservationRoot, '.run-lock');
     let held = false;
     try {
       await save();
@@ -122,7 +132,13 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
           || JSON.stringify(fresh.profile.accountQualification) !== JSON.stringify(profile.accountQualification))
           throw new UiError(409, 'The profile changed. Refresh the model list again.', 'catalog-context-changed');
         assertOpen(work);
-        await acquire(join(profile.reservationRoot, '.run-lock'), owner, true); held = true;
+        try { await acquire(reservation, owner, true); }
+        catch (error) {
+          if (await exists(reservation)) throw new UiError(409,
+            'Model discovery is blocked by a profile reservation. Close the active client or recover the stopped operation, then refresh models.', 'catalog-profile-busy');
+          throw error;
+        }
+        held = true;
       });
       assertOpen(work);
       state.status = 'starting'; await save();
@@ -142,9 +158,31 @@ export function createUiCatalog({ store, defaultUserHome, context = {} }) {
       throw error;
     } finally {
       if (held && (state.shutdown?.groupTerminated === true || !work.discoveryAttempted)) {
-        await guard(profile, () => release(join(profile.reservationRoot, '.run-lock'), owner));
+        await guard(profile, () => release(reservation, owner));
         state.released = true; await save();
       }
+    }
+  }
+  async function launch(input, work) {
+    assertOpen(work);
+    let chosen = await selected(input), waited = false;
+    for (;;) {
+      assertOpen(work);
+      const { reservationRoot, client } = chosen.profile;
+      const prior = runningByRoot.get(reservationRoot);
+      if (prior) {
+        // Cleanup takes the profile gate too. Wait for it before acquiring that gate.
+        await waitForProbe(prior, work.controller.signal);
+        assertOpen(work);
+        chosen = await selected(input);
+        waited = true;
+        continue;
+      }
+      const saved = waited ? cache.get(chosen) : null;
+      if (saved?.status === 'ready') return withPermissions(saved, client ?? 'codex');
+      const probe = launchProbe(chosen, input, work).finally(() => runningByRoot.delete(reservationRoot));
+      runningByRoot.set(reservationRoot, probe);
+      return probe;
     }
   }
   function refresh(input) {

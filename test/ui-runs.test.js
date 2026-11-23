@@ -87,6 +87,18 @@ test('run preview is read-only and binds exactly two profiles, commands and limi
   await assert.rejects(app.provider.startRun({ ...request(app) }), { code: 'invalid-run' });
 });
 
+test('run preview accepts multiline wildcard rules and preserves legacy comma splitting', async t => {
+  const app = await fixture(t);
+  const input = { ...request(app), fileRulesFormat: 'lines', files: 'README.md\r\nsrc/(routes)/[id]/**/*.ts\n\nassets/report,plan.txt' };
+  const preview = await app.provider.runPreview(input);
+  assert.equal(preview.ready, true);
+  assert.equal(preview.files, 'README.md\nsrc/(routes)/[id]/**/*.ts\nassets/report,plan.txt');
+  const legacy = await app.provider.runPreview({ ...request(app), files: 'README.md, src/a**.js' });
+  assert.equal(legacy.files, 'README.md\nsrc/a**.js');
+  await assert.rejects(app.provider.runPreview({ ...input, files: 'src/a**.js' }), { code: 'invalid-run' });
+  assert.deepEqual(app.calls.captures, []);
+});
+
 test('preview never discovers models and explicit choices require separate refresh before preview and Start', async t => {
   const app = await fixture(t);
   assert.equal((await app.provider.runPreview(request(app))).ready, true);

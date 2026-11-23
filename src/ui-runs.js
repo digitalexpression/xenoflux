@@ -27,8 +27,21 @@ const IDENTITY_FIELDS = ['profileId', 'home', 'nativeRoot', 'environmentId', 'ex
 const identity = profile => IDENTITY_FIELDS.map(key => profile[key] ?? null);
 const checkedId = id => { if (!UUID.test(id ?? '')) throw new UiError(400, 'Choose a saved task run.', 'invalid-run'); return id; };
 
+function requestFileRules(request) {
+  const lines = request.fileRulesFormat === 'lines';
+  if (lines && request.files !== undefined && typeof request.files !== 'string') throw new Error('Enter one file path or wildcard pattern per line.');
+  const rules = typeof request.files === 'string' ? request.files.split(lines ? '\n' : /[,\n]/).map(value => value.trim()).filter(Boolean) : [];
+  const editableFiles = [], editableFileGlobs = [];
+  for (const rule of rules) {
+    if (lines && /[*?]/.test(rule)) editableFileGlobs.push(rule);
+    else editableFiles.push(rule);
+  }
+  return { rules, taskContract: rules.length ? { id: 'ui-task', editableFiles, ...(lines ? { editableFileGlobs } : {}) } : undefined };
+}
+
 function requestSpec(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('Describe the task first.');
+  if (request.fileRulesFormat !== undefined && request.fileRulesFormat !== 'lines') throw new Error('Enter one file path or wildcard pattern per line.');
   const advanced = request.advanced ?? {};
   if (Object.hasOwn(advanced, 'sandbox')) throw new Error('Choose permission mode on each comparison side.');
   const execution = request.execution, clients = request.clients;
@@ -45,17 +58,18 @@ function requestSpec(request) {
       return { name: row.name, argv: ['/bin/sh', '-lc', row.command], timeoutMs: 60000 };
     });
   };
-  const files = typeof request.files === 'string' ? request.files.split(/[,\n]/).map(value => value.trim()).filter(Boolean) : [];
   const defaultExecution = advanced.reasoningEffort ? { reasoningEffort: advanced.reasoningEffort } : {};
   const runMs = advanced.timeMinutes === null ? null : (advanced.timeMinutes ?? 15) * 60000;
-  return validateAuditSpec({ schemaVersion: 1, repository: request.repository, revision: request.commit,
+  const { rules, taskContract } = requestFileRules(request);
+  const spec = validateAuditSpec({ schemaVersion: 1, repository: request.repository, revision: request.commit,
     task: request.task, profiles: ['a', 'b'].map(sideId => ({ name: request[sideId], sideId,
       ...(clients?.[sideId] ? { client: clients[sideId] } : {}),
       ...(advanced.program && (!clients?.[sideId] || clients[sideId] === 'codex') ? { executable: advanced.program } : {}), execution: execution && Object.hasOwn(execution, sideId) ? execution[sideId] : defaultExecution })),
     limits: { runMs, ...(runMs === null ? { experimentMs: null } : {}), outputBytes: (advanced.outputMiB ?? 8) * 1024 * 1024, maxRuns: 2 },
     checks: commandList(request.checks), setup: commandList(advanced.setup),
     ...(Object.hasOwn(advanced, 'approvalsReviewer') ? { approvalsReviewer: advanced.approvalsReviewer } : {}),
-    allowIncompleteCapture: true, ...(files.length ? { taskContract: { id: 'ui-task', editableFiles: files } } : {}) });
+    allowIncompleteCapture: true, taskContract });
+  return { spec, files: rules.join('\n') };
 }
 
 const defaultLabel = profile => ({ 'claude-code': 'Claude Code Default', copilot: 'Copilot CLI Default' }[profile.client] ?? 'Codex Default');
@@ -155,13 +169,19 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     if (await lstat(join(defaultUserHome, '.codex')).then(info => info.isDirectory(), () => false)) profiles.push({ name: 'Default', surface: 'cli', rootMode: 'explicit', executionLocation: 'local', ...(otherClients.length ? { label: 'Codex Default' } : {}), ready: false,
       readiness: 'Choose the Codex program in Advanced settings to preview Default. Its saved setup is not changed.' });
     profiles.push(...otherClients);
-    return { profiles, repositories, defaults, simulated: false };
+    const profileKey = ({ name, client = 'codex' }) => JSON.stringify([client, name]);
+    const bindings = new Map(data.profiles.map(profile => [profileKey(profile), profile.repositories.map(repo => repo.path)]));
+    return { profiles: profiles.map(profile => {
+      const boundRepositories = bindings.get(profileKey(profile));
+      return boundRepositories ? { ...profile, boundRepositories } : profile;
+    }), repositories, defaults, simulated: false };
   }
 
   async function runPreview(request) {
-    let spec;
-    try { spec = requestSpec(request); }
+    let prepared;
+    try { prepared = requestSpec(request); }
     catch (error) { throw new UiError(400, errorText(error), 'invalid-run'); }
+    const { spec, files } = prepared;
     const reviewed = await inspect(spec), { preview } = reviewed;
     const ready = preview.status === 'ready', token = ready ? randomUUID() : null;
     if (ready) boundedSet(previews, token, { ...reviewed, spec, at: Date.now() });
@@ -170,7 +190,7 @@ export function createUiRuns({ store, defaultUserHome, context = {}, admission }
     return { ready, previewToken: token, blocked: ready ? null : { title: 'This task cannot start yet',
       reason: preview.failures.map(failure => `${failure.profile ? `${failure.profile}: ` : ''}${failure.message}`).join(' ') },
       summary: `2 model runs, one after the other · ${minutes(spec.limits.experimentMs)}`, limit: minutes(spec.limits.experimentMs),
-      task: spec.task, files: spec.taskContract?.editableFiles.join(', ') ?? '',
+      task: spec.task, files,
       ...(spec.approvalsReviewer ? { approvalsReviewer: spec.approvalsReviewer } : {}),
       runs: preview.profiles.map((profile, index) => ({ side: index ? 'b' : 'a', profile: profileLabel(profile, preview.profiles), text: `${profileText(profile)} · Model: ${spec.profiles[index].execution.model ?? 'profile default'} · Effort: ${spec.profiles[index].execution.reasoningEffort ?? 'profile default'} · Permissions: ${spec.profiles[index].execution.permissionMode ?? ((profile.client ?? 'codex') === 'codex' ? spec.sandbox : 'profile default')} · ${[profile.client, profile.surface, profile.rootMode, profile.executionLocation].filter(Boolean).join(' / ')}` })),
       where: [preview.baseline?.repository ?? spec.repository, `Pinned commit: ${preview.baseline?.commit ?? 'not available'}`,

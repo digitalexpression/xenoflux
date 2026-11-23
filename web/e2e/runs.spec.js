@@ -67,7 +67,7 @@ for (const side of ['first', 'second']) test(`preserves the ${side} profile chos
     observer.observe(document, { subtree: true, childList: true });
   }, { side, chosen });
   await page.getByRole('link', { name: 'Run a new task' }).click();
-  const profile = page.getByLabel(side === 'first' ? /left side of the report/i : /right side of the report/i);
+  const profile = page.getByRole('combobox', { name: side === 'first' ? /First · left side/ : /Second · right side/ });
   await expect(profile).toHaveValue(chosen);
   expect(await page.evaluate(() => window.profileInitProbe)).toEqual({ before: '', chosen });
   await page.getByLabel('What should both profiles do?').fill('Preserve the explicitly selected fixture profile.');
@@ -449,11 +449,11 @@ test('rejects a commit that changed after review without starting a task', async
   expect(app.calls.captures).toHaveLength(0);
 });
 
-test('reviews and applies recovery for stopped runs opened from Recent', async ({ page, app }) => {
+test('reviews and applies recovery for stopped runs opened from Recent comparisons', async ({ page, app }) => {
   await app.seedStoppedRun();
   await page.reload();
-  await page.getByRole('heading', { name: 'Recent' }).waitFor();
-  await page.getByRole('link', { name: 'Task comparison' }).click();
+  const recent = page.getByRole('region', { name: 'Recent comparisons', exact: true });
+  await recent.getByRole('link', { name: 'Task comparison', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Interrupted' })).toBeVisible();
   const progress = page.getByRole('region', { name: 'Interrupted' });
   await expect(progress.getByText('Before changing anything')).toBeVisible();
@@ -468,21 +468,35 @@ test('reviews and applies recovery for stopped runs opened from Recent', async (
   expect(app.calls.captures).toHaveLength(0);
 });
 
-test('one profile can use separate model settings on both sides of a comparison', async ({ page }) => {
+test('one profile can use separate model settings on both sides of a comparison', async ({ page, app }) => {
+  await page.evaluate(() => sessionStorage.setItem('xenoflux-run-auto-load-models', 'false'));
   await page.getByRole('link', { name: 'Run a new task' }).click();
   await page.getByRole('textbox', { name: 'What should both profiles do?' }).fill('Compare the two fixture settings.');
-  await page.getByLabel(/right side of the report/i).selectOption('baseline');
-  await page.getByRole('button', { name: 'Refresh models', exact: true }).nth(0).click();
+  await page.getByRole('combobox', { name: /Second · right side/ }).selectOption('baseline');
+  const catalog = page.getByRole('region', { name: 'Left model catalog', exact: true });
+  await catalog.getByText('Catalog details', { exact: true }).click();
+  await catalog.getByRole('button', { name: 'Refresh models', exact: true }).click();
   await expect(page.getByLabel('Model ID').nth(0).getByRole('option', { name: /fixture-left/ })).toHaveCount(1);
   await page.getByLabel('Model ID').nth(0).selectOption('fixture-left');
-  await page.getByRole('button', { name: 'Refresh models', exact: true }).nth(1).click();
   await expect(page.getByLabel('Model ID').nth(1).getByRole('option', { name: /fixture-right/ })).toHaveCount(1);
   await page.getByLabel('Model ID').nth(1).selectOption('fixture-right');
   await page.getByLabel('Reasoning effort').nth(0).selectOption('low');
   await page.getByLabel('Reasoning effort').nth(1).selectOption('high');
+  expect(app.calls.catalogs).toHaveLength(1);
   await page.getByRole('button', { name: 'Review before starting' }).click();
-  await expect(page.getByText(/Model: fixture-left · Effort: low/)).toBeVisible();
-  await expect(page.getByText(/Model: fixture-right · Effort: high/)).toBeVisible();
+  const differences = page.getByRole('region', { name: 'Setup differences', exact: true });
+  const row = name => differences.getByRole('row').filter({ has: page.getByRole('rowheader', { name, exact: true }) });
+  await expect(row('Model').getByRole('cell').nth(0).getByText('fixture-left', { exact: true })).toBeVisible();
+  await expect(row('Model').getByRole('cell').nth(1).getByText('fixture-right', { exact: true })).toBeVisible();
+  await expect(row('Reasoning effort').getByRole('cell').nth(0).getByText('low', { exact: true })).toBeVisible();
+  await expect(row('Reasoning effort').getByRole('cell').nth(1).getByText('high', { exact: true })).toBeVisible();
+  await expect(row('Profile').getByText('Same', { exact: true })).toBeVisible();
+  await differences.getByRole('checkbox', { name: 'Hide matches', exact: true }).check();
+  await expect(row('Profile')).toHaveCount(0);
+  await expect(row('Model').getByText('Different', { exact: true })).toBeVisible();
+  await expect(row('Reasoning effort').getByText('Different', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Start 2 model runs', exact: true })).toHaveCount(1);
+  expect(app.calls.captures).toEqual([]);
   await startRun(page);
   await page.getByRole('link', { name: 'Open the report' }).click({ timeout: 20000 });
   await expect(page.locator('details.comparison-side-details > summary')).toHaveCount(2);

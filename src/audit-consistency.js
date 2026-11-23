@@ -58,13 +58,15 @@ function sidePattern(value) {
     status: action?.status ?? null, targets: list(action?.targets).slice().sort(), subjects: list(action?.subjects).slice().sort() }));
   return { state: source.state ?? null, assertion: source.assertion ?? null, status: source.status ?? null,
     target: source.target ?? null, boundary: list(source.boundary).slice().sort(),
+    ...(source.boundaryGlobs !== undefined ? { boundaryGlobs: list(source.boundaryGlobs).slice().sort() } : {}),
     recordedScriptSubjects: list(source.recordedScriptSubjects).slice().sort(),
     exitZeroScriptSubjects: list(source.exitZeroScriptSubjects).slice().sort(), actions };
 }
 function semanticSidePattern(value) {
   const side = sidePattern(value);
   return { state: side.state, assertion: side.assertion, status: side.status, target: side.target,
-    boundary: side.boundary, recordedScriptSubjects: side.recordedScriptSubjects,
+    boundary: side.boundary, ...(side.boundaryGlobs !== undefined ? { boundaryGlobs: side.boundaryGlobs } : {}),
+    recordedScriptSubjects: side.recordedScriptSubjects,
     exitZeroScriptSubjects: side.exitZeroScriptSubjects };
 }
 function findingPattern(finding) {

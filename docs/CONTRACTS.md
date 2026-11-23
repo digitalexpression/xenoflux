@@ -167,10 +167,14 @@ hang on unsupported methods or retry silently. Distinguish JSON-RPC requests fro
 responses/notifications by shape. Keep provider-specific handle/reply codecs exact.
 
 Catalog identity includes client/profile/root mode, installation, account/connection
-generation and effective workspace settings. Ordinary preview uses cached metadata;
-explicit refresh owns bounded initialization without task/login fallback/model-policy
-mutation. Startup hooks/state effects are disclosed. Reap owned probes and admit late
-results only for the current scope/generation. Five-minute freshness does not survive
+generation and effective workspace settings. Ordinary reads and preview use cached
+metadata. The refresh path owns bounded initialization without task submission, login
+fallback, or model-policy mutation. The comparison editor requests refresh for missing
+or expired catalogs by default, with a tab-scoped opt-out and disclosure of startup
+hooks and state effects. Refreshes sharing a reservation root wait for the
+controller's current probe to finish cleanup. Preserve reservations from other
+operations and scopes with unconfirmed shutdown. Admit late results only for the
+current scope and generation. Five-minute freshness does not survive
 setup/authentication changes. Failure is unavailable, not an empty successful catalog.
 
 Model/effort defaults inherit independently. Native IDs/effort strings are opaque;

@@ -73,8 +73,41 @@ test('cancel and close during pending profile selection prevent all discovery an
 test('busy exclusive reservation stays byte-identical and never starts discovery', async t => {
   const f = await fixture(t); const owner = { kind: 'review-task', runId: randomUUID() };
   await acquire(f.lock, owner, true); const before = await readFile(join(f.lock, 'owner.json'));
-  await assert.rejects(f.service.refresh(f.input()), /locked/);
+  await assert.rejects(f.service.refresh(f.input()), { code: 'catalog-profile-busy', status: 409 });
   assert.deepEqual(await readFile(join(f.lock, 'owner.json')), before); assert.equal(f.calls(), 0);
+});
+
+test('unbound profile workspace is an actionable client error for reads and refreshes', async t => {
+  const f = await fixture(t, {
+    resolveProfile: async () => { throw Object.assign(new Error('Unbound'), { code: 'profile-repository-unbound' }); },
+  });
+  for (const client of ['codex', 'claude-code']) {
+    const input = { ...f.input(), client };
+    for (const operation of [f.service.get, f.service.refresh]) {
+      await assert.rejects(operation(input), { code: 'profile-repository-unbound', status: 422 });
+    }
+  }
+  await assert.rejects(access(f.lock), { code: 'ENOENT' });
+  assert.equal(f.calls(), 0);
+});
+
+test('a concurrent refresh for the same scope reuses one probe and a queued request can cancel', async t => {
+  const finish = deferred(), entered = deferred(); let f, calls = 0;
+  f = await fixture(t, { discover: async () => {
+    calls++; entered.resolve(); await finish.promise; return f.result();
+  } });
+  const running = f.service.refresh(f.input()); await entered.promise;
+  const queued = f.input(), cancelled = f.service.refresh(queued);
+  const expectedCancellation = assert.rejects(cancelled, { code: 'catalog-cancelled' });
+  const follower = f.service.refresh(f.input());
+  try {
+    assert.equal((await f.service.cancel(queued)).status, 'cancelled');
+    await expectedCancellation;
+  } finally { finish.resolve(); }
+  assert.equal((await running).status, 'ready');
+  assert.equal((await follower).status, 'ready');
+  assert.equal(calls, 1);
+  await assert.rejects(access(f.lock), { code: 'ENOENT' });
 });
 
 test('cancellation after process startup joins discovery and releases only confirmed shutdown', async t => {

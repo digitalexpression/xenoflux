@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { validateAuditSpec } from '../src/audit-spec.js';
 import { buildAuditComparisonConditions } from '../src/audit-conditions.js';
 import { compactAuditTrial } from '../src/audit-statistics.js';
+import { matchAuditFileGlobs } from '../src/audit-file-scope.js';
 import { bookingLedgerPair } from '../test-support/audit-explanation/booking-ledger.js';
 
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -32,6 +33,22 @@ test('task contracts reject absolute, traversal, and ambiguous paths', () => {
   for (const path of ['/private/file', '../secret', 'src/../secret', 'src//file', 'src\\file'])
     assert.throws(() => validateAuditSpec({ ...basic, taskContract: { id: 'task', editableFiles: [path] } }), /safe ID and distinct relative/);
   assert.throws(() => validateAuditSpec({ ...basic, taskContract: { id: '../task', editableFiles: [] } }), /safe ID and distinct relative/);
+});
+
+test('editable wildcards stay relative and match complete paths with bounded operators', () => {
+  const editableFiles = ['file?.txt'];
+  const editableFileGlobs = ['src/(routes)/[id]/**/@file,?.ts', 'docs/*.md'];
+  const specFor = globs => validateAuditSpec({ ...basic, taskContract: { id: 'task', editableFiles, editableFileGlobs: globs } });
+  const spec = specFor(editableFileGlobs);
+  assert.deepEqual(spec.taskContract, { id: 'task', editableFiles, editableFileGlobs });
+  const matches = matchAuditFileGlobs(spec.taskContract.editableFileGlobs);
+  for (const path of ['src/(routes)/[id]/@file,1.ts', 'src/(routes)/[id]/nested/deep/@file,2.ts', 'docs/.draft.md'])
+    assert.equal(matches(path), true, path);
+  for (const path of ['src/(routes)/i/@file,1.ts', 'src/(routes)/[id]/@file,12.ts', 'src/(routes)/[id]/@file,1.ts.bak', 'docs/nested/intro.md'])
+    assert.equal(matches(path), false, path);
+  for (const globs of [['/etc/*'], ['../*'], ['src/../*.js'], ['src//*.js'], ['src/a**.js'], ['src\\*.js'], ['src/*.js\u0000'],
+    ['src/*.js', 'src/*.js'], Array.from({ length: 100 }, (_, i) => `src/f${i}*.js`)])
+    assert.throws(() => specFor(globs), /distinct repository-relative files or wildcard patterns/);
 });
 
 test('trial compaction freezes the same conditions it exports on the run', () => {

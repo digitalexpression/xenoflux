@@ -66,6 +66,38 @@ test('booking-ledger scope difference has paired owned references and distinct o
   }
 });
 
+test('wildcard file scope flags only unmatched observed edits and survives frozen export', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'xfx-file-globs-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const [left, right] = bookingLedgerPair();
+  const editableFiles = [...Array.from({ length: 70 }, (_, index) => `docs/guide-${index}.md`), 'zzz/exact.md'];
+  const editableFileGlobs = ['src/(routes)/[id]/**/*.ts'];
+  for (const run of [left, right]) Object.assign(run.comparisonConditions, { editableFiles, editableFileGlobs });
+  left.artifacts[0].path = 'src/(routes)/[id]/fresh/@working,file.ts';
+  left.artifacts.push({ ...left.artifacts[0], sourceLine: 16, path: 'zzz/exact.md' });
+  right.artifacts[0].path = 'src/(routes)/elsewhere.ts';
+
+  const report = compareAuditRuns(left, right);
+  const explanation = report.comparison.explanation;
+  assert.equal(scope(explanation).left.assertion, 'in-boundary-edit-observed');
+  assert.equal(scope(explanation).right.assertion, 'outside-boundary-edit-observed');
+  assert.equal(explanation.conditions.fields.find(row => row.key === 'editableFileGlobs').status, 'match');
+  const compact = compactAuditTrial({ runs: [left, right] });
+  assert.deepEqual(compact.runs[0].comparisonConditions.editableFiles, editableFiles);
+  assert.deepEqual(compact.runs[0].comparisonConditions.editableFileGlobs, editableFileGlobs);
+  assert.deepEqual(scope(buildAuditExplanation(...compact.runs)), scope(explanation));
+
+  const exported = await exportAuditReport(report, { output: join(directory, 'report.md'), format: 'markdown' });
+  const reopened = await readAuditReport(exported.evidencePath);
+  assert.deepEqual(scope(reopened.comparison.explanation), scope(explanation));
+  assert.deepEqual(reopened.left.comparisonEvidence.conditions.editableFileGlobs, editableFileGlobs);
+
+  delete right.comparisonConditions.editableFileGlobs;
+  right.comparisonConditions.editableFiles = ['README.md', 'src/(routes)/[id]/**/*.ts'];
+  right.artifacts[0].path = left.artifacts[0].path;
+  assert.equal(scope(buildAuditExplanation(left, right)).right.assertion, 'outside-boundary-edit-observed', 'legacy paths are still literal');
+});
+
 test('similar, missing, unknown and incompatible findings preserve observed sides without false absence', () => {
   const [left, right] = bookingLedgerPair();
   right.artifacts[0].path = left.artifacts[0].path;

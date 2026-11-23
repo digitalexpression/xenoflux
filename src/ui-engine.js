@@ -1413,11 +1413,12 @@ export function createEngineProvider({ store, version = 'unknown', reportsRoot =
       return { status: 'success', message: `Renamed ${name} to ${newName.trim()}. Its files, sign-in and history are unchanged.` };
     },
 
-    async bindProfile({ name, repository }) {
+    async bindProfile({ name, repository, ensure = false }) {
       if (typeof repository !== 'string' || !isAbsolute(repository.trim())) throw new UiError(400, 'Enter the project folder’s full path, starting with /.', 'invalid-path');
+      if (typeof ensure !== 'boolean') throw new UiError(400, 'Invalid profile binding request.', 'invalid-binding');
       try {
         await reconcileProfile(name);
-        await editProfileRegistry(store, name, (data, profile) => bind(data, profile.id, repository.trim()), lockOptions);
+        await editProfileRegistry(store, name, (data, profile) => bind(data, profile.id, repository.trim(), { ensure }), lockOptions);
       }
       catch (error) { throw new UiError(409, error.message, 'bind-failed'); }
       return { status: 'success', message: `Bound ${name} to ${basename(repository.trim())}.` };

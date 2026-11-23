@@ -17,6 +17,7 @@ export function buildAuditComparisonConditions({ spec, baseline, profile, profil
   const taskContract = spec?.taskContract;
   return { schemaVersion: 1, taskFingerprint: digest(spec?.task ?? ''),
     ...(taskContract ? { taskId: taskContract.id, editableFiles: [...taskContract.editableFiles] } : {}),
+    ...(taskContract?.editableFileGlobs ? { editableFileGlobs: [...taskContract.editableFileGlobs] } : {}),
     checkRecipes: (spec?.checks ?? []).map(check => ({ name: check.name, fingerprint: digest(check) })),
     qualityFingerprint: auditQualityFingerprint(spec?.quality, spec?.checks ?? []) ?? null,
     ...(sharedProfileOverlap ? { sharedProfileOverlap: true } : {}),

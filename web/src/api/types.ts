@@ -542,7 +542,7 @@ export interface SavedReportsView { recent: { id: string; title: string; savedAt
 /* Runs */
 export type NativeClientId = 'codex' | 'claude-code' | 'copilot';
 export interface RunProfileOption { name: string; label?: string; client?: NativeClientId; readiness: string; ready: boolean;
-  surface?: 'cli'; executionLocation?: 'local'; rootMode?: 'explicit' | 'implicit';
+  surface?: 'cli'; executionLocation?: 'local'; rootMode?: 'explicit' | 'implicit'; boundRepositories?: string[];
 }
 export interface RunOptions {
   profiles: RunProfileOption[];
@@ -562,6 +562,7 @@ export interface RunRequest {
   execution?: Record<'a' | 'b', ExecutionSelection>;
   task: string;
   files: string;
+  fileRulesFormat?: 'lines';
   a: string;
   b: string;
   repository: string;

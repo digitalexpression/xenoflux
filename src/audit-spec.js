@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { resolve } from 'node:path';
 import { validateAuditQuality } from './audit-quality.js';
 import { validateCaptureRequirements } from './audit-evidence.js';
+import { isAuditEvidencePath, readAuditFileGlobs } from './audit-file-scope.js';
 
 const plain = (value, limit = 4096) => typeof value === 'string' && value.trim().length > 0
   && value.length <= limit && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(value);
@@ -84,7 +85,7 @@ function commands(value = [], label) {
 
 function taskContract(value) {
   if (value === undefined) return undefined;
-  allowed(value, ['id', 'editableFiles'], 'task contract');
+  allowed(value, ['id', 'editableFiles', 'editableFileGlobs'], 'task contract');
   if (!plain(value.id, 120) || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value.id)
     || !Array.isArray(value.editableFiles) || value.editableFiles.length > 100
     || value.editableFiles.some(path => typeof path !== 'string' || !path || path.length > 500
@@ -92,7 +93,11 @@ function taskContract(value) {
       || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(path))
     || new Set(value.editableFiles).size !== value.editableFiles.length)
     throw new Error('Task contract requires a safe ID and distinct relative editable paths');
-  return { id: value.id, editableFiles: [...value.editableFiles] };
+  const editableFileGlobs = value.editableFileGlobs === undefined ? [] : readAuditFileGlobs(value.editableFileGlobs);
+  if (!editableFileGlobs || editableFileGlobs.length + value.editableFiles.length > 100
+    || value.editableFileGlobs !== undefined && [...value.editableFiles].some(path => !isAuditEvidencePath(path)))
+    throw new Error('Use at most 100 distinct repository-relative files or wildcard patterns. Use ** as a whole path segment.');
+  return { id: value.id, editableFiles: [...value.editableFiles], ...(value.editableFileGlobs !== undefined ? { editableFileGlobs } : {}) };
 }
 
 /** Freeze one task, committed baseline, selected setups and bounded execution recipe. */

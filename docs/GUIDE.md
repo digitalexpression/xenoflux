@@ -214,8 +214,10 @@ source; dirty, untracked and ignored files are excluded.
 
 Preparation groups **Task and source**, **Two setups**, and **Checks and limits**
 on one page. Use the stage links to move between them without losing entered
-values. **Review before starting** checks the preparation; edit links return to
-the relevant section before requesting a fresh preview.
+values. Compare each side’s requested settings in the aligned rows. **Review before
+starting** checks the preparation and shows the pinned source and setup differences.
+Use **Hide matches** to focus on differences and unresolved values. Edit links
+return to the relevant section before requesting a fresh preview.
 
 No checks are selected automatically. Setup/check programs run outside the Codex
 sandbox and can affect external files/services; select trusted commands. Codex
@@ -223,11 +225,27 @@ comparisons default to workspace-write with networking disabled and offer read-o
 Other clients use their supported permission modes. Ordinary review inherits native
 permissions. Matching effort labels across clients do not imply equal computation.
 
-**Refresh models** initializes the client without submitting a task. It can use
-sign-in, write native state or run configured startup hooks. Browsing/preview uses
-cached metadata; changing the model clears explicit effort. Start rechecks explicit
-choices. Advertised choices do not prove account entitlement or applied settings.
-Copilot Auto may route each turn differently.
+Fresh model catalogs load automatically for the selected profile and repository.
+Choose a repository bound to both managed profiles. Use **Use shared repository**
+when the editor suggests a match. To add missing bindings for the current selection,
+check **Bind selected profiles to this repository** and choose **Bind profiles**.
+Both sides share a catalog when they use the same profile. **Load models automatically
+in this tab** is on by default. Turn it off to keep discovery manual in that tab.
+You can choose **Refresh models** in **Catalog details** for either side. Discovery
+initializes the client without submitting a task.
+It can use sign-in, write native state, or run configured startup hooks. Changing the
+model clears explicit effort. Start rechecks explicit choices. Advertised choices do not
+prove account entitlement or applied settings. Copilot Auto may route each turn
+differently.
+
+Under **Files it may change**, enter one repository-relative path or wildcard per
+line. `*` matches within a directory, `?` matches one character, and a whole `**`
+segment spans directories, as in `src/**/*.ts`. Reports flag recorded edits outside
+these rules. The client sandbox applies its own permissions independently.
+
+If another operation holds the profile reservation, let it finish or close the
+client before refreshing models. For a stopped operation, see
+[profile recovery](CLI.md#profiles-copy-and-recovery).
 
 Independent comparisons/reviews can overlap, including on one profile, with separate
 progress, approvals, cancellation and results. Simultaneous review workspaces must

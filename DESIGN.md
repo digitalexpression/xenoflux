@@ -356,14 +356,18 @@ refusal. On narrow windows, the summary follows the preview in reading order.
 Organize preparation as Task and source, Two setups, Checks and limits, then
 Review and start. Keep the first three sections mounted and directly addressable;
 stage links move within the form without discarding values. Place source exclusions
-beside repository selection, model/effort/permission controls beside each profile,
-and command effects beside the optional commands. A compact This run summary holds
-the review action; it follows the form at narrower widths and never covers fields.
+beside repository selection and command effects beside the optional commands.
+Align Left and Right profile, model, effort and permission controls in the same rows.
+Show which requested values differ and keep unresolved values explicit. Put model
+catalog status and the tab's automatic loading control beneath the fields. Disclose
+native discovery effects beside the control. Name the selected profiles and repository
+before an in-place binding. Give each allowed file path or pattern its own line in the
+source textarea. The form ends with one Review before starting action.
 
 Review leads with the engine's readiness and side order, the no-checks consequence
-and the explicit start action. Keep exact task, pinned source, controls and limits
-inspectable, with edit links returning to the corresponding preparation section.
-Use neutral dividers and paired columns rather than nested colored cards.
+and the verification status. Show the exact task and pinned source above the paired
+settings, with an option to hide matches. Keep limits and command effects above one
+explicit start action. Edit links return to the corresponding preparation section.
 
 Activity separates current jobs from recent comparison records. Job links lead to
 their existing progress and native requests; the list does not infer completion or

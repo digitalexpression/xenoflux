@@ -1,6 +1,115 @@
 import { test, expect } from '@playwright/test';
+import { execFileSync } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { bind } from '../../src/profiles.js';
 import { createMixedClientFixture, pinnedCheck } from '../../test-support/ui-mixed-client-fixture.js';
+
+test('switching Codex and Claude keeps model choices scoped to each profile and a bound repository', async ({ page }) => {
+  const app = await createMixedClientFixture();
+  try {
+    const codexOnly = join(app.root, 'codex-only');
+    execFileSync('git', ['clone', '-q', '--local', app.repository, codexOnly]);
+    await app.store.update(data => bind(data, 'baseline', codexOnly));
+    const probes = [];
+    page.on('request', request => {
+      if (request.url().endsWith('/api/catalog/refresh')) probes.push(request.postDataJSON());
+    });
+
+    await page.addInitScript(() => sessionStorage.setItem('xenoflux-run-auto-load-models', 'false'));
+    await page.goto(app.url);
+    await page.getByRole('link', { name: 'Run a new task', exact: true }).click();
+    const repository = page.getByLabel('Repository', { exact: true });
+    const leftProfile = page.getByRole('combobox', { name: /First · left side/ });
+    const rightProfile = page.getByRole('combobox', { name: /Second · right side/ });
+    const leftModel = page.getByLabel('Model ID · Left', { exact: true });
+    const rightModel = page.getByLabel('Model ID · Right', { exact: true });
+    await leftProfile.selectOption('baseline');
+    await rightProfile.selectOption({ label: 'Claude managed · Claude Code' });
+    await repository.fill(codexOnly);
+    await repository.press('Tab');
+    await page.getByRole('checkbox', { name: 'Load models automatically in this tab', exact: true }).check();
+    const rightCatalog = page.getByRole('region', { name: 'Right model catalog', exact: true });
+    await expect(rightCatalog.getByRole('status')).toContainText('isn’t bound to this profile');
+    await expect(leftModel.getByRole('option', { name: 'Fixture · fixture', exact: true })).toHaveCount(1);
+    await expect(rightModel.getByRole('option')).toHaveCount(1);
+    expect(probes.some(probe => probe.profile === 'Claude managed')).toBe(false);
+
+    await repository.fill(app.repository);
+    await repository.press('Tab');
+    await leftModel.selectOption('fixture');
+    await rightModel.selectOption('sonnet');
+    await expect(leftModel.getByRole('option', { name: /sonnet/i })).toHaveCount(0);
+    await expect(rightModel.getByRole('option', { name: 'Fixture · fixture', exact: true })).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Swap the two sides', exact: true }).click();
+    await expect(leftModel).toHaveValue('sonnet');
+    await expect(rightModel).toHaveValue('fixture');
+    await leftProfile.selectOption('baseline');
+    await expect(leftModel.getByRole('option', { name: 'Fixture · fixture', exact: true })).toHaveCount(1);
+    await expect(leftModel.getByRole('option', { name: /sonnet/i })).toHaveCount(0);
+    await expect(leftModel).toHaveValue('');
+    await expect(rightModel).toHaveValue('fixture');
+    await leftProfile.selectOption({ label: 'Claude managed · Claude Code' });
+    await expect(leftModel.getByRole('option', { name: /sonnet/i })).toHaveCount(1);
+    await expect(leftModel.getByRole('option', { name: 'Fixture · fixture', exact: true })).toHaveCount(0);
+    await expect(leftModel).toHaveValue('');
+    expect(probes.filter(probe => probe.profile === 'Claude managed').map(probe => probe.workspace)).toEqual([app.repository]);
+  } finally { await app.close(); }
+});
+
+test('binding both selected profiles needs an explicit action and preserves the task draft', async ({ page }) => {
+  const app = await createMixedClientFixture();
+  try {
+    const unboundRepo = join(app.root, 'unbound-repository');
+    execFileSync('git', ['clone', '-q', '--local', app.repository, unboundRepo]);
+    const bound = [], probes = [], starts = [];
+    page.on('request', request => {
+      if (request.method() !== 'POST') return;
+      const path = new URL(request.url()).pathname;
+      if (path.endsWith('/binding')) bound.push(decodeURIComponent(path.split('/').at(-2)));
+      if (path === '/api/catalog/refresh') probes.push(request.postDataJSON());
+      if (path === '/api/runs') starts.push(path);
+    });
+    const bindingNames = async () => (await app.store.read()).profiles
+      .filter(profile => profile.repositories.some(repo => repo.path === unboundRepo)).map(profile => profile.name).sort();
+    const problem = 'Read the disposable repository with both profiles.';
+    await page.goto(app.url);
+    await page.getByRole('link', { name: 'Run a new task', exact: true }).click();
+    const task = page.getByRole('textbox', { name: 'What should both profiles do?' });
+    const repository = page.getByLabel('Repository', { exact: true });
+    const commit = page.getByLabel('Commit or branch', { exact: true });
+    await page.getByRole('combobox', { name: /First · left side/ }).selectOption('baseline');
+    await repository.fill(unboundRepo);
+    await repository.press('Tab');
+    await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'Claude managed · Claude Code' });
+    await task.fill(problem);
+    await commit.fill('HEAD');
+    const missing = page.getByRole('region', { name: /^(Left|Right) model catalog$/ }).getByText('This repository isn’t bound to this profile.', { exact: false });
+    await expect(missing).toHaveCount(2);
+    await expect(page.getByRole('checkbox', { name: 'Load models automatically in this tab', exact: true })).toBeChecked();
+    const selection = page.getByRole('checkbox', { name: 'Bind selected profiles to this repository', exact: true });
+    const bindProfiles = page.getByRole('button', { name: 'Bind profiles', exact: true });
+    await expect(selection).not.toBeChecked();
+    await expect(bindProfiles).toBeDisabled();
+    await selection.check();
+    await expect(bindProfiles).toBeEnabled();
+    expect(await bindingNames()).toEqual([]);
+    expect(bound).toEqual([]);
+    expect(probes.filter(probe => probe.workspace === unboundRepo)).toEqual([]);
+
+    await bindProfiles.click();
+    await expect(page.getByLabel('Model ID · Left', { exact: true }).getByRole('option', { name: 'Fixture · fixture', exact: true })).toHaveCount(1);
+    await expect(page.getByLabel('Model ID · Right', { exact: true }).getByRole('option', { name: /sonnet/i })).toHaveCount(1);
+    expect(bound.sort()).toEqual(['Claude managed', 'baseline']);
+    expect(await bindingNames()).toEqual(['Claude managed', 'baseline']);
+    expect(probes.filter(probe => probe.workspace === unboundRepo).map(probe => probe.profile).sort()).toEqual(['Claude managed', 'baseline']);
+    await expect(task).toHaveValue(problem);
+    await expect(repository).toHaveValue(unboundRepo);
+    await expect(commit).toHaveValue('HEAD');
+    expect(starts).toEqual([]);
+  } finally { await app.close(); }
+});
 
 test('mixed clients expose native choices and keep path and command decisions separate', async ({ page }) => {
   test.setTimeout(45000);
@@ -8,14 +117,18 @@ test('mixed clients expose native choices and keep path and command decisions se
   try {
     await writeFile(app.copilotConfig, JSON.stringify({ label: 'Copilot fixture', storedText: 'Stored Copilot answer.' }), { mode: 0o600 });
     await page.setViewportSize({ width: 1280, height: 900 });
-    await page.addInitScript(() => localStorage.setItem('xenoflux-theme', 'dark'));
+    await page.addInitScript(() => {
+      localStorage.setItem('xenoflux-theme', 'dark');
+      sessionStorage.setItem('xenoflux-run-auto-load-models', 'false');
+    });
     await page.goto(app.url);
     await page.getByRole('link', { name: 'Run a new task' }).click();
     await page.getByRole('textbox', { name: 'What should both profiles do?' }).fill('Read the pinned disposable fixture.');
     await page.getByRole('combobox', { name: /First · left side/ }).selectOption({ label: 'Copilot managed · Copilot CLI' });
     await page.getByRole('combobox', { name: /Second · right side/ }).selectOption({ label: 'Claude managed · Claude Code' });
-    const refresh = page.getByRole('button', { name: 'Refresh models' });
-    await refresh.first().click();
+    const leftCatalog = page.getByRole('region', { name: 'Left model catalog', exact: true });
+    await leftCatalog.getByText('Catalog details', { exact: true }).click();
+    await leftCatalog.getByRole('button', { name: 'Refresh models', exact: true }).click();
     await expect(page.getByRole('option', { name: 'Auto · Copilot routing' })).toHaveCount(1);
     await page.getByRole('combobox', { name: 'Model ID' }).first().selectOption('auto');
     await page.getByRole('combobox', { name: 'Permission mode' }).first().selectOption('manual');
@@ -26,6 +139,11 @@ test('mixed clients expose native choices and keep path and command decisions se
     await page.getByRole('button', { name: 'Review before starting' }).click();
     await expect(page.getByText('These sides use different native permission rules.')).toBeVisible();
     await expect(page.getByText(/Pinned commit:/)).toBeVisible();
+    const differences = page.getByRole('region', { name: 'Setup differences', exact: true });
+    const permission = differences.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'Permission mode', exact: true }) });
+    await expect(permission.getByText('Unknown', { exact: true })).toBeVisible();
+    await differences.getByRole('checkbox', { name: 'Hide matches', exact: true }).check();
+    await expect(permission.getByText('Unknown', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Start 2 model runs' }).first().click();
     const path = page.getByRole('region', { name: 'Native request' }).filter({ hasText: 'requests path access' });
     const command = page.getByRole('region', { name: 'Native request' }).filter({ hasText: 'requests command execution' });

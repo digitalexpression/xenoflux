@@ -216,7 +216,9 @@ Each setup/check command has a unique name and `argv`, without a shell; at most
 to 15 minutes per side and a derived experiment bound, each capped at 24 hours;
 output defaults to 8 MiB per process (1 KiB–64 MiB). Set both duration fields to
 JSON `null` for uncapped non-series work. Startup, cancellation and output bounds
-still apply. A `taskContract` labels identity/editable files, not enforced sandbox scope.
+still apply. A `taskContract` labels task identity and editable files for reports.
+Use `editableFiles` for literal paths and `editableFileGlobs` for repository-relative
+wildcards. The sandbox applies its own permissions independently.
 
 `allowIncompleteCapture` permits useful partial evidence. It does not waive
 positive `captureRequirements` for agents, usage, tools, skills, hooks or reported

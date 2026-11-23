@@ -101,6 +101,9 @@ export function compareSessionControls(left, right, { conditions } = {}) {
     add(`condition-${key}`, name, 'inputs', null, [field?.left ?? null, field?.right ?? null],
       'Canonical retained comparison conditions; this row does not change task or metric eligibility.');
   }
+  const fileGlobs = list(conditions?.fields).find(row => row.key === 'editableFileGlobs');
+  if (fileGlobs) add('condition-editableFileGlobs', 'Editable wildcard patterns', 'inputs', null, [fileGlobs.left, fileGlobs.right],
+    'Recorded wildcard patterns for observed editing scope. This row does not change task or metric eligibility.');
   const setup = list(conditions?.fields).find(row => row.key === 'setup');
   add('setup-inputs', 'Setup and native configuration inputs', 'inputs', null, [setup?.left ?? null, setup?.right ?? null],
     'This fingerprint combines setup recipes and the entire nativeConfig, including model. A difference alone cannot identify a harness change; a match cannot establish full historical equality.');
