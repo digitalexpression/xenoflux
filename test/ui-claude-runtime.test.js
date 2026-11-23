@@ -86,10 +86,12 @@ test('ordinary Claude survivor completes exact approvals, checks and lock releas
     checks: [{ name: 'marker', command: '/bin/test -f xfx-local-marker.txt' }] });
   assert.equal(preview.ready, true, JSON.stringify(preview));
   const started = await app.provider.startRun({ previewToken: preview.previewToken });
-  for (let side = 0; side < 2; side++) {
-    const waiting = await until(() => app.provider.run(started), value => value.pendingRequests.length > 0 || value.state !== 'running', 'Closure approval');
-    assert.equal(waiting.pendingRequests.length, 1, JSON.stringify(waiting));
-    const request = waiting.pendingRequests[0];
+  for (const side of ['a', 'b']) {
+    const waiting = await until(() => app.provider.run(started),
+      value => value.pendingRequests.some(request => request.side === side) || value.state !== 'running', `Closure approval for side ${side}`);
+    const requests = waiting.pendingRequests.filter(request => request.side === side);
+    assert.equal(requests.length, 1, JSON.stringify(waiting));
+    const [request] = requests;
     assert.equal(request.method, 'claude/tool/requestApproval');
     assert.equal(request.params.input.command, '/usr/bin/touch xfx-local-marker.txt');
     assert.equal(request.params.itemId, request.item.id);
