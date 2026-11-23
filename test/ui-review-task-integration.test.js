@@ -509,9 +509,10 @@ test('shutdown waits for an ordinary review even when comparison receipt cleanup
   const review = await app.provider.startReviewTask({ ref, previewToken: preview.previewToken });
   await until(() => app.provider.reviewTask(review), task => task.status === 'running', 'Review did not start');
   mode.capture = 'delayed';
+  const previousCaptures = app.calls.captures.length;
   const runPreview = await app.provider.runPreview(input(app));
   const comparison = await app.provider.startRun({ previewToken: runPreview.previewToken });
-  await until(() => app.calls.captures.length, count => count === 3, 'Comparison did not start');
+  await until(() => app.calls.captures.length, count => count === previousCaptures + 2, 'Both comparison sides did not start');
   await writeFile(join(app.store.directory, 'ui-runs', `${comparison.id}.json`), 'corrupt receipt');
   let settled = false;
   const closing = app.provider.close().finally(() => { settled = true; });
